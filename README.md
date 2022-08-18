@@ -1,10 +1,10 @@
 # Brighterscript Game Engine
 
-An object oriented game engine for the Roku, written in [Brighterscript](https://github.com/rokucommunity/brighterscript), and available via [ROPM](https://github.com/rokucommunity/ropm).
+An object oriented game engine for the Roku, written in [Brighterscript](https://github.com/rokucommunity/brighterscript), and (SONN!) available via [ROPM](https://github.com/rokucommunity/ropm).
 
 This project is designed to be used with VScode.
 
-This is forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into Brighterscript. This work owes almost everything to this original project!
+This was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into Brighterscript. This work owes a lot to this original project!
 
 ## Introduction
 
