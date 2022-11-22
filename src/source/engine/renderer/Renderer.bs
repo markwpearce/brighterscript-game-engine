@@ -10,6 +10,9 @@ namespace BGE
     protected onlyDrawWhenInFrame as boolean = true
 
     private drawCallsLastFrame = 0
+    private activeDebugCells = 0
+    private debugCellSize = 100
+    private debugCellStart as BGE.Math.Vector = new BGE.Math.Vector(100, 100)
 
     private draw2d as object = invalid
 
@@ -22,13 +25,17 @@ namespace BGE
     cameraRotation as BGE.Math.Vector
 
 
-    sub new(draw2d as object)
+    private game as Game
+
+    sub new(game as BGE.Game, draw2d as object)
+      m.game = game
       m.draw2d = draw2d
       m.camera = new Camera()
     end sub
 
     sub resetDrawCallCounter()
       m.drawCallsLastFrame = 0
+      m.activeDebugCells = 0
     end sub
 
 
@@ -124,6 +131,15 @@ namespace BGE
     end function
 
 
+    function drawSquare(x as float, y as float, sideLength as float, rgba as integer) as boolean
+      if not m.shouldDraw(x - sideLength / 2, y - sideLength / 2, sideLength, sideLength)
+        return false
+      end if
+      m.draw2d.DrawPoint(x, y, sideLength, rgba)
+
+      m.drawCallsLastFrame++
+      return true
+    end function
 
     ' Draws text to the screen
     '
@@ -160,38 +176,208 @@ namespace BGE
     end function
 
     ' NOTE: This function is unsafe! It creates an roBitmap of the required size to be able to both scale and rotate the drawing, this action requires free video memory of the appropriate amount.
-    function drawScaledAndRotatedObject(x as float, y as float, scaleX as float, scaleY as float, theta as float, drawable as object, rgba = -1 as integer) as boolean
+    function drawScaledAndRotatedObject(x as float, y as float, scaleX as float, scaleY as float, theta as float, drawable as object, rgba = -1 as integer, rotateAroundX = 0, rotateAroundY = 0) as boolean
       return m.drawScaledAndRotatedObjectTo(m.draw2d, x, y, scaleX, scaleY, theta, drawable, rgba)
     end function
 
-    function drawScaledAndRotatedObjectTo(draw2D as object, x as float, y as float, scale_x as float, scale_y as float, theta as float, drawable as object, color = -1 as integer) as boolean
+    function drawScaledAndRotatedObjectTo(draw2D as object, x as float, y as float, scale_x as float, scale_y as float, theta as float, drawable as object, color = -1 as integer, rotateAroundX = 0, rotateAroundY = 0) as boolean
       new_width = Abs(int(drawable.GetWidth() * scale_x))
       new_height = Abs(int(drawable.GetHeight() * scale_y))
-      if new_width <> 0 and new_height <> 0 and m.shouldDrawTo(draw2d, x, y, new_width, new_height, theta)
+      xToDraw = x
+      yToDraw = y
+
+      if scale_x < 0 and scale_y > 0
+        xToDraw = x + new_width
+        ' scale_x = abs(scale_x)
+      else if scale_y < 0 and scale_x > 0
+        ' yToDraw = y + new_height
+        '  scale_y = abs(scale_y)
+      else if scale_y < 0 and scale_x < 0
+        '  yToDraw = y + new_height
+        ' xToDraw = x + new_width
+        '  scale_y = abs(scale_y)
+      end if
+
+      if new_width <> 0 and new_height <> 0 and m.shouldDrawTo(draw2d, xToDraw, yToDraw, new_width, new_height, theta)
         scaledBitmap = CreateObject("roBitmap", {width: new_width, height: new_height, AlphaEnable: true})
         scaledRegion = CreateObject("roRegion", scaledBitmap, 0, 0, new_width, new_height)
         pretranslation_x = drawable.GetPretranslationX()
         pretranslation_y = drawable.GetPretranslationY()
         newPreX = pretranslation_x * scale_x
+        scaleXdrawAdjustment = 0 ' need to change draw position if scale is negative
+        scaleYdrawAdjustment = 0
         if scale_x < 0
           newPreX = -newPreX
+          scaleXdrawAdjustment = new_width
         end if
         newPreY = pretranslation_y * scale_y
         if scale_y < 0
           newPreY = -newPreY
+          scaleYDrawAdjustment = new_height
         end if
-        scaledRegion.setPretranslation(-Abs(newPreX), -Abs(newPreY))
-        scaled_draw_x = Abs(newPreX)
-        scaled_draw_y = Abs(newPreY)
+        scaledRegion.setPretranslation(-Abs(newPreX) + rotateAroundY, -Abs(newPreY) + rotateAroundY)
+        scaled_draw_x = Abs(newPreX) + scaleXdrawAdjustment
+        scaled_draw_y = Abs(newPreY) + scaleYdrawAdjustment
         scaledRegion.DrawScaledObject(scaled_draw_x, scaled_draw_y, scale_x, scale_y, drawable)
         m.drawCallsLastFrame++
 
-        draw2d.DrawRotatedObject(x, y, theta, scaledRegion, color)
+        thetaDeg = BGE.Math.RadiansToDegrees(theta)
+
+        draw2d.DrawRotatedObject(xToDraw, yToDraw, thetaDeg, scaledRegion, color)
         m.drawCallsLastFrame++
         return true
       end if
       return false
     end function
+
+    function drawPinnedCorners(cornerPoints as BGE.Math.CornerPoints, drawable as object, isMirror = false as boolean, color = -1 as integer) as boolean
+      return m.drawPinnedCornersTo(m.draw2d, cornerPoints, drawable, isMirror, color)
+    end function
+
+    function drawPinnedCornersTo(draw2D as object, cornerPoints as BGE.Math.CornerPoints, drawable as object, isMirror = false as boolean, color = -1 as integer) as boolean
+      originalWidth = drawable.getWidth()
+      originalHeight = drawable.getHeight()
+
+      avgWidth = cornerPoints.getAvgWidth()
+      avgHeight = cornerPoints.getAvgHeight()
+      avgDiagonalLength = sqr(avgWidth * avgWidth + avgHeight * avgHeight)
+
+      ' maxWidth = cornerPoints.getMaxWidth()
+      'maxHeight = cornerPoints.getMaxHeight()
+
+      ' 1. Scale so Avg width & Avg height is correct (eg. aspect ratio is correct), then scale uniformly so longest diagonal is matched
+      diagonalLengths = cornerPoints.computeDiagonalLengths()
+      longestDiagonal = BGE.Math.Max(diagonalLengths[0], diagonalLengths[1])
+      shortestDiagonal = BGE.Math.Min(diagonalLengths[0], diagonalLengths[1])
+      useTlBr = false
+
+      if diagonalLengths[1] > (diagonalLengths[0] + 1)
+        '        useTlBr = false
+      end if
+
+
+
+      crossScale = longestDiagonal / avgDiagonalLength
+
+      scaledWidth = avgWidth * crossScale
+      scaledHeight = avgHeight * crossScale
+
+      primaryScaleX = scaledWidth / originalWidth
+      primaryScaleY = scaledHeight / originalHeight
+      scaledDiagonalLength = sqr(scaledWidth * scaledWidth + scaledHeight * scaledHeight)
+
+      scaledDrawX = 0
+      scaledDrawY = 0
+      if isMirror
+        'reverse X, and draw from right side
+        primaryScaleX = -primaryScaleX
+        scaledDrawX = scaledWidth
+      end if
+
+      scaledBitmap = CreateObject("roBitmap", {width: scaledWidth, height: scaledHeight, AlphaEnable: true})
+      if invalid = scaledBitmap
+        return false
+      end if
+      scaledRegion = CreateObject("roRegion", scaledBitmap, 0, 0, scaledWidth, scaledHeight)
+      m.drawScaledObjectTo(scaledRegion, scaledDrawX, scaledDrawY, primaryScaleX, primaryScaleY, drawable)
+
+      m.addDebugCell(scaledRegion, "scaledRegion")
+
+      ' 2. rotate scaled object so a vertical scale change affects the shorter diagonal only
+      aspectRatioAngle = BGE.Math.atan2(scaledHeight, scaledWidth)
+
+      rotation1Bitmap = CreateObject("roBitmap", {width: longestDiagonal, height: longestDiagonal, AlphaEnable: true})
+      if invalid = scaledBitmap
+        return false
+      end if
+      rotation1Region = CreateObject("roRegion", rotation1Bitmap, 0, 0, longestDiagonal, longestDiagonal)
+
+      firstRotX = 0
+      firstRoty = longestDiagonal / 2
+      if not useTlBr
+        'scaledRegion.setPretranslation(0, -scaledWidth)
+        'firstRotX = longestDiagonal
+        'firstRoty = longestDiagonal / 2
+        aspectRatioAngle = -aspectRatioAngle
+      end if
+
+      m.DrawRotatedObjectTo(rotation1Region, firstRotX, firstRoty, aspectRatioAngle, scaledRegion)
+
+      m.addDebugCell(rotation1Region, "rotation1Region")
+
+      rotation2Bitmap = CreateObject("roBitmap", {width: longestDiagonal, height: longestDiagonal, AlphaEnable: true})
+      if invalid = rotation2Bitmap
+        return false
+      end if
+      rotation2Region = CreateObject("roRegion", rotation2Bitmap, 0, 0, longestDiagonal, longestDiagonal)
+      shorterDiagScale = shortestDiagonal / scaledDiagonalLength
+      longerDiagScale = longestDiagonal / scaledDiagonalLength
+
+      rotatedXScale = longerDiagScale
+      rotatedYScale = shorterDiagScale
+      vertOffset = (longestDiagonal - shortestDiagonal) / 2
+      if not useTlBr
+        rotatedXScale = shorterDiagScale
+        rotatedYScale = longerDiagScale
+      end if
+      'rotation2Region.setPretranslation(0, vertOffset)
+      m.drawScaledObjectTo(rotation2Region, 0, vertOffset, rotatedXScale, rotatedYScale, rotation1Region)
+
+      'rotation1Region.setPretranslation(0, shortestDiagonal / 2)
+
+      m.addDebugCell(rotation2Region, "rotation2Region")
+
+      '  '   rotation3Bitmap = CreateObject("roBitmap", {width: longestDiagonal, height: longestDiagonal, AlphaEnable: true})
+      '     if invalid = rotation3Bitmap
+      '       return false
+      '     end if
+      '     rotation3Region = CreateObject("roRegion", rotation3Bitmap, 0, 0, longestDiagonal, longestDiagonal)
+      '     'rotation2Region.setPretranslation(0, -longestDiagonal / 2)
+      '     rotatedAspectRatioAngle = BGE.Math.atan2(rotatedYScale, rotatedXScale)
+      '    'rotation2Region.setPretranslation(0, longestDiagonal / 2)
+
+      ' m.drawScaledAndRotatedObjectTo(rotation3Region, 0, 0, 1, 1, rotatedAspectRatioAngle, rotation2Region)
+
+      'm.addDebugCell(rotation3Region, "rotation3Region")
+
+      drawOrigin = cornerPoints.topLeft.copy()
+      rotationTheta = 0
+
+      if useTlBr
+        rotation2Region.setPretranslation(0, -longestDiagonal / 2)
+
+        'topLeft -> bottomRight is longer
+        'drawOrigin.y -= longestDiagonal / 2
+        rotationTheta = BGE.MATH.GetAngle(cornerPoints.topLeft, cornerPoints.bottomRight)'cornerPoints.getRotationOfTopLeftBottomRightDiagonal(originalDiagonalVector)
+        finalTheta = -rotationTheta
+      else
+        'topRight -> bottomLeft is longer
+        ' reverse X
+        drawOrigin = cornerPoints.topRight.copy()
+        'rotation2Region.setPretranslation(longestDiagonal, -longestDiagonal / 2)
+
+        'rotation2Region.setPretranslation(longestDiagonal, -longestDiagonal / 2)
+
+        rotationTheta = BGE.MATH.GetAngle(cornerPoints.topRight, cornerPoints.bottomLeft)
+        finalTheta = rotationTheta '+' BGE.Math.Pi()
+      end if
+
+
+      lineEndX = 300 * cos(rotationTheta) + drawOrigin.x
+      lineEndY = 300 * sin(rotationTheta) + drawOrigin.y
+
+      m.drawLine(drawOrigin.x, drawOrigin.y, lineEndX, lineEndY, BGE.Colors().cyan)
+
+
+      m.DrawRotatedObject(drawOrigin.x, drawOrigin.y, BGE.Math.RadiansToDegrees(finalTheta), rotation2Region)', color)
+
+
+      return true
+
+      'return m.drawScaledAndRotatedObjectTo(draw2D, cornerPoints.topLeft.x - longestDiagonal / 2, cornerPoints.topLeft.y - shortestDiagonal / 2, 1, 1, finalTheta, rotation1Region, color)
+    end function
+
+
 
 
     function drawCircleOutline(line_count as integer, x as float, y as float, radius as float, rgba as integer) as boolean
@@ -265,28 +451,22 @@ namespace BGE
       if not m.shouldDrawTo(draw2d, x, y, src.getWidth(), src.getHeight(), theta)
         return false
       end if
-      draw2d.DrawRotatedObject(x, y, theta, src)
+      thetaDeg = BGe.Math.RadiansToDegrees(theta)
+      draw2d.DrawRotatedObject(x, y, thetaDeg, src)
       m.drawCallsLastFrame++
       return true
     end function
 
-    function drawRegionToCanvas(regionToDraw as object, canvasDrawTo as object, scaleX = 1 as float, scaleY = 1 as float, additionalRotation = invalid as BGE.Math.Vector, ignoreColor = false as boolean) as void
-      position = m.getWorldPosition()
-      x = position.x
-      y = position.y
-      rgba = m.getFillColorRGBA(ignoreColor)
-      totalRotation = m.rotation.z
-      if invalid <> additionalRotation
-        totalRotation = additionalRotation.add(m.rotation).z
-      end if
-      if scaleX = 1 and scaleY = 1 and totalRotation = 0
+    function drawRegionToCanvas(regionToDraw as object, canvasDrawTo as object, x as float, y as float, scaleX = 1 as float, scaleY = 1 as float, rotation = 0 as float, RGBA = -1 as integer) as void
+
+      if scaleX = 1 and scaleY = 1 and rotation = 0
         m.DrawObjectTo(canvasDrawTo, x, y, regionToDraw)
-      else if totalRotation = 0
+      else if rotation = 0
         m.DrawScaledObjectTo(canvasDrawTo, x, y, scaleX, scaleY, regionToDraw)
       else if scaleX = 1 and scaleY = 1
-        m.DrawRotatedObjectTo(canvasDrawTo, x, y, -totalRotation, regionToDraw)
+        m.DrawRotatedObjectTo(canvasDrawTo, x, y, -rotation, regionToDraw)
       else
-        m.DrawScaledAndRotatedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -totalRotation, regionToDraw, rgba)
+        m.DrawScaledAndRotatedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -rotation, regionToDraw, rgba)
       end if
     end function
 
@@ -356,6 +536,30 @@ namespace BGE
 
       return insideCanvas
     end function
+
+    sub addDebugCell(region as object, text = "" as string)
+      regionWidth = region.getWidth()
+      regionHeight = region.getHeight()
+      scale = m.debugCellSize - 2
+      offsetX = 1
+      offsetY = 1
+      if regionWidth > regionHeight
+        scale = scale / regionWidth
+        offsetY = m.debugCellSize / 2 - scale * regionHeight / 2 + 1
+      else
+        scale = scale / regionHeight
+        offsetX = m.debugCellSize / 2 - scale * regionWidth / 2 + 1
+      end if
+      cellX = m.debugCellStart.x + m.debugCellSize * m.activeDebugCells
+      cellY = m.debugCellStart.y
+      textY = cellY + m.debugCellSize + 2
+      m.drawRectangleOutline(cellX, cellY, m.debugCellSize, m.debugCellSize, BGE.Colors().White)
+      m.drawRegionToCanvas(region, m.draw2d, cellX + offsetX, cellY + offsetY, scale, scale)
+      debugText = `(${cint(regionWidth)}, ${cint(regionHeight)})`
+      m.drawText(text, cellX, textY, m.game.getFont("debugUiSmall"))
+      m.drawText(debugText, cellX, textY + 12, m.game.getFont("debugUiSmall"))
+      m.activeDebugCells++
+    end sub
 
   end class
 
