@@ -13,6 +13,7 @@ namespace BGE
     private activeDebugCells = 0
     private debugCellSize = 100
     private debugCellStart as BGE.Math.Vector = new BGE.Math.Vector(100, 100)
+    private drawDebugCells = false
 
     private draw2d as object = invalid
 
@@ -201,6 +202,9 @@ namespace BGE
       if new_width <> 0 and new_height <> 0 and m.shouldDrawTo(draw2d, xToDraw, yToDraw, new_width, new_height, theta)
         scaledBitmap = CreateObject("roBitmap", {width: new_width, height: new_height, AlphaEnable: true})
         scaledRegion = CreateObject("roRegion", scaledBitmap, 0, 0, new_width, new_height)
+        if invalid = scaledRegion
+          return false
+        end if
         pretranslation_x = drawable.GetPretranslationX()
         pretranslation_y = drawable.GetPretranslationY()
         newPreX = pretranslation_x * scale_x
@@ -246,6 +250,10 @@ namespace BGE
 
 
     function makeIntoTriangle(srcRegion as object, points as BGE.Math.Vector[]) as TriangleBitmap
+
+      'makeIntoTriangle() SHOULD CACHE RESULTS!
+
+
       if points.count() < 3
         return invalid
       end if
@@ -275,7 +283,6 @@ namespace BGE
 
       m.drawRotatedImageWithCenterTo(initialRegion, srcRegion, originPoint, srcTri.anglesToNext[longestIndex], originPoint.negative())
 
-      m.addDebugCell(initialRegion, "initialRegion")
       ' At this point, we have region where the top line is the longest side of the triangle
       ' find the angle to rotate to cut off the right side
       nextIndex = (longestIndex + 1) mod 3
@@ -289,7 +296,6 @@ namespace BGE
 
       m.drawRotatedImageWithCenterTo(region2, initialRegion, new BGE.Math.Vector(longestSide, 0), rightSideTheta)
 
-      m.addDebugCell(region2, "region2")
       bitmap3 = CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
       region3 = CreateObject("roRegion", bitmap3, 0, 0, longestSide, longestSide)
       if invalid = region3
@@ -302,7 +308,6 @@ namespace BGE
       leftSideTheta = -rightSideTheta - (halfPi - srcTri.angles[longestIndex])
       m.drawRotatedImageWithCenterTo(region3, region2, lastRotCenter, leftSideTheta, lastRotCenter.negative())
 
-      m.addDebugCell(region3, "region3")
       points = [new BGE.Math.Vector(), new BGE.Math.Vector(), new BGE.Math.Vector()]
       ' longestPoint is always mapped to (0,0)
       ' next point is found via trig
@@ -323,13 +328,19 @@ namespace BGE
 
 
 
-    function drawBitmapTriangleTo(draw2D as object, srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[]) as boolean
+
+
+
+
+
+
+    function drawBitmapTriangleTo(draw2D as object, srcRegion as object, srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[]) as boolean
       if srcPoints.count() < 3 or destPoints.count() < 3
         return false
       end if
       shouldDraw = false
       for i = 0 to 3
-        shouldDraw = shouldDraw or m.shouldDrawTo(draw2d, destPoints[i].x, destPoints.y, 1, 1, 0)
+        shouldDraw = shouldDraw or m.shouldDrawTo(draw2d, destPoints[i].x, destPoints[i].y, 1, 1, 0)
         if shouldDraw
           exit for
         end if
@@ -338,13 +349,87 @@ namespace BGE
         return false
       end if
 
-      destTri = new TriangleDetails(destPoints)
-      srcTri = new TriangleDetails(destPoints)
+      srcTriangle = m.makeIntoTriangle(srcRegion, srcPoints)
+      if invalid = srcTriangle
+        return false
+      end if
+      m.addDebugCell(srcTriangle.bitmap, "srcTriangle")
+
+      destTriangle = new TriangleDetails(destPoints)
+
+      if srcTriangle.longestIndex <> destTriangle.longestIndex and srcTriangle.isObtuse()
+        ' TODO: this could be a problem - srcTriangle can not be transformed properly
+      end if
+
+      'rearrange srcTriangle so side that corresponds to dest's longest side is on top of a bitmap
+      originIndex = destTriangle.longestIndex
+      nextIndex = srcTriangle.nextIndex(originIndex)
+      prevIndex = srcTriangle.nextIndex(nextIndex)
+      finalBitmapWidth = destTriangle.getLongestSide()
+      finalBitmapHeight = destTriangle.getLongestSide()'destTriangle.height
+
+
+      scaledSrcBitmap = CreateObject("roBitmap", {width: finalBitmapWidth, height: finalBitmapHeight, AlphaEnable: true})
+      scaledSrcRegion = CreateObject("roRegion", scaledSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
+      scaledSrcRegion.SetScaleMode(1)
+      mappedPreviousLength = destTriangle.lengths[prevIndex]
+      mappedNextLength = destTriangle.lengths[nextIndex]
+
+      srcYScale = mappedPreviousLength / srcTriangle.lengths[prevIndex]
+      prevPoint = srcTriangle.points[prevIndex]
+      changedPrevPoint = prevPoint.copy()
+      changedPrevPoint.y *= srcYScale
+      nextPrevYDelta = (srcYScale * srcTriangle.points[nextIndex].y) - mappedPreviousLength
+      nextX = srcTriangle.points[nextIndex].x
+
+      if nextX = 0
+        return false
+      end if
+
+
+      'SrcXScale & srcYScale should scale so "prevpoint" is in correct place, not that prevSide & nextSide are correct length
+
+
+      srcXScale = sqr((mappedNextLength * mappedNextLength - nextPrevYDelta * nextPrevYDelta) / (nextX * nextX))
+
+      mappedNextAfterLegLengthSet = new BGE.Math.Vector(srcXScale * srcTriangle.points[nextIndex].x, srcYScale * srcTriangle.points[nextIndex].y)
+
+      angleToMappedNext = BGE.Math.GetAngle(new BGE.Math.Vector(), mappedNextAfterLegLengthSet)
+
+      m.drawScaledObjectTo(scaledSrcRegion, 0, 0, srcXScale, srcYScale, srcTriangle.bitmap)
+
+      m.addDebugCell(scaledSrcRegion, "scaledSrcRegion")
+
+      destOrigin = destTriangle.points[destTriangle.longestIndex]
+
+      finalAngle = BGE.Math.GetAngle(destOrigin, destTriangle.points[destTriangle.nextIndex(destTriangle.longestIndex)])
+
+      finalROtation = angleToMappedNext - finalAngle' destTriangle.anglesToNext[destTriangle.longestIndex]' - angleToMappedNext
+
+      rotatedBitmap = CreateObject("roBitmap", {width: finalBitmapWidth * 1.25, height: finalBitmapHeight, AlphaEnable: true})
+      rotatedRegion = CreateObject("roRegion", rotatedBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
+      rotatedRegion.SetScaleMode(1)
+      m.drawRotatedObjectTo(rotatedRegion, 0, 0, angleToMappedNext, scaledSrcRegion)
+
+
+      m.addDebugCell(rotatedRegion, "rotatedRegion")
+
+
+      finalScaleX = finalBitmapWidth / mappedNextAfterLegLengthSet.length()
+      finalScaleY = destTriangle.height / (sin(bge.Math.halfPI() - angleToMappedNext) * mappedPreviousLength)
+      finalBitmap = CreateObject("roBitmap", {width: finalBitmapWidth, height: finalBitmapHeight, AlphaEnable: true})
+      finalRegion = CreateObject("roRegion", finalBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
+      finalRegion.SetScaleMode(1)
+
+      didDraw = m.DrawScaledObjectTo(finalRegion, 0, 0, finalScaleX, finalScaleY, rotatedRegion)
+
+      m.addDebugCell(finalRegion, "finalRegion")
+
+      didDraw = m.drawRotatedObjectTo(draw2d, destOrigin.x, destOrigin.y, -finalAngle, finalRegion)
 
 
 
-
-
+      return didDraw
     end function
 
 
@@ -357,6 +442,89 @@ namespace BGE
 
       diagonalLengths = cornerPoints.computeDiagonalLengths()
       sideLengths = cornerPoints.computeSideLengths()
+      srcWidth = drawable.getWidth()
+      srcHeight = drawable.getHeight()
+
+
+      worked = true
+      if diagonalLengths[0] > diagonalLengths[1]
+        'topLeft to BottomRight Diag
+
+        topRightSrc = [
+          new BGE.Math.Vector(0, 0),
+          new BGE.Math.Vector(srcWidth, 0),
+          new BGE.Math.Vector(srcWidth, srcHeight)
+        ]
+        bottomLeftSrc = [
+          new BGE.Math.Vector(0, 0),
+          new BGE.Math.Vector(srcWidth, srcHeight),
+          new BGE.Math.Vector(0, srcHeight)
+        ]
+
+        topRightDest = [
+          cornerPoints.topLeft,
+          cornerPoints.topRight,
+          cornerPoints.bottomRight
+
+        ]
+
+        bottomLeftDest = [
+          cornerPoints.topLeft,
+          cornerPoints.bottomRight,
+          cornerPoints.bottomLeft
+
+        ]
+
+        worked = m.drawBitmapTriangleTo(draw2d, drawable, topRightSrc, topRightDest)
+        m.drawSquare(topRightDest[0].x, topRightDest[0].y, 4, BGE.Colors().Red)
+        m.drawSquare(topRightDest[1].x, topRightDest[1].y, 4, BGE.Colors().Green)
+        m.drawSquare(topRightDest[2].x, topRightDest[2].y, 4, BGE.Colors().Blue)
+
+
+
+        worked = worked and m.drawBitmapTriangleTo(draw2d, drawable, bottomLeftSrc, bottomLeftDest)
+      else
+        'topRight to BottomLeft Diag
+
+        topLeftSrc = [
+          new BGE.Math.Vector(0, 0),
+          new BGE.Math.Vector(srcWidth, 0),
+          new BGE.Math.Vector(0, srcHeight)
+        ]
+        bottomRightSrc = [
+          new BGE.Math.Vector(srcWidth, 0),
+          new BGE.Math.Vector(srcWidth, srcHeight),
+          new BGE.Math.Vector(0, srcHeight)
+        ]
+
+        topLeftDest = [
+          cornerPoints.topLeft,
+          cornerPoints.topRight,
+          cornerPoints.bottomLeft
+
+        ]
+
+        bottomRightDest = [
+          cornerPoints.topRight,
+          cornerPoints.bottomRight,
+          cornerPoints.bottomLeft
+
+        ]
+
+        worked = m.drawBitmapTriangleTo(draw2d, drawable, topLeftSrc, topLeftDest)
+
+        worked = worked and m.drawBitmapTriangleTo(draw2d, drawable, bottomRightSrc, bottomRightDest)
+      end if
+      return worked
+
+
+
+
+
+
+
+
+
       if diagonalLengths[0] > diagonalLengths[1]
         'Bottom Left Corner
 
@@ -803,7 +971,10 @@ namespace BGE
     end function
 
     sub addDebugCell(region as object, text = "" as string)
-      return
+
+      if not m.drawDebugCells
+        return
+      end if
       regionWidth = region.getWidth()
       regionHeight = region.getHeight()
       scale = m.debugCellSize - 2
