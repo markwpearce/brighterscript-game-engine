@@ -21,19 +21,17 @@ namespace BGE
 
     camera as Camera
 
-    cameraPosition as BGE.Math.Vector
-    worldToCamera as BGE.Math.Matrix44
-    cameraRotation as BGE.Math.Vector
-
-
     triangleCache as TriangleCache = new TriangleCache()
 
     private game as Game
 
-    sub new(game as BGE.Game, draw2d as object)
+    sub new(game as BGE.Game, draw2d as object, cam = invalid as Camera)
       m.game = game
       m.draw2d = draw2d
-      m.camera = new Camera()
+      if invalid = cam
+        cam = new Camera2d()
+      end if
+      m.camera = cam
     end sub
 
     sub resetDrawCallCounter()
@@ -66,17 +64,19 @@ namespace BGE
       for each sceneObj in m.sceneObjects
         sceneObj.update(m.camera)
       end for
+    end sub
 
+    sub setupCameraForFrame()
+      m.camera.setFrameSize(m.draw2d.getWidth(), m.draw2d.getHeight())
+      m.camera.checkMovement()
+
+      if m.camera.movedLastFrame() or invalid = m.camera.worldToCamera
+        m.camera.computeWorldToCameraMatrix()
+      end if
     end sub
 
     sub drawScene()
-      m.camera.checkMovement()
-
-      if m.camera.movedLastFrame()
-        m.cameraPosition = m.camera.position' m.camera ? m.camera.position : new BGE.Math.Vector()
-        lookTarget = m.camera.position.add(m.camera.orientation) ' m.camera? m.camera.orientation : new BGE.Math.Vector(0, 0, -1)
-        m.worldToCamera = BGE.Math.lookAt(m.cameraPosition, lookTarget).inverse()
-      end if
+      m.setupCameraForFrame()
       m.updateSceneObjects()
 
       m.sceneObjects.sortBy("negDistanceFromCamera")
@@ -90,45 +90,23 @@ namespace BGE
           end if
         end if
       end for
-
     end sub
 
-
     function worldPointToCanvasPoint(pWorld as BGE.Math.Vector) as BGE.Math.Vector
-      pCamera = m.worldToCamera.multVecMatrix(pWorld)
-      if pCamera.z >= 0
-        return invalid
-      end if
-      pScreen = {x: 0, y: 0}
-      pScreen.x = 500 * pCamera.x / -pCamera.z
-      pScreen.y = 500 * pCamera.y / -pCamera.z
-      pNDC = {x: 0, y: 0}
-
-      canvasWidth = m.draw2d.getWidth()
-      canvasHeight = m.draw2d.getHeight()
-      pNDC.x = (pScreen.x + canvasWidth * 0.5) / canvasWidth
-      pNDC.y = (pScreen.y + canvasHeight * 0.5) / canvasHeight
-      pRaster = new BGE.Math.Vector()
-      imageWidth = canvasWidth
-      imageHeight = canvasHeight
-
-      pRaster.x = fix(pNDC.x * imageWidth)
-      pRaster.y = cint ((1 - pNDC.y) * imageHeight)
-      '? "pCamera: "; pCamera.toStr();" -> screen: [";pScreen.x;pScreen.y;"] -> NDC [";pNDC.x;pNDC.y;"] -> Raster [";pRaster.x;pRaster.y;"]"
-
-      return pRaster
+      return m.camera.worldPointToCanvasPoint(pWorld)
     end function
 
-
-
     function drawLine(x as float, y as float, endX as float, endY as float, rgba as integer) as boolean
+      return m.drawLineTo(m.draw2d, x, y, endX, endY, rgba)
+    end function
+
+    function drawLineTo(draw2D as object, x as float, y as float, endX as float, endY as float, rgba as integer) as boolean
       width = abs(x - endx)
       height = abs(y - endY)
-      if not m.shouldDraw(x, y, width, height)
+      if not m.shouldDrawTo(draw2D, x, y, width, height)
         return false
       end if
       m.draw2d.DrawLine(x, y, endX, endY, rgba)
-
       m.drawCallsLastFrame++
       return true
     end function
@@ -143,7 +121,19 @@ namespace BGE
         return false
       end if
       draw2d.DrawPoint(x, y, sideLength, rgba)
+      m.drawCallsLastFrame++
+      return true
+    end function
 
+    function drawRectangle(x as float, y as float, width as float, height as float, rgba as integer) as boolean
+      return m.drawRectangleTo(m.draw2d, x, y, width, height, rgba)
+    end function
+
+    function drawRectangleTo(draw2D as object, x as float, y as float, width as float, height as float, rgba as integer) as boolean
+      if not m.shouldDrawTo(draw2D, x, y, width, height)
+        return false
+      end if
+      draw2d.DrawRect(x, y, width, height, rgba)
       m.drawCallsLastFrame++
       return true
     end function
@@ -153,11 +143,29 @@ namespace BGE
     ' @param {string} text the test to display
     ' @param {integer} x
     ' @param {integer} y
-    ' @param {object} font Font object to use
     ' @param {integer} [color=-1] RGBA color to use
+    ' @param {object} [font=invalid] Font object to use (uses default font if none provided)
     ' @param {string} [horizAlign="left"] Horizontal Alignment - "left", "right" or "center"
     ' @param {string} [vertAlign="left"] Vertical Alignment - "top", "bottom" or "center"
-    function drawText(text as string, x as integer, y as integer, font as object, color = -1 as integer, horizAlign = "left" as string, vertAlign = "top" as string) as boolean
+    function drawText(text as string, x as integer, y as integer, color = -1 as integer, font = invalid as object, horizAlign = "left" as string, vertAlign = "top" as string) as boolean
+      return m.drawTextTo(m.draw2d, text, x, y, color, font, horizAlign, vertAlign)
+    end function
+
+
+    ' Draws text to a canvas
+    '
+    ' @param {string} text the test to display
+    ' @param {integer} x
+    ' @param {integer} y
+    ' @param {integer} [color=-1] RGBA color to use
+    ' @param {object} [font=invalid] Font object to use (uses default font if none provided)
+    ' @param {string} [horizAlign="left"] Horizontal Alignment - "left", "right" or "center"
+    ' @param {string} [vertAlign="left"] Vertical Alignment - "top", "bottom" or "center"
+    function drawTextTo(draw2D as object, text as string, x as integer, y as integer, color = -1 as integer, font = invalid as object, horizAlign = "left" as string, vertAlign = "top" as string) as boolean
+      if font = invalid
+        font = m.game.getFont("default")
+      end if
+
       width = font.GetOneLineWidth(text, 10000)
       height = font.GetOneLineHeight() * BGE.getNumberOfLinesInAString(text)
       textX = x
@@ -174,8 +182,8 @@ namespace BGE
       else if vertAlign = "center"
         textY = y - height / 2
       end if
-      if m.shouldDraw(textX, textY, width, height)
-        m.draw2d.DrawText(text, textX, textY, color, font)
+      if m.shouldDrawTo(draw2D, textX, textY, width, height)
+        draw2d.DrawText(text, textX, textY, color, font)
         m.drawCallsLastFrame++
         return true
       end if
@@ -262,7 +270,6 @@ namespace BGE
         return existingItem
       end if
 
-
       srcRegion = srcRegionWithId.region
 
       if points.count() < 3
@@ -312,7 +319,6 @@ namespace BGE
       region2.SetScaleMode(1)
       m.drawRotatedImageWithCenterTo(region2, initialRegion, new BGE.Math.Vector(longestSide, 0), rightSideTheta)
 
-
       m.addDebugCell(region2, "region2")
 
       bitmap3 = CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
@@ -328,19 +334,7 @@ namespace BGE
       leftSideTheta = -srcTri.angles[prevIndex]
       m.drawRotatedImageWithCenterTo(region3, region2, lastRotCenter, leftSideTheta, lastRotCenter.negative())
 
-
-
-
-
       resultPoints = [new BGE.Math.Vector(), new BGE.Math.Vector(), new BGE.Math.Vector()]
-
-
-      ' nextSrcIndex = srcTri.nextIndex(longestIndex)
-      ' resultPoints[1].y = srcTri.lengths[nextSrcIndex]
-
-      ' resultPoints[2]
-
-
 
       ' next point is always mapped to (0,0)
       index = (longestIndex + 1) mod 3
@@ -356,8 +350,8 @@ namespace BGE
       index = longestIndex
 
       finalAngle = srcTri.angles[(longestIndex + 1) mod 3]
-      resultPoints[index].x = longestSide * cos(halfPi - finalAngle)
-      resultPoints[index].y = longestSide * sin(halfPi - finalAngle)
+      resultPoints[index].x = fix(longestSide * cos(halfPi - finalAngle))
+      resultPoints[index].y = fix(longestSide * sin(halfPi - finalAngle))
 
 
       m.drawTrianglePointsTo(region3, resultPoints)
@@ -995,6 +989,13 @@ namespace BGE
       return false
     end function
 
+    function getCanvasSize() as BGE.Math.Vector
+      return new BGE.Math.Vector(m.draw2d.getWidth(), m.draw2d.getHeight())
+    end function
+
+    function getCanvasCenter() as BGE.Math.Vector
+      return new BGE.Math.Vector(fix(m.draw2d.getWidth() / 2), fix(m.draw2d.getHeight() / 2))
+    end function
 
     private function shouldDraw(x as float, y as float, width as float, height as float, rotation = 0 as float) as boolean
       return m.shouldDrawTo(m.draw2d, x, y, width, height, rotation)
@@ -1105,11 +1106,11 @@ namespace BGE
       m.drawRectangleOutline(cellX, cellY, m.debugCellSize, m.debugCellSize, BGE.Colors().White)
 
       m.draw2d.drawScaledObject(cellX + offsetX, cellY + offsetY, scale, scale, region)
-      ' m.drawRegionToCanvas(region, m.draw2d, cellX + offsetX, cellY + offsetY, scale, scale)
+      m.drawCallsLastFrame++
+
       debugText = `(${fix(regionWidth)}, ${fix(regionHeight)})`
-      m.drawText(text, cellX, textY, m.game.getFont("debugUiSmall"))
-      m.drawText(debugText, cellX, textY + 12, m.game.getFont("debugUiSmall"))
-      m.drawCallsLastFrame += 3
+      m.drawText(text, cellX, textY, BGE.Colors().White, m.game.getFont("debugUiSmall"))
+      m.drawText(debugText, cellX, textY + 12, BGE.Colors().White, m.game.getFont("debugUiSmall"))
       m.activeDebugCells++
     end sub
 

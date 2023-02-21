@@ -1,0 +1,146 @@
+namespace BGE
+
+
+  enum CameraFrustumSide
+    top = "top"
+    bottom = "bottom"
+    left = "left"
+    right = "right"
+    near = "near"
+  end enum
+
+
+  class CameraFrustumNormals
+    top as BGE.Math.Vector
+    bottom as BGE.Math.Vector
+    left as BGE.Math.Vector
+    right as BGE.Math.Vector
+    near as BGE.Math.Vector
+
+
+    sub setNormals(cameraOrientation as BGE.Math.Vector, fovDegrees as float)
+      'near
+      m.near = cameraOrientation.copy()
+      fovRad = BGE.Math.DegreesToRadians(fovDegrees)
+      rotVect = new BGE.Math.Vector()
+
+      'top
+      rotVect.x = fovRad / 2
+      rotVect.y = 0
+      m.top = BGE.Math.getRotationMatrix(rotVect).multDirMatrix(cameraOrientation)
+
+      'bottom
+      rotVect.x = -fovRad / 2
+      rotVect.y = 0
+      m.bottom = BGE.Math.getRotationMatrix(rotVect).multDirMatrix(cameraOrientation)
+
+      'left
+      rotVect.x = 0
+      rotVect.y = fovRad / 2
+      m.left = BGE.Math.getRotationMatrix(rotVect).multDirMatrix(cameraOrientation)
+
+      'right
+      rotVect.x = 0
+      rotVect.y = -fovRad / 2
+      m.right = BGE.Math.getRotationMatrix(rotVect).multDirMatrix(cameraOrientation)
+    end sub
+
+  end class
+
+  class Camera3d extends Camera
+
+    fieldOfViewDegrees as float = 90
+
+    protected frustumNormals as CameraFrustumNormals = new CameraFrustumNormals()
+
+    protected frustrumConvergence as BGE.Math.Vector = new BGE.Math.Vector()
+
+    override sub setTarget(targetPos as BGE.Math.Vector)
+      m.orientation = targetPos.subtract(m.position).normalize()
+    end sub
+
+
+    override sub rotate(rotation as BGE.Math.Vector)
+      m.orientation = BGE.Math.getRotationMatrix(rotation).multDirMatrix(m.orientation).normalize()
+    end sub
+
+    override sub onCameraMovement()
+      if m.motionChecker.getRotationDifference(m.orientation).norm() > 0
+        m.frustumNormals.setNormals(m.orientation, m.fieldOfViewDegrees)
+      end if
+      ' make the frustrum converge BEHIND the camera, instead of at the camera's position, so
+      ' items on edge of frame don't get cut off
+      ' This simply puts the convergence such that the whole frame will be in the frustrum
+      ' There are probably better ways of doing this
+      fovRad = BGE.Math.DegreesToRadians(m.fieldOfViewDegrees)
+      halfFrameSize = BGE.Math.max(m.frameSize.x, m.frameSize.y) / 2
+      m.frustrumConvergence = m.position.subtract(m.orientation.scale(halfFrameSize * cos(fovRad / 2)))
+    end sub
+
+
+    override function distanceFromCameraFront(point as BGE.Math.Vector) as float
+      return m.distanceFromFrustumSide("near", point)
+    end function
+
+
+    function distanceFromFrustumSide(frustumSide as string, point as BGE.Math.Vector) as float
+      frusNorm = m.frustumNormals[frustumSide]
+      return BGE.Math.distanceFromPlane(m.frustrumConvergence, frusNorm, point)
+    end function
+
+
+    override function isInView(point as BGE.Math.Vector) as boolean
+      frustumSides = ["near", "top", "left", "right", "bottom"]
+      for each side in frustumSides
+        distance = m.distanceFromFrustumSide(side, point)
+        if distance < 0
+          return false
+        end if
+      end for
+      return true
+    end function
+
+
+    override sub computeWorldToCameraMatrix()
+      lookTarget = m.position.add(m.orientation)
+      m.worldToCamera = BGE.Math.lookAt(m.position, lookTarget).inverse()
+    end sub
+
+    override function getDrawMode() as BGE.SceneObjectDrawMode
+      return BGE.SceneObjectDrawMode.attemptToOrient
+    end function
+
+
+    override function worldPointToCanvasPoint(pWorld as BGE.Math.Vector) as BGE.Math.Vector
+      if invalid = m.worldToCamera
+        m.computeWorldToCameraMatrix()
+      end if
+      pCamera = m.worldToCamera.multVecMatrix(pWorld)
+      if pCamera.z >= 0
+        return invalid
+      end if
+      pScreen = {x: 0, y: 0}
+
+      near = (m.frameSize.x / 2) / tan(BGE.Math.DegreesToRadians(m.fieldOfViewDegrees) / 2)
+      pScreen.x = near * pCamera.x / -pCamera.z
+      pScreen.y = near * pCamera.y / -pCamera.z
+      pNDC = {x: 0, y: 0}
+
+      canvasWidth = m.frameSize.x
+      canvasHeight = m.frameSize.y
+      pNDC.x = (pScreen.x + canvasWidth * 0.5) / canvasWidth
+      pNDC.y = (pScreen.y + canvasHeight * 0.5) / canvasHeight
+      pRaster = new BGE.Math.Vector()
+      imageWidth = canvasWidth
+      imageHeight = canvasHeight
+
+      pRaster.x = fix(pNDC.x * imageWidth)
+      pRaster.y = cint ((1 - pNDC.y) * imageHeight)
+      '? "pCamera: "; pCamera.toStr();" -> screen: [";pScreen.x;pScreen.y;"] -> NDC [";pNDC.x;pNDC.y;"] -> Raster [";pRaster.x;pRaster.y;"]"
+      return pRaster
+    end function
+
+
+  end class
+
+end namespace
