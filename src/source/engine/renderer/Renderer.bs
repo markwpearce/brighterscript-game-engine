@@ -21,9 +21,12 @@ namespace BGE
 
     camera as Camera
 
-    triangleCache as TriangleCache = new TriangleCache()
+    triangleCache as TriangleCache = new TriangleCache(30)
 
     private game as Game
+
+    private maxBitmapWidth = 1920
+    private maxBitmapHeight = 1080
 
     sub new(game as BGE.Game, draw2d as object, cam = invalid as Camera)
       m.game = game
@@ -64,9 +67,9 @@ namespace BGE
 
     private sub updateSceneObjects()
       for each sceneObj in m.sceneObjects
-        'if sceneObj.isEnabled()
-        sceneObj.update(m.camera)
-        'end if
+        if sceneObj.isEnabled()
+          sceneObj.update(m.camera)
+        end if
       end for
     end sub
 
@@ -93,6 +96,12 @@ namespace BGE
           end if
         end if
       end for
+    end sub
+
+
+    sub onSwapBuffers()
+      ' m.bmpPool.clearPool()
+      '      '
     end sub
 
     function worldPointToCanvasPoint(pWorld as BGE.Math.Vector) as BGE.Math.Vector
@@ -217,11 +226,15 @@ namespace BGE
       end if
 
       if new_width <> 0 and new_height <> 0 and m.shouldDrawTo(draw2d, xToDraw, yToDraw, new_width, new_height, theta)
-        scaledBitmap = CreateObject("roBitmap", {width: new_width, height: new_height, AlphaEnable: true})
-        scaledRegion = CreateObject("roRegion", scaledBitmap, 0, 0, new_width, new_height)
-        if invalid = scaledRegion
+        'scaledBitmap = m.scratchBitmaps[0]'CreateObject("roBitmap", {width: new_width, height: new_height, AlphaEnable: true})
+
+        scratchRegion = getScratchRegion(new_width, new_height)
+        'scaledRegion = CreateObject("roRegion", scaledBitmap, 0, 0, new_width, new_height)
+        if invalid = scratchRegion
           return false
         end if
+        scaledRegion = scratchRegion.region
+        scaledRegion.clear(0)
         pretranslation_x = drawable.GetPretranslationX()
         pretranslation_y = drawable.GetPretranslationY()
         newPreX = pretranslation_x * scale_x
@@ -266,24 +279,38 @@ namespace BGE
     end function
 
 
-    function makeIntoTriangle(srcRegionWithId as RegionWithId, points as BGE.Math.Vector[]) as TriangleBitmap
+    function makeIntoTriangle(srcRegionWithId as RegionWithId, points as BGE.Math.Vector[], makeAcute = false, useCache = false) as TriangleBitmap
 
-      existingItem = m.triangleCache.getTriangle(srcRegionWithId.id, points)
-      if invalid <> existingItem
-        return existingItem
+      if useCache
+        existingItem = m.triangleCache.getTriangle(srcRegionWithId.id, points)
+        if invalid <> existingItem
+          return existingItem
+        end if
       end if
-
 
       srcRegion = srcRegionWithId.region
 
-      srcPreX = srcRegion.GetPretranslationX()
-      srcPreY = srcRegion.GetPretranslationY()
+      srcPreX = 0
+      srcPreY = 0
+
+      srcRegion.GetPretranslationX()
+      srcRegion.GetPretranslationY()
+
+
 
       if srcPreX <> 0 or srcPreY <> 0
         m.addDebugCell(srcRegion, "srcRegionPreTran")
-        unPreTranslatedBitmap = CreateObject("roBitmap", {width: srcRegion.getWidth(), height: srcRegion.getHeight(), AlphaEnable: true})
+        scratchRegion1 = getScratchRegion(srcRegion.getWidth(), srcRegion.getHeight())
+        'unPreTranslatedBitmap = m.scratchBitmaps[0]'CreateObject("roBitmap", {width: srcRegion.getWidth(), height: srcRegion.getHeight(), AlphaEnable: true})
         unPreTranslated = CreateObject("roRegion", unPreTranslatedBitmap, 0, 0, srcRegion.getWidth(), srcRegion.getHeight())
-        m.drawObjectTo(unPreTranslated, -srcPreX, -srcPreY, srcRegion)
+        if invalid = scratchRegion1
+          return false
+        end if
+
+        unPreTranslated = scratchRegion1.region
+        if not m.drawObjectTo(unPreTranslated, -srcPreX, -srcPreY, srcRegion)
+          return invalid
+        end if
         srcRegion = unPreTranslated
       end if
 
@@ -309,18 +336,18 @@ namespace BGE
       longestIndex = srcTri.longestIndex
       startIndex = srcTri.nextIndex(longestIndex)
       longestSide = srcTri.getLongestSide()
-      bitmap = CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
+      bmpSizeW = BGE.math.min(longestSide, m.maxBitmapWidth)
+      bmpSizeH = BGE.math.min(longestSide, m.maxBitmapHeight)
 
       originPoint = srcTri.points[startIndex]
-
-      initialRegion = CreateObject("roRegion", bitmap, 0, 0, longestSide, longestSide)
-      if invalid = initialRegion
+      ' bitmap = m.scratchBitmaps[1]'CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
+      scratchRegion2 = getScratchRegion(bmpSizeW, bmpSizeH)
+      if invalid = scratchRegion2
         return invalid
       end if
-      initialRegion.SetScaleMode(1)
+      initialRegion = scratchRegion2.region
+
       initialAngle = srcTri.anglesToPrevious[startIndex]
-
-
       initialCenter = originPoint.negative()
       m.drawRotatedImageWithCenterTo(initialRegion, srcRegion, originPoint, initialAngle, initialCenter)
 
@@ -330,18 +357,21 @@ namespace BGE
       ' find the angle to rotate to cut off the right side
       prevIndex = srcTri.previousIndex(startIndex)
       rightSideTheta = -initialAngle - halfPi + srcTri.anglesToPrevious[prevIndex]' - halfPi - srcTri.anglesToPrevious[prevIndex]
-      bitmap2 = CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
-      region2 = CreateObject("roRegion", bitmap2, 0, 0, longestSide, longestSide)
-      if invalid = region2
+      'bitmap2 = m.scratchBitmaps[0]'CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
+
+      scratchRegion3 = getScratchRegion(bmpSizeW, bmpSizeH)
+      if invalid = scratchRegion3
         return invalid
       end if
-      region2.SetScaleMode(1)
-      m.drawRotatedImageWithCenterTo(region2, initialRegion, new BGE.Math.Vector(longestSide, 0), rightSideTheta)
+
+      region2 = scratchRegion3.region
+
+      m.drawRotatedImageWithCenterTo(region2, initialRegion, new BGE.Math.Vector(bmpSizeW, 0), rightSideTheta)
 
       m.addDebugCell(region2, "region2")
 
-      bitmap3 = CreateObject("roBitmap", {width: longestSide, height: longestSide, AlphaEnable: true})
-      region3 = CreateObject("roRegion", bitmap3, 0, 0, longestSide, longestSide)
+      bitmap3 = CreateObject("roBitmap", {width: fix(bmpSizeW + 1), height: fix(bmpSizeH + 1), AlphaEnable: true})
+      region3 = CreateObject("roRegion", bitmap3, 0, 0, bmpSizeW, bmpSizeH)
       if invalid = region3
         return invalid
       end if
@@ -373,19 +403,23 @@ namespace BGE
       resultPoints[index].y = fix(longestSide * sin(halfPi - finalAngle))
 
 
-      m.drawTrianglePointsTo(region3, resultPoints)
+      'm.drawTrianglePointsTo(region3, resultPoints)
 
       result = new TriangleBitmap(region3, resultPoints)
 
       m.addDebugCell(region3, "triangle")
 
-      if not result.isAcute()
+      if not result.isAcute() and makeAcute
         ' Make the cached triangles Acute, so it is easier to transform them into obtuse triangles later
         result = m.scaleTriangleToBeAcuteTriangle(result)
+        if result = invalid
+          return invalid
+        end if
         m.addDebugCell(result.bitmap, "acutetriangle")
       end if
-
-      m.triangleCache.addTriangle(srcRegionWithId.id, points, result)
+      if useCache
+        m.triangleCache.addTriangle(srcRegionWithId.id, points, result)
+      end if
       return result
     end function
 
@@ -404,7 +438,7 @@ namespace BGE
         return false
       end if
 
-      srcTriangle = m.makeIntoTriangle(srcRegionWithId, srcPoints)
+      srcTriangle = m.makeIntoTriangle(srcRegionWithId, srcPoints, true, true)
       srcRegion = srcRegionWithId.region
       if invalid = srcTriangle
         return false
@@ -418,14 +452,18 @@ namespace BGE
         srcTriangle = m.rotateAcuteTriangleForDesiredOrigin(srcTriangle, destTriangle.nextIndex(destTriangle.longestIndex))
       end if
 
+      if invalid = srcTriangle
+        return false
+      end if
+
       pivotIndex = srcTriangle.previousIndex(srcTriangle.getOriginIndex())
 
       nextIndex = srcTriangle.nextIndex(pivotIndex)
       prevIndex = srcTriangle.nextIndex(nextIndex)
 
 
-      finalBitmapWidth = destTriangle.getLongestSide() * 1.33
-      finalBitmapHeight = finalBitmapWidth
+      finalBitmapWidth = BGE.Math.min(destTriangle.getLongestSide() * 1.33, m.maxBitmapWidth)
+      finalBitmapHeight = BGE.Math.min(finalBitmapWidth, m.maxBitmapHeight)
 
 
       mappedLongestLength = destTriangle.lengths[pivotIndex]
@@ -445,18 +483,26 @@ namespace BGE
       changedPointOnYAxis.y *= srcYScale
 
       angleToMappedLongest = BGE.Math.GetAngle(new BGE.Math.Vector(), mappedOriginPointAfterLengthSet)
-      distanceToMappedLongest = mappedOriginPointAfterLengthSet.length()
-      scaledSrcBitmap = CreateObject("roBitmap", {width: distanceToMappedLongest, height: changedPointOnYAxis.y, AlphaEnable: true})
-      scaledSrcRegion = CreateObject("roRegion", scaledSrcBitmap, 0, 0, distanceToMappedLongest, changedPointOnYAxis.y)
-      if invalid = scaledSrcRegion
+      distanceToMappedLongest = BGE.Math.min(mappedOriginPointAfterLengthSet.length(), m.maxBitmapWidth)
+      newHeightAfterChange = BGE.Math.min(changedPointOnYAxis.y, m.maxBitmapHeight)
+      'scaledSrcBitmap = m.scratchBitmaps[0]'CreateObject("roBitmap", {width: distanceToMappedLongest, height: changedPointOnYAxis.y, AlphaEnable: true})
+      'scaledSrcRegion = CreateObject("roRegion", scaledSrcBitmap, 0, 0, distanceToMappedLongest, changedPointOnYAxis.y)
+      'if invalid = scaledSrcRegion
+      ' return false
+      'end if
+
+      scratchRegion1 = getScratchRegion(distanceToMappedLongest, newHeightAfterChange)
+      if invalid = scratchRegion1
         return false
       end if
-      scaledSrcRegion.SetScaleMode(1)
+
+      scaledSrcRegion = scratchRegion1.region
+
       m.drawScaledObjectTo(scaledSrcRegion, 0, 0, srcXScale, srcYScale, srcTriangle.bitmap)
 
       m.drawTrianglePointsTo(scaledSrcRegion, [
         new BGE.Math.Vector(),
-        changedPointOnYAxis,
+        new BGE.Math.vector(0, newHeightAfterChange), ' was changedPointOnYAxis, but this is not safe - could be too big
         mappedOriginPointAfterLengthSet
       ])
 
@@ -466,13 +512,21 @@ namespace BGE
 
       finalAngle = BGE.Math.GetAngle(destOrigin, destTriangle.points[pivotIndex])
       rotatedTriHeight = changedPointOnYAxis.y * cos(angleToMappedLongest)
-      rotatedRegionHeight = rotatedTriHeight
-      rotatedBitmap = CreateObject("roBitmap", {width: distanceToMappedLongest, height: rotatedRegionHeight, AlphaEnable: true})
-      rotatedRegion = CreateObject("roRegion", rotatedBitmap, 0, 0, distanceToMappedLongest, rotatedRegionHeight)
-      if rotatedRegion = invalid
+      rotatedRegionHeight = BGE.math.min(rotatedTriHeight, m.maxBitmapHeight)
+      ' rotatedBitmap = m.scratchBitmaps[1]'CreateObject("roBitmap", {width: distanceToMappedLongest, height: rotatedRegionHeight, AlphaEnable: true})
+      ' rotatedRegion = CreateObject("roRegion", rotatedBitmap, 0, 0, distanceToMappedLongest, rotatedRegionHeight)
+      ' if rotatedRegion = invalid
+      '   return false
+      ' end if
+      ' rotatedRegion.clear(0)
+      ' rotatedRegion.SetScaleMode(1)
+
+      scratchRegion2 = getScratchRegion(distanceToMappedLongest, rotatedRegionHeight)
+      if invalid = scratchRegion2
         return false
       end if
-      rotatedRegion.SetScaleMode(1)
+
+      rotatedRegion = scratchRegion2.region
 
       angleToMappedLongest = Bge.Math.Max(angleToMappedLongest, 0.05)
 
@@ -483,14 +537,14 @@ namespace BGE
 
       secondPartLength = distanceToMappedLongest - firstPartLength
 
-      firstPartRegion = CreateObject("roRegion", rotatedBitmap, 0, 0, firstPartLength, rotatedTriHeight)
+      firstPartRegion = CreateObject("roRegion", scratchRegion2.getBitmapObject(), 0, 0, firstPartLength, rotatedTriHeight)
 
       if invalid = firstPartRegion
         return false
       end if
       firstPartRegion.SetScaleMode(1)
 
-      secondPartRegion = CreateObject("roRegion", rotatedBitmap, BGE.Math.Max(0, firstPartLength - 1), 0, secondPartLength, rotatedTriHeight)
+      secondPartRegion = CreateObject("roRegion", scratchRegion2.getBitmapObject(), BGE.Math.Max(0, firstPartLength - 1), 0, secondPartLength, rotatedTriHeight)
       if invalid = secondPartRegion
         return false
       end if
@@ -513,12 +567,21 @@ namespace BGE
 
       finalScaleY = destTriangle.getHeightByTangentIndex(nextIndex) / rotatedTriHeight
 
-      finalBitmap = CreateObject("roBitmap", {width: finalBitmapWidth, height: finalBitmapHeight, AlphaEnable: true})
-      finalRegion = CreateObject("roRegion", finalBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
+      ' finalBitmap = m.scratchBitmaps[2]'CreateObject("roBitmap", {width: finalBitmapWidth, height: finalBitmapHeight, AlphaEnable: true})
+      ' finalRegion = CreateObject("roRegion", finalBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
 
-      if invalid = finalRegion
+      ' if invalid = finalRegion
+      '   return false
+      ' end if
+      ' finalRegion.clear(0)
+
+
+      scratchRegion3 = getScratchRegion(finalBitmapWidth, finalBitmapHeight)
+      if invalid = scratchRegion3
         return false
       end if
+
+      finalRegion = scratchRegion3.region
 
       m.addDebugCell(firstPartRegion, "firstPartRegion")
 
@@ -655,15 +718,23 @@ namespace BGE
 
       firstRotation = srcTriangle.anglesToPrevious[nextIndex]
 
-      rotatedSrcBitmap = CreateObject("roBitmap", {width: srcLongestLength, height: srcLongestLength, AlphaEnable: true})
+
+      'rotatedSrcBitmap = CreateObject("roBitmap", {width: srcLongestLength, height: srcLongestLength, AlphaEnable: true})
       'rotatedSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
 
-      m.drawRotatedObjectTo(rotatedSrcBitmap, 0, 0, firstRotation, srcTriangle.bitmap)
+      scratchRegion1 = getScratchRegion(srcLongestLength, srcLongestLength)
+      if invalid = scratchRegion1
+        return invalid
+      end if
+
+      rotatedSrcRegion = scratchRegion1.region
+
+      m.drawRotatedObjectTo(rotatedSrcRegion, 0, 0, firstRotation, srcTriangle.bitmap)
 
       newPrevPointY = srcNextLength * cos(firstRotation)
       newPrevPointX = srcNextLength * sin(firstRotation)
 
-      m.addDebugCell(rotatedSrcBitmap, "rotatedSrcBitmap")
+      m.addDebugCell(rotatedSrcRegion, "rotatedSrcRegion")
 
 
       ' Scaling from Y-axis will mean the ratio between triangle legs will be constant
@@ -688,22 +759,31 @@ namespace BGE
       newNextLength = sqr(newPrevPointX * newPrevPointX + acuteNextY * acuteNextY)
       newBitmapSize = BGE.Math.Max(srcLongestLength * scaleYToMakeAcute, newNextLength)
 
-      acuteTriBitmap = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
+      'acuteTriBitmap = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
       '  acuteTriangleSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
 
+      scratchRegion2 = getScratchRegion(newBitmapSize, newBitmapSize)
+      if invalid = scratchRegion2
+        return invalid
+      end if
 
-      m.drawScaledObjectTo(acuteTriBitmap, 0, 0, 1, scaleY, rotatedSrcBitmap)
+      acuteTriRegion = scratchRegion2.region
 
-      m.addDebugCell(acuteTriBitmap, "acuteTriBitmap")
+      m.drawScaledObjectTo(acuteTriRegion, 0, 0, 1, scaleY, rotatedSrcRegion)
+
+      m.addDebugCell(acuteTriRegion, "acuteTriRegion")
 
 
       acuteTriRotBmp = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
       '  acuteTriangleSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
+      if invalid = acuteTriRotBmp
+        return invalid
+      end if
 
       afterScaleHeight = acuteNextY'(srcTriangle.height * scaleYToMakeAcute)
       afterScaleTheta = atn(newPrevPointX / afterScaleHeight)
 
-      m.drawRotatedObjectTo(acuteTriRotBmp, 0, 0, -afterScaleTheta, acuteTriBitmap)
+      m.drawRotatedObjectTo(acuteTriRotBmp, 0, 0, -afterScaleTheta, acuteTriRegion)
 
       m.addDebugCell(acuteTriRotBmp, "acuteTriRotBmp")
 
@@ -732,6 +812,7 @@ namespace BGE
         return srcTriangle
       end if
       bitmapSize = srcTriangle.getLongestSide()
+
 
       rotForCorrectOrigin = CreateObject("roBitmap", {width: bitmapSize, height: bitmapSize, AlphaEnable: true})
 
@@ -960,16 +1041,16 @@ namespace BGE
     end function
 
 
-    function drawObject(x as integer, y as integer, src as object) as boolean
-      return m.drawObjectTo(m.draw2d, x, y, src)
+    function drawObject(x as integer, y as integer, src as object, rgba = -1 as integer) as boolean
+      return m.drawObjectTo(m.draw2d, x, y, src, rgba)
     end function
 
 
-    function drawObjectTo(draw2d as object, x as integer, y as integer, src as object) as boolean
+    function drawObjectTo(draw2d as object, x as integer, y as integer, src as object, rgba = -1 as integer) as boolean
       if not m.shouldDrawTo(draw2d, x, y, src.getWidth(), src.getHeight())
         return false
       end if
-      draw2d.drawObject(fix(x), fix(y), src)
+      draw2d.drawObject(fix(x), fix(y), src, rgba)
       m.drawCallsLastFrame++
       return true
     end function
@@ -980,7 +1061,7 @@ namespace BGE
     end function
 
     function drawScaledObjectTo(draw2d as object, x as integer, y as integer, scaleX as float, scaleY as float, src as object) as boolean
-      if not m.shouldDrawTo(draw2d, x, y, src.getWidth() * scaleX, src.getHeight() * scaleY)
+      if src = invalid or not m.shouldDrawTo(draw2d, x, y, src.getWidth() * scaleX, src.getHeight() * scaleY)
         return false
       end if
       draw2d.DrawScaledObject(fix(x), fix(y), scaleX, scaleY, src)
@@ -1009,7 +1090,7 @@ namespace BGE
 
     function drawRegionTo(canvasDrawTo as object, regionToDraw as object, x as float, y as float, scaleX = 1 as float, scaleY = 1 as float, rotation = 0 as float, RGBA = -1 as integer) as boolean
       if scaleX = 1 and scaleY = 1 and rotation = 0
-        return m.DrawObjectTo(canvasDrawTo, x, y, regionToDraw)
+        return m.DrawObjectTo(canvasDrawTo, x, y, regionToDraw, rgba)
       else if rotation = 0
         return m.DrawScaledObjectTo(canvasDrawTo, x, y, scaleX, scaleY, regionToDraw)
       else if scaleX = 1 and scaleY = 1
@@ -1018,6 +1099,56 @@ namespace BGE
         return m.DrawScaledAndRotatedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -rotation, regionToDraw, rgba)
       end if
       return false
+    end function
+
+    function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer) as boolean
+      return m.drawTriangleTo(m.draw2d, points, x, y, rgba)
+    end function
+
+    function drawTriangleTo(canvasDrawTo as object, points as BGE.Math.Vector[], x as float, y as float, rgba as integer) as boolean
+      if points.count() <> 3
+        return false
+      end if
+
+      bounds = BGE.Math.getBounds(points)
+      minP = bounds[0]
+      maxP = bounds[1]
+      totalXOffset = x + minP.x
+      totalYOffset = y + minP.y
+
+      srcSize = maxP.subtract(minP)
+
+      offsetPoints = []
+      for each point in points
+        offsetPoints.push(point.subtract(minP))
+      end for
+
+      polyId = "polyTriangle"
+
+      ' polyBitmap = m.triangleCache.getTriangle(polyId, offsetPoints)
+      'if invalid = polyBitmap
+
+      scratchRegion = getScratchRegion(srcSize.x, srcSize.y)
+      if invalid = scratchRegion
+        return false
+      end if
+
+      'triSrcBitmap = createObject("roBitmap", {width: srcSize.x, height: srcSize.y, AlphaEnable: true})
+
+      'if invalid = triSrcBitmap
+      '  return false
+      'end if
+      triSrcRegion = scratchRegion.region'createObject("roRegion", triSrcBitmap, 0, 0, srcSize.x, srcSize.y)
+
+      m.drawRectangleTo(triSrcRegion, 0, 0, srcSize.x, srcSize.y, rgba)
+      polyBitmap = m.makeIntoTriangle(new RegionWithId(triSrcRegion, polyId), offsetPoints, false, false)
+      if invalid = polyBitmap
+        return false
+      end if
+      'end if
+
+      didDraw = m.DrawObjectTo(canvasDrawTo, totalXOffset, totalYOffset, polyBitmap.bitmap)', 1, 1, 0, rgba)
+      return didDraw
     end function
 
     function getCanvasSize() as BGE.Math.Vector
@@ -1036,7 +1167,7 @@ namespace BGE
       if not m.onlyDrawWhenInFrame
         return true
       end if
-      if width = 0 or height = 0
+      if draw2d = invalid or width = 0 or height = 0
         return false
       end if
       return m.isInsideCanvas(draw2d, x, y, width, height, rotation)

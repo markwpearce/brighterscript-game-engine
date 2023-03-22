@@ -1,0 +1,162 @@
+namespace BGE
+
+  class SceneObjectBillboard extends SceneObject
+
+
+    private worldPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
+    private canvasPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
+
+
+    private canvasPosition as BGE.Math.Vector
+
+    private isMirror = false
+
+    private surfaceToCameraDotProduct as float
+    private surfaceNormal as BGE.Math.Vector
+    private normalOnCanvasStart as BGE.Math.Vector
+    private normalOnCanvasEnd as BGE.Math.Vector
+
+    private tempBitmap as object = invalid
+
+    sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
+      super(name, drawableObj, objType)
+    end sub
+
+    protected override function performDraw(renderer as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      retVal = false
+
+      regionToDraw = m.getRegionWithIdToDraw()
+      regionObj = regionToDraw.region
+      if invalid = regionToDraw or invalid = regionObj
+        return false
+      end if
+
+      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+        drawPos = m.canvasPosition
+        totalScaleX = 1.0 * m.drawable.scale.x * m.drawable.owner.scale.x
+        totalScaleY = 1.0 * m.drawable.scale.y * m.drawable.owner.scale.y
+        theta = m.drawable.rotation.z + m.drawable.owner.rotation.z
+
+        retVal = renderer.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta)
+      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        if invalid <> m.normalOnCanvasStart and invalid <> m.normalOnCanvasEnd
+          renderer.drawLine(m.normalOnCanvasStart.x, m.normalOnCanvasStart.y, m.normalOnCanvasEnd.x, m.normalOnCanvasEnd.y, BGE.Colors().Red)
+        end if
+        if m.isMirror
+          m.tempBitmap = invalid
+          return false
+        end if
+
+        canvasBounds = m.canvasPoints.getBounds()
+        if m.objMovedInRelationToCamera(renderer.camera) or invalid = m.tempBitmap or m.didRegionToDrawChange()
+          preTransX = regionObj.getPretranslationX()
+          preTransY = regionObj.getPretranslationY()
+          offsetCanvasPoints = m.canvasPoints.subtract(canvasBounds[0])
+          canvasSize = canvasBounds[1].subtract(canvasBounds[0])
+          m.tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
+          if m.tempBitmap = invalid
+            return false
+          end if
+          regionObj.setPretranslation(0, 0)
+          tempDidDraw = renderer.drawPinnedCornersTo(m.tempBitmap, offsetCanvasPoints, regionToDraw, m.isMirror)
+          regionObj.setPretranslation(preTransX, preTransY)
+          if not tempDidDraw
+            m.tempBitmap = invalid
+            return false
+          end if
+        end if
+        retVal = renderer.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
+      end if
+
+      return retVal
+    end function
+
+
+    protected function getRegionWithIdToDraw() as RegionWithId
+      return invalid
+    end function
+
+    protected function getUniqueRegionName() as string
+      return `${m.name}`
+    end function
+
+
+    protected function didRegionToDrawChange() as boolean
+      return false
+    end function
+
+    protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
+      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+        m.worldPosition = m.drawable.getWorldPosition()
+
+      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        origin = new BGE.Math.Vector()
+        totalScaleX = 1 * m.drawable.scale.x
+        totalScaleY = 1 * m.drawable.scale.y
+        scaledSize = m.drawable.getDrawnSize()
+        scaledWidth = scaledSize.width
+        scaledHeight = scaledSize.height
+        pretrans = m.drawable.getPretranslation()
+        topLeft = new BGE.Math.Vector(pretrans.x * totalScaleX, -pretrans.y * totalScaleY, 0)
+        topRight = topLeft.add(new BGE.Math.Vector(scaledWidth, 0, 0))
+        bottomLeft = topLeft.add(new BGE.Math.Vector(0, -scaledHeight, 0))
+        bottomRight = topLeft.add(new BGE.Math.Vector(scaledWidth, -scaledHeight, 0))
+
+        m.worldPoints.topLeft = m.transformationMatrix.multVecMatrix(topLeft)
+        m.worldPoints.topRight = m.transformationMatrix.multVecMatrix(topRight)
+        m.worldPoints.bottomLeft = m.transformationMatrix.multVecMatrix(bottomLeft)
+        m.worldPoints.bottomRight = m.transformationMatrix.multVecMatrix(bottomRight)
+        m.worldPosition = m.worldPoints.topLeft
+
+        m.surfaceNormal = m.worldPoints.getNormal()
+      end if
+      return true
+    end function
+
+
+    override function getPositionForCameraDistance(drawMode as SceneObjectDrawMode) as BGE.Math.Vector
+      if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        return m.worldPoints.getCenter()
+      end if
+      return m.worldPosition
+    end function
+
+    override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        return m.worldPoints.toArray()
+      end if
+      return [m.worldPosition]
+    end function
+
+    protected override function findCanvasPosition(renderer as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+        m.canvasPosition = renderer.worldPointToCanvasPoint(m.worldPosition)
+        if invalid = m.canvasPosition
+          return false
+        end if
+      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        index = 0
+        for each corner in m.worldPoints.toArray()
+          canvasPoint = renderer.worldPointToCanvasPoint(corner)
+          if invalid = canvasPoint
+            return false
+          end if
+          m.canvasPoints.setPointByIndex(index, canvasPoint)
+          index++
+        end for
+
+        'm.normalOnCanvasStart = m.canvasPoints.getCenter()
+        'm.normalOnCanvasEnd = renderer.worldPointToCanvasPoint(m.worldPoints.getCenter().add(m.surfaceNormal.scale(100)))
+        m.surfaceToCameraDotProduct = m.surfaceNormal.dotProduct(renderer.camera.orientation)
+        m.isMirror = false
+        if m.surfaceToCameraDotProduct < 0
+          m.isMirror = true
+        end if
+      end if
+      return true
+    end function
+
+
+  end class
+
+end namespace
