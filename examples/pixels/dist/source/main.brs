@@ -1,0 +1,20 @@
+sub Main()
+    game = BGE_Game(1280, 720, true) ' This initializes the game engine
+    game.loadBitmap("walkingsprite", "pkg:/sprites/walkingsprite.png")
+    polyRoom = PolygonRoom(game)
+    rectRoom = RectangleRoom(game)
+    spriteExampleRoom = SpriteRoom(game)
+    ghostExampleRoom = GhostRoom(game)
+    'game.defineRoom(polyRoom)
+    'game.defineRoom(rectRoom)
+    game.defineRoom(spriteExampleRoom)
+    'game.defineRoom(ghostExampleRoom)
+    game.changeRoom(spriteExampleRoom.name)
+    game.getDebugUI().addChild(BGE_Debug_FpsDisplay(game))
+    game.getDebugUI().addChild(BGE_Debug_InputDisplay(game))
+    game.getDebugUI().addChild(BGE_Debug_MemoryDisplay(game))
+    game.getDebugUI().addChild(BGE_Debug_GarbageCollectorDisplay(game))
+    game.debugShowUi(true)
+    game.Play()
+    ' vscode_rale_tracker_entry
+end sub'//# sourceMappingURL=./main.bs.map
