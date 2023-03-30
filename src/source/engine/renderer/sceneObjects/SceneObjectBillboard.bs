@@ -18,59 +18,38 @@ namespace BGE
 
     private tempBitmap as object = invalid
 
+    protected useTempBitmapMap as boolean[] = [false, false, false]
+
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       super(name, drawableObj, objType)
+      m.useTempBitmapMap[BGE.SceneObjectDrawMode.matchCamera] = false
+      m.useTempBitmapMap[BGE.SceneObjectDrawMode.directToCamera] = false
+      m.useTempBitmapMap[BGE.SceneObjectDrawMode.attemptToOrient] = true
     end sub
 
     protected override function performDraw(renderer as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       retVal = false
 
-      regionToDraw = m.getRegionWithIdToDraw()
-      regionObj = regionToDraw.region
-      if invalid = regionToDraw or invalid = regionObj
-        return false
-      end if
-
-      if drawMode = BGE.SceneObjectDrawMode.directToCamera
-        drawPos = m.canvasPosition
-        totalScaleX = 1.0 * m.drawable.scale.x * m.drawable.owner.scale.x
-        totalScaleY = 1.0 * m.drawable.scale.y * m.drawable.owner.scale.y
-        theta = m.drawable.rotation.z + m.drawable.owner.rotation.z
-
-        retVal = renderer.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta)
-      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
-
-        if m.isMirror
-          m.tempBitmap = invalid
-          return false
-        end if
-
-        canvasBounds = m.canvasPoints.getBounds()
-        if m.objMovedInRelationToCamera(renderer.camera) or m.didRegionToDrawChange()
-          ' If something changed since last frame, just go ahead and draw right to the canvas
-          m.tempBitmap = invalid
-          retVal = renderer.drawPinnedCorners(m.canvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
-        else
-          ' nothing changed since last frame, draw a static image that can be used later
-          if invalid = m.tempBitmap
-            preTransX = regionObj.getPretranslationX()
-            preTransY = regionObj.getPretranslationY()
-            offsetCanvasPoints = m.canvasPoints.subtract(canvasBounds[0])
-            canvasSize = canvasBounds[1].subtract(canvasBounds[0])
-            m.tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
-            if m.tempBitmap = invalid
-              return false
-            end if
-            regionObj.setPretranslation(0, 0)
-            tempDidDraw = renderer.drawPinnedCornersTo(m.tempBitmap, offsetCanvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
-            regionObj.setPretranslation(preTransX, preTransY)
-            if not tempDidDraw
-              m.tempBitmap = invalid
-              return false
-            end if
+      if m.isRedrawToCanvasRequired(renderer, drawMode)
+        ' either this moved recently, changed or not supposed to use temp bitmap in this drawMode
+        m.tempBitmap = invalid
+        retVal = m.drawToCanvas(renderer, drawMode)
+      else
+        ' nothing changed since last frame, draw a static image that can be used later
+        canvasBounds = m.getCanvasBounds()
+        if invalid = m.tempBitmap
+          canvasBounds = m.getCanvasBounds()
+          if invalid = canvasBounds or canvasBounds.count() < 2
+            return false
           end if
-          retVal = renderer.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
+          canvasSize = canvasBounds[1].subtract(canvasBounds[0])
+          m.tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
+          tempBitmapDrawn = m.drawToTempBitmap(renderer, m.tempBitmap, canvasBounds[0], drawMode)
+          if not tempBitmapDrawn
+            return false
+          end if
         end if
+        retVal = renderer.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
       end if
 
       if drawMode = BGE.SceneObjectDrawMode.attemptToOrient and invalid <> m.normalOnCanvasStart and invalid <> m.normalOnCanvasEnd
@@ -80,13 +59,50 @@ namespace BGE
       return retVal
     end function
 
-
-    protected function getRegionWithIdToDraw() as RegionWithId
-      return invalid
+    protected function isRedrawToCanvasRequired(renderer as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      return not m.useTempBitmapMap[drawMode] or m.objMovedInRelationToCamera(renderer.camera) or m.didRegionToDrawChange()
     end function
 
-    protected function getUniqueRegionName() as string
-      return `${m.name}`
+
+    protected function drawToCanvas(renderer as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      regionToDraw = m.getRegionWithIdToDraw()
+      regionObj = regionToDraw.region
+      if invalid = regionToDraw or invalid = regionObj
+        return false
+      end if
+      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+        drawPos = m.canvasPosition
+        totalScaleX = 1.0 * m.drawable.scale.x * m.drawable.owner.scale.x
+        totalScaleY = 1.0 * m.drawable.scale.y * m.drawable.owner.scale.y
+        theta = m.drawable.rotation.z + m.drawable.owner.rotation.z
+
+        retVal = renderer.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta)
+      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        retVal = renderer.drawPinnedCorners(m.canvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
+      end if
+      return retVal
+    end function
+
+    protected function getCanvasBounds() as BGE.Math.Vector[]
+      return m.canvasPoints.getBounds()
+    end function
+
+    protected function drawToTempBitmap(renderer as BGE.Renderer, tempBitmap as object, canvasPointsTopLeftBound as BGE.Math.Vector, drawMode as SceneObjectDrawMode) as boolean
+      if invalid = tempBitmap
+        return false
+      end if
+      regionToDraw = m.getRegionWithIdToDraw()
+      if invalid = regionToDraw or invalid = regionToDraw.region
+        return false
+      end if
+      regionObj = regionToDraw.region
+      preTransX = regionObj.getPretranslationX()
+      preTransY = regionObj.getPretranslationY()
+      offsetCanvasPoints = m.canvasPoints.subtract(canvasPointsTopLeftBound)
+      regionObj.setPretranslation(0, 0)
+      tempBmpDidDraw = renderer.drawPinnedCornersTo(tempBitmap, offsetCanvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
+      regionObj.setPretranslation(preTransX, preTransY)
+      return tempBmpDidDraw
     end function
 
 
@@ -138,6 +154,23 @@ namespace BGE
     end function
 
     protected override function findCanvasPosition(renderer as Renderer, drawMode as SceneObjectDrawMode) as boolean
+
+      result = m.updateCanvasPosition(renderer, drawMode)
+      if result and drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+        m.computeNormalDebugInfo(renderer)
+        m.isMirror = false
+        if invalid <> m.surfaceNormal
+          m.surfaceToCameraDotProduct = m.surfaceNormal.dotProduct(renderer.camera.orientation)
+          if m.surfaceToCameraDotProduct < 0
+            m.isMirror = true
+          end if
+        end if
+      end if
+      return result
+    end function
+
+
+    protected function updateCanvasPosition(renderer as Renderer, drawMode as SceneObjectDrawMode) as boolean
       if drawMode = BGE.SceneObjectDrawMode.directToCamera
         m.canvasPosition = renderer.worldPointToCanvasPoint(m.worldPosition)
         if invalid = m.canvasPosition
@@ -153,21 +186,24 @@ namespace BGE
           m.canvasPoints.setPointByIndex(index, canvasPoint)
           index++
         end for
-
-        if isTrue(m.drawable.owner.game.getDebugValue("draw_scene_object_normals"))
-          m.normalOnCanvasStart = renderer.worldPointToCanvasPoint(m.worldPoints.getCenter())
-          m.normalOnCanvasEnd = renderer.worldPointToCanvasPoint(m.worldPoints.getCenter().subtract(m.surfaceNormal.scale(100)))
-        else
-          m.normalOnCanvasStart = invalid
-          m.normalOnCanvasEnd = invalid
-        end if
-        m.surfaceToCameraDotProduct = m.surfaceNormal.dotProduct(renderer.camera.orientation)
-        m.isMirror = false
-        if m.surfaceToCameraDotProduct < 0
-          m.isMirror = true
-        end if
       end if
       return true
+    end function
+
+
+    protected sub computeNormalDebugInfo(renderer as Renderer)
+      if isTrue(m.drawable.owner.game.getDebugValue("draw_scene_object_normals")) and invalid <> m.surfaceNormal and invalid <> m.worldPoints
+        normalCenter = m.getNormalDebugPoint()
+        m.normalOnCanvasStart = renderer.worldPointToCanvasPoint(m.worldPoints.getCenter())
+        m.normalOnCanvasEnd = renderer.worldPointToCanvasPoint(m.worldPoints.getCenter().subtract(m.surfaceNormal.scale(100)))
+      else
+        m.normalOnCanvasStart = invalid
+        m.normalOnCanvasEnd = invalid
+      end if
+    end sub
+
+    protected function getNormalDebugPoint() as BGE.Math.Vector
+      return m.worldPoints.getCenter()
     end function
 
 
