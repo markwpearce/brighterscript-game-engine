@@ -5,7 +5,7 @@ function __BGE_Renderer_builder()
     instance.new = sub(game as object, draw2d as object, cam = invalid as object)
         m.nextSceneObjectId = 0
         m.minimumFrameRateTarget = 12
-        m.onlyDrawWhenInFrame = true
+        m.onlyDrawWhenInFrame = false
         m.drawCallsLastFrame = 0
         m.activeDebugCells = 0
         m.debugCellSize = 100
