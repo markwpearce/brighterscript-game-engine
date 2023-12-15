@@ -17,9 +17,11 @@ namespace BGE
 
     private tempBitmap as ifDraw2d = invalid
 
-    private tempBitmapPoints as BGE.Math.Vector[]
+    private limitPointMap as LimitPointMappings = invalid
 
     protected useTempBitmapMap as boolean[] = [false, false, false]
+
+    frameCount = 0
 
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       super(name, drawableObj, objType)
@@ -30,31 +32,32 @@ namespace BGE
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       retVal = false
-
+      canvasBounds = m.getCanvasBounds()
       if m.isRedrawToCanvasRequired(rendererObj, drawMode)
         ' either this moved recently, changed or not supposed to use temp bitmap in this drawMode
 
+        if m.canAttemptTransformTempBitmap(drawMode)
 
 
+        end if
+        if not retVal
+          if drawMode = BGE.SceneObjectDrawMode.directToCamera
+            retval = m.drawToCanvas(rendererObj, drawMode)
+          else
 
-        retVal = m.drawToCanvas(rendererObj, drawMode)
-      else
-        ' nothing changed since last frame, draw a static image that can be used later
-        canvasBounds = m.getCanvasBounds()
-        if invalid = m.tempBitmap
-          canvasBounds = m.getCanvasBounds()
-          if invalid = canvasBounds or canvasBounds.count() < 2
-            return false
-          end if
-          canvasSize = canvasBounds[1].subtract(canvasBounds[0])
-          m.tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
-          tempBitmapDrawn = m.drawToTempBitmap(rendererObj, m.tempBitmap, canvasBounds[0], drawMode)
-          if not tempBitmapDrawn
-            m.tempBitmap = invalid
-            return false
+            if invalid = m.tempBitmap
+              m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode)
+            end if
+            retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
           end if
         end if
+      else
+        ' nothing changed since last frame, draw a static image that can be used later
+        if invalid = m.tempBitmap
+          m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode)
+        end if
         retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
+
       end if
 
       if drawMode = BGE.SceneObjectDrawMode.attemptToOrient and invalid <> m.normalOnCanvasStart and invalid <> m.normalOnCanvasEnd
@@ -72,17 +75,22 @@ namespace BGE
       return not m.useTempBitmapMap[drawMode] or m.objMovedInRelationToCamera(rendererObj.camera) or m.didRegionToDrawChange()
     end function
 
-    ' Determine if we can just scale and/or rotate the temp bitmap to match the required position
-    protected function canAttemptTransformTempBitmap(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
-      if rodash.isInvalid(m.tempBitmap) or not m.useTempBitmapMap[drawMode]
-        return false
+
+
+
+    protected function createTempBitmap(canvasBounds as BGE.Math.Vector[], rendererObj as Renderer, drawMode as SceneObjectDrawMode) as roBitmap
+      if invalid = canvasBounds or canvasBounds.count() < 2
+        return invalid
       end if
-
-      ' check points to see if
-
-
-
-      return
+      canvasSize = canvasBounds[1].subtract(canvasBounds[0])
+      tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
+      tempBitmapDrawn = m.drawToTempBitmap(rendererObj, m.tempBitmap, canvasBounds[0], drawMode)
+      if not tempBitmapDrawn
+        m.limitPointMap = invalid
+        return invalid
+      end if
+      m.limitPointMap = m.getCanvasLimitPointMap()
+      return tempBitmap
     end function
 
     protected function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -104,8 +112,34 @@ namespace BGE
       return retVal
     end function
 
-    protected function getCanvasBounds() as BGE.Math.Vector[]
-      return m.canvasPoints.getBounds()
+    private function getCanvasBounds() as BGE.Math.Vector[]
+      return BGE.Math.getBounds(m.getAllCanvasPoints())
+    end function
+
+    protected function getAllCanvasPoints() as BGE.Math.Vector[]
+      return m.canvasPoints.toArray()
+    end function
+
+    private function getCanvasLimitPointMap() as LimitPointMappings
+      return new LimitPointMappings(m.getAllCanvasPoints())
+    end function
+
+    private function getCurrentLimitPointsFromMap() as LimitPoints2d
+      if rodash.isInvalid(m.limitPointMap)
+        return invalid
+      end if
+      currentCanvasPoints = m.getAllCanvasPoints()
+
+      if currentCanvasPoints.Count() <> m.limitPointMap.totalPointCount
+        return invalid
+      end if
+      currentLimits = {
+        top: currentCanvasPoints[m.limitPointMap.topIndex]
+        left: currentCanvasPoints[m.limitPointMap.leftIndex]
+        bottom: currentCanvasPoints[m.limitPointMap.bottomIndex]
+        right: currentCanvasPoints[m.limitPointMap.rightIndex]
+      }
+      return currentLimits
     end function
 
     protected function getRegionWithIdToDraw() as RegionWithId
@@ -124,8 +158,9 @@ namespace BGE
       regionObj = regionToDraw.region
       preTransX = regionObj.getPretranslationX()
       preTransY = regionObj.getPretranslationY()
-      m.tempBitmapPoints = offsetCanvasPoints.toArray()
       offsetCanvasPoints = m.canvasPoints.subtract(canvasPointsTopLeftBound)
+      m.tempBitmapPoints = offsetCanvasPoints.toArray()
+
       regionObj.setPretranslation(0, 0)
       tempBmpDidDraw = rendererObj.drawPinnedCornersTo(tempBitmap, offsetCanvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
       regionObj.setPretranslation(preTransX, preTransY)
@@ -233,6 +268,23 @@ namespace BGE
       return m.worldPoints.getCenter()
     end function
 
+
+    ' Determine if we can just scale and/or rotate the temp bitmap to match the required position
+    protected function canAttemptTransformTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+      if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.limitPointMap) or not m.useTempBitmapMap[drawMode]
+        return false
+      end if
+
+      ' check points to see if
+      currentLimits = m.getCurrentLimitPointsFromMap()
+      if rodash.isInvalid(currentLimits)
+        return false
+      end if
+
+
+
+      return false
+    end function
 
   end class
 
