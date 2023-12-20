@@ -1,5 +1,12 @@
 namespace BGE
 
+  interface TransformTempBitmapDetails
+    origin as BGE.Math.Vector
+    rotation as float
+    scaleX as float
+    scaleY as float
+  end interface
+
   class SceneObjectBillboard extends SceneObject
 
 
@@ -19,37 +26,47 @@ namespace BGE
 
     private limitPointMap as LimitPointMappings = invalid
 
-    protected useTempBitmapMap as boolean[] = [false, false, false]
+    protected useTempBitmapMap as boolean[] = [false, false, false, false]
 
-    frameCount = 0
+    private hasAccurateTempBitmap = false
 
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       super(name, drawableObj, objType)
       m.useTempBitmapMap[SceneObjectDrawMode.matchCamera] = false
       m.useTempBitmapMap[SceneObjectDrawMode.directToCamera] = false
-      m.useTempBitmapMap[SceneObjectDrawMode.attemptToOrient] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.oriented] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.orientedDrawBackFace] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.wireFrame] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.wireFrameDrawBackFace] = true
     end sub
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       retVal = false
       canvasBounds = m.getCanvasBounds()
-      if m.isMirror
-        ' This face is facing backwards
+      if m.doNotDrawBecauseBackface(drawMode)
+        ' this is backface, and should not be drawn
         m.tempBitmap = invalid
         return false
       end if
+
+
       if m.isRedrawToCanvasRequired(rendererObj, drawMode)
         ' either this moved recently, changed or not supposed to use temp bitmap in this drawMode
-
-        if m.canAttemptTransformTempBitmap(drawMode)
-
-
+        if m.objMovedInRelationToCamera(rendererObj.camera)
+          transformDetails = m.attemptTransformTempBitmap(rendererObj, drawMode)
+          if invalid <> transformDetails
+            ' the object moved, but the temporary bitmap can be reused
+            m.hasAccurateTempBitmap = false
+            region = CreateObject("roRegion", m.tempBitmap, 0, 0, m.tempBitmap.GetWidth(), m.tempBitmap.GetHeight())
+            retVal = rendererObj.drawScaledAndRotatedObject(transformDetails.origin.x, transformDetails.origin.y, transformDetails.scaleX, transformDetails.scaleY, transformDetails.rotation, region)
+          end if
         end if
         if not retVal
-          if drawMode = BGE.SceneObjectDrawMode.directToCamera
+          ' we have not drawn anything yet
+          if isDirectDrawMode(drawMode)
             retval = m.drawToCanvas(rendererObj, drawMode)
           else
-
+            ' try to create a temp bitmap and draw it to the
             m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode)
             if invalid <> m.tempBitmap
               retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
@@ -57,19 +74,21 @@ namespace BGE
           end if
         end if
       else
-        ' nothing changed since last frame, draw a static image that can be used later
+        ' nothing changed since last frame
         if invalid = m.tempBitmap
+          ' draw a static image that can be used later
           m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode)
         end if
         retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
-
       end if
 
-      if drawMode = BGE.SceneObjectDrawMode.attemptToOrient and invalid <> m.normalOnCanvasStart and invalid <> m.normalOnCanvasEnd
+      if isOrientedDrawMode(drawMode) and invalid <> m.normalOnCanvasStart and invalid <> m.normalOnCanvasEnd
+        ' normalOnCanvasStart, normalOnCanvasEnd will only be set if in debug mode
         rendererObj.drawLine(m.normalOnCanvasStart.x, m.normalOnCanvasStart.y, m.normalOnCanvasEnd.x, m.normalOnCanvasEnd.y, BGE.Colors().Pink)
       end if
 
       if not retVal
+        ' nothing was drawn to the screen
         m.tempBitmap = invalid
       end if
 
@@ -77,17 +96,17 @@ namespace BGE
     end function
 
     protected function isRedrawToCanvasRequired(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
-      return not m.useTempBitmapMap[drawMode] or m.objMovedInRelationToCamera(rendererObj.camera) or m.didRegionToDrawChange()
+      return not m.useTempBitmapMap[drawMode] or m.objMovedInRelationToCamera(rendererObj.camera) or m.didRegionToDrawChange() or m.tempBitmap = invalid or m.hasAccurateTempBitmap = false
     end function
-
-
-
 
     protected function createTempBitmap(canvasBounds as BGE.Math.Vector[], rendererObj as Renderer, drawMode as SceneObjectDrawMode) as roBitmap
       if invalid = canvasBounds or canvasBounds.count() < 2
         return invalid
       end if
       canvasSize = canvasBounds[1].subtract(canvasBounds[0])
+      if canvasSize.x < 2 or canvasSize.y < 2
+        return invalid
+      end if
       tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
       tempBitmapDrawn = m.drawToTempBitmap(rendererObj, tempBitmap, canvasBounds[0], drawMode)
       if not tempBitmapDrawn
@@ -95,6 +114,7 @@ namespace BGE
         return invalid
       end if
       m.limitPointMap = m.getCanvasLimitPointMap()
+      m.hasAccurateTempBitmap = true
       return tempBitmap
     end function
 
@@ -111,7 +131,7 @@ namespace BGE
         theta = m.drawable.rotation.z + m.drawable.owner.rotation.z
 
         retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta)
-      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+      else if drawMode = BGE.SceneObjectDrawMode.oriented
         retVal = rendererObj.drawPinnedCorners(m.canvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
       end if
       return retVal
@@ -178,10 +198,11 @@ namespace BGE
     end function
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
-      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+      if drawMode = BGE.SceneObjectDrawMode.directToCamera or drawMode = BGE.SceneObjectDrawMode.matchCamera
         m.worldPosition = m.drawable.getWorldPosition()
 
-      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+      else
+        ' All oriented draw modes
         origin = new BGE.Math.Vector()
         totalScaleX = 1 * m.drawable.scale.x
         totalScaleY = 1 * m.drawable.scale.y
@@ -207,14 +228,14 @@ namespace BGE
 
 
     override function getPositionForCameraDistance(drawMode as SceneObjectDrawMode) as BGE.Math.Vector
-      if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+      if isOrientedDrawMode(drawMode)
         return m.worldPoints.getCenter()
       end if
       return m.worldPosition
     end function
 
     override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
-      if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+      if isOrientedDrawMode(drawMode)
         return m.worldPoints.toArray()
       end if
       return [m.worldPosition]
@@ -223,7 +244,7 @@ namespace BGE
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
 
       result = m.updateCanvasPosition(rendererObj, drawMode)
-      if result and drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+      if result and isOrientedDrawMode(drawMode)
         m.computeNormalDebugInfo(rendererObj)
         m.isMirror = false
         if invalid <> m.surfaceNormal
@@ -238,12 +259,12 @@ namespace BGE
 
 
     protected function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
-      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+      if isDirectDrawMode(drawMode)
         m.canvasPosition = rendererObj.worldPointToCanvasPoint(m.worldPosition)
         if invalid = m.canvasPosition
           return false
         end if
-      else if drawMode = BGE.SceneObjectDrawMode.attemptToOrient
+      else if isOrientedDrawMode(drawMode)
         index = 0
         for each corner in m.worldPoints.toArray()
           canvasPoint = rendererObj.worldPointToCanvasPoint(corner)
@@ -275,62 +296,91 @@ namespace BGE
 
 
     ' Determine if we can just scale and/or rotate the temp bitmap to match the required position
-    protected function canAttemptTransformTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+    protected function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.limitPointMap) or not m.useTempBitmapMap[drawMode]
-        return false
+        return invalid
       end if
 
-      ' check points to see if
+      if m.limitPointMap.height = invalid or m.limitPointMap.height < 2 or m.limitPointMap.width = invalid or m.limitPointMap.width < 2
+        return invalid
+      end if
+
       currentLimits = m.getCurrentLimitPointsFromMap()
+
       if rodash.isInvalid(currentLimits)
-        return false
+        return invalid
       end if
 
-      '
-      '   ?-----B
-      '   |   /
-      '   |  /
-      '   |a/
-      '   A
-      ' get aAngle
+      rotationDelta = m.limitPointMap.getAngleBaseLineDifference(currentLimits)
 
-      currentTLBAngle = BGE.Math.GetAngleBetweenVectors(currentLimits.left, currentLimits.top, currentLimits.bottom)
-      k = m.limitPointMap.alphaBetaRatio
-      currentAlphaAngle = k * (BGE.Math.PI() - currentTLBAngle) / (k + 1)
-
-      ' from currentLimits.left currentLimits.top aAngle, get mappedOrigin
-      mappedOrigin = BGE.Math.getThirdRightTrianglePoint(currentLimits.left, currentLimits.top, currentAlphaAngle)
-      testRotationOfTemp = BGE.Math.GetAngle(mappedOrigin, currentLimits.top)
+      ' rotate the current points to be axis aligned, so we can get the mappedOrigin - this allows us to read x & y sclaes
+      currentBackRotationMatrix = BGE.Math.getTransformationMatrix(new BGE.Math.Vector(),
+      new BGE.Math.Vector(0, 0, rotationDelta),
+      BGE.Math.Vector(1, 1)
+      )
+      backRotatedCurrent = {
+        left: currentBackRotationMatrix.multVecMatrix(currentLimits.left),
+        top: currentBackRotationMatrix.multVecMatrix(currentLimits.top),
+        right: currentBackRotationMatrix.multVecMatrix(currentLimits.right),
+        bottom: currentBackRotationMatrix.multVecMatrix(currentLimits.bottom),
+      } as LimitPoints2d
 
 
-      ' from mapped origin get horizScale & vertScale
-      if m.limitPointMap.originLeftDistance = 0
-        print "can not transform! (bad vert) - origin: ";m.limitPointMap.origin.toStr();" left: ";m.limitPointMap.left.toStr()
-        return false
-      end if
-      if m.limitPointMap.originTopDistance = 0
-        print "can not transform!  (bad horiz) - origin: ";m.limitPointMap.origin.toStr();" top: ";m.limitPointMap.top.toStr()
-        return false
-      end if
+      d = backRotatedCurrent.left.y - backRotatedCurrent.top.y ' distance From MappedOrigin To CurrentLeft
+      reRotation = BGE.Math.HalfPi() - rotationDelta
+      ' get the mapped origin by applying the distance From MappedOrigin To CurrentLeft
+      mappedOrigin = new BGE.Math.vector(currentLimits.left.x + d * cos(-reRotation), currentLimits.left.y + d * sin(-reRotation))
 
-      newVertScale = mappedOrigin.subtract(currentLimits.left).length() / m.limitPointMap.originLeftDistance
-      newHorizScale = mappedOrigin.subtract(currentLimits.top).length() / m.limitPointMap.originTopDistance
+      newVertScale = abs(backRotatedCurrent.top.y - backRotatedCurrent.bottom.y) / m.limitPointMap.height
+      newHorizScale = (backRotatedCurrent.right.x - backRotatedCurrent.left.x) / m.limitPointMap.width
 
+      originDelta = mappedOrigin.subtract(m.limitPointMap.origin)
       ' compare canvas points vs. scaled points from mappedOrigin
+
       tempTranslationTransformMatrix = BGE.Math.getTransformationMatrix(
-      new BGE.Math.Vector(),
-      new BGE.Math.Vector(0, 0, testRotationOfTemp),
+      originDelta,
+      new BGE.Math.Vector(0, 0, rotationDelta),
       new BGE.Math.Vector(newHorizScale, newVertScale)
       )
+      transformedLeft = tempTranslationTransformMatrix.multVecMatrix(m.limitPointMap.left)
+      transformedTop = tempTranslationTransformMatrix.multVecMatrix(m.limitPointMap.top)
 
-      rightDelta = tempTranslationTransformMatrix.multVecMatrix(m.limitPointMap.right).subtract(currentLimits.right).manhattanLength()
-      bottomDelta = tempTranslationTransformMatrix.multVecMatrix(m.limitPointMap.bottom).subtract(currentLimits.bottom).manhattanLength()
+      transformedRight = tempTranslationTransformMatrix.multVecMatrix(m.limitPointMap.right)
+      transformedBottom = tempTranslationTransformMatrix.multVecMatrix(m.limitPointMap.bottom)
 
-      totalDifference = rightDelta + bottomDelta
+      topDelta = transformedTop.subtract(currentLimits.top).manhattanLength()
+      leftDelta = transformedLeft.subtract(currentLimits.left).manhattanLength()
+      rightDelta = transformedRight.subtract(currentLimits.right).manhattanLength()
+      bottomDelta = transformedBottom.subtract(currentLimits.bottom).manhattanLength()
 
-      ?"totalDifference: ";totalDifference
+      totalDifference = topDelta + leftDelta + rightDelta + bottomDelta
+      maxDifference = BGE.Math.arrayMax([topDelta, leftDelta, rightDelta, bottomDelta])
+
+      if maxDifference < 24 ' TODO: MAGIC NUMBER!!
+        return {
+          origin: mappedOrigin,
+          rotation: rotationDelta,
+          scaleX: newHorizScale,
+          scaleY: newVertScale
+        }
+      end if
+
+      return invalid
+    end function
 
 
+
+    ' Is this a back and then we should not draw it?
+    '
+    ' @param {SceneObjectDrawMode} drawMode - some drawModes explicitly should draw the backface
+    ' @return {boolean} true if we should not draw
+    protected function doNotDrawBecauseBackFace(drawMode as SceneObjectDrawMode) as boolean
+      if m.isMirror
+        if drawMode = SceneObjectDrawMode.orientedDrawBackFace or drawMode = SceneObjectDrawMode.wireFrameDrawBackFace
+          return false
+        end if
+        return true
+      end if
       return false
     end function
 
