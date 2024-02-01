@@ -1,0 +1,186 @@
+namespace BGE.Parsers
+
+  function parseSTLFile(filePath as string) as BGE.Model3d
+    content = ReadAsciiFile(filePath)
+    if rodash.isNotInvalid(content)
+      if content.StartsWith("solid") and content.EndsWith("endsolid")
+        return parseSTLAsciiFile(content)
+      else
+        binaryData = CreateObject("roByteArray") as roByteArray
+        if binaryData.ReadFile(filePath)
+          return parseSTLBinaryFile(binaryData)
+        end if
+      end if
+    end if
+    return invalid
+
+  end function
+
+  function parseSTLAsciiFile(content as string) as BGE.Model3d
+    ' Split content into lines
+    lines = content.Split(chr(10))
+
+    solidRegex = CreateObject("roRegex", "solid\s+(.*)", "") as roRegex
+    facetRegex = CreateObject("roRegex", "facet normal\s+(.*)", "") as roRegex
+    outerLoopRegex = CreateObject("roRegex", "outer loop", "") as roRegex
+    vertexRegex = CreateObject("roRegex", "vertex\s+(.*)", "") as roRegex
+    endLoopRegex = CreateObject("roRegex", "endloop", "") as roRegex
+    endFacetRegex = CreateObject("roRegex", "endfacet", "") as roRegex
+    endSolidRegex = CreateObject("roRegex", "endsolid", "") as roRegex
+
+    depth = 0
+    name = ""
+    vertexes = [] as BGE.Math.Vector[]
+    normal = invalid as BGE.Math.Vector
+    faces = [] as BGE.Model3dFace[]
+    isError = false
+    lineCount = 0
+    ' Process each line
+    try
+      for each line in lines
+        if depth = 0
+          if solidRegex.isMatch(line)
+            name = solidRegex.match(line)[1] as string
+            depth++
+          else
+            throw `Unable to read line ${lineCount}, depth ${depth}: ${line}`
+            exit for
+          end if
+
+        else if depth = 1
+          if facetRegex.isMatch(line)
+            normalStr = facetRegex.match(line)[1] as string
+            normalValuesArr = rodash.map(normalStr.Split(" "), BGE.stringToFloat)
+            normal = BGE.Math.VectorFromFloatArray(normalValuesArr)
+            depth++
+          else if endSolidRegex.isMatch(line)
+            exit for
+          else
+            throw `Unable to read line ${lineCount}, depth ${depth}: ${line}`
+          end if
+
+        else if depth = 2
+          if outerLoopRegex.isMatch(line)
+            vertexes = []
+            depth++
+          else if endFacetRegex.IsMatch(line)
+            faces.push(new BGE.Model3dFace(vertexes, normal))
+            depth--
+          else
+            throw `Unable to read line ${lineCount}, depth ${depth}: ${line}`
+
+          end if
+
+        else if depth = 3
+          if vertexRegex.isMatch(line) and vertexes.Count() < 3
+            vertexStr = vertexRegex.match(line)[1] as string
+            vertexValuesArr = rodash.map(vertexStr.Split(" "), BGE.stringToFloat)
+            vertex = BGE.Math.VectorFromFloatArray(vertexValuesArr)
+            if not rodash.isInvalid(vertex)
+              vertexes.Push(vertex)
+            end if
+          else if endLoopRegex.IsMatch(line)
+            depth--
+          else
+            throw `Unable to read line ${lineCount}, depth ${depth}: ${line}`
+          end if
+        end if
+        lineCount++
+      end for
+      result = new BGE.Model3d(faces)
+      result.name = name
+      return result
+    catch errorMsg
+      print errorMsg
+    end try
+    return invalid
+  end function
+
+
+  function parseSTLBinaryFile(fileBytes as roByteArray) as BGE.Model3d
+    faces = [] as BGE.Model3dFace[]
+
+    numOfMesh = 0
+    i = 0
+    byteIndex = 0
+
+    '  80 bytes title + 4 byte num of triangles + 50 bytes (1 of triangular mesh)
+    if (fileBytes.Count() > 120)
+      numOfMesh = BGE.bytesToInteger(fileBytes, 80)
+
+      byteIndex = 84
+      normal = invalid as BGE.Math.Vector
+
+      for i = 0 to numOfMesh - 1
+
+        try
+          ? "face: ";i
+          '          /* face normal */
+          nx = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          ny = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          nz = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          normal = new BGE.Math.Vector(nx, ny, nz)
+          ? " - normal : ";normal.toStr()
+
+          v0x = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v0y = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v0z = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v0 = new BGE.Math.Vector(v0x, v0y, v0z)
+          ? " - vert 0 : ";v0.toStr()
+
+          v1x = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v1y = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v1z = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v1 = new BGE.Math.Vector(v1x, v1y, v1z)
+          ? " - vert 1 : ";v1.toStr()
+
+          v2x = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v2y = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v2z = BGE.bytesToFloat(fileBytes, byteIndex)
+          byteIndex += 4
+          v2 = new BGE.Math.Vector(v2x, v2y, v2z)
+          ? " - vert 2 : ";v2.toStr()
+
+          byteIndex += 2 '/ / Attribute byte count
+          face = new BGE.Model3dFace([v0, v1, v2], normal)
+          ? face.toStr()
+
+          faces.Push(face)
+        catch error
+          throw `Unable to process face ${i}: ${rodash.toString(error)}`
+        end try
+
+      end for
+
+    else
+      ' intentionally left blank
+    end if
+
+    return new BGE.Model3d(faces)
+  end function
+
+
+
+  function stlStringToFloat(input as string) as float
+    output = invalid
+    try
+      output = input.ToFloat()
+    catch e
+      ?e
+    end try
+    return output
+  end function
+
+
+end namespace
