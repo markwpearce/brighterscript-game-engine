@@ -1,0 +1,161 @@
+namespace BGE
+
+  class SceneObjectModel extends SceneObjectBillboard
+
+
+    drawable as DrawableModel
+
+    private modelWorldBounds as BGE.Math.Vector[] = []
+    private modelWorldFaces as BGE.Model3dFace[] = []
+
+    private modelCanvasSamplePoints as BGE.Math.Vector[] = []
+    private modelCanvasBounds as BGE.Math.Vector[] = []
+    private modelCanvasFaces as BGE.Model3dFace[] = []
+
+    sub new(name as string, drawableObj as DrawableModel)
+      super(name, drawableObj, SceneObjectType.Model)
+      m.useTempBitmapMap[BGE.SceneObjectDrawMode.matchCamera] = true
+      m.useTempBitmapMap[BGE.SceneObjectDrawMode.directToCamera] = true
+      m.useTempBitmapMap[BGE.SceneObjectDrawMode.oriented] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.orientedDrawBackFace] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.wireFrame] = true
+      m.useTempBitmapMap[SceneObjectDrawMode.wireFrameDrawBackFace] = true
+    end sub
+
+    protected override function didRegionToDrawChange() as boolean
+      return false ' Assume model is static - interior parts do not change
+    end function
+
+
+    protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      someWorked = false
+      for each face in m.modelCanvasFaces
+        if face.normal.dotProduct(rendererObj.camera.orientation)
+          someWorked = rendererObj.drawPolygon(face.vertices, 0, 0, face.color) or someWorked
+        end if
+      end for
+      return someWorked
+    end function
+
+
+    protected override function drawToTempBitmap(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, canvasPointsTopLeftBound as BGE.Math.Vector, drawMode as SceneObjectDrawMode) as boolean
+      if tempBitmap = invalid
+        return false
+      end if
+      someWorked = false
+      offsetX = -canvasPointsTopLeftBound.x
+      offsetY = -canvasPointsTopLeftBound.y
+
+      dataToDraw = []
+
+      for each face in m.modelCanvasFaces
+        if face.normal.dotProduct(rendererObj.camera.orientation) >= 0
+          negDistances = []
+          for each point in face.vertices
+            negDistance = -rendererObj.camera.distanceFromCameraFront(face.vertices[0])
+            negDistances.Push(negDistance)
+          end for
+          dataToDraw.push({face: face, negDistanceToCamera: BGE.Math.arrayMin(negDistances)})
+        end if
+      end for
+
+      dataToDraw.SortBy("negDistanceToCamera")
+      for each data in dataToDraw
+        if false or drawMode = SceneObjectDrawMode.wireFrame
+          thisWorked = rendererObj.drawTriangleOutlineTo(tempBitmap, data.face.vertices, data.face.color, {x: offsetX, y: offsetY})
+        else
+          thisWorked = rendererObj.drawTriangleTo(tempBitmap, data.face.vertices, offsetX, offsetY, data.face.color)
+        end if
+        someWorked = thisWorked or someWorked
+      end for
+      return someWorked
+    end function
+
+
+    protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
+      m.modelWorldFaces = []
+      m.worldPosition = m.drawable.getWorldPosition()
+      m.modelWorldBounds = []
+      i = 0
+
+      for each face in m.drawable.model.faces as BGE.Model3dFace[]
+        worldVerts = [] as BGE.Math.Vector[]
+        for each vert in face.vertices
+          if m.modelWorldBounds.Count() <> 2
+            m.modelWorldBounds.push(vert)
+            m.modelWorldBounds.push(vert)
+          end if
+          m.modelWorldBounds[0] = m.modelWorldBounds[0].minBound(vert)
+          m.modelWorldBounds[1] = m.modelWorldBounds[1].maxBound(vert)
+          worldVerts.push(m.transformationMatrix.multVecMatrix(vert))
+        end for
+        'normal = m.transformationMatrix.multVecMatrix(face.normal)
+        worldFace = new Model3dFace(worldVerts)', normal)
+        worldFace.Texture = face.Texture
+        worldFace.color = face.color
+        m.modelWorldFaces.Push(worldFace)
+        i++
+        if i > 1200
+          exit for
+        end if
+      end for
+
+      return true
+    end function
+
+
+    override function getPositionForCameraDistance(drawMode as SceneObjectDrawMode) as BGE.Math.Vector
+      if drawMode = BGE.SceneObjectDrawMode.oriented
+        return m.worldPoints.getCenter()
+      end if
+      return m.worldPosition
+    end function
+
+    override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      'TODO: this is probably too slow - this gives 8 points and needs to loop through all points
+      return BGE.Math.getBoundingCubePoints(m.modelWorldBounds)
+    end function
+
+    protected override function getAllCanvasPoints() as BGE.Math.Vector[]
+      return m.modelCanvasSamplePoints
+    end function
+
+    protected override function getCanvasBounds() as BGE.Math.Vector[]
+      return m.modelCanvasBounds
+    end function
+
+    protected override function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.modelCanvasFaces = []
+      m.modelCanvasSamplePoints = []
+      m.modelCanvasBounds = []
+      for each worldFace in m.modelWorldFaces
+        canvasPoints = [] as BGE.Math.Vector[]
+        for each vert in worldFace.vertices
+          canvasPoint = rendererObj.worldPointToCanvasPoint(vert)
+          if invalid = canvasPoint
+            exit for
+          end if
+          if m.modelCanvasBounds.Count() <> 2
+            m.modelCanvasBounds.push(canvasPoint)
+            m.modelCanvasBounds.push(canvasPoint)
+          end if
+          m.modelCanvasBounds[0] = m.modelCanvasBounds[0].minBound(canvasPoint)
+          m.modelCanvasBounds[1] = m.modelCanvasBounds[1].maxBound(canvasPoint)
+          '?"canvasPoint "; canvasPoint.toStr()
+          canvasPoints.push(canvasPoint)
+        end for
+        if canvasPoints.Count() = 3
+          canvasFace = new Model3dFace(canvasPoints)
+          canvasFace.Texture = worldFace.Texture
+          canvasFace.color = worldFace.color
+          m.modelCanvasFaces.Push(canvasFace)
+          m.modelCanvasSamplePoints.push(canvasPoints[0])
+        end if
+
+      end for
+
+      return true
+    end function
+  end class
+
+end namespace
