@@ -2,7 +2,6 @@ namespace BGE
 
   class SceneObjectModel extends SceneObjectBillboard
 
-
     drawable as DrawableModel
 
     private modelWorldBounds as BGE.Math.Vector[] = []
@@ -38,40 +37,24 @@ namespace BGE
     end function
 
 
-    protected override function drawToTempBitmap(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, canvasPointsTopLeftBound as BGE.Math.Vector, drawMode as SceneObjectDrawMode) as boolean
+    protected override function drawToTempBitmap(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, canvasPointsTopLeftBound as BGE.Math.Vector, drawMode as SceneObjectDrawMode, allowFastDraw = false) as TempBitmapDrawResult
       if tempBitmap = invalid
-        return false
+        return {worked: false, didFastDraw: false}
       end if
       someWorked = false
       offsetX = -canvasPointsTopLeftBound.x
       offsetY = -canvasPointsTopLeftBound.y
 
-      dataToDraw = []
-      i = 0
       for each face in m.modelCanvasFaces
-        dotProductResult = BGE.Math.VectorOps.dotProduct(m.modelWorldFaces[i].normal, rendererObj.camera.orientation)
-        if dotProductResult >= 0
-          negDistances = []
-          for each point in face.vertices
-            negDistance = -rendererObj.camera.distanceFromCameraFront(point)
-            negDistances.Push(negDistance)
-          end for
-          dataToDraw.push({face: face, negDistanceToCamera: BGE.Math.arrayMin(negDistances), dotProd: dotProductResult})
-        end if
-        i++
-      end for
-
-      dataToDraw.SortBy("negDistanceToCamera")
-      for each data in dataToDraw
         if drawMode = SceneObjectDrawMode.wireFrame
-          thisWorked = rendererObj.drawTriangleOutlineTo(tempBitmap, data.face.vertices, data.face.color, {x: offsetX, y: offsetY})
+          thisWorked = rendererObj.drawTriangleOutlineTo(tempBitmap, face.vertices, face.color, {x: offsetX, y: offsetY})
         else
-          shadedColor = BGE.colorBrightness(data.face.color, data.dotProd)
-          thisWorked = rendererObj.drawTriangleTo(tempBitmap, data.face.vertices, offsetX, offsetY, shadedColor)
+          shadedColor = BGE.colorBrightness(face.color, face.brightness)
+          thisWorked = rendererObj.drawTriangleTo(tempBitmap, face.vertices, offsetX, offsetY, shadedColor, allowFastDraw)
         end if
         someWorked = thisWorked or someWorked
       end for
-      return someWorked
+      return {worked: someWorked, didFastDraw: allowFastDraw}
     end function
 
 
@@ -130,10 +113,31 @@ namespace BGE
       m.modelCanvasFaces = []
       m.modelCanvasSamplePoints = []
       m.modelCanvasBounds = []
+
+      dataToDraw = []
+      i = 0
+      for each face in m.modelCanvasFaces
+        negDistances = []
+        for each point in face.vertices
+          negDistance = -rendererObj.camera.distanceFromCameraFront(point)
+          negDistances.Push(negDistance)
+        end for
+        dataToDraw.push({face: face, negDistanceToCamera: BGE.Math.arrayMin(negDistances)})
+        i++
+      end for
+
+
       for each worldFace in m.modelWorldFaces
         canvasPoints = [] as BGE.Math.Vector[]
+        dotProductResult = BGE.Math.VectorOps.dotProduct(worldFace.normal, rendererObj.camera.orientation)
+        if dotProductResult <= 0
+          continue for
+        end if
+        negDistances = []
+
         for each vert in worldFace.vertices
           canvasPoint = rendererObj.worldPointToCanvasPoint(vert)
+
           if invalid = canvasPoint
             exit for
           end if
@@ -143,22 +147,30 @@ namespace BGE
           end if
           m.modelCanvasBounds[0] = BGE.Math.VectorOps.minBound(m.modelCanvasBounds[0], canvasPoint)
           m.modelCanvasBounds[1] = BGE.Math.VectorOps.maxBound(m.modelCanvasBounds[1], canvasPoint)
+          negDistance = -rendererObj.camera.distanceFromCameraFront(vert)
           canvasPoints.push(canvasPoint)
+          negDistances.Push(negDistance)
         end for
+
         if canvasPoints.Count() = 3
           canvasFace = new Model3dFace(canvasPoints)
           canvasFace.Texture = worldFace.Texture
           canvasFace.color = worldFace.color
+          canvasFace.brightness = dotProductResult
+          canvasFace.priority = -BGE.Math.arrayMax(negDistances)
           m.modelCanvasFaces.Push(canvasFace)
           m.modelCanvasSamplePoints.push(canvasPoints[0])
         end if
-
       end for
 
+      m.modelCanvasFaces.SortBy("priority")
       return true
     end function
 
-    protected override function useTempBitmapThreshold() as integer
+    protected override function getTempBitmapThreshold(drawMode as SceneObjectDrawMode) as integer
+      if drawMode = SceneObjectDrawMode.wireFrame
+        return 24
+      end if
       return 64
     end function
   end class
