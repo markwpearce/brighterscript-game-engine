@@ -1,6 +1,6 @@
 # Brighterscript Game Engine
 
-An object oriented game engine for the Roku, written in [Brighterscript](https://github.com/rokucommunity/brighterscript), and (SONN!) available via [ROPM](https://github.com/rokucommunity/ropm).
+An object oriented game engine for the Roku, written in [Brighterscript](https://github.com/rokucommunity/brighterscript), and (SOON!) available via [ROPM](https://github.com/rokucommunity/ropm).
 
 This project is designed to be used with VScode.
 
