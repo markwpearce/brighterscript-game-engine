@@ -1,10 +1,10 @@
-# Brighterscript Game Engine
+# BrighterScript Game Engine
 
-An object oriented game engine for the Roku, written in [Brighterscript](https://github.com/rokucommunity/brighterscript), and (SOON!) available via [ROPM](https://github.com/rokucommunity/ropm).
+An object oriented game engine for the Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript), and (someday) available via [ROPM](https://github.com/rokucommunity/ropm).
 
 This project is designed to be used with VScode.
 
-This was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into Brighterscript. This work owes a lot to this original project!
+This was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into BrighterScript. This work owes a lot to this original project!
 
 ## Introduction
 
@@ -12,7 +12,7 @@ The purpose of this project is to make it easy to develop games for the Roku in 
 
 ## Cloning and Running Examples
 
-The Brighterscript Game Engine public repository is on [Github](https://github.com/markwpearce/brighterscript-game-engine/)
+The BrighterScript Game Engine public repository is on [Github](https://github.com/markwpearce/brighterscript-game-engine/)
 
 Clone the project:
 
@@ -31,11 +31,13 @@ cd brighterscript-game-engine
 npm install
 ```
 
-You will need to "install" the brighterscript-game-engine in the examples directories. You can do this by running `ropm install` in each example (e.g. ./examples/snake) or by using the handy script:
+You will need to set up each project in the examples directories. You can do this by using this script:
 
 ```
 npm run prepare-examples
 ```
+
+### Build from the command line:
 
 You can manually build the examples from the command line and manually add the zip files to your Roku:
 
@@ -43,15 +45,11 @@ You can manually build the examples from the command line and manually add the z
 npm run build-examples
 ```
 
-The above command will generate example .zip files like `./examples/asteroids/out/asteroids.zip`
+The above command will generate example .zip files like `./examples/asteroids/out/bge-asteroids.zip`
 
-Open the Workspace in VS Code:
+### Open the Workspace in VS Code:
 
-```
-code brighterscript-game-engine.code-workspace
-```
-
-We recommend you install the great [Brightscript Language vscode extension](https://marketplace.visualstudio.com/items?itemName=RokuCommunity.brightscript).
+We recommend you install the great [Brightscript Language VSCode Extension](https://marketplace.visualstudio.com/items?itemName=RokuCommunity.brightscript).
 
 Create/edit a `.env` file to specify the details for you target Roku device:
 
