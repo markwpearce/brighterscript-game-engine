@@ -33,6 +33,8 @@ namespace BGE
 
     private defaultFont as roFont = invalid
 
+    private isGameEngine as boolean = false
+
 
     resources as {
       rightTriangle as TriangleBitmap,
@@ -42,6 +44,11 @@ namespace BGE
     sub new(draw2d as ifDraw2d, mainGame = invalid as BGE.Game, cam = invalid as BGE.Camera)
       m.game = mainGame
       m.draw2d = draw2d
+      device = CreateObject("roDeviceInfo")
+      if device.HasFeature("simulation_engine")
+        ' The simulator does not need pooling
+        m.isGameEngine = true
+      end if
       m.setCamera(cam)
       m.loadResources()
     end sub
@@ -54,7 +61,7 @@ namespace BGE
         BGE.Math.VectorOps.create(RendererResourceSize, 0)
       ]
       rightTriBitmap = CreateObject("roBitmap", {width: RendererResourceSize, height: RendererResourceSize, AlphaEnable: true})
-      m.drawTriangleTo(rightTriBitmap, rightTriPoints, 0, 0, -1)
+      m.drawTriangleTo(rightTriBitmap, rightTriPoints, 0, 0, -1, false, true)
       rightTriBitmap.Finish()
       m.resources.rightTriangle = new TriangleBitmap(rightTriBitmap, rightTriPoints)
     end sub
@@ -253,11 +260,81 @@ namespace BGE
 
     function drawTransformedObjectTo(draw2d as ifDraw2d, x as float, y as float, scale_x as float, scale_y as float, theta as float, region as ifDraw2d, rgba = -1 as integer) as boolean
       thetaDeg = BGE.Math.RadiansToDegrees(theta)
-      ' using undocumented ifDraw2d function
-      result = (draw2d as dynamic).DrawTransformedObject(x, y, thetaDeg, scale_x, scale_y, region, rgba)
+      if m.isGameEngine or scale_x = scale_y
+        return m.drawTransformedObjectNativeTo(draw2d, x, y, scale_x, scale_y, theta, region, rgba)
+      end if
+
+
+      new_width = Abs(int(region.GetWidth() * scale_x))
+      new_height = Abs(int(region.GetHeight() * scale_y))
+      xToDraw = x
+      yToDraw = y
+
+      if scale_x < 0 and scale_y > 0
+        xToDraw = x + new_width
+        ' scale_x = abs(scale_x)
+      else if scale_y < 0 and scale_x > 0
+        ' yToDraw = y + new_height
+        '  scale_y = abs(scale_y)
+      else if scale_y < 0 and scale_x < 0
+        '  yToDraw = y + new_height
+        ' xToDraw = x + new_width
+        '  scale_y = abs(scale_y)
+      end if
+
+      if new_width <> 0 and new_height <> 0 and m.shouldDrawTo(draw2d, xToDraw, yToDraw, new_width, new_height, theta)
+
+        myScratchRegion = m.bmpPool.getRegion(new_width, new_height)
+        if invalid = myScratchRegion
+          return false
+        end if
+        scaledRegion = myScratchRegion.region
+
+        pretranslation_x = 0
+        pretranslation_y = 0
+        if getInterface(region, "ifRegion") <> invalid
+          pretranslation_x = region.GetPretranslationX()
+          pretranslation_y = region.GetPretranslationY()
+        end if
+        newPreX = pretranslation_x * scale_x
+        scaleXdrawAdjustment = 0 ' need to change draw position if scale is negative
+        scaleYdrawAdjustment = 0
+        if scale_x < 0
+          newPreX = -newPreX
+          scaleXdrawAdjustment = new_width
+        end if
+        newPreY = pretranslation_y * scale_y
+        if scale_y < 0
+          newPreY = -newPreY
+          scaleYDrawAdjustment = new_height
+        end if
+
+        rotateAroundX = 0 ' potential for alternate rotation point
+        rotateAroundY = 0 ' potential for alternate rotation point
+
+        scaledRegion.setPretranslation(-Abs(newPreX) + rotateAroundY, -Abs(newPreY) + rotateAroundY)
+        scaled_draw_x = Abs(newPreX) + scaleXdrawAdjustment
+        scaled_draw_y = Abs(newPreY) + scaleYdrawAdjustment
+        scaledRegion.DrawScaledObject(fix(scaled_draw_x), fix(scaled_draw_y), scale_x, scale_y, region)
+        m.drawCallsLastFrame++
+
+        draw2d.DrawRotatedObject(fix(xToDraw), fix(yToDraw), thetaDeg, scaledRegion, rgba)
+        m.bmpPool.returnRegion(myScratchRegion)
+        m.drawCallsLastFrame++
+        return true
+      end if
+      return false
+    end function
+
+    ' NOTE: This function is broken on the device if scale_x <> scale_y
+    '
+    private function drawTransformedObjectNativeTo(draw2d as ifDraw2d, x as float, y as float, scale_x as float, scale_y as float, theta as float, region as ifDraw2d, rgba = -1 as integer) as boolean
+      thetaDeg = BGE.Math.RadiansToDegrees(theta)
+      result = draw2d.DrawTransformedObject(x, y, thetaDeg, scale_x, scale_y, region, rgba)
       m.drawCallsLastFrame++
       return result
     end function
+
 
     function drawPinnedCorners(cornerPoints as BGE.Math.CornerPoints, drawableRegion as RegionWithId, options = {} as DrawPinnedCornersOptions, color = -1 as integer) as boolean
       return m.drawPinnedCornersTo(m.draw2d, cornerPoints, drawableRegion, options, color)
@@ -1122,14 +1199,14 @@ namespace BGE
       else if scaleX = 1 and scaleY = 1
         return m.DrawRotatedObjectTo(canvasDrawTo, x, y, -rotation, regionToDraw)
       end if
-      return m.DrawTransformedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -rotation, regionToDraw, rgba)
+      return m.drawTransformedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -rotation, regionToDraw, rgba)
     end function
 
     function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
       return m.drawTriangleTo(m.draw2d, points, x, y, rgba)
     end function
 
-    function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
+    function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, keepBitmapsActive = false as boolean) as boolean
       if points.count() <> 3
         return false
       end if
@@ -1172,9 +1249,6 @@ namespace BGE
 
       polyId = "polyTriangle"
 
-      ' polyBitmap = m.triangleCache.getTriangle(polyId, offsetPoints)
-      'if invalid = polyBitmap
-
       myScratchRegion = m.bmpPool.getRegion(srcSize.x, srcSize.y)
       if invalid = myScratchRegion or invalid = myScratchRegion.region
         return false
@@ -1194,8 +1268,10 @@ namespace BGE
       theta = polyBitmap.triangle.angleRotatedFromOriginal
 
       didDraw = m.drawRotatedObjectTo(canvasDrawTo, totalXOffset + longestPoint.x, totalYOffset + longestPoint.y, theta, polyBitmap.bitmap, rgba)
-      m.bmpPool.returnStagedRegions()
-      m.bmpPool.returnRegions([myScratchRegion, polyBitmap.scratchRegion])
+      if not keepBitmapsActive
+        m.bmpPool.returnStagedRegions()
+        m.bmpPool.returnRegions([myScratchRegion, polyBitmap.scratchRegion])
+      end if
       return didDraw
     end function
 
@@ -1256,18 +1332,15 @@ namespace BGE
       horizScale1 = perpFootInfo.firstDistance / BGE.RendererResourceSize
 
       angleFromPerpFootToPoint = -srcTriangle.anglesToNext[0] + BGE.Math.PI
-
       m.drawTransformedObjectTo(canvasDrawTo, perpFoot.x, perpFoot.y, horizScale1, vertScale, angleFromPerpFootToPoint, m.resources.rightTriangle.bitmap, rgba)
       horizScale2 = perpFootInfo.secondDistance / BGE.RendererResourceSize
-
-
       m.drawTransformedObjectTo(canvasDrawTo, perpFoot.x, perpFoot.y, vertScale, horizScale2, angleFromPerpFootToPoint - BGE.Math.HALF_PI, m.resources.rightTriangle.bitmap, rgba)
 
       if m.drawDebugTrianglePoints
         m.drawSquareTo(canvasDrawTo, perpFoot.x, perpFoot.y, 5, BGE.Colors().Pink)
       end if
 
-      m.drawTrianglePointsTo(canvasDrawTo, points, 5, {x: x, y: y})
+      m.drawTrianglePointsTo(canvasDrawTo, srcTriangle.points, 5, {x: x, y: y})
 
       return true
 
