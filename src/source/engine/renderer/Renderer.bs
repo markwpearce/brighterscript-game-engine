@@ -1,6 +1,8 @@
 namespace BGE
 
   const RendererResourceSize = 512
+  const TriangleDrawThreshold = 4
+  const TriangleDrawAsRectangleThreshold = 12
 
 
   ' Wrapper for Draw2D calls, so that we can keep track of how much is being drawn per frame
@@ -35,6 +37,8 @@ namespace BGE
 
     private isGameEngine as boolean = false
 
+    game as BGE.Game = invalid
+
 
     resources as {
       rightTriangle as TriangleBitmap,
@@ -61,7 +65,7 @@ namespace BGE
         BGE.Math.VectorOps.create(RendererResourceSize, 0)
       ]
       rightTriBitmap = CreateObject("roBitmap", {width: RendererResourceSize, height: RendererResourceSize, AlphaEnable: true})
-      m.drawTriangleTo(rightTriBitmap, rightTriPoints, 0, 0, -1, false, true)
+      m.drawTriangleFromScratchTo(rightTriBitmap, rightTriPoints, 0, 0, -1, false, true)
       rightTriBitmap.Finish()
       m.resources.rightTriangle = new TriangleBitmap(rightTriBitmap, rightTriPoints)
     end sub
@@ -293,15 +297,15 @@ namespace BGE
         pretranslation_x = 0
         pretranslation_y = 0
         if getInterface(region, "ifRegion") <> invalid
-          pretranslation_x = region.GetPretranslationX()
-          pretranslation_y = region.GetPretranslationY()
+          pretranslation_x = (region as ifRegion).GetPretranslationX()
+          pretranslation_y = (region as ifRegion).GetPretranslationY()
         end if
         newPreX = pretranslation_x * scale_x
-        scaleXdrawAdjustment = 0 ' need to change draw position if scale is negative
-        scaleYdrawAdjustment = 0
+        scaleXDrawAdjustment = 0 ' need to change draw position if scale is negative
+        scaleYDrawAdjustment = 0
         if scale_x < 0
           newPreX = -newPreX
-          scaleXdrawAdjustment = new_width
+          scaleXDrawAdjustment = new_width
         end if
         newPreY = pretranslation_y * scale_y
         if scale_y < 0
@@ -312,9 +316,9 @@ namespace BGE
         rotateAroundX = 0 ' potential for alternate rotation point
         rotateAroundY = 0 ' potential for alternate rotation point
 
-        scaledRegion.setPretranslation(-Abs(newPreX) + rotateAroundY, -Abs(newPreY) + rotateAroundY)
-        scaled_draw_x = Abs(newPreX) + scaleXdrawAdjustment
-        scaled_draw_y = Abs(newPreY) + scaleYdrawAdjustment
+        scaledRegion.setPretranslation(-Abs(newPreX) + rotateAroundX, -Abs(newPreY) + rotateAroundY)
+        scaled_draw_x = Abs(newPreX) + scaleXDrawAdjustment
+        scaled_draw_y = Abs(newPreY) + scaleYDrawAdjustment
         scaledRegion.DrawScaledObject(fix(scaled_draw_x), fix(scaled_draw_y), scale_x, scale_y, region)
         m.drawCallsLastFrame++
 
@@ -411,7 +415,7 @@ namespace BGE
       bmpSizeH = longestSide
       originPoint = srcTri.points[startIndex]
       scratchRegion2 = m.bmpPool.getRegion(bmpSizeW, bmpSizeH)
-      ``
+
       if invalid = scratchRegion2
         m.bmpPool.returnRegions([scratchRegion1])
         return invalid
@@ -895,7 +899,7 @@ namespace BGE
       srcTriangle = srcTriangleBmp.triangle
 
       if srcTriangle.points[indexForOrigin].x = 0 and srcTriangle.points[indexForOrigin].y = 0
-        return srcTriangle
+        return srcTriangleBmp
       end if
       bitmapSize = BGE.Math.TriangleOps.getLongestSide(srcTriangle)
 
@@ -1202,11 +1206,11 @@ namespace BGE
       return m.drawTransformedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -rotation, regionToDraw, rgba)
     end function
 
-    function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
-      return m.drawTriangleTo(m.draw2d, points, x, y, rgba)
+    private function drawTriangleFromScratch(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
+      return m.drawTriangleFromScratchTo(m.draw2d, points, x, y, rgba, allowQuickDraw)
     end function
 
-    function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, keepBitmapsActive = false as boolean) as boolean
+    private function drawTriangleFromScratchTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, keepBitmapsActive = false as boolean) as boolean
       if points.count() <> 3
         return false
       end if
@@ -1275,11 +1279,31 @@ namespace BGE
       return didDraw
     end function
 
-    function drawTriangle2(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
-      return m.drawTriangle2To(m.draw2d, points, x, y, rgba)
+    private function drawQuickTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer) as boolean
+      bounds = BGE.Math.getBounds(points)
+      minP = bounds[0]
+      totalXOffset = x + minP.x
+      totalYOffset = y + minP.y
+
+      triangleSize = BGE.Math.VectorOps.subtract(bounds[1], bounds[0])
+      if triangleSize.x < BGE.TriangleDrawThreshold and triangleSize.y < BGE.TriangleDrawThreshold
+        return true
+      end if
+      if triangleSize.x < BGE.TriangleDrawAsRectangleThreshold and triangleSize.y < BGE.TriangleDrawAsRectangleThreshold
+        pointSize = BGE.Math.Min(triangleSize.x, triangleSize.y)
+        pointOffset = 0
+        return m.drawSquareTo(canvasDrawTo, totalXOffset + pointOffset, totalYOffset + pointOffset, pointSize, rgba)
+      else if (triangleSize.x < BGE.TriangleDrawAsRectangleThreshold) or (triangleSize.y < BGE.TriangleDrawAsRectangleThreshold)
+        return m.drawRectangleTo(canvasDrawTo, totalXOffset, totalYOffset, triangleSize.x, triangleSize.y, rgba)
+      end if
+      return false
     end function
 
-    function drawTriangle2To(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
+    function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
+      return m.drawTriangleTo(m.draw2d, points, x, y, rgba)
+    end function
+
+    function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
       if canvasDrawTo = invalid or points = invalid
         return false
       end if
@@ -1288,43 +1312,13 @@ namespace BGE
         return false
       end if
 
-      bounds = BGE.Math.getBounds(points)
-      minP = bounds[0]
-      maxP = bounds[1]
-      totalXOffset = x + minP.x
-      totalYOffset = y + minP.y
-
-      triangleSize = BGE.Math.VectorOps.subtract(bounds[1], bounds[0])
       if allowQuickDraw
-        drawThreshold = 4
-        if triangleSize.x < drawThreshold and triangleSize.y < drawThreshold
+        if m.drawQuickTriangleTo(canvasDrawTo, points, x, y, rgba)
           return true
-        end if
-        thresholdSizeForQuickDraw = 12
-        if triangleSize.x < thresholdSizeForQuickDraw and triangleSize.y < thresholdSizeForQuickDraw
-          pointSize = BGE.Math.Min(triangleSize.x, triangleSize.y)
-          pointOffset = 0
-          return m.drawSquareTo(canvasDrawTo, totalXOffset + pointOffset, totalYOffset + pointOffset, pointSize, rgba)
-        else if (triangleSize.x < thresholdSizeForQuickDraw) or (triangleSize.y < thresholdSizeForQuickDraw)
-          return m.drawRectangleTo(canvasDrawTo, totalXOffset, totalYOffset, triangleSize.x, triangleSize.y, rgba)
         end if
       end if
 
-      newCenter = BGE.Math.VectorOps.copy(points[0])
-      newCenter.x += x
-      newCenter.y += y
-
-      srcSize = BGE.Math.VectorOps.subtract(maxP, minP)
-
-      offsetPoints = []
-      for i = 0 to 2
-        point = points[i]
-        offsetPoints.push(BGE.Math.VectorOps.subtract(point, minP))
-      end for
-
       srcTriangle = BGE.Math.TriangleOps.create(points, true)
-
-      firstScale = srcTriangle.lengths[0] / BGE.RendererResourceSize
 
       perpFootInfo = BGE.Math.TriangleOps.getPerpendicularFootOfHeight(srcTriangle)
       perpFoot = BGE.Math.VectorOps.add({x: x, y: y}, perpFootInfo.point)
@@ -1332,46 +1326,16 @@ namespace BGE
       horizScale1 = perpFootInfo.firstDistance / BGE.RendererResourceSize
 
       angleFromPerpFootToPoint = -srcTriangle.anglesToNext[0] + BGE.Math.PI
-      m.drawTransformedObjectTo(canvasDrawTo, perpFoot.x, perpFoot.y, horizScale1, vertScale, angleFromPerpFootToPoint, m.resources.rightTriangle.bitmap, rgba)
+      worked = m.drawTransformedObjectTo(canvasDrawTo, perpFoot.x, perpFoot.y, horizScale1, vertScale, angleFromPerpFootToPoint, m.resources.rightTriangle.bitmap, rgba)
       horizScale2 = perpFootInfo.secondDistance / BGE.RendererResourceSize
-      m.drawTransformedObjectTo(canvasDrawTo, perpFoot.x, perpFoot.y, vertScale, horizScale2, angleFromPerpFootToPoint - BGE.Math.HALF_PI, m.resources.rightTriangle.bitmap, rgba)
+      worked = worked and m.drawTransformedObjectTo(canvasDrawTo, perpFoot.x, perpFoot.y, vertScale, horizScale2, angleFromPerpFootToPoint - BGE.Math.HALF_PI, m.resources.rightTriangle.bitmap, rgba)
 
       if m.drawDebugTrianglePoints
         m.drawSquareTo(canvasDrawTo, perpFoot.x, perpFoot.y, 5, BGE.Colors().Pink)
+        m.drawTrianglePointsTo(canvasDrawTo, srcTriangle.points, 5, {x: x, y: y})
       end if
 
-      m.drawTrianglePointsTo(canvasDrawTo, srcTriangle.points, 5, {x: x, y: y})
-
-      return true
-
-      polyId = "bmpTriangle"
-
-
-      ' polyBitmap = m.triangleCache.getTriangle(polyId, offsetPoints)
-      'if invalid = polyBitmap
-
-      myScratchRegion = m.bmpPool.getRegion(srcSize.x, srcSize.y)
-      if invalid = myScratchRegion or invalid = myScratchRegion.region
-        return false
-      end if
-
-      triSrcRegion = myScratchRegion.region
-
-      m.drawRectangleTo(triSrcRegion, 0, 0, srcSize.x, srcSize.y, rgba)
-      polyBitmap = m.makeIntoTriangle(new RegionWithId(triSrcRegion, polyId), offsetPoints, false, false)
-      if invalid = polyBitmap
-        m.bmpPool.returnRegions([myScratchRegion])
-        return false
-      end if
-
-      longestPoint = offsetPoints[BGE.Math.TriangleOps.nextIndex(srcTriangle.longestIndex)]
-      m.drawTrianglePointsTo(polyBitmap.bitmap, offsetPoints)
-      theta = polyBitmap.angleRotatedFromOriginal
-
-      didDraw = m.drawRotatedObjectTo(canvasDrawTo, totalXOffset + longestPoint.x, totalYOffset + longestPoint.y, theta, polyBitmap.bitmap, rgba)
-      m.bmpPool.returnStagedRegions()
-      m.bmpPool.returnRegions([myScratchRegion, polyBitmap.scratchRegion])
-      return didDraw
+      return worked
     end function
 
 
@@ -1384,13 +1348,13 @@ namespace BGE
         return false
       end if
       if points.count() = 3
-        return m.drawTriangle2To(canvasDrawTo, points, x, y, rgba)
+        return m.drawTriangleTo(canvasDrawTo, points, x, y, rgba)
       end if
 
       triangles = BGE.QuickHull.getTrianglesFromPoints(points, true)
       didDraw = true
       for each tri in triangles
-        didDraw = m.drawTriangle2To(canvasDrawTo, tri, x, y, rgba) or didDraw
+        didDraw = m.drawTriangleTo(canvasDrawTo, tri, x, y, rgba) or didDraw
       end for
 
       return didDraw
