@@ -68,7 +68,7 @@ namespace BGE
     private fontRegistry as roFontRegistry = CreateObject("roFontRegistry")
     screen as roScreen = invalid
     canvas as BGE.Canvas = invalid
-    private uiRenderer as BGE.Renderer = invalid
+    uiCanvas as BGE.Canvas = invalid
     private nextGameEntityId as integer = 0
     private secondsBetweenGarbageCollection = 10
     private lastGarbageCollection as GarbageCollectionInfo = invalid
@@ -111,14 +111,17 @@ namespace BGE
     '
     ' @param {integer} canvasWidth - Width of the canvas the game is drawn to
     ' @param {integer} canvasHeight - Height of the canvas the game is drawn to
+    ' @param {integer} [uiWidth=0] - Width of the UI canvas - if 0, will be same as screen
+    ' @param {integer} [uiHeight=0] - Height of the UI canvas - if 0, will be same as screen
     ' @return {void}
-    sub new(canvasWidth as integer, canvasHeight as integer)
+    sub new(canvasWidth as integer, canvasHeight as integer, uiWidth = 0 as integer, uiHeight = 0 as integer)
 
       ' ############### Create Initial Object - Begin ###############
       ' Set up the screen
       m.canvas = new Canvas(m, canvasWidth, canvasHeight)
 
       m.setUpScreen(canvasWidth, canvasHeight, true)
+      m.setupUi(uiWidth, uiHeight)
 
       ' Set up the audioPlayer
       m.audioPlayer.SetMessagePort(m.musicPort)
@@ -173,23 +176,26 @@ namespace BGE
         end if
       end if
       m.compositor.SetDrawTo(m.canvas.bitmap, &h00000000)
-      m.setupUi()
     end sub
 
     ' Sets up the Ui layer
     '
-    private sub setupUi()
-      m.uiRenderer = new Renderer(m.screen, m)
+    sub setupUi(uiWidth as integer, uiHeight as integer)
+      uiWidthToUse = uiWidth > 0? uiWidth : m.screen.GetWidth()
+      uiHeightToUse = uiHeight > 0? uiHeight : m.screen.GetHeight()
+      m.uiCanvas = new Canvas(m, uiWidthToUse, uiHeightToUse)
+      m.uiCanvas.renderer.name = "UIRenderer"
+      m.uiCanvas.scale = BGE.Math.VectorOps.create(m.screen.GetWidth() / m.uiCanvas.getWidth(), m.screen.GetHeight() / m.uiCanvas.getHeight(), 1)
 
       m.gameUi = new BGE.UI.UiContainer(m)
-      m.gameUi.setCanvas(m.screen)
+      m.gameUi.setCanvas(m.uiCanvas)
       m.gameUi.showBackground = false
       m.gameUi.width = m.screen.getWidth()
       m.gameUi.height = m.screen.getHeight()
       m.gameUi.padding.set(BGE.UI.DEFAULT_PADDING)
 
       m.debugUi = new BGE.UI.UiContainer(m as dynamic)
-      m.gameUi.setCanvas(m.screen)
+      m.debugUi.setCanvas(m.uiCanvas)
       m.debugUi.showBackground = false
       m.debugUi.width = m.screen.getWidth()
       m.debugUi.height = m.screen.getHeight()
@@ -263,6 +269,7 @@ namespace BGE
         end if
         m.dtTimer.Mark()
         m.canvas.renderer.resetDrawCallCounter()
+        m.uiCanvas.renderer.resetDrawCallCounter()
         urlMsg = m.urlPort.GetMessage()
         universalControlEvents = [] as roUniversalControlEvent[]
         screenMsg = m.screen_port.GetMessage()
@@ -300,6 +307,7 @@ namespace BGE
         if m.background_color <> invalid
           m.canvas.clear(m.background_color)
         end if
+        m.uiCanvas.clear(0) ' clear with transparent color so that it doesn't cover the game canvas
 
         ' ----------------------Then draw all of the entities and call onDrawBegin() and onDrawEnd()-------------------------
         m.drawEntities()
@@ -318,12 +326,17 @@ namespace BGE
         ' ---------------------- Handle all Debug UI updates and draws -------------------------
         m.processAndDrawDebugUI(universalControlEvents, musicMsg, ecpMsg, urlMsg)
 
+        m.screen.drawScaledObject(m.uiCanvas.offset.x, m.uiCanvas.offset.y, m.uiCanvas.scale.x, m.uiCanvas.scale.y, m.uiCanvas.bitmap)
+
         if m.debugging.draw_safe_zones
           m.drawSafeZones()
         end if
-
+        preSwapTime = m.dtTimer.TotalMilliseconds()
         m.screen.SwapBuffers()
+        postSwapTime = m.dtTimer.TotalMilliseconds()
+        drawTime = postSwapTime - preSwapTime
         m.canvas.renderer.onSwapBuffers()
+        m.uiCanvas.renderer.onSwapBuffers()
 
         if m.debugging.limit_frame_rate > 0 and m.dtTimer.TotalMilliseconds() > 0
           while 1000 / m.dtTimer.TotalMilliseconds() > m.debugging.limit_frame_rate
@@ -340,8 +353,11 @@ namespace BGE
         end if
 
         if m.garbageCollectionTimer.totalMilliseconds() > (m.secondsBetweenGarbageCollection * 1000)
+
+          print m.canvas.renderer.statsString
+          print m.uiCanvas.renderer.statsString
           frameTime = m.dtTimer.TotalMilliseconds()
-          print "Ms per frame  " + frameTime.toStr()
+          print `Average per frame ${frameTime}ms (Draw time: ${drawTime}ms)`
           m.lastGarbageCollection = runGarbageCollector()
           print "GC per second " + (m.dtTimer.TotalMilliseconds() - frameTime).toStr()
 
@@ -657,7 +673,7 @@ namespace BGE
         for each img in entity.images
           img.update()
         end for
-        entity.onDrawBegin(m.canvas.renderer, m.uiRenderer)
+        entity.onDrawBegin(m.canvas.renderer, m.uiCanvas.renderer)
       end if
       return m.isValidEntity(entity)
     end function
@@ -670,7 +686,7 @@ namespace BGE
     ' @return {boolean} true if this entity is still valid
     private function processEntityPostDraw(entity as GameEntity) as boolean
       if m.isValidEntity(entity) and invalid <> entity.onDrawEnd
-        entity.onDrawEnd(m.canvas.renderer, m.uiRenderer)
+        entity.onDrawEnd(m.canvas.renderer, m.uiCanvas.renderer)
       end if
       return m.isValidEntity(entity)
     end function
@@ -854,8 +870,10 @@ namespace BGE
     private sub processAndDrawUI(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       m.processUiUpdate(m.gameUi, universalControlEvents, musicMsg, ecpMsg, urlMsg)
 
+      m.uiCanvas.renderer.setupCameraForFrame()
       if m.isValidEntity(m.gameUi) and invalid <> m.gameUi.draw
         m.adjustEntityCompositorObjectPostCollision(m.gameUi)
+
         m.gameUi.draw()
       end if
     end sub
