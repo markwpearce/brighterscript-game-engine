@@ -1,6 +1,6 @@
 namespace BGE
 
-  const RendererResourceSize = 512
+  const RendererResourceSize = 400
   const TriangleDrawThreshold = 4
   const TriangleQuickDrawThreshold = 64
   const TriangleQuickDrawThresholdForSimulator = 32
@@ -8,6 +8,10 @@ namespace BGE
   interface LevelOfDetailOptions
     levelOffset as integer
     levelOfDetail as integer
+  end interface
+
+  interface RendererOptions
+    useBitmapPooling as boolean
   end interface
 
   ' Wrapper for Draw2D calls, so that we can keep track of how much is being drawn per frame
@@ -21,7 +25,7 @@ namespace BGE
 
     private drawCallsLastFrame = 0
     private activeDebugCells = 0
-    private debugCellSize = 100
+    private debugCellSize = 50
     private debugCellStart as BGE.Math.Vector = BGE.Math.VectorOps.create(100, 100)
     drawDebugCells = false
     drawDebugTrianglePoints = false
@@ -32,13 +36,14 @@ namespace BGE
 
     camera as Camera
 
-    triangleCache = new TriangleCache(30)
+    triangleCache = new TriangleCache(5)
 
     frameCount = 0
 
-    private bmpPool = new BGE.ScratchBitmapPool()
+    bmpPool as BGE.ScratchBitmapPool = invalid
 
     private defaultFont as roFont = invalid
+    private defaultDebugFont as roFont = invalid
 
     private isSimulator as boolean = false
 
@@ -53,7 +58,10 @@ namespace BGE
       circle as ifDraw2d
     } = {}
 
-    sub new(draw2d as ifDraw2d, mainGame = invalid as BGE.Game, cam = invalid as BGE.Camera)
+
+    dummyScreen as roScreen
+
+    sub new(draw2d as ifDraw2d, mainGame = invalid as BGE.Game, cam = invalid as BGE.Camera, options = {useBitmapPooling: true} as RendererOptions)
       m.game = mainGame
       m.draw2d = draw2d
       device = CreateObject("roDeviceInfo")
@@ -61,6 +69,7 @@ namespace BGE
         ' The simulator does not need pooling
         m.isSimulator = true
       end if
+      m.bmpPool = new BGE.ScratchBitmapPool(options.useBitmapPooling)
       m.setCamera(cam)
       m.loadResources()
     end sub
@@ -73,9 +82,11 @@ namespace BGE
         BGE.Math.VectorOps.create(RendererResourceSize, 0)
       ]
       rightTriBitmap = CreateObject("roBitmap", {width: RendererResourceSize, height: RendererResourceSize, AlphaEnable: true})
-      m.drawTriangleFromScratchTo(rightTriBitmap, rightTriPoints, 0, 0, -1, false, true)
-      rightTriBitmap.Finish()
-      m.resources.rightTriangle = BGE.RendererHelpers.createTriangleBitmap(rightTriBitmap, rightTriPoints)
+      if invalid <> rightTriBitmap
+        m.drawTriangleFromScratchTo(rightTriBitmap, rightTriPoints, 0, 0, -1, false, true)
+        m.resources.rightTriangle = BGE.RendererHelpers.createTriangleBitmap(rightTriBitmap, rightTriPoints)
+      end if
+
     end sub
 
     sub setDraw2d(draw2d as ifDraw2d)
@@ -297,11 +308,10 @@ namespace BGE
       if new_width <> 0 and new_height <> 0 and m.shouldDrawTo(draw2d, xToDraw, yToDraw, new_width, new_height, theta)
 
         myScratchRegion = m.bmpPool.getRegion(new_width, new_height)
-        if invalid = myScratchRegion
+        if invalid = myScratchRegion or invalid = myScratchRegion.region
           return false
         end if
         scaledRegion = myScratchRegion.region
-
         pretranslation_x = 0
         pretranslation_y = 0
         if getInterface(region, "ifRegion") <> invalid
@@ -368,6 +378,8 @@ namespace BGE
 
 
     function makeIntoTriangle(srcRegionWithId as BGE.RendererHelpers.RegionWithId, points as BGE.Math.Vector[], makeAcute = false as boolean, useCache = false as boolean) as BGE.RendererHelpers.TriangleBitmap
+      'useCache = false
+
       if useCache
         existingItem = m.triangleCache.getTriangle(srcRegionWithId.id, points)
         if invalid <> existingItem
@@ -383,6 +395,8 @@ namespace BGE
 
       srcPreX = 0
       srcPreY = 0
+
+      srcRegion.SetAlphaEnable(true)
 
       srcRegion.GetPretranslationX()
       srcRegion.GetPretranslationY()
@@ -422,7 +436,7 @@ namespace BGE
       bmpSizeW = longestSide
       bmpSizeH = longestSide
       originPoint = srcTri.points[startIndex]
-      scratchRegion2 = m.bmpPool.getRegion(bmpSizeW, bmpSizeH)
+      scratchRegion2 = m.bmpPool.getRegion(bmpSizeW, bmpSizeH, originPoint.x > 0)
 
       if invalid = scratchRegion2
         m.bmpPool.returnRegions([scratchRegion1])
@@ -450,12 +464,22 @@ namespace BGE
 
       m.drawRotatedImageWithCenterTo(region2, initialRegion, BGE.Math.VectorOps.create(bmpSizeW, 0), rightSideTheta)
 
+      m.addDebugCell(region2, "rotatedRegion")
+
+
       bitmap3 = invalid as roBitmap
       region3 = invalid as roRegion
       scratchRegion4 = invalid as BGE.ScratchRegion
       if useCache
         bitmap3 = CreateObject("roBitmap", {width: fix(bmpSizeW + 1), height: fix(bmpSizeH + 1), AlphaEnable: true})
+        if invalid = bitmap3
+          m.bmpPool.returnRegions([scratchRegion1, scratchRegion2, scratchRegion3])
+          return invalid
+        end if
         region3 = CreateObject("roRegion", bitmap3, 0, 0, bmpSizeW, bmpSizeW)
+        bitmap3.SetAlphaEnable(true)
+        region3.SetAlphaEnable(true)
+        bitmap3.Clear(0)
       else
         scratchRegion4 = m.bmpPool.getRegion(bmpSizeW, bmpSizeH)
         if invalid = scratchRegion4
@@ -498,6 +522,7 @@ namespace BGE
       m.drawTrianglePointsTo(region3, resultPoints)
 
       result = BGE.RendererHelpers.createTriangleBitmap(region3, resultPoints)
+
       if not useCache
         result.scratchRegion = scratchRegion4
       end if
@@ -513,11 +538,14 @@ namespace BGE
         end if
         m.addDebugCell(result.bitmap, "acuteTriangle")
       end if
+
+      m.forceDraw(result.bitmap)
       if useCache
         m.triangleCache.addTriangle(srcRegionWithId.id, points, result)
       end if
+
       ' Everything worked here, so stage regions for return after completing drawing the frame.
-      m.bmpPool.stageRegionsForReturn([scratchRegion1, scratchRegion2, scratchRegion3])
+      m.bmpPool.returnRegions([scratchRegion1, scratchRegion2, scratchRegion3])'stageRegionsForReturn([scratchRegion1, scratchRegion2, scratchRegion3])
       return result
     end function
 
@@ -636,7 +664,7 @@ namespace BGE
       secondPartLength = distanceToMappedLongest - firstPartLength
 
       firstPartRegion = CreateObject("roRegion", scratchRegion2.getBitmapObject(), 0, 0, firstPartLength, rotatedTriHeight)
-
+      firstPartRegion.SetAlphaEnable(true)
       if invalid = firstPartRegion
         m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
         return false
@@ -644,6 +672,7 @@ namespace BGE
       firstPartRegion.SetScaleMode(1)
 
       secondPartRegion = CreateObject("roRegion", scratchRegion2.getBitmapObject(), BGE.Math.Max(0, firstPartLength - 1), 0, secondPartLength, rotatedTriHeight)
+      secondPartRegion.SetAlphaEnable(true)
       if invalid = secondPartRegion
         m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
         return false
@@ -819,6 +848,7 @@ namespace BGE
       if invalid = scratchRegion1
         return invalid
       end if
+      scratchRegion1.region.setAlphaEnable(true)
 
       rotatedSrcRegion = scratchRegion1.region
 
@@ -898,7 +928,7 @@ namespace BGE
 
       acuteTriangle = BGE.RendererHelpers.createTriangleBitmap(acuteTriRotBmp, acuteTrianglePoints)
       m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-
+      m.forceDraw(acuteTriangle.bitmap)
       return acuteTriangle
     end function
 
@@ -1079,10 +1109,7 @@ namespace BGE
         worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, topLeftSrc, topLeftDest)
         worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, bottomRightSrc, bottomRightDest)
       end if
-      for each region in m.bmpPool.stagedRegions 'bs:disable-line
-        '  m.drawObject(0, 0, region.region)
-      end for
-
+      m.forceDraw(draw2d)
       m.bmpPool.returnStagedRegions()
 
       return worked
@@ -1251,7 +1278,16 @@ namespace BGE
 
       polyId = "polyTriangle"
 
-      myScratchRegion = m.bmpPool.getRegion(srcSize.x, srcSize.y)
+      myScratchRegion as BGE.ScratchRegion = invalid
+      regionsToReturn as BGE.ScratchRegion[] = []
+
+      if keepBitmapsActive
+        myScratchRegion = BGE.getNewMemoryScratchRegion(srcSize.x, srcSize.y)
+      else
+        myScratchRegion = m.bmpPool.getRegion(srcSize.x, srcSize.y)
+        regionsToReturn.push(myScratchRegion)
+      end if
+
       if invalid = myScratchRegion or invalid = myScratchRegion.region
         return false
       end if
@@ -1261,19 +1297,19 @@ namespace BGE
       m.drawRectangleTo(triSrcRegion, 0, 0, srcSize.x, srcSize.y, rgba)
       polyBitmap = m.makeIntoTriangle(BGE.RendererHelpers.createRegionWithId(triSrcRegion, polyId), offsetPoints, false, false)
       if invalid = polyBitmap
-        m.bmpPool.returnRegions([myScratchRegion])
+        m.bmpPool.returnRegions(regionsToReturn)
         return false
       end if
+      regionsToReturn.push(polyBitmap.scratchRegion)
 
       longestPoint = offsetPoints[BGE.Math.TriangleOps.nextIndex(srcTriangle.longestIndex)]
       m.drawTrianglePointsTo(polyBitmap.bitmap, offsetPoints)
       theta = polyBitmap.triangle.angleRotatedFromOriginal
 
       didDraw = m.drawRotatedObjectTo(canvasDrawTo, totalXOffset + longestPoint.x, totalYOffset + longestPoint.y, theta, polyBitmap.bitmap, rgba)
-      if not keepBitmapsActive
-        m.bmpPool.returnStagedRegions()
-        m.bmpPool.returnRegions([myScratchRegion, polyBitmap.scratchRegion])
-      end if
+      m.forceDraw(canvasDrawTo)
+      m.bmpPool.returnStagedRegions()
+      m.bmpPool.returnRegions(regionsToReturn)
       return didDraw
     end function
 
@@ -1318,6 +1354,10 @@ namespace BGE
         end if
       end if
 
+      if invalid = m.resources.rightTriangle
+        return false
+      end if
+
       srcTriangle = BGE.Math.TriangleOps.create(points, true)
 
       perpFootInfo = BGE.Math.TriangleOps.getPerpendicularFootOfHeight(srcTriangle)
@@ -1360,7 +1400,6 @@ namespace BGE
       for each tri in triangles
         didDraw = m.drawTriangleTo(canvasDrawTo, tri, x, y, rgba, allowQuickDraw) or didDraw
       end for
-
       return didDraw
     end function
 
@@ -1610,14 +1649,29 @@ namespace BGE
       if invalid <> m.game
         return m.game.getFont(fontName)
       end if
+      if lcase(fontName).StartsWith("debug") and invalid <> m.defaultDebugFont
+        return m.defaultDebugFont
+      end if
       if invalid <> m.defaultFont
         return m.defaultFont
       end if
       print "No roFontRegistry found - using Default font"
       fontRegistry = CreateObject("roFontRegistry")
-      font = fontRegistry.GetDefaultFont() as roFont
-      m.defaultFont = font
-      return font
+      m.defaultFont = fontRegistry.GetDefaultFont() as roFont
+      m.defaultDebugFont = fontRegistry.GetDefaultFont(10, false, false) as roFont
+      return m.getFont(fontName)
+    end function
+
+
+    function forceDraw(drawSurface as ifDraw2d) as void
+      if invalid <> drawSurface
+        drawSurface.Finish()
+      end if
+      if m.dummyScreen <> invalid
+        m.dummyScreen.DrawObject(0, 0, drawSurface)
+        m.dummyScreen.SwapBuffers()
+        m.dummyScreen.clear(0)
+      end if
     end function
 
   end class
