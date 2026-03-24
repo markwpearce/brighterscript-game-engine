@@ -1,3 +1,5 @@
+import "../../../math/CornerPoints.bs"
+
 namespace BGE
 
   interface TransformTempBitmapDetails
@@ -14,7 +16,6 @@ namespace BGE
 
   class SceneObjectBillboard extends SceneObject
 
-
     protected worldPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
     protected canvasPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
 
@@ -29,20 +30,16 @@ namespace BGE
 
     private tempBitmap as ifDraw2d = invalid
 
-    private limitPointMap as LimitPointMappings = invalid
+    private limitPointMap as BGE.RendererHelpers.LimitPointMappings = invalid
 
-    protected useTempBitmapMap as boolean[] = [false, false, false, false]
+    protected useTempBitmapMap as boolean[] = BGE.getDrawModeBooleanLookupArray()
 
     private hasAccurateTempBitmap = false
 
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       super(name, drawableObj, objType)
-      m.useTempBitmapMap[SceneObjectDrawMode.matchCamera] = false
-      m.useTempBitmapMap[SceneObjectDrawMode.directToCamera] = false
       m.useTempBitmapMap[SceneObjectDrawMode.oriented] = true
       m.useTempBitmapMap[SceneObjectDrawMode.orientedDrawBackFace] = true
-      m.useTempBitmapMap[SceneObjectDrawMode.wireFrame] = true
-      m.useTempBitmapMap[SceneObjectDrawMode.wireFrameDrawBackFace] = true
     end sub
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -68,7 +65,7 @@ namespace BGE
         end if
         if not retVal
           ' we have not drawn anything yet
-          if isDirectDrawMode(drawMode)
+          if not m.useTempBitmapMap[drawMode]
             retval = m.drawToCanvas(rendererObj, drawMode)
           else
             ' try to create a temp bitmap and draw it to the
@@ -123,6 +120,9 @@ namespace BGE
         '   return invalid
       end if
       tempBitmap = createObject("roBitmap", {width: canvasSize.x + 1, height: canvasSize.y + 1, alphaEnable: true})
+      if invalid = tempBitmap
+        return invalid
+      end if
       tempBitmapResult = m.drawToTempBitmap(rendererObj, tempBitmap, canvasBounds[0], drawMode, allowFastDraw)
       tempBitmapDrawn = tempBitmapResult.worked
       if not tempBitmapDrawn
@@ -131,6 +131,7 @@ namespace BGE
       end if
       m.limitPointMap = m.getCanvasLimitPointMap()
       m.hasAccurateTempBitmap = not tempBitmapResult.didFastDraw
+      rendererObj.forceDraw(tempBitmap)
       return tempBitmap
     end function
 
@@ -148,15 +149,31 @@ namespace BGE
       if invalid = regionToDraw or invalid = regionObj
         return false
       end if
-      if drawMode = BGE.SceneObjectDrawMode.directToCamera
+      color = m.getDrawColorRGBA(rendererObj)
+      if m.drawable.isShaded
+        color = BGE.colorBrightness(color, getDotProductFromSurfaceToCamera(rendererObj, m.worldPoints.getCenter(), m.surfaceNormal))
+      end if
+      if (drawMode = BGE.SceneObjectDrawMode.directToCamera) and m.canvasPosition <> invalid
         drawPos = m.canvasPosition
         totalScaleX = 1.0 * m.drawable.scale.x * m.drawable.owner.scale.x
         totalScaleY = 1.0 * m.drawable.scale.y * m.drawable.owner.scale.y
         theta = m.drawable.rotation.z + m.drawable.owner.rotation.z
+        retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta, color)
+      else if drawMode = BGE.SceneObjectDrawMode.directScaled
+        ' TODO may need to change this to add some sort of "locked position"
+        ' so that things like trees have the bottom of the tree locked to the ground,
+        ' instead of the center of the tree being locked to the ground
+        ' - this would prevent weird scaling issues where the tree appears to grow out of the ground as it scales up
+        drawPos = m.canvasPoints.getCenter()
+        totalScaleX = 1.0 * m.canvasPoints.getAvgWidth() / regionObj.getWidth()
+        totalScaleY = 1.0 * m.canvasPoints.getAvgHeight() / regionObj.getHeight()
+        theta = m.canvasPoints.getAvgRotation()
 
-        retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta)
-      else if drawMode = BGE.SceneObjectDrawMode.oriented
-        retVal = rendererObj.drawPinnedCorners(m.canvasPoints, regionToDraw, m.isMirror, m.drawable.getFillColorRGBA())
+        retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta, color)
+      else if drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+        retVal = rendererObj.drawPolygon(m.canvasPoints.toArray(), 0, 0, color)
+      else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
+        retVal = rendererObj.drawPolygonOutline(m.canvasPoints.toClockwiseOutlineArray(), color)
       end if
       return retVal
     end function
@@ -179,12 +196,12 @@ namespace BGE
 
     ' Get the limit point mappings for the canvas points
     '
-    ' @return {LimitPointMappings}
-    private function getCanvasLimitPointMap() as LimitPointMappings
-      return new LimitPointMappings(m.getAllCanvasPoints())
+    ' @return {BGE.RendererHelpers.LimitPointMappings}
+    private function getCanvasLimitPointMap() as BGE.RendererHelpers.LimitPointMappings
+      return new BGE.RendererHelpers.LimitPointMappings(m.getAllCanvasPoints())
     end function
 
-    private function getCurrentLimitPointsFromMap() as LimitPoints2d
+    private function getCurrentLimitPointsFromMap() as BGE.RendererHelpers.LimitPoints2d
       if rodash.isInvalid(m.limitPointMap)
         return invalid
       end if
@@ -202,7 +219,7 @@ namespace BGE
       return currentLimits
     end function
 
-    protected function getRegionWithIdToDraw() as RegionWithId
+    protected function getRegionWithIdToDraw() as BGE.RendererHelpers.RegionWithId
       return invalid
     end function
 
@@ -220,7 +237,7 @@ namespace BGE
       preTransY = regionObj.getPretranslationY()
       offsetCanvasPoints = m.canvasPoints.subtract(canvasPointsTopLeftBound)
       regionObj.setPretranslation(0, 0)
-      tempBmpDidDraw = rendererObj.drawPinnedCornersTo(tempBitmap, offsetCanvasPoints, regionToDraw, m.getPinnedCornersOptions(), m.drawable.getFillColorRGBA())
+      tempBmpDidDraw = rendererObj.drawPinnedCornersTo(tempBitmap, offsetCanvasPoints, regionToDraw, m.getPinnedCornersOptions(), m.getDrawColorRGBA(rendererObj))
       regionObj.setPretranslation(preTransX, preTransY)
       return {worked: tempBmpDidDraw, didFastDraw: false}
     end function
@@ -231,6 +248,14 @@ namespace BGE
 
     protected function didRegionToDrawChange() as boolean
       return false
+    end function
+
+    protected function getDrawColorRGBA(rendererObj as BGE.Renderer, ignoreColor = false as boolean) as integer
+      color = m.drawable.getFillColorRGBA(ignoreColor)
+      if m.drawable.isShaded
+        color = BGE.colorBrightness(color, getDotProductFromSurfaceToCamera(rendererObj, m.worldPoints.getCenter(), m.surfaceNormal))
+      end if
+      return color
     end function
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
@@ -284,8 +309,7 @@ namespace BGE
         m.isMirror = false
         if invalid <> m.surfaceNormal
           worldCenter = m.worldPoints.getCenter()
-          m.surfaceToCameraDotProduct = BGE.Math.VectorOps.dotProduct(m.surfaceNormal, rendererObj.getRayFromCameraToWorldPoint(worldCenter))
-          if m.surfaceToCameraDotProduct < 0.0001
+          if not isNormalFacingCamera(rendererObj, worldCenter, m.surfaceNormal)
             m.isMirror = true
           end if
         end if
@@ -364,10 +388,10 @@ namespace BGE
         top: BGE.Math.Matrix44.multVecMatrix(currentLimits.top, currentBackRotationMatrix),
         right: BGE.Math.Matrix44.multVecMatrix(currentLimits.right, currentBackRotationMatrix),
         bottom: BGE.Math.Matrix44.multVecMatrix(currentLimits.bottom, currentBackRotationMatrix)
-      } as LimitPoints2d
+      } as BGE.RendererHelpers.LimitPoints2d
 
       d = backRotatedCurrent.left.y - backRotatedCurrent.top.y ' distance From MappedOrigin To CurrentLeft
-      reRotation = BGE.Math.HalfPi() - rotationDelta
+      reRotation = BGE.Math.HALF_PI - rotationDelta
       ' get the mapped origin by applying the distance From MappedOrigin To CurrentLeft
       mappedOrigin = BGE.Math.VectorOps.create(currentLimits.left.x + d * cos(-reRotation), currentLimits.left.y + d * sin(-reRotation))
 

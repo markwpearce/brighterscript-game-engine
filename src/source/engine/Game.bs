@@ -38,15 +38,15 @@ namespace BGE
     private background_color = BGE.Colors().Black
     private running = true
     private paused = false
-    private sortedEntities as GameEntity[] = []
+    sortedEntities as GameEntity[] = []
 
     private buttonHeld = -1
     private buttonHeldTimeMs = 0
-    private inputEntityId as string = invalid
-    private currentInputEntityId as string = invalid
+    private optional inputEntityId as string or dynamic = invalid
+    private optional currentInputEntityId as string or dynamic = invalid
     private dt as float = 0
     private totalRunTime = 0
-    private fakeDT as float = invalid
+    private fakeDT as float or dynamic = invalid
     private dtTimer as roTimespan = CreateObject("roTimespan")
     private pauseTimer as roTimespan = CreateObject("roTimespan")
     private buttonHeldTimer as roTimespan = CreateObject("roTimespan")
@@ -68,7 +68,9 @@ namespace BGE
     private fontRegistry as roFontRegistry = CreateObject("roFontRegistry")
     screen as roScreen = invalid
     canvas as BGE.Canvas = invalid
-    private uiRenderer as BGE.Renderer = invalid
+    uiCanvas as BGE.Canvas = invalid
+
+    dummyScreen as roScreen = CreateObject("roScreen", true, 0, 0)
     private nextGameEntityId as integer = 0
     private secondsBetweenGarbageCollection = 10
     private lastGarbageCollection as GarbageCollectionInfo = invalid
@@ -83,7 +85,7 @@ namespace BGE
     ' Any special arguments for the current room
     currentRoomArgs = {}
 
-    ' All of the GameEntities <entityName> => GameEntity[]
+    ' All of the GameEntities by room <roomName> => <entityName> => GameEntity
     Entities = {}
     ' All static variables for a given object type
     Statics = {}
@@ -111,14 +113,20 @@ namespace BGE
     '
     ' @param {integer} canvasWidth - Width of the canvas the game is drawn to
     ' @param {integer} canvasHeight - Height of the canvas the game is drawn to
+    ' @param {integer} [uiWidth=0] - Width of the UI canvas - if 0, will be same as screen
+    ' @param {integer} [uiHeight=0] - Height of the UI canvas - if 0, will be same as screen
     ' @return {void}
-    sub new(canvasWidth as integer, canvasHeight as integer)
+    sub new(canvasWidth as integer, canvasHeight as integer, uiWidth = 0 as integer, uiHeight = 0 as integer)
 
       ' ############### Create Initial Object - Begin ###############
       ' Set up the screen
       m.canvas = new Canvas(m, canvasWidth, canvasHeight)
 
       m.setUpScreen(canvasWidth, canvasHeight, true)
+      m.setupUi(uiWidth, uiHeight)
+
+
+      m.canvas.renderer.dummyScreen = m.dummyScreen
 
       ' Set up the audioPlayer
       m.audioPlayer.SetMessagePort(m.musicPort)
@@ -162,34 +170,37 @@ namespace BGE
         screenHeight = UIResolution.height
         m.screen = CreateObject("roScreen", true, screenWidth, screenHeight)
       end if
-      m.compositor.SetDrawTo(m.screen, &h00000000)
       m.screen.SetMessagePort(m.screen_port)
       m.screen.SetAlphaEnable(true)
 
       if canvas_as_screen_if_possible
         if m.screen.GetWidth() = m.canvas.bitmap.GetWidth() and m.screen.GetHeight() = m.canvas.bitmap.GetHeight()
           m.canvas.setBitmap(m.screen)
+
           m.canvas_is_screen = true
         end if
       end if
-
-      m.setupUi()
+      m.compositor.SetDrawTo(m.canvas.bitmap, &h00000000)
     end sub
 
     ' Sets up the Ui layer
     '
-    private sub setupUi()
-      m.uiRenderer = new Renderer(m, m.screen)
+    sub setupUi(uiWidth as integer, uiHeight as integer)
+      uiWidthToUse = uiWidth > 0? uiWidth : m.screen.GetWidth()
+      uiHeightToUse = uiHeight > 0? uiHeight : m.screen.GetHeight()
+      m.uiCanvas = new Canvas(m, uiWidthToUse, uiHeightToUse, {useBitmapPooling: false})
+      m.uiCanvas.renderer.name = "UIRenderer"
+      m.uiCanvas.scale = BGE.Math.VectorOps.create(m.screen.GetWidth() / m.uiCanvas.getWidth(), m.screen.GetHeight() / m.uiCanvas.getHeight(), 1)
 
       m.gameUi = new BGE.UI.UiContainer(m)
-      m.gameUi.setCanvas(m.screen)
+      m.gameUi.setCanvas(m.uiCanvas)
       m.gameUi.showBackground = false
       m.gameUi.width = m.screen.getWidth()
       m.gameUi.height = m.screen.getHeight()
       m.gameUi.padding.set(BGE.UI.DEFAULT_PADDING)
 
       m.debugUi = new BGE.UI.UiContainer(m as dynamic)
-      m.gameUi.setCanvas(m.screen)
+      m.debugUi.setCanvas(m.uiCanvas)
       m.debugUi.showBackground = false
       m.debugUi.width = m.screen.getWidth()
       m.debugUi.height = m.screen.getHeight()
@@ -264,6 +275,7 @@ namespace BGE
         end if
         m.dtTimer.Mark()
         m.canvas.renderer.resetDrawCallCounter()
+        m.uiCanvas.renderer.resetDrawCallCounter()
         urlMsg = m.urlPort.GetMessage()
         universalControlEvents = [] as roUniversalControlEvent[]
         screenMsg = m.screen_port.GetMessage()
@@ -301,6 +313,7 @@ namespace BGE
         if m.background_color <> invalid
           m.canvas.clear(m.background_color)
         end if
+        m.uiCanvas.clear(0) ' clear with transparent color so that it doesn't cover the game canvas
 
         ' ----------------------Then draw all of the entities and call onDrawBegin() and onDrawEnd()-------------------------
         m.drawEntities()
@@ -308,18 +321,28 @@ namespace BGE
         ' ---------------------- Draw debug items in game space -------------------------
         m.drawDebugItems()
 
+        ' -------------------Draw everything to the screen----------------------------
+        if not m.canvas_is_screen
+          m.screen.DrawScaledObject(m.canvas.offset.x, m.canvas.offset.y, m.canvas.scale.x, m.canvas.scale.y, m.canvas.bitmap)
+        end if
+
         ' ---------------------- Handle all UI updates and draws -------------------------
         m.processAndDrawUI(universalControlEvents, musicMsg, ecpMsg, urlMsg)
 
         ' ---------------------- Handle all Debug UI updates and draws -------------------------
         m.processAndDrawDebugUI(universalControlEvents, musicMsg, ecpMsg, urlMsg)
 
+        m.screen.drawScaledObject(m.uiCanvas.offset.x, m.uiCanvas.offset.y, m.uiCanvas.scale.x, m.uiCanvas.scale.y, m.uiCanvas.bitmap)
+
         if m.debugging.draw_safe_zones
           m.drawSafeZones()
         end if
-
+        preSwapTime = m.dtTimer.TotalMilliseconds()
         m.screen.SwapBuffers()
+        postSwapTime = m.dtTimer.TotalMilliseconds()
+        drawTime = postSwapTime - preSwapTime
         m.canvas.renderer.onSwapBuffers()
+        m.uiCanvas.renderer.onSwapBuffers()
 
         if m.debugging.limit_frame_rate > 0 and m.dtTimer.TotalMilliseconds() > 0
           while 1000 / m.dtTimer.TotalMilliseconds() > m.debugging.limit_frame_rate
@@ -336,8 +359,11 @@ namespace BGE
         end if
 
         if m.garbageCollectionTimer.totalMilliseconds() > (m.secondsBetweenGarbageCollection * 1000)
+
+          print m.canvas.renderer.statsString
+          print m.uiCanvas.renderer.statsString
           frameTime = m.dtTimer.TotalMilliseconds()
-          print "Ms per frame  " + frameTime.toStr()
+          print `Average per frame ${frameTime}ms (Draw time: ${drawTime}ms)`
           m.lastGarbageCollection = runGarbageCollector()
           print "GC per second " + (m.dtTimer.TotalMilliseconds() - frameTime).toStr()
 
@@ -555,21 +581,21 @@ namespace BGE
             myCollider.refreshColliderRegion()
             myCollider.compositorObject.MoveTo(entity.position.x, entity.position.y)
             '? `${myCollider.name} ${myCollider.compositorObject.getX()},${myCollider.compositorObject.getY()} ${myCollider.compositorObject.getRegion().getWidth()},${myCollider.compositorObject.getRegion().getHeight()}`
-            multipleCollisions = myCollider.compositorObject.CheckMultipleCollisions()
+            multipleCollisions = myCollider.compositorObject.CheckMultipleCollisions() as roSprite[]
             if multipleCollisions <> invalid
               for each otherCollider in multipleCollisions
                 otherColliderData = otherCollider.GetData()
                 if invalid <> otherColliderData and invalid <> otherColliderData.entityId
                   if otherColliderData.entityId <> entity.id
-                    otherEntity = invalid
+                    otherEntity as GameEntity = invalid
                     if invalid <> m.Entities[otherColliderData.objectName][otherColliderData.entityId]
-                      otherEntity = m.Entities[otherColliderData.objectName][otherColliderData.entityId]
+                      otherEntity = m.Entities[otherColliderData.objectName][otherColliderData.entityId] as GameEntity
                     else if invalid <> m.currentRoom and otherColliderData.objectName = m.currentRoom.name
                       ' Or is it the current room?
-                      otherEntity = m.currentRoom
+                      otherEntity = m.currentRoom as GameEntity
                     end if
                     if invalid <> otherEntity and otherEntity.id <> entity.id
-                      entity.onCollision(colliderKey, otherColliderData.colliderName, otherEntity)
+                      entity.onCollision(myCollider, otherEntity.colliders[otherColliderData.colliderName], otherEntity)
                       if not m.isValidEntity(entity)
                         return false
                       end if
@@ -635,11 +661,6 @@ namespace BGE
 
       m.canvas.renderer.drawScene()
 
-      ' -------------------Draw everything to the screen----------------------------
-      if not m.canvas_is_screen
-        m.screen.DrawScaledObject(m.canvas.offset.x, m.canvas.offset.y, m.canvas.scale.x, m.canvas.scale.y, m.canvas.bitmap)
-      end if
-
       if invalid <> m.currentRoom
         m.processEntityPostDraw(m.currentRoom)
       end if
@@ -655,10 +676,10 @@ namespace BGE
     ' @return {boolean} true if this entity is still valid
     private function processEntityPreDraw(entity as GameEntity) as boolean
       if m.isValidEntity(entity) and invalid <> entity.onDrawBegin
-        for each img in entity.images
-          img.update()
+        for each drawable in entity.drawables
+          drawable.update()
         end for
-        entity.onDrawBegin(m.canvas.renderer, m.uiRenderer)
+        entity.onDrawBegin(m.canvas.renderer, m.uiCanvas.renderer)
       end if
       return m.isValidEntity(entity)
     end function
@@ -671,7 +692,7 @@ namespace BGE
     ' @return {boolean} true if this entity is still valid
     private function processEntityPostDraw(entity as GameEntity) as boolean
       if m.isValidEntity(entity) and invalid <> entity.onDrawEnd
-        entity.onDrawEnd(m.canvas.renderer, m.uiRenderer)
+        entity.onDrawEnd(m.canvas.renderer, m.uiCanvas.renderer)
       end if
       return m.isValidEntity(entity)
     end function
@@ -717,10 +738,10 @@ namespace BGE
           entity = m.sortedEntities[i]
 
           if entity <> invalid and entity.id <> invalid
-            if invalid <> entity.images
-              for each image in entity.images
-                if image.onResume <> invalid
-                  image.onResume(paused_time)
+            if invalid <> entity.drawables
+              for each drawable in entity.drawables
+                if drawable.onResume <> invalid
+                  drawable.onResume(paused_time)
                 end if
               end for
             end if
@@ -855,8 +876,10 @@ namespace BGE
     private sub processAndDrawUI(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       m.processUiUpdate(m.gameUi, universalControlEvents, musicMsg, ecpMsg, urlMsg)
 
+      m.uiCanvas.renderer.setupCameraForFrame()
       if m.isValidEntity(m.gameUi) and invalid <> m.gameUi.draw
         m.adjustEntityCompositorObjectPostCollision(m.gameUi)
+
         m.gameUi.draw()
       end if
     end sub
@@ -989,7 +1012,7 @@ namespace BGE
     '
     ' @param {boolean} enabled
     ' @param {boolean} drawToScreen Draw the debug UI to the screen instead of the canvas
-    sub debugShowUi(enabled as boolean, drawToScreen = false as boolean)
+    sub debugShowUi(enabled as boolean, drawToScreen = true as boolean)
       m.debugging.show_debug_ui = enabled
       m.debugging.draw_debugUi_to_screen = drawToScreen
       debugCanvas = m.canvas
@@ -999,6 +1022,10 @@ namespace BGE
       m.debugUi.width = debugCanvas.getWidth()
       m.debugUi.height = debugCanvas.getHeight()
     end sub
+
+    function isDebugUiEnabled() as boolean
+      return m.debugging.show_debug_ui
+    end function
 
     function getDebugValue(debugKey as string) as dynamic
       return m.debugging[debugKey]
@@ -1135,7 +1162,7 @@ namespace BGE
     ' TODO: work on interfaces
     '
     ' @param {string} interfaceName
-    ' @param {callable} interfaceCreationFunction
+    ' @param {function} interfaceCreationFunction
     ' @return {void}
     sub defineInterface(interfaceName as string, interfaceCreationFunction as function)
       m.Interfaces[interfaceName] = interfaceCreationFunction
@@ -1162,9 +1189,12 @@ namespace BGE
 
     ' Gets an entity by its unique id
     '
-    ' @param {string} entityId
+    ' @param {string or dynamic} entityId
     ' @return {GameEntity} the entity with the given id, if found, otherwise invalid
-    function getEntityByID(entityId as string) as GameEntity
+    function getEntityByID(entityId as string or dynamic) as GameEntity
+      if invalid = entityId
+        return invalid
+      end if
       for each entity in m.sortedEntities
         if m.isValidEntity(entity) and entityId = entity.id
           return entity
@@ -1365,6 +1395,10 @@ namespace BGE
       m.changeRoom(m.currentRoom.name, m.currentRoomArgs)
     end sub
 
+    function getRoomNames() as string[]
+      return m.Rooms.Keys() as string[]
+    end function
+
 
     ' --------------------------------Begin Bitmap Functions----------------------------------------
 
@@ -1538,20 +1572,20 @@ namespace BGE
       canvas_height = m.canvas.bitmap.GetHeight()
       screen_width = m.screen.GetWidth()
       screen_height = m.screen.GetHeight()
-      ' screenRatio = screen_width / screen_height
+      screenRatio = screen_width / screen_height
       canvasRatio = canvas_width / canvas_height
-      if screen_width / screen_height < canvasRatio
+      if screenRatio < canvasRatio
         m.canvas.scale.x = screen_width / canvas_width
         m.canvas.scale.y = m.canvas.scale.x
         m.canvas.offset.x = 0
         screenToCanvas = screen_width / (canvasRatio)
         m.canvas.offset.y = (screen_height - screenToCanvas) / 2
-      else if screen_width / screen_height > canvasRatio
+      else if screenRatio > canvasRatio
         m.canvas.scale.x = screen_height / canvas_height
         m.canvas.scale.y = m.canvas.scale.x
         m.canvas.offset.x = (screen_width - (screen_height * (canvasRatio))) / 2
         m.canvas.offset.y = 0
-      else
+      else ' same ratio
         m.canvas.offset.x = 0
         m.canvas.offset.y = 0
         scale_difference = screen_width / canvas_width
