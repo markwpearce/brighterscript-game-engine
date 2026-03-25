@@ -7,8 +7,7 @@ import * as path from 'path';
 import { execSync } from 'child_process';
 
 import { Chalk } from 'chalk';
-
-import { createCanvas, Image, registerFont } from 'canvas';
+import sharp from 'sharp';
 
 
 function camelize(str: string) {
@@ -31,6 +30,49 @@ async function replaceTextInFile(filePath: string, newName: string) {
         fs.writeFileSync(filePath, updatedContent, 'utf8');
     } catch (err) {
         console.error('Error handling the file:', err);
+    }
+}
+
+async function addTextToImage(
+    inputPath: string,
+    outputPath: string,
+    text: string,
+    fontSize: number,
+): Promise<void> {
+    try {
+        // 1. Get dimensions of the original image
+        const metadata = await sharp(inputPath).metadata();
+        const width = metadata.width ?? 800;
+        const height = metadata.height ?? 600;
+
+        // 2. Create an SVG string for the text
+        // You can customize font-size, color, and positioning here
+        const svgText = `
+      <svg width="${width}" height="${height}">
+        <style>
+          .title { fill: white; font-size: ${fontSize}px; font-weight: bold; font-family: sans-serif; }
+          .shadow { fill: black; font-size: ${fontSize}px; font-weight: bold; font-family: sans-serif; opacity: 0.5; }
+        </style>
+        <text x="51%" y="51%" text-anchor="middle" class="shadow">${text}</text>
+        <text x="50%" y="50%" text-anchor="middle" class="title">${text}</text>
+      </svg>
+    `;
+
+        // 3. Composite the text SVG over the original image
+        await sharp(inputPath)
+            .composite([
+                {
+                    input: Buffer.from(svgText),
+                    top: 0,
+                    left: 0,
+                },
+            ])
+            .png() // Ensure the output is PNG
+            .toFile(outputPath);
+
+        console.log(`Image saved to ${outputPath}`);
+    } catch (error) {
+        console.error('Error processing image:', error);
     }
 }
 
@@ -97,6 +139,26 @@ async function main() {
     replaceTextInFile(path.join(targetDir, "src", "manifest"), projectName);
 
     console.log(chalk.yellow("🖼️ Updating Splash Screen..."));
+
+    const imageText = `BGE: ${projectName}`;
+
+    const imagesToUpdate = [
+        { fileName: "Splash_HD.png", fontSize: 48 },
+        { fileName: "Splash_SD.png", fontSize: 36 },
+        { fileName: "Channel_Icon_HD.png", fontSize: 24 },
+        { fileName: "Channel_Icon_SD.png", fontSize: 16 }
+    ];
+
+    for (const { fileName, fontSize } of imagesToUpdate) {
+        await addTextToImage(
+            path.join(templateDir, "src", "images", fileName),
+            path.join(targetDir, "src", "images", fileName),
+            imageText,
+            fontSize
+        );
+    }
+
+
 
     console.log(chalk.yellow("📦 Installing dependencies..."));
     execSync("npm install", { cwd: targetDir, stdio: "inherit" });
