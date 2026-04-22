@@ -18,10 +18,12 @@ namespace BGE
     near as BGE.Math.Vector
 
 
-    sub setNormals(cameraOrientation as BGE.Math.Vector, fovDegrees as float)
+    sub setNormals(cameraOrientation as BGE.Math.Vector, fovDegrees as float, fovDegressVertical as float)
       'near
       m.near = BGE.Math.VectorOps.copy(cameraOrientation)
       fovRad = BGE.Math.DegreesToRadians(fovDegrees)
+      vFovRad = BGE.Math.DegreesToRadians(fovDegressVertical)
+
       rotVect = BGE.Math.VectorOps.create()
 
       'top
@@ -36,15 +38,61 @@ namespace BGE
 
       'left
       rotVect.x = 0
-      rotVect.y = fovRad / 2
+      rotVect.y = vFovRad / 2
       m.left = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
 
       'right
       rotVect.x = 0
-      rotVect.y = -fovRad / 2
+      rotVect.y = -vFovRad / 2
       m.right = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
     end sub
 
+  end class
+
+
+  class CameraFrustumRays
+    topLeft as BGE.Math.Ray
+    topRight as BGE.Math.Ray
+    bottomLeft as BGE.Math.Ray
+    bottomRight as BGE.Math.Ray
+
+    sub setRays(cameraPosition as BGE.Math.Vector, cameraOrientation as BGE.Math.Vector, fovDegrees as float, fovDegressVertical as float, cameraUp as BGE.Math.Vector, cameraRight as BGE.Math.Vector)
+      fovRad = BGE.Math.DegreesToRadians(fovDegrees)
+      vFovRad = BGE.Math.DegreesToRadians(fovDegressVertical)
+      ' rotVect = BGE.Math.VectorOps.create()
+
+      ' ' rotate on X axis for vertical FOV, Y axis for horizontal FOV
+      ' ' rotations are clockwise, so top is rotated by negative number
+
+      ' 'topLeft
+      ' rotVect.x = -vFovRad / 2
+      ' rotVect.y = -fovRad / 2
+      ' topLeftDir = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+      ' m.topLeft = {origin: cameraPosition, direction: topLeftDir}
+      ' 'topRight
+      ' rotVect.x = -vFovRad / 2
+      ' rotVect.y = fovRad / 2
+      ' topRightDir = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+      ' m.topRight = {origin: cameraPosition, direction: topRightDir}
+      ' 'bottomLeft
+      ' rotVect.x = vFovRad / 2
+      ' rotVect.y = -fovRad / 2
+      ' 'bottomLeftDir = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+
+      leftEdge = BGE.math.RotateVectorAroundPoint3d(cameraOrientation, {x: 0, y: 0, z: 0}, cameraUp, -fovRad / 2)
+      rightEdge = BGE.math.RotateVectorAroundPoint3d(cameraOrientation, {x: 0, y: 0, z: 0}, cameraUp, fovRad / 2)
+
+      topLeft = BGE.math.RotateVectorAroundPoint3d(leftEdge, {x: 0, y: 0, z: 0}, cameraRight, vFovRad / 2)
+      topRight = BGE.math.RotateVectorAroundPoint3d(rightEdge, {x: 0, y: 0, z: 0}, cameraRight, vFovRad / 2)
+
+      m.topLeft = {origin: cameraPosition, direction: topRight}
+      m.topRight = {origin: cameraPosition, direction: topLeft}
+
+      bottomLeft = BGE.math.RotateVectorAroundPoint3d(leftEdge, {x: 0, y: 0, z: 0}, cameraRight, -vFovRad / 2)
+      bottomRight = BGE.math.RotateVectorAroundPoint3d(rightEdge, {x: 0, y: 0, z: 0}, cameraRight, -vFovRad / 2)
+      m.bottomLeft = {origin: cameraPosition, direction: bottomLeft}
+      m.bottomRight = {origin: cameraPosition, direction: bottomRight}
+    end sub
   end class
 
   class Camera3d extends Camera
@@ -54,6 +102,8 @@ namespace BGE
     protected frustumNormals as CameraFrustumNormals = new CameraFrustumNormals()
 
     protected frustrumConvergence as BGE.Math.Vector = BGE.Math.VectorOps.create()
+
+    frustumRays as CameraFrustumRays = new CameraFrustumRays()
 
     private currentDrawMode = BGE.SceneObjectDrawMode.oriented
 
@@ -71,9 +121,15 @@ namespace BGE
     end sub
 
     override sub onCameraMovement()
+
+      vertFov = m.getVerticalFOV()
+
       if BGE.Math.VectorOps.norm(m.motionChecker.getRotationDifference(m.orientation)) > 0
-        m.frustumNormals.setNormals(m.orientation, m.fieldOfViewDegrees)
+        m.frustumNormals.setNormals(m.orientation, m.fieldOfViewDegrees, vertFov)
       end if
+
+      m.frustumRays.setRays(m.position, m.orientation, m.fieldOfViewDegrees, vertFov, m.getUpVector(), m.getRightVector())
+
       ' make the frustrum converge BEHIND the camera, instead of at the camera's position, so
       ' items on edge of frame don't get cut off
       ' This simply puts the convergence such that the whole frame will be in the frustrum
@@ -119,7 +175,7 @@ namespace BGE
 
     sub toggleWireFrame()
       if m.currentDrawMode = SceneObjectDrawMode.oriented
-        m.currentDrawMode = SceneObjectDrawMode.wireFrame as dynamic
+        m.currentDrawMode = SceneObjectDrawMode.wireFrame
       else
         m.currentDrawMode = SceneObjectDrawMode.oriented
       end if
@@ -161,6 +217,224 @@ namespace BGE
     override sub useDefaultCameraTarget()
       m.setTarget(BGE.Math.VectorOps.create())
     end sub
+
+
+    ' Returns two screen-space points that define the visible horizon line of a plane.
+    ' If the horizon does not intersect the camera frame, an empty array is returned.
+    '
+    ' @param {BGE.Math.Plane} plane
+    ' @return {BGE.Math.Vector[]} Two points in screen space that define the horizon line of the plane, or an empty array if the plane is not visible.
+    function getHorizonOfPlane_AI(plane as BGE.Math.Plane) as BGE.Math.Vector[]
+      output as BGE.Math.Vector[] = []
+      if invalid = plane or invalid = plane.normal or invalid = plane.point
+        return output
+      end if
+
+      if invalid = m.worldToCamera
+        m.computeWorldToCameraMatrix()
+      end if
+
+      planeNormalCamera = BGE.Math.Matrix44.multDirMatrix(plane.normal, m.worldToCamera)
+      planePointCamera = BGE.Math.Matrix44.multVecMatrix(plane.point, m.worldToCamera)
+
+      near = (m.frameSize.x / 2) / tan(BGE.Math.DegreesToRadians(m.fieldOfViewDegrees) / 2)
+      halfW = m.frameSize.x / 2
+      halfH = m.frameSize.y / 2
+
+      a = planeNormalCamera.x
+      b = planeNormalCamera.y
+      planeDot = BGE.Math.VectorOps.dotProduct(planeNormalCamera, planePointCamera)
+      rhs = planeNormalCamera.z * near + planeDot
+      epsilon = 0.00001
+
+      ' Horizon on near plane: a*x + b*y = rhs. Intersect with view rectangle bounds.
+      if abs(b) > epsilon
+        yAtLeft = (rhs - a * (-halfW)) / b
+        if yAtLeft >= -halfH and yAtLeft <= halfH
+          output.push({x: -halfW, y: yAtLeft, z: -near})
+        end if
+
+        yAtRight = (rhs - a * halfW) / b
+        if yAtRight >= -halfH and yAtRight <= halfH
+          didFind = false
+          for each p in output
+            if abs(p.x - halfW) < epsilon and abs(p.y - yAtRight) < epsilon
+              didFind = true
+              exit for
+            end if
+          end for
+          if not didFind
+            output.push({x: halfW, y: yAtRight, z: -near})
+          end if
+        end if
+      end if
+
+      if abs(a) > epsilon
+        xAtTop = (rhs - b * (-halfH)) / a
+        if xAtTop >= -halfW and xAtTop <= halfW
+          didFind = false
+          for each p in output
+            if abs(p.x - xAtTop) < epsilon and abs(p.y + halfH) < epsilon
+              didFind = true
+              exit for
+            end if
+          end for
+          if not didFind
+            output.push({x: xAtTop, y: -halfH, z: -near})
+          end if
+        end if
+
+        xAtBottom = (rhs - b * halfH) / a
+        if xAtBottom >= -halfW and xAtBottom <= halfW
+          didFind = false
+          for each p in output
+            if abs(p.x - xAtBottom) < epsilon and abs(p.y - halfH) < epsilon
+              didFind = true
+              exit for
+            end if
+          end for
+          if not didFind
+            output.push({x: xAtBottom, y: halfH, z: -near})
+          end if
+        end if
+      end if
+
+      if output.count() > 2
+
+
+        maxDist = -1
+        bestI = 0
+        bestJ = 1
+        for i = 0 to output.count() - 1
+          for j = i + 1 to output.count() - 1
+            dx = output[i].x - output[j].x
+            dy = output[i].y - output[j].y
+            distSq = dx * dx + dy * dy
+            if distSq > maxDist
+              maxDist = distSq
+              bestI = i
+              bestJ = j
+            end if
+          end for
+        end for
+
+        output = [output[bestI], output[bestJ]]
+      end if
+
+      for i = 0 to output.count() - 1
+        output[i] = {x: output[i].x + halfW, y: output[i].y + halfH}
+      end for
+
+      return output
+    end function
+
+
+    function findHorizonPoint(screenX as float, focalLength as float, nv as BGE.Math.Vector) as BGE.Math.Vector
+      ' Equation: px * nv.x + py * nv.y + f * nv.z = 0
+      ' Solving for py:
+      ' py = - (screenX * nv.x + focalLength * nv.z) / nv.y
+
+      py = (screenX * nv.x + focalLength * nv.z) / nv.y
+      return {x: screenX, y: py}
+    end function
+
+    function getHorizonLine(plane as BGE.Math.Plane) as BGE.Math.Vector[]
+
+      if invalid = m.worldToCamera
+        m.computeWorldToCameraMatrix()
+      end if
+
+
+      ' 1. Transform Normal to View Space (ignore translation)
+      nv = BGE.Math.Matrix44.multDirMatrix(plane.normal, m.worldToCamera)
+
+      ' 2. Calculate Focal Length from Horizontal FOV
+      ' f = (width / 2) / tan(fov / 2)
+
+      fovRad = BGE.Math.DegreesToRadians(m.fieldOfViewDegrees)
+      width = m.frameSize.x
+      height = m.frameSize.y
+      focalLength = (width * 0.5) / tan(fovRad * 0.5)
+
+      ' 3. Check if horizon is even visible
+      ' if nv.y is near 0, the camera is tilted so the horizon is vertical or perfectly aligned.
+      if abs(nv.y) < 0.001
+        ' Handle edge case: Vertical horizon or camera looking straight up / down
+        return invalid
+      end if
+
+      ' 4. Find points at the left and right edges of the screen
+      ' Screen space coordinates usually range from -width/2 to +width/2
+      leftPt = m.findHorizonPoint(-width * 0.5, focalLength, nv)
+      rightPt = m.findHorizonPoint(width * 0.5, focalLength, nv)
+
+
+      return [leftPt, rightPt]
+      ' 5. Convert to 0 -> Width, 0 -> Height space (standard UI space)
+      'screenPt1 = {x: leftPt.x + width * 0.5, y: height * 0.5 - leftPt.y}
+      'screenPt2 = {x: rightPt.x + width * 0.5, y: height * 0.5 - rightPt.y}
+
+      'return [screenPt1, screenPt2]
+    end function
+
+    ' Converts from float (-1 to 1) screen space with (0,0) as the center of the screen to pixel coordinates
+    '
+    ' @param {BGE.Math.Vector} pCamera
+    ' @return {BGE.Math.Vector}
+    function cameraPointToScreenPoint(pCamera as BGE.Math.Vector) as BGE.Math.Vector
+      ' if pCamera.z >= 0
+      '   return invalid
+      ' end if
+      ' pScreen = {x: 0, y: 0}
+
+      ' near = (m.frameSize.x / 2) / tan(BGE.Math.DegreesToRadians(m.fieldOfViewDegrees) / 2)
+      ' pScreen.x = near * pCamera.x / -pCamera.z
+      ' pScreen.y = near * pCamera.y / -pCamera.z
+      width = m.frameSize.x
+      height = m.frameSize.y
+      return {x: pCamera.x + width * 0.5, y: height * 0.5 - pCamera.y}
+    end function
+
+
+
+
+    function getVerticalFOV() as float
+      if m.frameSize.x = 0 or m.frameSize.y = 0
+        return m.fieldOfViewDegrees
+      end if
+      aspectRatio = m.frameSize.y / m.frameSize.x
+      return m.fieldOfViewDegrees * aspectRatio
+    end function
+
+    ' Returns a normalized up vector that is perpendicular to the camera orientation.
+    ' This assumes a world-up preference (+Y), with fallback when forward is parallel to +Y.
+    function getUpVector() as BGE.Math.Vector
+      forward = BGE.Math.VectorOps.copy(m.orientation)
+      BGE.Math.VectorOps.normalize(forward)
+
+      worldUp = BGE.Math.VectorOps.create(0, 1, 0)
+      right = BGE.Math.VectorOps.crossProduct(worldUp, forward)
+      epsilon = 0.00001
+
+      if BGE.Math.VectorOps.norm(right) <= epsilon
+        worldUp = BGE.Math.VectorOps.create(0, 0, 1)
+        right = BGE.Math.VectorOps.crossProduct(worldUp, forward)
+      end if
+
+      if BGE.Math.VectorOps.norm(right) <= epsilon
+        return BGE.Math.VectorOps.create(0, 1, 0)
+      end if
+
+      BGE.Math.VectorOps.normalize(right)
+      up = BGE.Math.VectorOps.crossProduct(forward, right)
+      BGE.Math.VectorOps.normalize(up)
+      return up
+    end function
+
+
+    function getRightVector() as BGE.Math.Vector
+      return BGE.Math.VectorOps.crossProduct(m.orientation, m.getUpVector())
+    end function
 
   end class
 
