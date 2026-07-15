@@ -1,0 +1,240 @@
+namespace BGE
+
+  class ScratchBitmap
+
+    bitmap as roBitmap
+    id as string
+
+    sub new(id as string, w as integer, h as integer)
+      m.bitmap = CreateObject("roBitmap", {width: w, height: h, alphaEnable: true})
+      m.id = id
+      if invalid = m.bitmap
+        print "Failed to create bitmap for ScratchBitmap with id: "; id
+        return
+      else
+        m.bitmap.SetAlphaEnable(true)
+        m.bitmap.Clear(0)
+      end if
+
+    end sub
+  end class
+
+
+  class ScratchRegion
+
+    region as roRegion
+    scratchBmp as ScratchBitmap
+    scale = BGE.Math.createScaleVector(1)
+
+    sub new(region as roRegion, scratchBmp as ScratchBitmap)
+      m.region = region
+      m.scratchBmp = scratchBmp
+      m.region.SetAlphaEnable(true)
+      m.scratchBmp.bitmap.SetAlphaEnable(true)
+      m.region.clear(0)
+    end sub
+
+    function getBitmapObject() as roBitmap
+      return m.scratchBmp.bitmap
+    end function
+
+  end class
+
+  class ScratchBitmapPool
+
+    private pool as ScratchBitmap[] = []
+
+    ' These values work for low-end devices (Express, eg)
+    ' Ideally, the width and height of the scratch bitmaps would be bigger
+    ' For example, a Roku Ultra 4k can handle 1920x1080
+    ' It is unknown what the "correct" size is for various devices
+    ' But it would be great to have a look-up table for best values for different devices
+    private scratchWidth as integer = 1080
+    private scratchHeight as integer = 1080
+
+    private nextId = 0
+
+    private maxPoolCount = 20
+    private activePoolCount = 0
+
+    private doPooling = true
+
+    private stagedRegions as ScratchRegion[] = []
+
+    sub new(doPooling = true as boolean, initialCount = 10 as integer)
+      m.doPooling = doPooling
+      m.setUpBasedOnDevice()
+      for i = 0 to initialCount - 1
+        m.addNewBitmapToPool()
+      end for
+    end sub
+
+    private sub setUpBasedOnDevice()
+
+      device = CreateObject("roDeviceInfo")
+      if device.HasFeature("simulation_engine")
+        ' The simulator does not need pooling
+        m.doPooling = false
+        return
+      end if
+
+      ' Get Max UI resolution supported by the device, and use that as the size for the scratch bitmaps
+      resolution = device.GetUIResolution()
+      if "SD" = resolution.name
+        m.scratchWidth = 256
+        m.scratchHeight = 256
+      else if "HD" = resolution.name
+        m.scratchWidth = 720
+        m.scratchHeight = 720
+      else if "FHD" = resolution.name
+        m.scratchWidth = 1080
+        m.scratchHeight = 1080
+      end if
+
+      if m.scratchHeight >= 1080
+        ' for higher-end devices, we have more memory to work with, so we can have a bigger pool
+        m.maxPoolCount = 30
+      end if
+    end sub
+
+    private sub addNewBitmapToPool()
+      if not m.doPooling
+        return
+      end if
+
+      id = m.nextId.toStr()
+      m.nextId++
+
+      m.pool.push(new ScratchBitmap(id, m.scratchWidth, m.scratchHeight))
+      m.activePoolCount++
+    end sub
+
+
+    function getRegion(askedForWidth as float, askedForHeight as float, onTopRight = false as boolean) as BGE.ScratchRegion
+      if not m.doPooling
+        return getNewMemoryScratchRegion(askedForWidth, askedForHeight)
+      end if
+      width = BGE.Math.Clamp(fix(askedForWidth + 1), 1, m.scratchWidth)
+      height = BGE.Math.Clamp(fix(askedForHeight + 1), 1, m.scratchHeight)
+
+      if width > m.scratchWidth or height > m.scratchHeight
+        return invalid
+      end if
+      bmp as ScratchBitmap = invalid
+      if m.pool.count() > 0
+        'bmp = m.pool[m.pool.count() - 1]
+        bmp = m.pool[0]'m.pool.count() - 1]
+        m.pool.Shift()'pop()
+      end if
+      if bmp = invalid and m.activePoolCount < m.maxPoolCount
+        print "BMP Pool has been drained, adding new bitmap to pool"
+        m.addNewBitmapToPool()
+        'bmp = m.pool[m.pool.count() - 1]
+        bmp = m.pool[0]
+        m.pool.Shift()'pop()
+        if bmp = invalid or bmp.bitmap = invalid
+          return invalid
+        end if
+      end if
+
+
+      region as roRegion = invalid
+      if bmp = invalid
+        print "BMP Pool has been drained"
+        print m.toStr()
+        return invalid
+      end if
+      if not onTopRight
+        ' create region on top left
+        region = CreateObject("roRegion", bmp.bitmap, 0, 0, width, height) as roRegion
+      else
+        ' create region on top right
+        region = CreateObject("roRegion", bmp.bitmap, m.scratchWidth - width, 0, width, height) as roRegion
+      end if
+      if invalid = region
+        m.pool.push(bmp)
+        print "Valid bitmap could not be used to create region"
+        print m.toStr()
+        return invalid
+      end if
+
+      result = new ScratchRegion(region, bmp)
+      if askedForWidth > m.scratchWidth or askedForHeight > m.scratchHeight
+        minScale = BGE.Math.min(width / askedForWidth, height / askedForHeight)
+        result.scale = BGE.Math.createScaleVector(minScale)
+      end if
+      return result
+    end function
+
+    sub returnRegion(usedRegion as ScratchRegion)
+      if usedRegion = invalid or not m.doPooling
+        return
+      end if
+
+      inProgBmp = usedRegion.scratchBmp
+      ' NOTE: in the future, it may be necessary to "finish" the bitmap: inProgBmp.bitmap.finish(), but this slows things down
+      inProgBmp.bitmap.Finish()
+      m.pool.push(inProgBmp)
+    end sub
+
+    sub returnRegions(usedRegions as ScratchRegion[])
+      if not m.doPooling
+        return
+      end if
+
+      for i = usedRegions.count() - 1 to 0 step -1
+        region = usedRegions[i]
+        m.returnRegion(region)
+      end for
+    end sub
+
+
+    sub stageRegionsForReturn(usedRegions as ScratchRegion[])
+      if not m.doPooling
+        return
+      end if
+
+      for i = usedRegions.count() - 1 to 0 step -1
+        region = usedRegions[i]
+        m.stagedRegions.Push(region)
+      end for
+    end sub
+
+    sub returnStagedRegions()
+      if not m.doPooling
+        return
+      end if
+
+      m.returnRegions(m.stagedRegions)
+      m.stagedRegions = []
+    end sub
+
+    sub clearPool()
+      m.pool = []
+      m.activePoolCount = 0
+    end sub
+
+    function toStr() as string
+      return "ScratchBitmapPool: " + m.pool.count().toStr() + " / " + m.activePoolCount.toStr() + " (" + m.maxPoolCount.toStr() + ")"
+    end function
+
+  end class
+
+
+  function getNewMemoryScratchRegion(width as float, height as float) as ScratchRegion
+    if width < 1 or height < 1
+      return invalid
+    end if
+    bmp = new ScratchBitmap("temp", width, height)
+    if invalid = bmp
+      return invalid
+    end if
+    region = CreateObject("roRegion", bmp.bitmap, 0, 0, width, height)
+    if invalid = region
+      return invalid
+    end if
+    region.SetAlphaEnable(true)
+    return new ScratchRegion(region, bmp)
+  end function
+
+end namespace

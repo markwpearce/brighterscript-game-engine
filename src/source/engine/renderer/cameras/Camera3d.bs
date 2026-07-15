@@ -1,0 +1,167 @@
+namespace BGE
+
+
+  enum CameraFrustumSide
+    top = "top"
+    bottom = "bottom"
+    left = "left"
+    right = "right"
+    near = "near"
+  end enum
+
+
+  class CameraFrustumNormals
+    top as BGE.Math.Vector
+    bottom as BGE.Math.Vector
+    left as BGE.Math.Vector
+    right as BGE.Math.Vector
+    near as BGE.Math.Vector
+
+
+    sub setNormals(cameraOrientation as BGE.Math.Vector, fovDegrees as float)
+      'near
+      m.near = BGE.Math.VectorOps.copy(cameraOrientation)
+      fovRad = BGE.Math.DegreesToRadians(fovDegrees)
+      rotVect = BGE.Math.VectorOps.create()
+
+      'top
+      rotVect.x = fovRad / 2
+      rotVect.y = 0
+      m.top = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+
+      'bottom
+      rotVect.x = -fovRad / 2
+      rotVect.y = 0
+      m.bottom = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+
+      'left
+      rotVect.x = 0
+      rotVect.y = fovRad / 2
+      m.left = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+
+      'right
+      rotVect.x = 0
+      rotVect.y = -fovRad / 2
+      m.right = BGE.Math.Matrix44.multVecMatrix(cameraOrientation, BGE.Math.getRotationMatrix(rotVect))
+    end sub
+
+  end class
+
+  class Camera3d extends Camera
+
+    fieldOfViewDegrees as float = 90
+
+    protected frustumNormals as CameraFrustumNormals = new CameraFrustumNormals()
+
+    protected frustrumConvergence as BGE.Math.Vector = BGE.Math.VectorOps.create()
+
+    private currentDrawMode = BGE.SceneObjectDrawMode.oriented
+
+    name as string = "Camera3d"
+
+    override sub setTarget(targetPos as BGE.Math.Vector)
+      m.orientation = BGE.Math.VectorOps.subtract(targetPos, m.position)
+      BGE.Math.VectorOps.normalize(m.orientation)
+    end sub
+
+
+    override sub rotate(rotation as BGE.Math.Vector)
+      m.orientation = BGE.Math.Matrix44.multDirMatrix(m.orientation, BGE.Math.getRotationMatrix(rotation))
+      BGE.Math.VectorOps.normalize(m.orientation)
+    end sub
+
+    override sub onCameraMovement()
+      if BGE.Math.VectorOps.norm(m.motionChecker.getRotationDifference(m.orientation)) > 0
+        m.frustumNormals.setNormals(m.orientation, m.fieldOfViewDegrees)
+      end if
+      ' make the frustrum converge BEHIND the camera, instead of at the camera's position, so
+      ' items on edge of frame don't get cut off
+      ' This simply puts the convergence such that the whole frame will be in the frustrum
+      ' There are probably better ways of doing this
+      fovRad = BGE.Math.DegreesToRadians(m.fieldOfViewDegrees)
+      halfFrameSize = BGE.Math.max(m.frameSize.x, m.frameSize.y) / 2
+      m.frustrumConvergence = BGE.Math.VectorOps.subtract(m.position, BGE.Math.VectorOps.scale(m.orientation, halfFrameSize * cos(fovRad / 2)))
+    end sub
+
+
+    override function distanceFromCameraFront(point as BGE.Math.Vector) as float
+      return m.distanceFromFrustumSide("near", point)
+    end function
+
+
+    function distanceFromFrustumSide(frustumSide as string, point as BGE.Math.Vector) as float
+      frusNorm = m.frustumNormals[frustumSide]
+      return BGE.Math.distanceFromPlane(m.frustrumConvergence, frusNorm, point)
+    end function
+
+
+    override function isInView(point as BGE.Math.Vector) as boolean
+      frustumSides = ["near", "top", "left", "right", "bottom"]
+      for each side in frustumSides
+        distance = m.distanceFromFrustumSide(side, point)
+        if distance < 0
+          return false
+        end if
+      end for
+      return true
+    end function
+
+
+    override sub computeWorldToCameraMatrix()
+      lookTarget = BGE.Math.VectorOps.add(m.position, m.orientation)
+      m.worldToCamera = BGE.Math.Matrix44.inverse(BGE.Math.lookAt(m.position, lookTarget))
+    end sub
+
+    override function getDrawMode() as BGE.SceneObjectDrawMode
+      return m.currentDrawMode
+    end function
+
+
+    sub toggleWireFrame()
+      if m.currentDrawMode = SceneObjectDrawMode.oriented
+        m.currentDrawMode = SceneObjectDrawMode.wireFrame as dynamic
+      else
+        m.currentDrawMode = SceneObjectDrawMode.oriented
+      end if
+    end sub
+
+
+    override function worldPointToCanvasPoint(pWorld as BGE.Math.Vector) as BGE.Math.Vector
+      if invalid = m.worldToCamera
+        m.computeWorldToCameraMatrix()
+      end if
+      pCamera = BGE.Math.Matrix44.multVecMatrix(pWorld, m.worldToCamera)
+      if pCamera.z >= 0
+        return invalid
+      end if
+      pScreen = {x: 0, y: 0}
+
+      near = (m.frameSize.x / 2) / tan(BGE.Math.DegreesToRadians(m.fieldOfViewDegrees) / 2)
+      pScreen.x = near * pCamera.x / -pCamera.z
+      pScreen.y = near * pCamera.y / -pCamera.z
+      pNDC = {x: 0, y: 0}
+
+      canvasWidth = m.frameSize.x
+      canvasHeight = m.frameSize.y
+      pNDC.x = (pScreen.x + canvasWidth * 0.5) / canvasWidth
+      pNDC.y = (pScreen.y + canvasHeight * 0.5) / canvasHeight
+      imageWidth = canvasWidth
+      imageHeight = canvasHeight
+      pRaster = {
+        x: fix(pNDC.x * imageWidth),
+        y: cint ((1 - pNDC.y) * imageHeight),
+        z: 0
+      }
+
+      '? "pCamera: "; pCamera.toStr();" -> screen: [";pScreen.x;pScreen.y;"] -> NDC [";pNDC.x;pNDC.y;"] -> Raster [";pRaster.x;pRaster.y;"]"
+      return pRaster
+    end function
+
+
+    override sub useDefaultCameraTarget()
+      m.setTarget(BGE.Math.VectorOps.create())
+    end sub
+
+  end class
+
+end namespace

@@ -1,0 +1,261 @@
+import "../../../math/CornerPoints.bs"
+
+
+namespace BGE
+
+  enum SceneObjectType
+    Line = "Line"
+    Rectangle = "Rectangle"
+    Text = "Text"
+    Bitmap = "Bitmap"
+    Polygon = "Polygon"
+    Billboard = "Billboard"
+    Model = "Model"
+  end enum
+
+  enum SceneObjectDrawMode
+    ' Rotations are ignored
+    matchCamera = 0
+    ' Do not orient in 3d space
+    directToCamera = 1
+    ' Do not orient in 3d space, but scale in relation to distance from camera
+    directScaled = 2
+    ' Orient in 3d space
+    oriented = 3
+    '  Orient the object, and draw any back faces
+    orientedDrawBackFace = 4
+    ' Just draw a wire frame
+    wireFrame = 5
+    ' Just draw a wire frame, including back faces
+    wireFrameDrawBackFace = 6
+    ' Draw a solid polygon
+    solid = 7
+    ' Draw a solid polygon, including back faces
+    solidDrawBackFace = 8
+  end enum
+
+  const MAX_DRAW_MODE = 8
+
+  function isBackFaceDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return drawMode = SceneObjectDrawMode.orientedDrawBackFace or drawMode = SceneObjectDrawMode.wireFrameDrawBackFace or drawMode = SceneObjectDrawMode.solidDrawBackFace
+  end function
+
+
+  function isDirectDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return drawMode = SceneObjectDrawMode.matchCamera or drawMode = SceneObjectDrawMode.directToCamera
+  end function
+
+  function isOrientedDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return not isDirectDrawMode(drawMode)
+  end function
+
+  function isWireFrameDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return drawMode = SceneObjectDrawMode.wireFrame or drawMode = SceneObjectDrawMode.wireFrameDrawBackFace
+  end function
+
+
+  function isSolidDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return drawMode = SceneObjectDrawMode.solid or drawMode = SceneObjectDrawMode.solidDrawBackFace
+  end function
+
+  function isFullDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return drawMode = SceneObjectDrawMode.oriented or drawMode = SceneObjectDrawMode.orientedDrawBackFace or drawMode = SceneObjectDrawMode.matchCamera or drawMode = SceneObjectDrawMode.directToCamera
+  end function
+
+  function getDrawModeBooleanLookupArray(defaultValue = false as boolean) as boolean[]
+    arr = []
+    for i = 0 to MAX_DRAW_MODE
+      arr.push(defaultValue)
+    end for
+    return arr
+  end function
+
+
+  function getDotProductFromSurfaceToCamera(rendererObj as BGE.Renderer, facePoint as BGE.Math.Vector, faceNormal as BGE.Math.Vector) as float
+    cameraToPoint = rendererObj.getRayFromCameraToWorldPoint(facePoint)
+    BGE.Math.VectorOps.normalize(cameraToPoint)
+    return BGE.Math.VectorOps.dotProduct(faceNormal, cameraToPoint)
+  end function
+
+
+  function isNormalFacingCamera(rendererObj as BGE.Renderer, facePoint as BGE.Math.Vector, faceNormal as BGE.Math.Vector) as boolean
+    dotProductResult = getDotProductFromSurfaceToCamera(rendererObj, facePoint, faceNormal)
+    return dotProductResult > 0.0001
+  end function
+
+  class SceneObject
+
+    name as string
+
+    ' Unique Id
+    id as string = ""
+
+    drawable as Drawable
+
+    type as SceneObjectType
+
+    negDistanceFromCamera as float = 0
+
+    private previousTransform = {}
+
+    worldPosition = BGE.Math.VectorOps.create()
+
+    ' The Current Transformation Matrix
+    transformationMatrix = BGE.Math.getFloat44Identity()
+
+    protected framesSinceDrawn = 0
+
+    protected hasValidWorldPosition = false
+    protected hasValidCanvasPosition = false
+
+    protected wasEnabledLastFrame = false
+
+    protected isFirstFrameSinceEnabled = false
+
+    protected isLowEndDevice = false
+
+
+    sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
+      m.name = name
+      m.drawable = drawableObj
+      m.type = objType
+
+      device = CreateObject("roDeviceInfo")
+      if device.HasFeature("simulation_engine")
+        ' The simulator does not need pooling
+        m.isLowEndDevice = false
+        return
+      end if
+
+      ' Get Max UI resolution supported by the device, and use that as the size for the scratch bitmaps
+      resolution = device.GetUIResolution()
+      if "SD" = resolution.name
+        m.isLowEndDevice = true
+      else if "HD" = resolution.name
+        m.isLowEndDevice = true
+      else if "FHD" = resolution.name
+        m.isLowEndDevice = false
+      end if
+
+    end sub
+
+    sub setId(id as string)
+      if m.id = ""
+        m.id = id
+      end if
+    end sub
+
+    sub update(cameraObj as Camera)
+      objMovedLastFrame = m.drawable.movedLastFrame(true)
+      m.isFirstFrameSinceEnabled = (m.isEnabled() and not m.wasEnabledLastFrame)
+      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled
+      if forceRecompute
+        m.drawable.computeTransformationMatrix()
+        BGE.math.Matrix44.setFrom(m.transformationMatrix, BGE.math.Matrix44.multiply(m.drawable.transformationMatrix, m.drawable.owner.transformationMatrix))
+        sceneObjDrawMode = m.getActualDrawMode(cameraObj)
+        m.hasValidWorldPosition = m.updateWorldPosition(sceneObjDrawMode)
+      end if
+      if cameraObj.movedLastFrame() or objMovedLastFrame
+        drawModeToUse = m.getActualDrawMode(cameraObj)
+        m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.getPositionForCameraDistance(drawModeToUse))
+      end if
+      m.wasEnabledLastFrame = m.isEnabled()
+    end sub
+
+    function getPositionForCameraDistance(drawMode as SceneObjectDrawMode) as BGE.Math.Vector
+      return m.worldPosition
+    end function
+
+    function isEnabled() as boolean
+      return m.drawable.isEnabled()
+    end function
+
+    protected function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
+      m.worldPosition = m.drawable.getWorldPosition()
+      return true
+    end function
+
+
+    sub draw(rendererObj as Renderer)
+      didDraw = false
+      if m.isPotentiallyOnScreen(rendererObj.camera)
+        drawModeToUse = m.getActualDrawMode(rendererObj.camera)
+        if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled
+          m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
+        end if
+        if m.hasValidCanvasPosition
+          didDraw = m.performDraw(rendererObj, drawModeToUse)
+          if didDraw
+            m.afterDraw()
+          end if
+        end if
+      end if
+      if didDraw
+        m.resetFrameSinceDrawn()
+      else
+        m.framesSinceDrawn++
+      end if
+      m.isFirstFrameSinceEnabled = false
+    end sub
+
+    private function getActualDrawMode(cam as Camera) as BGE.SceneObjectDrawMode
+      if m.drawable.drawMode = BGE.SceneObjectDrawMode.matchCamera
+        return cam.getDrawMode()
+      end if
+      return m.drawable.drawMode
+    end function
+
+
+    protected function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      return true
+    end function
+
+
+    protected function performDraw(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      ' No op - needs to be overriden in Specific types of scene objects
+      return false
+    end function
+
+
+
+    protected sub afterDraw()
+      ' No op - needs to be overriden in Specific types of scene objects
+    end sub
+
+    protected sub resetFrameSinceDrawn()
+      m.framesSinceDrawn = 0
+    end sub
+
+
+    protected function objMovedInRelationToCamera(cameraObj as Camera) as boolean
+      return m.drawable.movedLastFrame(true) or cameraObj.movedLastFrame()
+    end function
+
+    protected function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      if m.framesSinceDrawn = 0 or m.isFirstFrameSinceEnabled
+        return true
+      end if
+      if not m.objMovedInRelationToCamera(cameraObj)
+        return false
+      end if
+      inCamera = false
+      frustumCheckPositions = m.getPositionsForFrustumCheck(m.getActualDrawMode(cameraObj))
+      for each checkPos in frustumCheckPositions
+        inCamera = cameraObj.isInView(checkPos)
+        if inCamera
+          exit for
+        end if
+      end for
+      return inCamera
+    end function
+
+
+
+    function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      return[m.worldPosition]
+    end function
+
+
+  end class
+
+end namespace

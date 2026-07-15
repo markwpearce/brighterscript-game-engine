@@ -1,4 +1,3 @@
-' @module BGE
 namespace BGE
 
 
@@ -7,21 +6,20 @@ namespace BGE
     ' --------------Values That Can Be Changed------------
     name as string = ""
 
-    ' The horizontal offset of the image from the owner's x position
-    offset_x as float = 0
-    ' The vertical offset of the image from the owner's y position
-    offset_y as float = 0
+    ' The offset of the image from the owner's position
+    offset = BGE.Math.VectorOps.create()
 
-    ' The image scale - horizontal
-    scale_x as float = 1.0
-    ' The image scale - vertical
-    scale_y as float = 1.0
+    ' The image scale
+    scale = BGE.Math.VectorOps.create(1, 1, 1)
 
     ' Rotation of the image
-    rotation as float = 0
+    rotation = BGE.Math.VectorOps.create()
 
     ' This can be used to tint the image with the provided color if desired. White makes no change to the original image.
     color as integer = &hFFFFFF
+
+    ' RGBA color for outline stroke
+    optional outlineRGBA as integer = invalid
 
     ' Change the image alpha (transparency).
     alpha as float = 255
@@ -29,113 +27,147 @@ namespace BGE
     ' Whether or not the image will be drawn.
     enabled as boolean = true
 
-    ' Should the image be offset from teh owner, or from the canvas's origin?
-    offsetPositionFromOwner as boolean = true
+    transformationMatrix = BGE.Math.getFloat44Identity()
 
-    ' The canvas this will be drawn to (e.g. m.game.getCanvas())
-    drawTo as object = invalid
+    motionChecker as MotionChecker = new MotionChecker()
 
+    protected shouldRedraw as boolean = false
+
+    owner as GameEntity ' owner GameEntity
     ' -------------Never To Be Manually Changed-----------------
     ' These values should never need to be manually changed.
-    protected owner as GameEntity ' owner GameEntity
 
     protected width as float = 0
     protected height as float = 0
 
-    protected shouldRedraw as boolean = false
+    protected sceneObjects = {}
 
-    function new(owner as GameEntity, canvasBitmap as object, args = {} as object) as void
+    drawMode as SceneObjectDrawMode = SceneObjectDrawMode.matchCamera
+
+    isShaded as boolean = false
+
+    sub new(owner as GameEntity, args = {} as roAssociativeArray)
       m.owner = owner
-      m.drawTo = canvasBitmap
+      ' bs:disable-next-line: 1140
       m.append(args)
-    end function
-
-    ' Sets the scale of the drawable
-    '
-    ' @param {float} scale_x - horizontal scale
-    ' @param {dynamic} [scale_y=invalid] - vertical scale, or if invalid, use the horizontal scale as vertical scale
-    function setScale(scale_x as float, scale_y = invalid as dynamic) as void
-      if scale_y = invalid
-        scale_y = scale_x
-      end if
-      m.scale_x = scale_x
-      m.scale_y = scale_y
-    end function
-
-    ' Sets the canvas this will draw to
-    '
-    ' @param {object} [canvas] The canvas (roBitmap) this should draw to
-    sub setCanvas(canvas as object)
-      m.drawTo = canvas
     end sub
 
-    protected function getDrawPosition() as object
-      x = m.offset_x
-      y = m.offset_y
-      if invalid <> m.owner and m.offsetPositionFromOwner
-        x += m.owner.x
-        y += m.owner.y
-      end if
-      return {x: x, y: y}
-    end function
 
-    function draw(additionalRotation = 0 as float) as void
-    end function
-
-    function onResume(pausedTimeMs as integer)
-    end function
-
-    ' Forces a redraw of this drawable on next frame
-    ' By default, some drawables that need to do preprocessing (text, polygons, etc) will only redraw automatically
-    ' if their dimensions or underlying values change --
+    ' Adds the Drawable object to the given render scene.
     '
-    function forceRedraw() as void
-      m.shouldRedraw = true
+    ' @param {Renderer} rendererScene
+    ' @return {BGE.SceneObject} The SceneObject that represents this Drawable in the scene, if applicable
+    function addToScene(rendererScene as Renderer) as BGE.SceneObject
+      ' This should be overridden by drawables that want to add a scene object to the renderer.
+      return invalid
     end function
 
-    function getSize() as object
+    sub removeFromScene(rendererScene as Renderer)
+      for each item in m.sceneObjects.items()
+        rendererScene.removeSceneObject(item.value as SceneObject)
+      end for
+      m.sceneObjects = {}
+    end sub
+
+    sub computeTransformationMatrix()
+      currentlyMoved = m.motionChecker.check(m.offset, m.rotation, m.scale)
+
+      if m.movedLastFrame() and not currentlyMoved
+        m.motionChecker.resetMovedFlag()
+        return
+      end if
+
+      if currentlyMoved
+        m.motionChecker.setTransform(m.offset, m.rotation, m.scale)
+        BGE.Math.Matrix44.setFrom(m.transformationMatrix, BGE.Math.getTransformationMatrix(m.offset, m.rotation, m.scale))
+      end if
+    end sub
+
+    function movedLastFrame(includeOwner = false as boolean) as boolean
+      if includeOwner
+        return m.motionChecker.movedLastFrame or m.owner.movedLastFrame()
+      end if
+      return m.motionChecker.movedLastFrame
+    end function
+
+    sub update()
+    end sub
+
+
+    sub onResume(pausedTimeMs as integer)
+    end sub
+
+    function isEnabled() as boolean
+      return m.enabled and m.owner.enabled
+    end function
+
+    function getSize() as SizeWH
       return {width: m.width, height: m.height}
     end function
 
-    function getDrawnSize() as object
-      return {width: m.width * m.scale_x, height: m.height * m.scale_y}
+    function getDrawnSize() as SizeWH
+      return {width: m.width * m.scale.x, height: m.height * m.scale.y}
     end function
 
-    protected function getFillColorRGBA(ignoreColor = false as boolean) as integer
-      rgba = ignoreColor ? BGE.Colors().White : (m.color << 8) + int(m.alpha)
+    function getWorldPosition() as BGE.Math.Vector
+      return BGE.Math.Matrix44.multVecMatrix(m.offset, m.owner.transformationMatrix)
+    end function
+
+    function getPretranslation() as BGE.Math.Vector
+      return BGE.Math.VectorOps.create()
+    end function
+
+    function getFillColorRGBA(ignoreColor = false as boolean) as integer
+      rgba = BGE.Colors().White
+      if not ignoreColor and invalid <> m.color
+        rgba = (m.color << 8) + int(m.alpha)
+      end if
       return rgba
     end function
 
-    protected function drawRegionToCanvas(draw2d as object, additionalRotation = 0 as float, ignoreColor = false as boolean) as void
-      position = m.getDrawPosition()
+
+    function getOutlineColorRGBA(ignoreColor = false as boolean) as integer
+      rgba = m.getFillColorRGBA(ignoreColor)
+      if not ignoreColor and invalid <> m.outlineRGBA
+        rgba = (m.outlineRGBA << 8) + int(m.alpha)
+      end if
+      return rgba
+    end function
+
+    protected function getSceneObjectName(extraBit = "" as string) as string
+      return `${m.owner.name}_${m.name}_${extraBit}`
+    end function
+
+    protected function addSceneObjectToRenderer(sceneObj as SceneObject, renderScene as Renderer) as SceneObject
+      sceneObj.drawable = m
+      renderScene.addSceneObject(sceneObj)
+      m.sceneObjects[sceneObj.id] = sceneObj
+      return sceneObj
+    end function
+
+    protected sub drawRegionToCanvas(region as ifDraw2d, additionalRotation = invalid as BGE.Math.Vector, ignoreColor = false as boolean, drawTo = invalid as ifDraw2D)
+      position = m.getWorldPosition()
       x = position.x
       y = position.y
       rgba = m.getFillColorRGBA(ignoreColor)
-      totalRotation = additionalRotation + m.rotation
-      if m.scale_x = 1 and m.scale_y = 1 and totalRotation = 0
-        m.drawTo.DrawObject(x, y, draw2d, rgba)
-      else if totalRotation = 0
-        m.drawTo.DrawScaledObject(x, y, m.scale_x, m.scale_y, draw2d, rgba)
-      else if m.scale_x = 1 and m.scale_y = 1
-        m.drawTo.DrawRotatedObject(x, y, -totalRotation, draw2d, rgba)
-      else
-        BGE.DrawScaledAndRotatedObject(m.drawTo, x, y, m.scale_x, m.scale_y, -totalRotation, draw2d, rgba)
+      totalRotation = m.rotation.z
+      if invalid <> additionalRotation
+        totalRotation = BGE.Math.VectorOps.add(additionalRotation, m.rotation).z
       end if
-    end function
-  end class
+      if invalid <> drawTo
+        m.owner.game.canvas.renderer.drawRegionTo(drawTo, region, x, y, m.scale.x, m.scale.y, -totalRotation, rgba)
+      else
+        m.owner.game.canvas.renderer.drawRegion(region, x, y, m.scale.x, m.scale.y, -totalRotation, rgba)
+      end if
+    end sub
 
 
-  class DrawableWithOutline extends Drawable
-    ' Draw an outline stroke of outlineRGBA color
-    drawOutline as boolean = false
+    sub forEachSceneObject(operation as function, context as roAssociativeArray)
+      for each item in m.sceneObjects.items()
+        operation(item.value as SceneObject, context)
+      end for
+    end sub
 
-    ' RGBA color for outline stroke
-    outlineRGBA as integer = BGE.Colors().White
-
-
-    function new(owner as GameEntity, canvasBitmap as object, args = {} as object) as void
-      super(owner, canvasBitmap, args)
-    end function
   end class
 
 
