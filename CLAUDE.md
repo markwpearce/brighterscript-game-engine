@@ -22,8 +22,9 @@ Working with the example apps (each example under `examples/<name>` is its own n
 - `npm run build-examples` — build the engine, then build every example (`bsc` + zip via `roku-deploy`) — output zips land in `examples/<name>/out/bge-<name>.zip`
 - `npm run validate-examples` — validate the engine, then `bsc --validate --create-package=false` in every example
 - `npm run clean-all` — clean the engine and every example
+- `npm run create-example -- <name> ["Display Title"]` — scaffold a new `examples/<name>` from `scripts/exampleTemplate` (manifest, bsconfig, generated icon/splash images, minimal `MainRoom`), and register it in the root `.vscode/tasks.json` example picker
 
-All of the `*-examples` scripts fan out via `scripts/examples_command.sh`, which just `cd`s into each `examples/*/` directory and runs the given command. To act on a single example, `cd examples/<name>` and run its own npm scripts directly (`npm run build`, `npm run package`) instead.
+All of the `*-examples` scripts fan out via `scripts/examples.js`, which iterates every `examples/*/` directory and runs the given command in each (a failure in one example doesn't stop the others, matching the original shell scripts this replaced). To act on a single example, `cd examples/<name>` and run its own npm scripts directly (`npm run build`, `npm run package`) instead. All `scripts/*.js` tooling is plain Node (no shell scripts) so it runs the same on Windows as macOS/Linux.
 
 There is no automated test framework/spec runner in this repo. Confidence comes from `bsc` type-checking (`npm run validate`) plus manually running an example on a real Roku or the Roku simulator via the VSCode BrightScript extension debug configurations in `.vscode/launch.json` / each example's own `.vscode/launch.json` (requires a `.env` with `ROKU_USERNAME`/`ROKU_PASSWORD`/`ROKU_HOST`, or the `Launch Simulator` config).
 
