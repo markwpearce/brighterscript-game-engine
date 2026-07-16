@@ -4,9 +4,10 @@ An object-oriented game engine **and 2D/3D drawing library** for Roku, written i
 
 Build a full game with entities, rooms, collisions, input, and UI - or just pull in the renderer to draw sprites, shapes, billboards, and wireframe/solid 3D models on top of your own Roku app. Same engine, use as much or as little of it as you need.
 
+![Asteroids example](assets/screenshots/asteroids.jpg)
+
 <!--
-  Add screenshots here once available, e.g.:
-  ![Asteroids example](assets/screenshots/asteroids.png)
+  Add remaining screenshots here once available, e.g.:
   ![3D example](assets/screenshots/3d.png)
   ![Pong example](assets/screenshots/pong.png)
 -->
