@@ -17,6 +17,7 @@ Build a full game with entities, rooms, collisions, input, and UI - or just pull
 - **A real 2D/3D renderer, not just sprite blitting.** Draw images, sprites, animations, shapes, text, and billboards, or render actual 3D models (loaded from `.stl`) with wireframe, solid, and shaded draw modes - all built on Roku's `roCompositor`/`Draw2D`, so it runs on real hardware.
 - **Built-in collisions, input, UI, and debug tooling.** Circle/rectangle colliders, a retained-mode UI widget tree, and debug overlays (FPS, colliders, memory, GC stats) come standard, so you're not rebuilding the basics for every project.
 - **Use only what you need.** The `Renderer`/`Canvas` layer works standalone if you just want a capable drawing library for an existing Roku app, without adopting the full game loop.
+- **Develop without a physical Roku.** This engine supports running under the [BrightScript Simulator](https://github.com/lvcabral/brs-desktop), Marcelo Lv Cabral's desktop BrightScript simulator, so you can iterate on your game without deploying to hardware every time.
 
 ## A quick taste
 
@@ -35,6 +36,21 @@ end sub
 ```
 
 ```brightscript
+class MainRoom extends BGE.Room
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainRoom"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.game.addEntity(new Player(m.game))
+  end sub
+
+end class
+```
+
+```brightscript
 class Player extends BGE.GameEntity
 
   sub new(game as BGE.Game)
@@ -43,7 +59,7 @@ class Player extends BGE.GameEntity
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.position = BGE.Math.VectorOps.create(100, 100)
+    m.position = m.game.canvas.renderer.getCanvasCenter()
     bitmap = m.game.getBitmap("player")
     region = CreateObject("roRegion", bitmap, 0, 0, bitmap.GetWidth(), bitmap.GetHeight())
     m.addImage("sprite", region)
@@ -51,10 +67,8 @@ class Player extends BGE.GameEntity
   end sub
 
   override sub onInput(input as BGE.GameInput)
-    if input.held
-      m.velocity.x = input.x * 100
-      m.velocity.y = input.y * 100
-    end if
+    m.velocity.x = input.x * 10
+    m.velocity.y = input.y * 10
   end sub
 
   override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
@@ -64,7 +78,7 @@ class Player extends BGE.GameEntity
 end class
 ```
 
-See the [Documentation](https://markwpearce.github.io/brighterscript-game-engine) for the full API, and the examples below for complete, runnable projects.
+This exact code lives in [`examples/quickstart`](examples/quickstart) as a runnable app. See the [Documentation](https://markwpearce.github.io/brighterscript-game-engine) for the full API, and the examples below for complete, runnable projects.
 
 ## Examples
 
@@ -72,6 +86,7 @@ The `examples/` directory has full Roku channels you can build and run:
 
 | Example | What it shows |
 | --- | --- |
+| [`quickstart`](examples/quickstart) | The minimal `MainRoom`/`Player` example from above, as a runnable app |
 | [`asteroids`](examples/asteroids) | A complete 2D game - player movement, bullets, collisions, particle-style explosions, sound |
 | [`pong`](examples/pong) | Classic 2D Pong, playable in both 2D and 3D camera modes |
 | [`snake`](examples/snake) | Grid-based movement and growing collision shapes, in 2D and 3D |
@@ -80,6 +95,12 @@ The `examples/` directory has full Roku channels you can build and run:
 | [`canvas`](examples/canvas) | Using the engine's canvas/renderer as a standalone drawing surface |
 | [`hybrid`](examples/hybrid) | Mixing this engine's Draw2D-based rendering with a SceneGraph app |
 | [`rendererTest`](examples/rendererTest) | A manual test harness used while developing the renderer itself |
+
+Scaffold a new example (manifest, icons/splash, `package.json`, a minimal `MainRoom`) with:
+
+```
+npm run create-example -- <name> ["Display Title"]
+```
 
 ## Cloning and Running Examples
 
@@ -159,4 +180,4 @@ This project was originally forked from [Roku-gameEngine](https://github.com/Rom
 Thanks also to:
 
 - [RokuCommunity](https://github.com/rokucommunity) for [BrighterScript](https://github.com/rokucommunity/brighterscript), [bslint](https://github.com/rokucommunity/bslint), [roku-deploy](https://github.com/rokucommunity/roku-deploy), and the rest of the tooling that makes this project possible.
-- [Marcelo Lv Cabral](https://github.com/lvcabral) for his work on the Roku/BrightScript community and tooling, including the in-browser simulator this engine supports developing against.
+- [Marcelo Lv Cabral](https://github.com/lvcabral) for his work on the Roku/BrightScript community and tooling, including the [BrightScript Simulator](https://github.com/lvcabral/brs-desktop) this engine supports developing against.
