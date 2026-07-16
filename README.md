@@ -6,11 +6,7 @@ Build a full game with entities, rooms, collisions, input, and UI - or just pull
 
 ![Asteroids example](assets/screenshots/asteroids.jpg)
 ![3D example](assets/screenshots/3d.jpg)
-
-<!--
-  Add remaining screenshots here once available, e.g.:
-  ![Pong example](assets/screenshots/pong.png)
--->
+![Snake example](assets/screenshots/snake.jpg)
 
 ## Why BrighterScript Game Engine?
 
