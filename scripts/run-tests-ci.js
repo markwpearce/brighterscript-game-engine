@@ -5,9 +5,12 @@
 //
 // brs-cli never exits on its own once the app finishes (it keeps a background
 // handle open even after printing its shutdown line), so this watches stdout for
-// Rooibos's own `RESULT: Success`/`RESULT: Fail` line and kills the process itself
-// once seen, with a timeout as a safety net in case that line never appears (e.g. a
-// crash before Rooibos gets a chance to report).
+// Rooibos's own `[Rooibos Result]: PASS`/`FAIL` line (framework-level, present
+// regardless of which reporter is configured - the reporter-specific `RESULT:
+// Success`/`Fail` line only appears with the default "console" reporter, not with
+// "mocha") and kills the process itself once seen, with a timeout as a safety net
+// in case that line never appears (e.g. a crash before Rooibos gets a chance to
+// report).
 
 const path = require('path');
 const { spawn } = require('child_process');
@@ -46,9 +49,9 @@ function runTests(zipPath) {
             const text = chunk.toString();
             output += text;
             process.stdout.write(text);
-            if (/RESULT: Success/.test(output)) {
+            if (/\[Rooibos Result\]: PASS/.test(output)) {
                 finish('success');
-            } else if (/RESULT: Fail/.test(output)) {
+            } else if (/\[Rooibos Result\]: FAIL/.test(output)) {
                 finish('failure');
             }
         });
