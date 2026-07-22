@@ -5,7 +5,7 @@ description: Drive brighterscript-game-engine example apps on a real or simulate
 
 # Driving BGE examples with rokubot
 
-`rokubot` (npm, `^0.2.0`, installed as a devDependency of this repo) is a CLI for driving any
+`rokubot` (npm, `^0.3.0`, installed as a devDependency of this repo) is a CLI for driving any
 Roku device over ECP: sideload, launch, press keys, screenshot, stream the debug console. It's
 the tool to use whenever a task requires actually running one of `examples/*` rather than just
 reading/editing its source.
@@ -32,12 +32,16 @@ a real-time game's state can visibly race ahead of you between calls. Speed it u
 2. **Use `--action keydown` / `--action keyup` holds** instead of many discrete `press` calls to
    cover more distance per round trip (e.g. hold `down` for 150-250ms instead of pressing it 3
    times).
-3. **Downsample screenshots before reading them** — full-res captures are 1280x720; for picking
-   the next action you rarely need more than a couple hundred px wide. `sips -Z 320 <in> --out
-   <out>` (macOS built-in) cuts file size ~10x and is much faster for you to read.
+3. **Downsample screenshots with the built-in `--scale` flag** — don't shell out to `sips`/
+   ImageMagick, `screenshot --scale 0.25` (or `press <key> --screenshot --scale 0.25`) does it
+   server-side. Full-res captures are 1280x720; for picking the next action you rarely need more
+   than a couple hundred px wide.
 4. **`press <key> --screenshot`** combines the action and the follow-up screenshot into one
    rokubot invocation — use it instead of two separate calls whenever you're about to look right
-   after acting.
+   after acting. `text <string> --screenshot` does the same for typed input.
+5. **`press` takes multiple keys in one call**, e.g. `press up up select`, with `--delay` (default
+   0.25s) controlling the pause between each and — combined with `--screenshot` — after the last
+   one before capturing. Use this for a known sequence instead of N separate invocations.
 
 zsh gotcha: **never name a shell variable `path`** — in zsh it's a special array kept in sync
 with `$PATH`, and assigning to it (e.g. `path=$(rbot screenshot ...)`) silently breaks every
@@ -58,9 +62,9 @@ next, so don't skip ahead to blind probing if a cheaper signal is available:
    ```
    grep -rn "onInput\|isButton" examples/<name>/src/source/ | grep -v node_modules
    ```
-   This is fast and exact, but it gives you the *engine's internal* button name, not necessarily
-   the string rokubot/ECP expects — see the translation table below before you conclude a control
-   "does nothing."
+   This gives you the *engine's internal* button name — as of rokubot 0.3.0 it accepts BGE's own
+   names directly as aliases (see below), so this is much less of a trap than it used to be, but
+   still worth knowing about for the one name (`"audioguide"`) with no ECP equivalent.
 3. **If you don't have source (a real third-party channel, a black-box build), probe
    systematically instead of randomly.** Go through the full ECP key set in a fixed order —
    `select`, `up`, `down`, `left`, `right`, `back`, `play`, `rev`, `fwd`, `instantreplay`, `info`,
@@ -98,29 +102,27 @@ next, so don't skip ahead to blind probing if a cheaper signal is available:
    you're driving (`rokubot skill init` scaffolds one). Future you (or another agent) shouldn't
    have to re-derive the same control scheme from scratch.
 
-### BGE button names vs rokubot/ECP key names — they don't match
+### BGE button names vs rokubot/ECP key names
 
-This is the specific case of step 2 above biting hardest in this repo: `GameInput.isButton("...")`
-checks against BGE's own button-name table (`src/source/utils/utils.bs`,
-`buttonNameFromCode`), which is **not** the same string rokubot expects on the command line.
-Translate using this table:
+`GameInput.isButton("...")` checks against BGE's own button-name table
+(`src/source/utils/utils.bs`, `buttonNameFromCode`) — historically **not** the same string
+rokubot expected on the command line (e.g. BGE's `"options"` vs. the real ECP key `info`), which
+cost real time earlier: pressing the literal string `"options"` used to send an ECP key of that
+name, which the device just silently ignored — indistinguishable from "nothing changed" due to an
+unrelated bug.
 
-| BGE `isButton(...)` name | rokubot / ECP key | Roku remote button |
-| --- | --- | --- |
-| `"back"` | `back` | Back |
-| `"up"` / `"down"` / `"left"` / `"right"` | `up` / `down` / `left` / `right` | D-pad |
-| `"OK"` | `select` | OK / center button |
-| `"replay"` | `instantreplay` | Instant Replay |
-| `"rewind"` | `rev` | Rewind |
-| `"fastforward"` | `fwd` | Fast Forward |
-| `"options"` | `info` | Options (the `*` button) |
-| `"play"` | `play` | Play/Pause |
-| `"audioguide"` | (no standard ECP key in rokubot) | — |
+**As of rokubot 0.3.0 this is fixed both ways:** `press` is now case-insensitive and accepts
+common aliases (`ok`, `ff`/`forward`/`fastforward`, `rw`/`rewind`, `options`/`*`, `replay`, plus
+several others — run `press --help` for the live list), so BGE's own `isButton(...)` strings now
+work directly as rokubot arguments in every case that mattered here. *And* an unrecognized key
+now errors immediately with the full valid-key/alias list instead of silently no-op'ing — so a
+typo or wrong name is caught right away rather than looking like an app bug. The one BGE name
+still without an ECP equivalent is `"audioguide"`.
 
-The `"options"`/`info` mismatch is the one most likely to bite: pressing rokubot's literal string
-`"options"` sends an ECP key of that name, which the device just silently ignores (no error,
-nothing happens) — it looks identical to "nothing changed" from an unrelated bug. Always map
-through this table rather than assuming rokubot's key name matches the BGE source string.
+Bottom line: you can generally just pass BGE's `isButton(...)` string straight to `press` now.
+The mapping (canonical rokubot key ← BGE name) for reference: `select`←OK, `instantreplay`←replay,
+`rev`←rewind, `fwd`←fastforward, `info`←options, plus the obvious `up`/`down`/`left`/`right`/
+`back`/`play`.
 
 ## Building & sideloading an example
 
@@ -144,13 +146,16 @@ node node_modules/rokubot/dist/cli.js launch dev --host $ROKU_HOST --password $R
 ## Debugging a crash or unresponsive screen
 
 If a screenshot looks frozen/unchanged across several actions, don't assume rokubot is broken —
-check `active-app` and the debug console first; the app may have crashed into the BrightScript
-Micro Debugger, which just keeps showing the last rendered frame:
+the app may have crashed into the BrightScript Micro Debugger, which just keeps showing the last
+rendered frame. Check directly instead of guessing:
 
 ```
-node node_modules/rokubot/dist/cli.js active-app
-node node_modules/rokubot/dist/cli.js console   # streams; Ctrl+C or `kill` after a few seconds
+node node_modules/rokubot/dist/cli.js debugger-state
 ```
+
+This tells you paused-at-breakpoint vs. idle/unchanged in one call — no more manually streaming
+`console` for a few seconds and grepping for the debugger prompt. `active-app` is still useful
+alongside it to confirm which app is in the foreground.
 
 Two crashes seen so far, for reference:
 - `asteroids` on brs-desktop (the BrightScript Simulator): background bitmap is a `.jpg`
