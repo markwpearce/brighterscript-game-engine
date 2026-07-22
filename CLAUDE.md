@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An object-oriented game engine for Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript) (a typed superset of BrightScript that compiles to `.brs`). Distributed via ROPM. All engine source lives under `src/source/` inside the `BGE` namespace; `examples/` contains full sample Roku channels (asteroids, pong, snake, 3d, terrain, canvas, hybrid, pixels, rendererTest) that consume the engine via ROPM and serve as the main way to exercise engine changes end-to-end, since there is no unit test suite.
+An object-oriented game engine for Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript) (a typed superset of BrightScript that compiles to `.brs`). Distributed via ROPM. All engine source lives under `src/source/` inside the `BGE` namespace; `examples/` contains full sample Roku channels (asteroids, pong, snake, 3d, terrain, canvas, hybrid, pixels, rendererTest) that consume the engine via ROPM and serve as the main way to exercise engine changes end-to-end. There is also a growing Rooibos unit test suite (colocated `*.spec.bs` files) — see [Unit tests](#unit-tests-rooibos) below.
 
 ## Commands
 
 Run from the repo root unless noted.
 
 - `npm run build` — clean, then compile the engine with `bsc` (output to `build/`)
-- `npm run validate` — type-check the engine with `bsc` without emitting a package (`--create-package=false --copy-to-staging=false`). This is the closest thing to a test suite here — always run it after changing engine code.
+- `npm run validate` — type-checks the engine both without tests (`bsconfig.build.json`) and with tests (`bsconfig.test.json`) — always run it after changing engine code.
 - `npm run lint` — run `bslint` (rules configured in `bslint.json`)
-- `npm run clean` — remove build artifacts (`out/`, `build/`, `*.tgz`)
+- `npm run clean` — remove build artifacts (`out/`, `build/`, `test-build/`, `*.tgz`)
 - `npm run docs` — regenerate JSDoc HTML docs into `docs/` (config in `jsdoc.json`)
+- `npm run build-tests` — compile the Rooibos test suite (`bsconfig.test.json`) to `test-build/`
+- `npm run test:ci` — build the tests, then run them headlessly via `brs-cli` (no device/simulator needed) — this is what CI runs
+- `npm run test:device` — run the tests against a real device or brs-desktop (`ROKU_HOST`/`ROKU_PASSWORD` env vars), for interactive debugging
 
 Working with the example apps (each example under `examples/<name>` is its own npm project with its own `package.json`/`bsconfig.json`, pulling in the engine via ropm):
 
@@ -26,7 +29,15 @@ Working with the example apps (each example under `examples/<name>` is its own n
 
 All of the `*-examples` scripts fan out via `scripts/examples.js`, which iterates every `examples/*/` directory and runs the given command in each (a failure in one example doesn't stop the others, matching the original shell scripts this replaced). To act on a single example, `cd examples/<name>` and run its own npm scripts directly (`npm run build`, `npm run package`) instead. All `scripts/*.js` tooling is plain Node (no shell scripts) so it runs the same on Windows as macOS/Linux.
 
-There is no automated test framework/spec runner in this repo. Confidence comes from `bsc` type-checking (`npm run validate`) plus manually running an example on a real Roku or the Roku simulator via the VSCode BrightScript extension debug configurations in `.vscode/launch.json` / each example's own `.vscode/launch.json` (requires a `.env` with `ROKU_USERNAME`/`ROKU_PASSWORD`/`ROKU_HOST`, or the `Launch Simulator` config). To drive an example programmatically instead (sideload, launch, press keys, screenshot) — e.g. when asked to run, test, or "play" one — use the `rokubot` devDependency; see the `rokubot-examples` skill (`.claude/skills/rokubot-examples/SKILL.md`) for the workflow, speed tricks, and known per-example gotchas.
+Beyond the Rooibos unit tests, confidence also comes from manually running an example on a real Roku or the Roku simulator via the VSCode BrightScript extension debug configurations in `.vscode/launch.json` / each example's own `.vscode/launch.json` (requires a `.env` with `ROKU_USERNAME`/`ROKU_PASSWORD`/`ROKU_HOST`, or the `Launch Simulator` config). To drive an example programmatically instead (sideload, launch, press keys, screenshot) — e.g. when asked to run, test, or "play" one — use the `rokubot` devDependency; see the `rokubot-examples` skill (`.claude/skills/rokubot-examples/SKILL.md`) for the workflow, speed tricks, and known per-example gotchas.
+
+### Unit tests (Rooibos)
+
+Tests are [Rooibos](https://github.com/rokucommunity/rooibos) v6 (`rooibos-roku`) suites, colocated next to the code they test as `*.spec.bs` (e.g. `src/source/math/Vector.spec.bs`, `src/source/utils/TagList.spec.bs`) — no separate `tests/` directory. `bsconfig.test.json` (extends `bsconfig.base.json`, loads the `rooibos-roku` plugin) builds them into `test-build/`; `bsconfig.build.json` excludes `*.spec.bs` entirely so none of this ships in a production build. `scripts/run-tests-ci.js` drives `brs-cli` (from the `brs-node` devDependency) headlessly for CI, watching stdout for Rooibos's `[Rooibos Result]: PASS`/`FAIL` line (the mocha reporter configured in `bsconfig.test.json` replaces, not supplements, the default console output) since `brs-cli` never exits on its own.
+
+**Critical gotcha**: a `*.spec.bs` file may only contain **one** `@suite` class. Rooibos v6 (confirmed on `6.0.0-alpha.52`) silently corrupts test-suite metadata when two or more `@suite` classes live in the same file — tests run and report correctly for the classes processed first, then the run crashes with `[Rooibos Error]: ERROR RETRIEVING TEST SUITE DATA!!` while processing a later suite, regardless of which classes/content are involved. One class per file, always.
+
+When testing `GameEntity`/`Game`-level behavior, prefer targeting the pure logic they depend on (e.g. `BGE.isValidEntity`, `MotionChecker`, `ArrayInsert`, `GameTimer`) over constructing a full `BGE.Game` (which creates a real `roScreen`/`roCompositor`) inside a test — that hasn't been proven safe inside Rooibos's own SceneGraph-based test-runner scene.
 
 ## Architecture
 
