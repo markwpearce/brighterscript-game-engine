@@ -26,7 +26,7 @@ Working with the example apps (each example under `examples/<name>` is its own n
 
 All of the `*-examples` scripts fan out via `scripts/examples.js`, which iterates every `examples/*/` directory and runs the given command in each (a failure in one example doesn't stop the others, matching the original shell scripts this replaced). To act on a single example, `cd examples/<name>` and run its own npm scripts directly (`npm run build`, `npm run package`) instead. All `scripts/*.js` tooling is plain Node (no shell scripts) so it runs the same on Windows as macOS/Linux.
 
-There is no automated test framework/spec runner in this repo. Confidence comes from `bsc` type-checking (`npm run validate`) plus manually running an example on a real Roku or the Roku simulator via the VSCode BrightScript extension debug configurations in `.vscode/launch.json` / each example's own `.vscode/launch.json` (requires a `.env` with `ROKU_USERNAME`/`ROKU_PASSWORD`/`ROKU_HOST`, or the `Launch Simulator` config).
+There is no automated test framework/spec runner in this repo. Confidence comes from `bsc` type-checking (`npm run validate`) plus manually running an example on a real Roku or the Roku simulator via the VSCode BrightScript extension debug configurations in `.vscode/launch.json` / each example's own `.vscode/launch.json` (requires a `.env` with `ROKU_USERNAME`/`ROKU_PASSWORD`/`ROKU_HOST`, or the `Launch Simulator` config). To drive an example programmatically instead (sideload, launch, press keys, screenshot) — e.g. when asked to run, test, or "play" one — use the `rokubot` devDependency; see the `rokubot-examples` skill (`.claude/skills/rokubot-examples/SKILL.md`) for the workflow, speed tricks, and known per-example gotchas.
 
 ## Architecture
 
