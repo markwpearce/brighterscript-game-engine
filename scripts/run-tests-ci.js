@@ -59,6 +59,15 @@ function runTests(zipPath) {
             console.error(err);
             finish('spawn-error');
         });
+        child.on('exit', (code, signal) => {
+            // brs-cli never exits on its own on success (see note above), so an exit
+            // here - before we've seen a RESULT line - means it crashed. Fail fast
+            // instead of waiting out the full timeout.
+            if (!settled) {
+                console.error(`\nbrs-cli exited early (code=${code}, signal=${signal}) before reporting a RESULT line.`);
+                finish('crashed');
+            }
+        });
     });
 }
 
