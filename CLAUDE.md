@@ -37,7 +37,7 @@ Tests are [Rooibos](https://github.com/rokucommunity/rooibos) v6 (`rooibos-roku`
 
 **Critical gotcha**: a `*.spec.bs` file may only contain **one** `@suite` class. Rooibos v6 (confirmed on `6.0.0-alpha.52`) silently corrupts test-suite metadata when two or more `@suite` classes live in the same file — tests run and report correctly for the classes processed first, then the run crashes with `[Rooibos Error]: ERROR RETRIEVING TEST SUITE DATA!!` while processing a later suite, regardless of which classes/content are involved. One class per file, always.
 
-When testing `GameEntity`/`Game`-level behavior, prefer targeting the pure logic they depend on (e.g. `BGE.isValidEntity`, `MotionChecker`, `ArrayInsert`, `GameTimer`) over constructing a full `BGE.Game` (which creates a real `roScreen`/`roCompositor`) inside a test — that hasn't been proven safe inside Rooibos's own SceneGraph-based test-runner scene.
+Constructing a real `BGE.Game` (which creates a real `roScreen`/`roCompositor`) inside a test works fine, including headlessly under `brs-cli` — confirmed via `Game.spec.bs`/`GameEntity.spec.bs`, which do this in `beforeEach`. Rooibos's own `stub()`/`mock()` can't fake native Roku components (`roScreen`, `roCompositor`, etc. — they only intercept methods on plain BrighterScript class/associative-array targets, and `CreateObject` itself can't be intercepted), so a real `Game` is the only way to exercise `GameEntity`/`Game` behavior; prefer it over duplicating engine logic by hand in a test.
 
 ## Architecture
 
