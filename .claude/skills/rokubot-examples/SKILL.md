@@ -91,12 +91,13 @@ next, so don't skip ahead to blind probing if a cheaper signal is available:
    ```
    grep -n "changeRoom" examples/<name>/src/source/Rooms/*.bs
    ```
-   This repo's `pixels` example is a good example of why this matters: it looks like it should
-   cycle through 4 rooms, but the real graph is
-   `GhostRoom → RectangleRoom → PolygonRoom → SpriteRoom → PolygonRoom` (loops there) — and since
-   the app's actual start room is `PolygonRoom`, **`GhostRoom` and `RectangleRoom` are unreachable
-   from the running app via any button at all.** You'd only ever find that by reading every room's
-   `changeRoom` calls, not by pressing buttons and hoping.
+   This repo's `pixels` example is a good example of why this matters: it looked like it should
+   cycle through 4 rooms, but the real graph (before this was fixed) was
+   `GhostRoom → RectangleRoom → PolygonRoom → SpriteRoom → PolygonRoom` (looped there) — and since
+   the app's actual start room was `PolygonRoom`, `GhostRoom` and `RectangleRoom` were unreachable
+   from the running app via any button at all. That would only ever have been found by reading
+   every room's `changeRoom` calls, not by pressing buttons and hoping — it's fixed now (see the
+   `pixels` row below), but the lesson generalizes to any new multi-room app you're exploring.
 6. **Write down what you learn as you go**, even mid-exploration — rokubot's own README describes
    this same screenshot→act→screenshot loop as a way to build up a `SKILL.md` for whatever app
    you're driving (`rokubot skill init` scaffolds one). Future you (or another agent) shouldn't
@@ -177,9 +178,8 @@ channel back to Home).
 | `asteroids` | Ship-vs-asteroids splash + gameplay. Crashes on brs-desktop (see above) — background JPEG fails to load. | untested past splash on simulator |
 | `snake` | Real playable snake: red = food, green segments = snake, score counter. Title screen is "Press OK To Play". | `select` starts, `up`/`down`/`left`/`right` steer, `play` pauses (`PauseHandler`), `back` quits, `info` toggles debug |
 | `3d` | Multi-room 3D renderer showcase — `ImagesRoom` (start), `TextRoom`, `ModelRoom`, `CubesRoom`, `PolyRoom`, `TreesRoom`, cycled in that fixed order (`getRoomNames()` in `main.bs`) and wrapping around. Self-documents its own controls on screen. Confirmed live: `fwd` does advance rooms — a single press from `ImagesRoom` lands on `TextRoom`, whose default camera framing just doesn't show anything eye-catching, which can look like "nothing happened" if you only check one press. | `select` (OK) = per-entity rotation toggle, `info` (`*`) = change rotation axis, arrows = move/rotate camera, `rev`/`fwd` (`<`/`>`) = prev/next room, `instantreplay` = toggle debug info, `play` = change draw mode/wireframe |
-| `pixels` | Multi-room draw-mode/sprite showcase. **The room graph is not a simple cycle** — confirmed by grepping every room's `changeRoom` calls: `GhostRoom → RectangleRoom → PolygonRoom → SpriteRoom → PolygonRoom` (loops there). The app starts at `PolygonRoom`, so `GhostRoom` and `RectangleRoom` are never reachable from the running app via any button — only `PolygonRoom`/`SpriteRoom` are actually visitable in practice. | From `PolygonRoom`: `select` (OK) = regenerate/randomize shapes, `info` (options) = cycle `SceneObjectDrawMode` 1-7, `up`/`down` = change shape count, `fwd` (fastforward) = advance to `SpriteRoom`. From `SpriteRoom`: `select` = add more sprites, `fwd` = back to `PolygonRoom` |
+| `pixels` | Multi-room draw-mode/sprite showcase. Room graph was fixed (was previously a broken 2-cycle orphaning 2 of the 4 rooms — see git history) to match `3d`'s pattern: `getRoomNames()`/`goToNextRoom()` in `main.bs`, cycling `PolygonRoom → RectangleRoom → SpriteRoom → GhostRoom → PolygonRoom`, confirmed live in both directions. | From any room: `fwd`/`rev` = next/previous room. `PolygonRoom`: `select` (OK) = regenerate shapes, `info` (options) = cycle `SceneObjectDrawMode` 1-7, `up`/`down` = change shape count. `RectangleRoom`: `select` = regenerate, `info` = recolor, `up`/`down` = change grid size. `SpriteRoom`/`GhostRoom`: `select` = add more sprites/ghosts |
 | `canvas` | Demonstrates panning/scaling the whole game **canvas** (offset/scale), not an on-screen entity. On-screen text/rectangle are drawn on the separate UI layer, so the pan/scale effect isn't visible in a screenshot even though it's working — don't mistake that for a bug. | arrows = pan canvas, `info`/`instantreplay` = scale up/down, `play` = re-center |
 | `quickstart` | Minimal scaffold-template app: one white square, moves freely. Good smoke-test for "is the toolchain working." | arrows (any direction, free movement via `input.x`/`input.y`) |
-| `rendererTest` | A scratch app for manually testing one-off renderer changes — not a stable demo of any one feature, and had nothing on screen (blank white canvas) in the state we found it. Check `main.bs` for whatever is currently wired up before relying on it. | varies / check source |
-| `hybrid` | **Skip.** Fresh build fails: `Ball.bs:62` calls `getImage`, which doesn't exist on `GameEntity`/`Ball` (looks like a stale API call from an engine rename). Its `out/bge-hybrid.zip` is a stale pre-existing build from Feb; don't rely on it. | — |
-| `terrain` | **Can't build at all right now** — the example directory has no `package.json`/`bsconfig.json`/`manifest`, only `src/`, `build/`, and `node_modules/`. Looks like an incomplete/broken scaffold, not something rokubot can sideload as-is. | — |
+| `rendererTest` | Categorized, menu-driven suite of `BGE.Renderer` demos - deliberately **not** built on `BGE.Game`/`Room` (see `CLAUDE.md`'s "Manually exercising the Renderer" note for the architecture and how to add a new demo). Grouped by category on an on-screen menu. | `up`/`down` = select in menu, `select` (OK) = run selected demo / demo-specific action, `back` = return to menu. Can also skip the menu entirely via a launch param: `rokubot launch dev --param demo=<id>` (see `DemoList.bs` for valid ids) |
+| `hybrid` | Fixed (was previously broken — stale `getImage` call). Now: SceneGraph side plays a sample video; roScreen/BGE side is a ball-to-target minigame that switches back to SceneGraph on collision. | Ball game: arrows move the ball, reaching the green target switches to video. `back` (either side) toggles/quits |
