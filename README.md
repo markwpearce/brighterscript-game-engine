@@ -1,12 +1,28 @@
 # BrighterScript Game Engine
 
+[![Validate](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/validate.yml/badge.svg)](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/validate.yml)
+[![Unit Tests](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/unit-tests.yml)
+[![Docs](https://img.shields.io/badge/docs-online-blue)](https://markwpearce.github.io/brighterscript-game-engine)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 An object-oriented game engine **and 2D/3D drawing library** for Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript).
 
 Build a full game with entities, rooms, collisions, input, and UI - or just pull in the renderer to draw sprites, shapes, billboards, and wireframe/solid 3D models on top of your own Roku app. Same engine, use as much or as little of it as you need.
 
-![Asteroids example](assets/screenshots/asteroids.jpg)
-![3D example](assets/screenshots/3d.jpg)
-![Snake example](assets/screenshots/snake.jpg)
+<figure>
+  <img src="assets/screenshots/asteroids.jpg" alt="A red rocket ship flying through a starry blue nebula, dodging gray asteroids, with a score of 5 shown at the top">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/asteroids">Asteroids example</a> - 2D movement, collisions, and scoring</figcaption>
+</figure>
+
+<figure>
+  <img src="assets/screenshots/3d.jpg" alt="A rotating 3D cube textured with the Roku logo on a black background, with on-screen controls for rotation, camera movement, and draw mode">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/3d">3D example</a> - loading and rendering .stl 3D models with the pseudo-3D renderer</figcaption>
+</figure>
+
+<figure>
+  <img src="assets/screenshots/snake.jpg" alt="A classic Snake game: a green snake made of square segments turning a corner toward a red apple, on a black grid with a white border">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/snake">Snake example</a> - grid-based movement and a growing collision shape</figcaption>
+</figure>
 
 ## Why BrighterScript Game Engine?
 
