@@ -168,8 +168,6 @@ Then simply run one of the Debug configurations from the Debug tab.
 
 ## Installation
 
-_NOTE - Not available yet from ropm!_
-
 Add it as a dependency and install with `ropm`:
 
 ```
@@ -198,6 +196,12 @@ Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` -
   ]
 }
 ```
+
+### Known limitation: subclassing `BGE.Room`/`BGE.GameEntity`
+
+Subclassing one of the engine's own classes and passing an instance back into an engine method (e.g. `game.defineRoom(new MainRoom(game))`, or calling `super(game)` in your subclass's constructor) currently trips a real upstream `brighterscript` bug ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758)): the generated type declarations reference the class's internal compiled name instead of its real type, so `bsc --validate` reports an `argument-type-mismatch` for this - completely ordinary and expected - pattern. The `roku_modules` filter above doesn't cover this, since the error is reported against **your own file**, not a `roku_modules` one.
+
+This is a static type-checker false positive only - type annotations aren't enforced at runtime, so your game still runs correctly regardless. If your own CI gates on `bsc --validate` reporting zero errors, you'll need to account for this until it's fixed upstream.
 
 ## Documentation
 
