@@ -170,16 +170,33 @@ Then simply run one of the Debug configurations from the Debug tab.
 
 _NOTE - Not available yet from ropm!_
 
-Use ropm:
+Add it as a dependency and install with `ropm`:
 
 ```
-ropm install brighterscript-game-engine
+npm install brighterscript-game-engine
+ropm install
 ```
 
-Suggestion - use a shorter prefix (we use `bge` in the documentation):
+By default, `ropm` renames every package's namespace to avoid collisions - so without any extra config, you'd need to reference the engine through its installed name, e.g. `new brighterscriptgameengine.BGE.Game(...)`.
 
+To use the engine directly as `BGE.*` (as shown throughout this README and the examples), add `ropm.noprefix` for it to your **own** project's `package.json` - this is a per-consumer opt-out, safe to use because `BGE` is this engine's own deliberate top-level namespace, not an auto-generated one:
+
+```jsonc
+{
+  "ropm": {
+    "noprefix": ["brighterscript-game-engine"]
+  }
+}
 ```
-ropm install bge@npm:brighterscript-game-engine
+
+Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` - this is a normal, expected pattern for any project consuming ropm dependencies (this engine's own `bsconfig.base.json` does the same for its `rodash` dependency), and avoids noise from a couple of known upstream `ropm`/`brighterscript` typedef-validation issues ([rokucommunity/ropm#148](https://github.com/rokucommunity/ropm/issues/148), [rokucommunity/brighterscript#1757](https://github.com/rokucommunity/brighterscript/issues/1757)):
+
+```jsonc
+{
+  "diagnosticFilters": [
+    { "files": "**/roku_modules/**" }
+  ]
+}
 ```
 
 ## Documentation
