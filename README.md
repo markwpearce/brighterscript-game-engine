@@ -183,9 +183,6 @@ To use the engine directly as `BGE.*` (as shown throughout this README and the e
 
 ```jsonc
 {
-  "dependencies": {
-    "brighterscript-game-engine": "^0.5.0"
-  },
   "ropm": {
     "noprefix": ["brighterscript-game-engine"]
   }
