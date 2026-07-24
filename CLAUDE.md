@@ -14,7 +14,8 @@ Run from the repo root unless noted.
 - `npm run validate` — type-checks the engine both without tests (`bsconfig.build.json`) and with tests (`bsconfig.test.json`) — always run it after changing engine code.
 - `npm run lint` — run `bslint` (rules configured in `bslint.json`)
 - `npm run clean` — remove build artifacts (`out/`, `build/`, `test-build/`, `*.tgz`)
-- `npm run docs` — regenerate JSDoc HTML docs into `docs/` (config in `jsdoc.json`)
+- `npm run docs` — regenerate the JSDoc HTML site into `docs-site/` from the API doc comments plus the hand-written guides in `docs/` (config in `jsdoc.json`)
+- `npm run docs-server` — build then serve the site locally via `scripts/docsServer.js`, which mirrors `docs-site/` under the same `opts.basePath` prefix (`/brighterscript-game-engine`) it's actually deployed at on GitHub Pages — serving `docs-site/` directly at a local server's root 404s every generated asset/nav link, since none of them are basePath-agnostic
 - `npm run build-tests` — compile the Rooibos test suite (`bsconfig.test.json`) to `test-build/`
 - `npm run test:ci` — build the tests, then run them headlessly via `brs-cli` (no device/simulator needed) — this is what CI runs
 - `npm run test:device` — run the tests against a real device or brs-desktop (`ROKU_HOST`/`ROKU_PASSWORD` env vars), for interactive debugging
@@ -46,6 +47,22 @@ Constructing a real `BGE.Game` (which creates a real `roScreen`/`roCompositor`) 
 - When unsure, run the test once and read the actual/expected types out of the failure diff rather than guessing — Rooibos's assertion failure output prints the type of both sides.
 
 **Avoid comparing whole objects with `assertEqual`** when they might embed circular references (e.g. a `GameEntity`/`Room` holding a `game` back-reference that itself holds the entity) or native Roku components (`roBitmap`, `roRegion`) — deep-equality comparison isn't guaranteed to handle either safely. Compare a distinguishing scalar field instead (an `id`, or a field you mutate specifically to mark identity, e.g. `renderer.frameCount = 12345` then assert the same value comes back through the code path under test).
+
+### Docs site (`docs/`, `docs-site/`)
+
+`docs/` holds hand-written developer guides (currently `game-engine-overview.md` and `engine-internals.md`, plus an `images/` folder); `docs-site/` is the generated JSDoc HTML output (`npm run docs`) and is what's actually deployed — GitHub Pages serves this repo from `main`'s `/docs-site` path (a project-page subpath, `https://markwpearce.github.io/brighterscript-game-engine/`, not domain root, hence the `opts.basePath` config in `jsdoc.json`). Never hand-edit anything under `docs-site/` — it's fully regenerated on every build and auto-committed by the `docs.yml` GitHub Actions workflow (which opens/updates a PR against `automated/docs-update` on every push to `main` — review and merge that PR to actually publish doc changes, source or guide).
+
+Each guide in `docs/` is picked up via `jsdoc.json`'s `opts.docs` (a JSDoc `plugins/markdown`-rendered "docs" tree distinct from JSDoc's built-in `opts.tutorials` mechanism — this repo deliberately uses `opts.docs` instead, so guides fold into the same `sectionOrder`-driven sidebar as the API reference, e.g. `sectionOrder: ["Guides", "Namespaces", "Classes", "Interfaces"]`, rather than appearing as a bolted-on top-level menu link). Give each guide file YAML frontmatter:
+
+```markdown
+---
+title: My Guide Title
+group: Guides
+order: 1
+---
+```
+
+`group` controls which sidebar section it's clubbed under (must appear in `sectionOrder` to control placement, otherwise it's appended alphabetically); `order` controls position within that group. Cross-link between guides with a plain root-relative markdown link to the other guide's slug (its filename without extension, e.g. `[Engine Internals](/engine-internals)`) — the theme rewrites these through `opts.basePath` automatically, but literal `opts.menu` entries in `jsdoc.json` do NOT get this rewriting and need the `/brighterscript-game-engine` prefix added by hand. Diagrams must be flat SVG/PNG files under `docs/images/`, referenced with a normal markdown image tag — `clean-jsdoc-theme` does not support Mermaid code fences.
 
 ## Architecture
 
