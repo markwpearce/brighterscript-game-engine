@@ -222,8 +222,12 @@ A few things fall out of this that matter in practice:
   - toggle these from an `onInput` handler (most examples bind them to the `options` remote
     button) to get the collider-outline view above, plus per-entity name/position labels.
 - `Game.getDebugUI().addChild(new BGE.Debug.FpsDisplay(game))` and
-  `BGE.Debug.InputDisplay`/`MemoryDisplay`/`GarbageCollectorDisplay` are ready-made debug widgets -
-  every example wires up at least the FPS display in `main.bs`.
+  `BGE.Debug.InputDisplay`/`MemoryDisplay`/`GarbageCollectorDisplay`/`LogDisplay` are ready-made
+  debug widgets - every example wires up at least the FPS display in `main.bs`.
+- `Game.log(message, level)` records a message (`BGE.Debug.LogLevel.info`/`warning`/`error`,
+  defaulting to `info`) that's both printed and kept in a short history `BGE.Debug.LogDisplay`
+  reads from - prefer it over a raw `print` in your own game code so failures are visible
+  on-screen, not just over telnet.
 - `examples/rendererTest` is a menu-driven suite of `Renderer` demos built *without* `Game`/`Room`
   at all - useful for trying out a specific rendering capability (draw modes, triangle warping,
   camera projection) in isolation before wiring it into a real game.
