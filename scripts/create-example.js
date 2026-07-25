@@ -2,12 +2,15 @@
 // Scaffolds a new example app under examples/<name> from scripts/exampleTemplate.
 // Pure Node (no cp/sed/uname), so this works on Windows as well as macOS/Linux.
 //
-// Usage: node scripts/create-example.js <name> ["Display Title"]
+// Usage: node scripts/create-example.js [name] ["Display Title"]
 //   name  - directory name under examples/, e.g. "quickstart" -> examples/quickstart
+//           prompted for interactively if omitted
 //   title - optional manifest/display title, defaults to "Example Game - <name>"
+//           prompted for interactively if omitted (accepting the default on enter)
 
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline/promises');
 const { generateExampleImages } = require('./generate-example-images.js');
 const { addExampleToVscodeTasks } = require('./add-example-to-vscode-tasks.js');
 
@@ -70,18 +73,36 @@ async function createExample(name, title) {
   printNextSteps(exampleDir);
 }
 
-if (require.main === module) {
-  const [name, titleArg] = process.argv.slice(2);
+async function promptForMissingArgs(name, titleArg) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (!name) {
+      name = (await rl.question('Example name (directory under examples/): ')).trim();
+    }
 
-  if (!name) {
-    console.error('Usage: node scripts/create-example.js <name> ["Display Title"]');
-    process.exit(1);
+    const defaultTitle = `Example Game - ${name}`;
+    if (!titleArg) {
+      const answer = (await rl.question(`Display title [${defaultTitle}]: `)).trim();
+      titleArg = answer || defaultTitle;
+    }
+  } finally {
+    rl.close();
   }
+  return { name, title: titleArg };
+}
 
-  const title = titleArg || `Example Game - ${name}`;
+if (require.main === module) {
+  let [name, titleArg] = process.argv.slice(2);
 
-  createExample(name, title).catch((err) => {
-    console.error(err.message || err);
-    process.exit(1);
-  });
+  Promise.resolve()
+    .then(async () => {
+      if (!name || !titleArg) {
+        ({ name, title: titleArg } = await promptForMissingArgs(name, titleArg));
+      }
+      return createExample(name, titleArg || `Example Game - ${name}`);
+    })
+    .catch((err) => {
+      console.error(err.message || err);
+      process.exit(1);
+    });
 }
