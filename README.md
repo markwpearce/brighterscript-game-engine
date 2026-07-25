@@ -1,14 +1,119 @@
 # BrighterScript Game Engine
 
-An object oriented game engine for the Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript), and (someday) available via [ROPM](https://github.com/rokucommunity/ropm).
+[![Validate](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/validate.yml/badge.svg)](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/validate.yml)
+[![Unit Tests](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/markwpearce/brighterscript-game-engine/actions/workflows/unit-tests.yml)
+[![Docs](https://img.shields.io/badge/docs-online-blue)](https://markwpearce.github.io/brighterscript-game-engine)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-This project is designed to be used with VScode.
+An object-oriented game engine **and 2D/3D drawing library** for Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript).
 
-This was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into BrighterScript. This work owes a lot to this original project!
+Build a full game with entities, rooms, collisions, input, and UI - or just pull in the renderer to draw sprites, shapes, billboards, and wireframe/solid 3D models on top of your own Roku app. Same engine, use as much or as little of it as you need.
 
-## Introduction
+<figure>
+  <img src="assets/screenshots/asteroids.jpg" alt="A red rocket ship flying through a starry blue nebula, dodging gray asteroids, with a score of 5 shown at the top">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/asteroids">Asteroids example</a> - 2D movement, collisions, and scoring</figcaption>
+</figure>
 
-The purpose of this project is to make it easy to develop games for the Roku in an object oriented fashion. Similar to how you would with an engine such as Phaser, HaxeFlixel, Gamemaker or Unity (minus any visual software that is).
+<figure>
+  <img src="assets/screenshots/3d.jpg" alt="A rotating 3D cube textured with the Roku logo on a black background, with on-screen controls for rotation, camera movement, and draw mode">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/3d">3D example</a> - loading and rendering .stl 3D models with the pseudo-3D renderer</figcaption>
+</figure>
+
+<figure>
+  <img src="assets/screenshots/snake.jpg" alt="A classic Snake game: a green snake made of square segments turning a corner toward a red apple, on a black grid with a white border">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/snake">Snake example</a> - grid-based movement and a growing collision shape</figcaption>
+</figure>
+
+## Why BrighterScript Game Engine?
+
+- **Object-oriented, like the engines you already know.** `GameEntity`, `Room`, and lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, ...) give you the same shape as Phaser, HaxeFlixel, GameMaker, or Unity - minus the visual editor.
+- **A real 2D/3D renderer, not just sprite blitting.** Draw images, sprites, animations, shapes, text, and billboards, or render actual 3D models (loaded from `.stl`) with wireframe, solid, and shaded draw modes - all built on Roku's `roCompositor`/`Draw2D`, so it runs on real hardware.
+- **Built-in collisions, input, UI, and debug tooling.** Circle/rectangle colliders, a retained-mode UI widget tree, and debug overlays (FPS, colliders, memory, GC stats) come standard, so you're not rebuilding the basics for every project.
+- **Use only what you need.** The `Renderer`/`Canvas` layer works standalone if you just want a capable drawing library for an existing Roku app, without adopting the full game loop.
+- **Develop without a physical Roku.** This engine supports running under the [BrightScript Simulator](https://github.com/lvcabral/brs-desktop), Marcelo Lv Cabral's desktop BrightScript simulator, so you can iterate on your game without deploying to hardware every time.
+
+## A quick taste
+
+```brightscript
+sub main()
+  game = new BGE.Game(1280, 720)
+  game.fitCanvasToScreen()
+  game.loadBitmap("player", "pkg:/sprites/player.png")
+
+  room = new MainRoom(game)
+  game.defineRoom(room)
+  game.changeRoom(room.name)
+
+  game.play()
+end sub
+```
+
+```brightscript
+class MainRoom extends BGE.Room
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainRoom"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.game.addEntity(new Player(m.game))
+  end sub
+
+end class
+```
+
+```brightscript
+class Player extends BGE.GameEntity
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Player"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.position = m.game.canvas.renderer.getCanvasCenter()
+    bitmap = m.game.getBitmap("player")
+    region = CreateObject("roRegion", bitmap, 0, 0, bitmap.GetWidth(), bitmap.GetHeight())
+    m.addImage("sprite", region)
+    m.addCircleCollider("body", bitmap.GetWidth() / 2)
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    m.velocity.x = input.x * 10
+    m.velocity.y = input.y * 10
+  end sub
+
+  override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+    m.game.postGameEvent("player_hit", {by: otherEntity})
+  end sub
+
+end class
+```
+
+This exact code lives in [`examples/quickstart`](examples/quickstart) as a runnable app. See the [Documentation](https://markwpearce.github.io/brighterscript-game-engine) for the full API, and the examples below for complete, runnable projects.
+
+## Examples
+
+The `examples/` directory has full Roku channels you can build and run:
+
+| Example | What it shows |
+| --- | --- |
+| [`quickstart`](examples/quickstart) | The minimal `MainRoom`/`Player` example from above, as a runnable app |
+| [`asteroids`](examples/asteroids) | A complete 2D game - player movement, bullets, collisions, particle-style explosions, sound |
+| [`pong`](examples/pong) | Classic 2D Pong, playable in both 2D and 3D camera modes |
+| [`snake`](examples/snake) | Grid-based movement and growing collision shapes, in 2D and 3D |
+| [`3d`](examples/3d) | Loading and rendering `.stl` 3D models with the pseudo-3D renderer |
+| [`pixels`](examples/pixels) | A tour of drawables - polygons, rectangles, sprites, and more, one room per shape |
+| [`canvas`](examples/canvas) | Using the engine's canvas/renderer as a standalone drawing surface |
+| [`hybrid`](examples/hybrid) | Mixing this engine's Draw2D-based rendering with a SceneGraph app |
+| [`rendererTest`](examples/rendererTest) | A manual test harness used while developing the renderer itself |
+
+Scaffold a new example (manifest, icons/splash, `package.json`, a minimal `MainRoom`) with:
+
+```
+npm run create-example -- <name> ["Display Title"]
+```
 
 ## Cloning and Running Examples
 
@@ -63,20 +168,50 @@ Then simply run one of the Debug configurations from the Debug tab.
 
 ## Installation
 
-_NOTE - Not available yet from ropm!_
-
-Use ropm:
+Add it as a dependency and install with `ropm`:
 
 ```
-ropm install brighterscript-game-engine
+npm install brighterscript-game-engine
+ropm install
 ```
 
-Suggestion - use a shorter prefix (we use `bge` in the documentation):
+By default, `ropm` renames every package's namespace to avoid collisions - so without any extra config, you'd need to reference the engine through its installed name, e.g. `new brighterscriptgameengine.BGE.Game(...)`.
 
+To use the engine directly as `BGE.*` (as shown throughout this README and the examples), add `ropm.noprefix` for it to your **own** project's `package.json` - this is a per-consumer opt-out, safe to use because `BGE` is this engine's own deliberate top-level namespace, not an auto-generated one:
+
+```jsonc
+{
+  "ropm": {
+    "noprefix": ["brighterscript-game-engine"]
+  }
+}
 ```
-ropm install bge@npm:brighterscript-game-engine
+
+Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` - this is a normal, expected pattern for any project consuming ropm dependencies (this engine's own `bsconfig.base.json` does the same for its `rodash` dependency), and avoids noise from a couple of known upstream `ropm`/`brighterscript` typedef-validation issues ([rokucommunity/ropm#148](https://github.com/rokucommunity/ropm/issues/148), [rokucommunity/brighterscript#1757](https://github.com/rokucommunity/brighterscript/issues/1757)):
+
+```jsonc
+{
+  "diagnosticFilters": [
+    { "files": "**/roku_modules/**" }
+  ]
+}
 ```
+
+### Known limitation: subclassing `BGE.Room`/`BGE.GameEntity`
+
+Subclassing one of the engine's own classes and passing an instance back into an engine method (e.g. `game.defineRoom(new MainRoom(game))`, or calling `super(game)` in your subclass's constructor) currently trips a real upstream `brighterscript` bug ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758)): the generated type declarations reference the class's internal compiled name instead of its real type, so `bsc --validate` reports an `argument-type-mismatch` for this - completely ordinary and expected - pattern. The `roku_modules` filter above doesn't cover this, since the error is reported against **your own file**, not a `roku_modules` one.
+
+This is a static type-checker false positive only - type annotations aren't enforced at runtime, so your game still runs correctly regardless. If your own CI gates on `bsc --validate` reporting zero errors, you'll need to account for this until it's fixed upstream.
 
 ## Documentation
 
 Documentation can be found [here](https://markwpearce.github.io/brighterscript-game-engine)
+
+## Acknowledgements
+
+This project was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into BrighterScript. This work owes a lot to this original project!
+
+Thanks also to:
+
+- [RokuCommunity](https://github.com/rokucommunity) for [BrighterScript](https://github.com/rokucommunity/brighterscript), [bslint](https://github.com/rokucommunity/bslint), [roku-deploy](https://github.com/rokucommunity/roku-deploy), and the rest of the tooling that makes this project possible.
+- [Marcelo Lv Cabral](https://github.com/lvcabral) for his work on the Roku/BrightScript community and tooling, including the [BrightScript Simulator](https://github.com/lvcabral/brs-desktop) this engine supports developing against.
