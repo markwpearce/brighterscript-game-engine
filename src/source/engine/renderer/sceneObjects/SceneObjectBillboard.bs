@@ -341,7 +341,11 @@ namespace BGE
     end function
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
-      if drawMode = BGE.SceneObjectDrawMode.directToCamera or drawMode = BGE.SceneObjectDrawMode.matchCamera
+      if isScreenAlignedDrawMode(drawMode)
+        ' Every billboard mode - including directScaled - is anchored at the drawable's own
+        ' position and deliberately ignores its 3D orientation. directScaled builds its quad
+        ' from the camera's own axes later, in updateCanvasPosition, since that's where the
+        ' camera is available.
         m.worldPosition = m.drawable.getWorldPosition()
 
       else
@@ -371,22 +375,24 @@ namespace BGE
 
 
     override function getPositionForCameraDistance(drawMode as SceneObjectDrawMode) as BGE.Math.Vector
-      if isOrientedDrawMode(drawMode)
-        return m.worldPoints.getCenter()
+      if isScreenAlignedDrawMode(drawMode)
+        return m.worldPosition
       end if
-      return m.worldPosition
+      return m.worldPoints.getCenter()
     end function
 
     protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
-      if isOrientedDrawMode(drawMode)
-        return m.worldPoints.toArray()
+      if isScreenAlignedDrawMode(drawMode)
+        return [m.worldPosition]
       end if
-      return [m.worldPosition]
+      return m.worldPoints.toArray()
     end function
 
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       result = m.updateCanvasPosition(rendererObj, drawMode)
-      if result and isOrientedDrawMode(drawMode)
+      ' A screen-aligned billboard has no face to turn away from the camera, so it never gets
+      ' a mirror flag and is never backface culled.
+      if result and not isScreenAlignedDrawMode(drawMode)
         m.computeNormalDebugInfo(rendererObj)
         m.isMirror = false
         if invalid <> m.surfaceNormal
@@ -409,6 +415,12 @@ namespace BGE
         if m.needsCanvasCornerPoints()
           m.updateCanvasPointsForDirectMode()
         end if
+      else if drawMode = BGE.SceneObjectDrawMode.directScaled
+        m.canvasPosition = rendererObj.worldPointToCanvasPoint(m.worldPosition)
+        if invalid = m.canvasPosition
+          return false
+        end if
+        return m.updateCanvasPointsForCameraFacingQuad(rendererObj)
       else if isOrientedDrawMode(drawMode)
         index = 0
         for each corner in m.worldPoints.toArray()
@@ -463,6 +475,48 @@ namespace BGE
         index++
       end for
     end sub
+
+
+    ' Builds this object's quad in the plane the camera is looking at, then projects it - which
+    ' is what makes `directScaled` a Doom-style sprite: it faces the camera by construction, it
+    ' shrinks purely with distance because its corners are offset by *world* units before being
+    ' projected, and it is completely independent of the object's own rotation. (Deriving the
+    ' on-screen size from the object's own projected quad instead would fold its orientation
+    ' into its size, so a sprite turned edge-on would squash - never what a billboard wants.)
+    '
+    ' The quad is anchored at its top left corner, the same as `directToCamera`, so switching
+    ' an object between the two billboard modes doesn't make it jump.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {boolean} true if every corner projected onto the canvas
+    protected function updateCanvasPointsForCameraFacingQuad(rendererObj as Renderer) as boolean
+      cameraObj = rendererObj.camera
+      right = cameraObj.getRightVector()
+      up = cameraObj.getUpVector()
+      worldSize = m.getDirectModeCanvasSize()
+
+      acrossWorld = BGE.Math.VectorOps.scale(right, worldSize.width)
+      downWorld = BGE.Math.VectorOps.scale(up, -worldSize.height)
+
+      topLeft = m.worldPosition
+      cornerWorldPoints = [
+        topLeft,
+        BGE.Math.VectorOps.add(topLeft, acrossWorld),
+        BGE.Math.VectorOps.add(topLeft, downWorld),
+        BGE.Math.VectorOps.add(BGE.Math.VectorOps.add(topLeft, acrossWorld), downWorld)
+      ]
+
+      index = 0
+      for each cornerWorldPoint in cornerWorldPoints
+        canvasPoint = rendererObj.worldPointToCanvasPoint(cornerWorldPoint)
+        if invalid = canvasPoint
+          return false
+        end if
+        m.canvasPoints.setPointByIndex(index, canvasPoint)
+        index++
+      end for
+      return true
+    end function
 
 
     ' The on-canvas size of this object in the direct (billboard) draw modes - its drawn

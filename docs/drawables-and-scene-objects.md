@@ -145,13 +145,23 @@ and perspective:
 | -------------------------------------- | ------------------------------------------------------------------------ |
 | `matchCamera`                          | Follows the camera's rotation/perspective like a normal 3D object.      |
 | `directToCamera`                       | Always faces the camera (billboard), ignoring its own rotation.         |
-| `directScaled`                         | Like `directToCamera`, but also compensates scale for camera distance.  |
+| `directScaled`                         | Like `directToCamera`, but sized by camera distance - a Doom-style sprite. |
 | `oriented` / `orientedDrawBackFace`    | Respects its own rotation in 3D, optionally drawing back faces.         |
 | `wireFrame` / `wireFrameDrawBackFace`  | Outline-only rendering of the triangle mesh.                           |
 | `solid` / `solidDrawBackFace`          | Filled triangle rendering.                                             |
 
 This is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard capability (see
 `examples/3d`) - `examples/rendererTest` has a runnable demo per mode (`DemoList.bs`).
+
+`matchCamera`, `directToCamera` and `directScaled` are the **screen-aligned** (billboard) modes -
+`isScreenAlignedDrawMode()` - and they keep an object square to the screen instead of turning it
+in 3D. `directScaled` is the Doom-sprite one: it faces the camera and its on-screen size comes
+from how far away it is, *independently of its own rotation*. That independence is the whole
+point, and it's why `SceneObjectBillboard` builds the quad from the camera's own right/up axes in
+world space and then projects it (`updateCanvasPointsForCameraFacingQuad`), rather than measuring
+the object's own projected quad - measuring the latter would fold the object's orientation into
+its size, so a sprite turned edge-on would squash. For the same reason a screen-aligned object is
+never backface culled: it has no face to turn away.
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
 lets you cycle through them (`examples/3d`'s BaseRoom displays it on screen).
 
