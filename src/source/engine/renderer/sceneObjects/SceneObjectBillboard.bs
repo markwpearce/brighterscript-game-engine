@@ -19,7 +19,7 @@ namespace BGE
     protected worldPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
     protected canvasPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
 
-    private canvasPosition as BGE.Math.Vector
+    protected canvasPosition as BGE.Math.Vector
 
     private isMirror = false
 
@@ -44,7 +44,13 @@ namespace BGE
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       retVal = false
-      canvasBounds = m.getCanvasBounds()
+      canvasBounds = invalid
+      if m.usesTempBitmap(drawMode)
+        ' only the temp bitmap paths below need the bounds, and they're the only paths
+        ' reachable when this draw mode uses a temp bitmap at all - so in the direct draw
+        ' modes (every sprite in a 2D game) this whole computation is skipped every frame
+        canvasBounds = m.getCanvasBounds()
+      end if
       if m.doNotDrawBecauseBackface(drawMode)
         ' this is backface, and should not be drawn
         m.tempBitmap = invalid
@@ -65,7 +71,7 @@ namespace BGE
         end if
         if not retVal
           ' we have not drawn anything yet
-          if not m.useTempBitmapMap[drawMode]
+          if not m.usesTempBitmap(drawMode)
             retval = m.drawToCanvas(rendererObj, drawMode)
           else
             ' try to create a temp bitmap and draw it to the
@@ -82,6 +88,14 @@ namespace BGE
           m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode)
         end if
         retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmap)
+      end if
+
+      if retVal and m.drawable.hasOutline() and not isWireFrameDrawMode(drawMode)
+        ' Stroked live on top of whatever was just drawn - including on the frames where a
+        ' cached temp bitmap was blitted - so the outline always tracks the current canvas
+        ' points. The wireFrame draw modes are skipped because their only draw call already
+        ' *is* the outline (see drawToCanvas).
+        m.drawOutlineToCanvas(rendererObj, drawMode)
       end if
 
       if isOrientedDrawMode(drawMode) and invalid <> m.normalOnCanvasStart and invalid <> m.normalOnCanvasEnd
@@ -103,7 +117,21 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function isRedrawToCanvasRequired(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
-      return not m.useTempBitmapMap[drawMode] or m.objMovedInRelationToCamera(rendererObj.camera) or m.didRegionToDrawChange() or m.tempBitmap = invalid or m.hasAccurateTempBitmap = false
+      return not m.usesTempBitmap(drawMode) or m.objMovedInRelationToCamera(rendererObj.camera) or m.didRegionToDrawChange() or m.tempBitmap = invalid or m.hasAccurateTempBitmap = false
+    end function
+
+
+    ' Whether this object caches its drawing into a temp bitmap in the given draw mode, so
+    ' that later frames can blit (or just re-transform) that bitmap instead of rasterizing
+    ' the object from scratch again. Worth it for anything whose draw involves triangle
+    ' rasterization; not worth it for a draw that's already a single cheap call.
+    '
+    ' Override to make the decision depend on more than the draw mode.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+      return m.useTempBitmapMap[drawMode]
     end function
 
 
@@ -149,16 +177,13 @@ namespace BGE
       if invalid = regionToDraw or invalid = regionObj
         return false
       end if
+      ' getDrawColorRGBA() already applies the isShaded brightness adjustment
       color = m.getDrawColorRGBA(rendererObj)
-      if m.drawable.isShaded
-        color = BGE.colorBrightness(color, getDotProductFromSurfaceToCamera(rendererObj, m.worldPoints.getCenter(), m.surfaceNormal))
-      end if
       if (drawMode = BGE.SceneObjectDrawMode.directToCamera) and m.canvasPosition <> invalid
         drawPos = m.canvasPosition
         totalScaleX = 1.0 * m.drawable.scale.x * m.drawable.owner.scale.x
         totalScaleY = 1.0 * m.drawable.scale.y * m.drawable.owner.scale.y
-        theta = m.drawable.rotation.z + m.drawable.owner.rotation.z
-        retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta, color)
+        retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -m.getNetRotationZ(), color)
       else if drawMode = BGE.SceneObjectDrawMode.directScaled
         ' TODO may need to change this to add some sort of "locked position"
         ' so that things like trees have the bottom of the tree locked to the ground,
@@ -170,12 +195,40 @@ namespace BGE
         theta = m.canvasPoints.getAvgRotation()
 
         retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta, color)
-      else if drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      else if isSolidDrawMode(drawMode)
         retVal = rendererObj.drawPolygon(m.canvasPoints.toArray(), 0, 0, color)
-      else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
-        retVal = rendererObj.drawPolygonOutline(m.canvasPoints.toClockwiseOutlineArray(), color)
+      else if isWireFrameDrawMode(drawMode)
+        retVal = rendererObj.drawPolygonOutline(m.canvasPoints.toClockwiseOutlineArray(), m.getOutlineDrawColorRGBA(rendererObj), m.drawable.outlineWidth)
       end if
       return retVal
+    end function
+
+
+    ' Strokes this object's outline onto the final canvas, on top of whatever has already
+    ' been drawn for it. Only called when `Drawable.hasOutline()` is true and the draw mode
+    ' isn't already outline-only.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean} true if the outline was drawn
+    protected function drawOutlineToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      outlinePoints = m.getOutlineCanvasPoints()
+      if invalid = outlinePoints or outlinePoints.count() < 2
+        return false
+      end if
+      return rendererObj.drawPolygonOutline(outlinePoints, m.getOutlineDrawColorRGBA(rendererObj), m.drawable.outlineWidth)
+    end function
+
+
+    ' The canvas points this object's outline is stroked along, in perimeter order - note
+    ' that this is *not* the order `getAllCanvasPoints()` returns, which is bounds order
+    ' (topLeft, topRight, bottomLeft, bottomRight) and traces a bowtie if stroked directly.
+    ' Return `invalid` to opt out of outline drawing entirely, which is what a SceneObject
+    ' whose shape isn't a single quad (e.g. `SceneObjectModel`) should do.
+    '
+    ' @return {BGE.Math.Vector[]} points to stroke along, or `invalid` for no outline
+    protected function getOutlineCanvasPoints() as BGE.Math.Vector[]
+      return m.canvasPoints.toClockwiseOutlineArray()
     end function
 
 
@@ -251,11 +304,40 @@ namespace BGE
     end function
 
     protected function getDrawColorRGBA(rendererObj as BGE.Renderer, ignoreColor = false as boolean) as integer
-      color = m.drawable.getFillColorRGBA(ignoreColor)
-      if m.drawable.isShaded
-        color = BGE.colorBrightness(color, getDotProductFromSurfaceToCamera(rendererObj, m.worldPoints.getCenter(), m.surfaceNormal))
+      return m.applyShading(rendererObj, m.drawable.getFillColorRGBA(ignoreColor))
+    end function
+
+
+    ' The outline stroke color, given the same shading treatment as the fill color.
+    ' `Drawable.getOutlineColorRGBA` falls back to the fill color when no `outlineRGBA`
+    ' has been set, which is what keeps the wireFrame draw modes looking the way they
+    ' did before outlines were supported.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {boolean} [ignoreColor=false] ignore the drawable's own color and use white
+    ' @return {integer} packed RGBA color to stroke with
+    protected function getOutlineDrawColorRGBA(rendererObj as BGE.Renderer, ignoreColor = false as boolean) as integer
+      return m.applyShading(rendererObj, m.drawable.getOutlineColorRGBA(ignoreColor))
+    end function
+
+
+    private function applyShading(rendererObj as BGE.Renderer, color as integer) as integer
+      if not m.drawable.isShaded or invalid = m.surfaceNormal or invalid = m.worldPoints
+        ' surfaceNormal is only computed for the oriented draw modes, so there is nothing
+        ' to shade against in the direct ones
+        return color
       end if
-      return color
+      return BGE.colorBrightness(color, getDotProductFromSurfaceToCamera(rendererObj, m.worldPoints.getCenter(), m.surfaceNormal))
+    end function
+
+
+    ' This object's total rotation about the z axis - its drawable's own rotation plus the
+    ' rotation of the entity it's attached to. This is the only rotation component the
+    ' direct (billboard) draw modes apply, since by definition they don't orient in 3D.
+    '
+    ' @return {float} rotation about z, in radians
+    protected function getNetRotationZ() as float
+      return m.drawable.rotation.z + m.drawable.owner.rotation.z
     end function
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
@@ -324,6 +406,9 @@ namespace BGE
         if invalid = m.canvasPosition
           return false
         end if
+        if m.needsCanvasCornerPoints()
+          m.updateCanvasPointsForDirectMode()
+        end if
       else if isOrientedDrawMode(drawMode)
         index = 0
         for each corner in m.worldPoints.toArray()
@@ -336,6 +421,61 @@ namespace BGE
         end for
       end if
       return true
+    end function
+
+
+    ' Whether the four canvas corner points are needed in the direct (billboard) draw
+    ' modes, which otherwise get by with the single `canvasPosition`. Computing them isn't
+    ' free, so it's opt-in: outlines are stroked along those corners, so anything with an
+    ' outline needs them. Override to require them for other reasons too.
+    '
+    ' @return {boolean}
+    protected function needsCanvasCornerPoints() as boolean
+      return m.drawable.hasOutline()
+    end function
+
+
+    ' Lays the four canvas corner points out around `canvasPosition` for the direct
+    ' (billboard) draw modes, which draw a screen-aligned quad rather than projecting each
+    ' world corner through the camera the way the oriented draw modes do (see
+    ' `updateCanvasPosition`). `canvasPosition` is the quad's top left corner and the point
+    ' any rotation pivots around, matching how `drawToCanvas` blits the region.
+    protected sub updateCanvasPointsForDirectMode()
+      canvasSize = m.getDirectModeCanvasSize()
+      ' negated to match the sign convention drawToCanvas passes to Renderer.drawRegion,
+      ' since canvas space is y-down while world rotations are y-up
+      theta = -m.getNetRotationZ()
+      cosTheta = cos(theta)
+      sinTheta = sin(theta)
+      cornerOffsets = [
+        [0, 0],
+        [canvasSize.width, 0],
+        [0, canvasSize.height],
+        [canvasSize.width, canvasSize.height]
+      ]
+      index = 0
+      for each offset in cornerOffsets
+        dX = offset[0]
+        dY = offset[1]
+        m.canvasPoints.setPointByIndex(index, BGE.Math.VectorOps.create(
+        m.canvasPosition.x + dX * cosTheta - dY * sinTheta,
+        m.canvasPosition.y + dX * sinTheta + dY * cosTheta))
+        index++
+      end for
+    end sub
+
+
+    ' The on-canvas size of this object in the direct (billboard) draw modes - its drawn
+    ' size scaled by the owning entity, matching the scale `drawToCanvas` applies to the
+    ' region it blits.
+    '
+    ' @return {SizeWH}
+    protected function getDirectModeCanvasSize() as SizeWH
+      drawnSize = m.drawable.getDrawnSize()
+      return {
+        width: drawnSize.width * m.drawable.owner.scale.x,
+        height: drawnSize.height * m.drawable.owner.scale.y
+      }
     end function
 
 
@@ -362,7 +502,7 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {TransformTempBitmapDetails} the details of the transformation or invalid if it cannot be done
     protected function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
-      if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.limitPointMap) or not m.useTempBitmapMap[drawMode]
+      if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.limitPointMap) or not m.usesTempBitmap(drawMode)
         return invalid
       end if
 

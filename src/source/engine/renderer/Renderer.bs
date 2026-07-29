@@ -112,6 +112,15 @@ namespace BGE
     end sub
 
 
+    ' How many draw calls have been issued since `resetDrawCallCounter()` - i.e. over the
+    ' course of the current frame. Handy when working out how expensive a scene is to draw.
+    '
+    ' @return {integer} the number of draw calls so far this frame
+    function getDrawCallsLastFrame() as integer
+      return m.drawCallsLastFrame
+    end function
+
+
     sub addSceneObject(sceneObj as SceneObject)
       sceneObj.setId(m.nextSceneObjectId.toStr().trim())
       m.nextSceneObjectId++
@@ -1206,28 +1215,100 @@ namespace BGE
     end function
 
 
-    function drawRectangleOutline(x as float, y as float, width as float, height as float, rgba as integer) as boolean
-      if not m.shouldDraw(x, y, width, height)
+    ' Draws the outline of an axis-aligned rectangle
+    '
+    ' @param {float} x left edge
+    ' @param {float} y top edge
+    ' @param {float} width
+    ' @param {float} height
+    ' @param {integer} rgba color to stroke with
+    ' @param {integer} [lineWidth=1] stroke thickness in pixels, drawn inwards from the given bounds
+    ' @return {boolean} true if anything was drawn
+    function drawRectangleOutline(x as float, y as float, width as float, height as float, rgba as integer, lineWidth = 1 as integer) as boolean
+      return m.drawRectangleOutlineTo(m.draw2d, x, y, width, height, rgba, lineWidth)
+    end function
+
+
+    ' Draws the outline of an axis-aligned rectangle to the given surface
+    '
+    ' @param {ifDraw2d} draw2d surface to draw to
+    ' @param {float} x left edge
+    ' @param {float} y top edge
+    ' @param {float} width
+    ' @param {float} height
+    ' @param {integer} rgba color to stroke with
+    ' @param {integer} [lineWidth=1] stroke thickness in pixels, drawn inwards from the given bounds
+    ' @return {boolean} true if anything was drawn
+    function drawRectangleOutlineTo(draw2d as ifDraw2d, x as float, y as float, width as float, height as float, rgba as integer, lineWidth = 1 as integer) as boolean
+      if invalid = draw2d or not m.shouldDrawTo(draw2d, x, y, width, height)
         return false
       end if
 
-      m.draw2d.DrawLine(x, y, x + width, y, rgba)
-      m.draw2d.DrawLine(x, y, x, y + height, rgba)
-      m.draw2d.DrawLine(x + width, y, x + width, y + height, rgba)
-      m.draw2d.DrawLine(x, y + height, x + width, y + height, rgba)
-      m.drawCallsLastFrame += 4
+      ' Roku's DrawLine is always a single pixel wide, so a thicker stroke is
+      ' drawn as nested 1px outlines working inwards from the given bounds.
+      for inset = 0 to lineWidth - 1
+        left = x + inset
+        top = y + inset
+        right = x + width - inset
+        bottom = y + height - inset
+        if right < left or bottom < top
+          exit for
+        end if
+        draw2d.DrawLine(left, top, right, top, rgba)
+        draw2d.DrawLine(left, top, left, bottom, rgba)
+        draw2d.DrawLine(right, top, right, bottom, rgba)
+        draw2d.DrawLine(left, bottom, right, bottom, rgba)
+        m.drawCallsLastFrame += 4
+      end for
       return true
     end function
 
 
-    function drawPolygonOutline(pointsArray as BGE.Math.Vector[], colorRgba as integer) as boolean
-      return m.drawPolygonOutlineTo(m.draw2d, pointsArray, colorRgba)
+    ' Draws the outline of a polygon, connecting each point to the next and the last back to the first
+    '
+    ' @param {BGE.Math.Vector[]} pointsArray points in outline (perimeter) order, not bounds order
+    ' @param {integer} colorRgba color to stroke with
+    ' @param {integer} [lineWidth=1] stroke thickness in pixels - approximated by nested outlines shrunk towards the polygon's center
+    ' @return {boolean} true if anything was drawn
+    function drawPolygonOutline(pointsArray as BGE.Math.Vector[], colorRgba as integer, lineWidth = 1 as integer) as boolean
+      return m.drawPolygonOutlineTo(m.draw2d, pointsArray, colorRgba, lineWidth)
     end function
 
-    function drawPolygonOutlineTo(draw2d as ifDraw2d, pointsArray as BGE.Math.Vector[], colorRgba as integer) as boolean
-      if pointsArray.count() < 2
+
+    ' Draws the outline of a polygon to the given surface
+    '
+    ' @param {ifDraw2d} draw2d surface to draw to
+    ' @param {BGE.Math.Vector[]} pointsArray points in outline (perimeter) order, not bounds order
+    ' @param {integer} colorRgba color to stroke with
+    ' @param {integer} [lineWidth=1] stroke thickness in pixels - approximated by nested outlines shrunk towards the polygon's center
+    ' @return {boolean} true if anything was drawn
+    function drawPolygonOutlineTo(draw2d as ifDraw2d, pointsArray as BGE.Math.Vector[], colorRgba as integer, lineWidth = 1 as integer) as boolean
+      if invalid = pointsArray or pointsArray.count() < 2
         return false
       end if
+      if lineWidth <= 1
+        return m.drawPolygonOutlineRingTo(draw2d, pointsArray, colorRgba)
+      end if
+
+      ' A polygon has no single "inwards" direction the way a rectangle does, so a
+      ' thicker stroke is approximated by re-stroking the outline shrunk one pixel at
+      ' a time towards the polygon's center.
+      center = BGE.Math.averagePoint(pointsArray)
+      worked = false
+      for inset = 0 to lineWidth - 1
+        ringPoints = []
+        for each point in pointsArray
+          toCenter = BGE.Math.VectorOps.subtract(center, point)
+          BGE.Math.VectorOps.normalize(toCenter)
+          ringPoints.push(BGE.Math.VectorOps.add(point, BGE.Math.VectorOps.scale(toCenter, inset)))
+        end for
+        worked = m.drawPolygonOutlineRingTo(draw2d, ringPoints, colorRgba) or worked
+      end for
+      return worked
+    end function
+
+
+    private function drawPolygonOutlineRingTo(draw2d as ifDraw2d, pointsArray as BGE.Math.Vector[], colorRgba as integer) as boolean
       worked = true
       for i = 0 to pointsArray.count() - 1
         thisPoint = pointsArray[i]

@@ -1,0 +1,148 @@
+namespace BGE
+
+  ' Draws a `DrawableRectangle`. Extends `SceneObjectBillboard`, so a rectangle orients and
+  ' foreshortens in 3D in the oriented draw modes and stays screen-aligned in the direct
+  ' ones, exactly like an image does.
+  '
+  ' Unlike an image, though, a rectangle has no texture to sample: it's a single flat color.
+  ' So it never needs the inherited *pinned-corners* path - filling the projected quad
+  ' produces identical pixels for far less work, and `DrawableRectangle` never has to hold a
+  ' bitmap of its own. This is how `SceneObjectPolygon` draws, for the same reason.
+  '
+  ' It does still cache that fill into a temp bitmap in the oriented draw modes, exactly like
+  ' a polygon: filling a rotated quad means rasterizing two triangles through scratch
+  ' bitmaps, which is far too expensive to repeat every frame for an object that hasn't
+  ' moved. In the direct (billboard) draw modes there's nothing worth caching - the draw is
+  ' already a single DrawRect - so those skip the temp bitmap entirely.
+  class SceneObjectRectangle extends SceneObjectBillboard
+
+    drawable as DrawableRectangle
+
+    private lastWidth as float = -1
+    private lastHeight as float = -1
+    private lastFillColor as integer = -1
+
+    sub new(name as string, drawableObj as DrawableRectangle)
+      super(name, drawableObj, SceneObjectType.Rectangle)
+    end sub
+
+
+    protected override function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+      ' An unfilled rectangle is nothing but its outline, which is stroked straight onto the
+      ' canvas every frame - there's no fill to cache, so a temp bitmap would just be an
+      ' empty allocation.
+      return super.usesTempBitmap(drawMode) and m.drawable.filled
+    end function
+
+
+    protected override function didRegionToDrawChange() as boolean
+      size = m.drawable.getSize()
+      fillColor = m.drawable.getFillColorRGBA()
+      changed = size.width <> m.lastWidth or size.height <> m.lastHeight or fillColor <> m.lastFillColor
+      m.lastWidth = size.width
+      m.lastHeight = size.height
+      m.lastFillColor = fillColor
+      return changed
+    end function
+
+
+    protected override function drawToTempBitmap(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, canvasPointsTopLeftBound as BGE.Math.Vector, drawMode as SceneObjectDrawMode, allowFastDraw = false as boolean) as TempBitmapDrawResult
+      if invalid = tempBitmap
+        return {worked: false, didFastDraw: false}
+      end if
+      ' Fill only. The outline is stroked onto the canvas by the parent every frame rather
+      ' than baked in here, so that it still lands in the right place on the frames where
+      ' this bitmap gets reused and re-transformed rather than redrawn.
+      offsetCorners = m.canvasPoints.subtract(canvasPointsTopLeftBound)
+      fillColor = m.getDrawColorRGBA(rendererObj)
+      worked = false
+      for each triangle in m.getQuadTriangles(offsetCorners)
+        worked = rendererObj.drawTriangleTo(tempBitmap, triangle, 0, 0, fillColor, allowFastDraw) or worked
+      end for
+      return {worked: worked, didFastDraw: false}
+    end function
+
+
+    ' The quad split into the two triangles a rasterizer needs.
+    '
+    ' A rectangle's corner order is known by construction, so going straight to triangles
+    ' skips the convex-hull pass `Renderer.drawPolygon` would otherwise run over the four
+    ' corner points on every redraw just to derive a triangulation we already know. Measured
+    ' on a Roku Ultra (`examples/rendererTest`'s "Quad Fill Benchmark", which is there to
+    ' re-check this) that's worth 4-7% of a rotated 240px quad fill - real, but small next to
+    ' the ~1.9ms the rasterization itself costs, which is why the temp bitmap above matters so
+    ' much more: blitting a cached fill is roughly 30x cheaper than recomputing one.
+    '
+    ' It's the same reasoning that keeps a rectangle out of `drawPinnedCorners`: none of the
+    ' texture-fidelity machinery there (`splitIntoFour` and friends, which exist to limit
+    ' affine distortion when stretching an *image* over a non-rectangular quad) buys anything
+    ' for a single flat color.
+    '
+    ' @param {BGE.Math.CornerPoints} corners
+    ' @return {BGE.Math.Vector[][]} two triangles covering the quad
+    private function getQuadTriangles(corners as BGE.Math.CornerPoints) as BGE.Math.Vector[][]
+      return [
+        [corners.topLeft, corners.topRight, corners.bottomRight],
+        [corners.topLeft, corners.bottomRight, corners.bottomLeft]
+      ]
+    end function
+
+
+    protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if isWireFrameDrawMode(drawMode)
+        ' The outline is the entire drawing here. These modes are excluded from the parent's
+        ' outline hook (which would otherwise stroke it a second time), so stroke it now.
+        return m.drawOutlineToCanvas(rendererObj, drawMode)
+      end if
+
+      if not m.drawable.filled
+        ' Outline-only: the parent's outline hook does the actual drawing, but it only runs
+        ' when the draw reported success, so report whether there's an outline to draw.
+        return m.drawable.hasOutline()
+      end if
+
+      fillColor = m.getDrawColorRGBA(rendererObj)
+      if m.isAxisAlignedOnCanvas(drawMode)
+        canvasSize = m.getDirectModeCanvasSize()
+        return rendererObj.drawRectangle(m.canvasPosition.x, m.canvasPosition.y, canvasSize.width, canvasSize.height, fillColor)
+      end if
+      worked = false
+      for each triangle in m.getQuadTriangles(m.canvasPoints)
+        worked = rendererObj.drawTriangle(triangle, 0, 0, fillColor, true) or worked
+      end for
+      return worked
+    end function
+
+
+    protected override function drawOutlineToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if not m.isAxisAlignedOnCanvas(drawMode)
+        return super.drawOutlineToCanvas(rendererObj, drawMode)
+      end if
+      ' An axis-aligned rectangle can be stroked as a rectangle, which gives crisper edges
+      ' (and honours outlineWidth exactly) compared to stroking it as a four-point polygon.
+      canvasSize = m.getDirectModeCanvasSize()
+      return rendererObj.drawRectangleOutline(m.canvasPosition.x, m.canvasPosition.y, canvasSize.width, canvasSize.height, m.getOutlineDrawColorRGBA(rendererObj), m.drawable.outlineWidth)
+    end function
+
+
+    protected override function needsCanvasCornerPoints() as boolean
+      ' When the rectangle is rotated, the corner points are its fill geometry too, not just
+      ' the path its outline is stroked along.
+      return super.needsCanvasCornerPoints() or m.getNetRotationZ() <> 0
+    end function
+
+
+    ' Whether this rectangle lands on the canvas as an axis-aligned rectangle, which is the
+    ' case in the direct (billboard) draw modes with no rotation applied. That's the 2D case,
+    ' and it's worth keeping cheap: it can go out as a single DrawRect with no triangle
+    ' rasterization at all.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    private function isAxisAlignedOnCanvas(drawMode as SceneObjectDrawMode) as boolean
+      return isDirectDrawMode(drawMode) and invalid <> m.canvasPosition and m.getNetRotationZ() = 0
+    end function
+
+  end class
+
+end namespace

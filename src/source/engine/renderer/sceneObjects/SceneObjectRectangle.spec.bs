@@ -1,0 +1,139 @@
+namespace tests
+
+  ' SceneObjectRectangle does the actual drawing for a DrawableRectangle. These tests drive
+  ' the same two per-frame passes Renderer.drawScene() runs (update, then draw) against a
+  ' real Renderer over a real bitmap, and assert on the draw call count - which is what
+  ' distinguishes the cheap axis-aligned fast path (one DrawRect) from the outline stroke
+  ' (four lines per ring) and from a filled polygon.
+  @suite("BGE.SceneObjectRectangle")
+  class SceneObjectRectangleTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    entity as BGE.GameEntity
+    bitmap as roBitmap
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.entity = new BGE.GameEntity(m.game, {name: "TestEntity"})
+      m.bitmap = CreateObject("roBitmap", {width: 200, height: 100, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.bitmap)
+      ' The default Camera2d centers on its canvas, so world (100, 50) is canvas (100, 50)
+      ' and a 40x20 rectangle anchored there lands well inside the 200x100 bitmap.
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+    end function
+
+    ' Registers the rectangle with the renderer and runs one frame of update+draw for it,
+    ' returning how many draw calls that took.
+    private function drawOnce(rect as BGE.DrawableRectangle) as integer
+      sceneObj = rect.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.resetDrawCallCounter()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+      return m.renderer.getDrawCallsLastFrame()
+    end function
+
+    private function newRectangle(args = {} as roAssociativeArray) as BGE.DrawableRectangle
+      return new BGE.DrawableRectangle(m.entity, 40, 20, args)
+    end function
+
+    @describe("registration")
+
+    @it("registers itself as a Rectangle type scene object")
+    function _()
+      sceneObj = m.newRectangle().addToScene(m.renderer)
+      m.assertEqual(BGE.SceneObjectType.Rectangle, sceneObj.type)
+    end function
+
+    @describe("2D fast path - axis aligned, no temp bitmap")
+
+    @it("draws a plain filled rectangle with a single draw call")
+    function _()
+      m.assertEqual(1, m.drawOnce(m.newRectangle()))
+    end function
+
+    @it("adds four lines for a 1px outline")
+    function _()
+      rect = m.newRectangle({outlineRGBA: BGE.ColorsRGB.Red})
+      m.assertEqual(5, m.drawOnce(rect))
+    end function
+
+    @it("strokes one ring per pixel of outlineWidth")
+    function _()
+      rect = m.newRectangle({outlineRGBA: BGE.ColorsRGB.Red, outlineWidth: 2})
+      m.assertEqual(9, m.drawOnce(rect))
+    end function
+
+    @it("draws only the outline when filled is false")
+    function _()
+      rect = m.newRectangle({filled: false, outlineRGBA: BGE.ColorsRGB.Red})
+      m.assertEqual(4, m.drawOnce(rect))
+    end function
+
+    @it("draws nothing at all when unfilled with no outline")
+    function _()
+      rect = m.newRectangle({filled: false})
+      m.assertEqual(0, m.drawOnce(rect))
+    end function
+
+    @describe("rotated and oriented draw modes")
+
+    @it("falls off the axis-aligned fast path once rotated, and fills as a polygon")
+    function _()
+      rect = m.newRectangle({rotation: BGE.Math.VectorOps.create(0, 0, 0.5)})
+      ' a rotated quad is rasterized as triangles rather than a single DrawRect, so this
+      ' costs more than the one call the axis-aligned path takes
+      m.assertTrue(m.drawOnce(rect) > 1)
+    end function
+
+    @it("needs the canvas corner points once it has an outline")
+    function _()
+      plain = m.newRectangle()
+      outlined = m.newRectangle({outlineRGBA: BGE.ColorsRGB.Red})
+      m.assertFalse(plain.hasOutline())
+      m.assertTrue(outlined.hasOutline())
+    end function
+
+    @it("skips the fill entirely in a wireFrame draw mode")
+    function _()
+      filled = m.newRectangle({drawMode: BGE.SceneObjectDrawMode.wireFrame, outlineRGBA: BGE.ColorsRGB.Red})
+      unfilled = m.newRectangle({drawMode: BGE.SceneObjectDrawMode.wireFrame, outlineRGBA: BGE.ColorsRGB.Red, filled: false})
+      ' whether or not it would be filled makes no difference: a wireFrame draw is only ever
+      ' the outline, and it must not be stroked twice by the parent's outline hook either
+      m.assertEqual(m.drawOnce(unfilled), m.drawOnce(filled))
+    end function
+
+    @it("draws something in the solid draw mode")
+    function _()
+      rect = m.newRectangle({drawMode: BGE.SceneObjectDrawMode.solid})
+      m.assertTrue(m.drawOnce(rect) > 0)
+    end function
+
+    @it("draws something in the oriented draw mode")
+    function _()
+      rect = m.newRectangle({drawMode: BGE.SceneObjectDrawMode.oriented})
+      m.assertTrue(m.drawOnce(rect) > 0)
+    end function
+
+    @describe("resizing")
+
+    @it("picks up a new size on the next frame without the object having moved")
+    function _()
+      rect = m.newRectangle()
+      sceneObj = rect.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+
+      ' nothing moves here - only the size changes, which is what invalidateGeometry is for
+      rect.setSize(80, 40)
+      m.renderer.resetDrawCallCounter()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+      m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
+    end function
+
+  end class
+
+end namespace
