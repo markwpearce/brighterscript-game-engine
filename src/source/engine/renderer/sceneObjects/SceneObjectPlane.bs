@@ -1,0 +1,333 @@
+namespace BGE
+
+  interface PerspectiveCalculationResult
+    actual as BGE.Math.CornerPoints
+    mapped as BGE.Math.CornerPoints
+    horizon as BGE.Math.Vector[]
+  end interface
+
+  interface PerspectiveSlice
+    srcWidth as float
+    srcHeight as float
+    srcTopLeft as BGE.PositionXY
+    destHeight as float
+    scaleX as float
+    scaleY as float
+  end interface
+
+  const SCENE_OBJECT_PLANE_NEAR_DISTANCE = 0
+  const SCENE_OBJECT_PLANE_FAR_DISTANCE = 512
+  const SCENE_OBJECT_PLANE_SLICE_COUNT = 50
+
+  class SceneObjectPlane extends SceneObject
+
+    drawable as DrawablePlane
+    private perspectivePoints as PerspectiveCalculationResult
+    private prePerspectiveBmp as roBitmap
+    private tempBitmap as ifDraw2d = invalid
+    private hasAccurateTempBitmap = false
+
+    sub new(name as string, drawableObj as DrawablePlane)
+      super(name, drawableObj, BGE.SceneObjectType.Plane)
+    end sub
+
+
+    protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      ' potentially, the camera could be facing away from the plane, but we'll ignore that for now
+      ' TODO: Implement a more robust check for whether the plane is on screen
+      return true
+    end function
+
+    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, SCENE_OBJECT_PLANE_FAR_DISTANCE)
+      if invalid = m.perspectivePoints
+        return false
+      end if
+      ' The texture is a finite decal, not an infinitely tiling one - skip
+      ' the (relatively expensive) perspective warp entirely once the view
+      ' has moved so far that there's no possible overlap with the texture
+      ' at all. Partial overlaps are handled correctly by performDraw
+      ' clearing its scratch/dest bitmaps before drawing into them, so a
+      ' partially-out-of-bounds view correctly shows real texture where
+      ' valid and background where not, rather than needing an all-or-
+      ' nothing gate here.
+      return BGE.Math.boundsOverlapRect(m.perspectivePoints.mapped.toArray(), m.drawable.region.GetWidth(), m.drawable.region.GetHeight())
+    end function
+
+    ' Perform any drawing logic for the object
+    ' Override this function in subclasses to provide specific behavior
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean} True if the draw call was successful
+    protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if not m.objMovedInRelationToCamera(rendererObj.camera) and m.tempBitmap <> invalid and m.hasAccurateTempBitmap
+        ' if the object hasn't moved in relation to the camera, we can skip all the perspective calculations and just draw the cached bitmap
+        return rendererObj.drawObject(0, 0, m.tempBitmap)
+      end if
+      m.hasAccurateTempBitmap = false
+
+      if invalid = m.perspectivePoints
+        return false
+      end if
+
+      if invalid = m.prePerspectiveBmp
+        m.prePerspectiveBmp = m.getPrePerspectiveBmp(rendererObj)
+      end if
+
+      gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp)
+      if not gotPreBmp
+        return false
+      end if
+      m.hasAccurateTempBitmap = m.drawPerspectiveBmpSlicesToByCamera(rendererObj, m.prePerspectiveBmp, m.perspectivePoints.actual, m.perspectivePoints.horizon, SCENE_OBJECT_PLANE_NEAR_DISTANCE, SCENE_OBJECT_PLANE_FAR_DISTANCE, SCENE_OBJECT_PLANE_SLICE_COUNT)
+
+      return m.hasAccurateTempBitmap
+    end function
+
+
+
+
+    private function getPerspectivePointsByCamera(rendererObj as Renderer, plane as BGE.Math.Plane, mapOffset as BGE.Math.Vector, farDistance as float) as PerspectiveCalculationResult
+      rendererCamera = rendererObj.camera
+      if rendererCamera.name <> "Camera3d"
+        return invalid
+      end if
+      camera = rendererCamera as Camera3d
+
+      'camera.onCameraMovement()
+
+      rays = camera.frustumRays
+
+
+      output = new BGE.Math.CornerPoints()
+
+      output.topRight = BGE.Math.intersectRayWithPlane(plane, rays.topRight)
+      output.topLeft = BGE.Math.intersectRayWithPlane(plane, rays.topLeft)
+      output.bottomRight = BGE.Math.intersectRayWithPlane(plane, rays.bottomRight)
+      output.bottomLeft = BGE.Math.intersectRayWithPlane(plane, rays.bottomLeft)
+
+      horizonOrig = camera.getHorizonLine(plane)
+      horizon = []
+      for each pt in horizonOrig
+        converted = camera.cameraPointToScreenPoint(pt)
+        'print "horizon point: "; pt; converted
+        horizon.Push(converted)
+      end for
+
+      horizFov = camera.fieldOfViewDegrees
+
+
+      cameraPointOnPlane = BGE.Math.closestPointOnPlane(plane, camera.position)
+
+      if output.topRight = invalid and output.topLeft = invalid and output.bottomRight = invalid and output.bottomLeft = invalid
+        ' camera can not see the plane at all
+        return invalid
+      end if
+
+
+      projectedRay = BGE.Math.projectRayOntoPlane(plane, {origin: camera.position, direction: camera.orientation})
+      if projectedRay = invalid
+        print "failed to project camera ray onto plane"
+        return invalid
+      end if
+
+      scaledOrientationFromCameraPointOnPlane = BGE.Math.VectorOps.add(cameraPointOnPlane, BGE.Math.VectorOps.scale(BGE.Math.VectorOps.getNormalizedCopy(projectedRay.direction), farDistance))
+
+      if invalid = output.topRight
+        output.topRight = BGE.Math.RotateVectorAroundPoint3d(
+        scaledOrientationFromCameraPointOnPlane,
+        cameraPointOnPlane,
+        plane.normal,
+        BGE.Math.DegreesToRadians(-horizFov / 2)
+        )
+      end if
+      if invalid = output.topLeft
+        output.topLeft = BGE.Math.RotateVectorAroundPoint3d(
+        scaledOrientationFromCameraPointOnPlane,
+        cameraPointOnPlane,
+        plane.normal,
+        BGE.Math.DegreesToRadians(horizFov / 2)
+        )
+      end if
+      if invalid = output.bottomRight
+        output.bottomRight = BGE.Math.RotateVectorAroundPoint3d(
+        scaledOrientationFromCameraPointOnPlane,
+        cameraPointOnPlane,
+        plane.normal,
+        BGE.Math.DegreesToRadians(horizFov / 2)
+        )
+      end if
+      if invalid = output.bottomLeft
+        output.bottomLeft = BGE.Math.RotateVectorAroundPoint3d(
+        scaledOrientationFromCameraPointOnPlane,
+        cameraPointOnPlane,
+        plane.normal,
+        - BGE.Math.DegreesToRadians(horizFov / 2)
+        )
+      end if
+
+      ' Anchor the texture's center on the plane's own world position (mapOffset)
+      ' rather than on world-space (0,0) - otherwise world points get used
+      ' directly as source-bitmap pixel coordinates, pinning the visible
+      ' texture to a fixed absolute-world-space footprint regardless of
+      ' where the plane (or camera) actually is.
+      textureWidth = m.drawable.region.GetWidth()
+      textureHeight = m.drawable.region.GetHeight()
+
+      mapped = new BGE.Math.CornerPoints()
+
+      mapped.topRight = BGE.Math.worldPointToTexturePixel(output.topRight, mapOffset, textureWidth, textureHeight)
+      mapped.topLeft = BGE.Math.worldPointToTexturePixel(output.topLeft, mapOffset, textureWidth, textureHeight)
+      mapped.bottomRight = BGE.Math.worldPointToTexturePixel(output.bottomRight, mapOffset, textureWidth, textureHeight)
+      mapped.bottomLeft = BGE.Math.worldPointToTexturePixel(output.bottomLeft, mapOffset, textureWidth, textureHeight)
+
+      return {actual: output, mapped: mapped, horizon: horizon}
+    end function
+
+    private function getPrePerspectiveBmp(rendererObj as BGE.Renderer) as roBitmap
+      nearDistance = SCENE_OBJECT_PLANE_NEAR_DISTANCE
+      farDistance = SCENE_OBJECT_PLANE_FAR_DISTANCE
+      camera = rendererObj.camera as Camera3d
+      finalHeight = farDistance - nearDistance
+      finalWidth = (finalHeight) * tan(BGE.Math.DegreesToRadians(camera.fieldOfViewDegrees) / 2) * 2
+      return CreateObject("roBitmap", {width: finalWidth, height: finalHeight, AlphaEnable: true})
+    end function
+
+    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D) as boolean
+      if invalid = cp
+        return false
+      end if
+
+      rotation = BGE.Math.atan2(cp.topRight.y - cp.topLeft.y, cp.topRight.x - cp.topLeft.x)
+      footInfo = BGE.Math.TriangleOps.getPerpendicularFootFromPoint(cp.topLeft, cp.topRight, cp.bottomRight)
+
+      distanceFromTopToBottom = BGE.Math.TotalDistance(cp.topLeft, cp.topRight)
+      if distanceFromTopToBottom = 0
+        return false
+      end if
+
+      horizScale = destRegion.GetWidth() / distanceFromTopToBottom
+      vertScale = destRegion.GetHeight() / footInfo.distanceToPoint
+      scratchRegion = rendererObj.bmpPool.getRegion(srcRegion.GetWidth(), srcRegion.GetHeight())
+
+      if scratchRegion = invalid
+        print "failed to get scratch region from pool"
+        return false
+      end if
+
+      ' Scratch regions are pooled/reused and are NOT cleared when handed
+      ' out - if the rotated draw below lands mostly or entirely outside
+      ' this region (e.g. the camera's view has moved beyond the texture's
+      ' valid bounds), leftover pixel data from a previous, unrelated frame's
+      ' use of this same pooled bitmap would otherwise show through.
+      scratchRegion.region.Clear(&h00000000)
+      destRegion.Clear(&h00000000)
+
+      worked = rendererObj.drawRotatedImageWithCenterTo(scratchRegion.region, srcRegion, cp.topLeft, rotation, BGE.Math.VectorOps.negative(cp.topLeft))
+      worked = worked and rendererObj.drawScaledObjectTo(destRegion, 0, 0, horizScale, vertScale, scratchRegion.region)
+      if not worked
+        '  rendererObj.forceDraw(destRegion)
+        print "failed to draw perspective bmp"
+      end if
+      rendererObj.bmpPool.returnRegion(scratchRegion)
+
+      return worked
+    end function
+
+
+
+    private function drawPerspectiveBmpSlicesToByCamera(rendererObj as BGE.Renderer, srcBmp as ifDraw2D, cp as BGE.Math.CornerPoints, horizon as BGE.Math.Vector[], nearDistance as float, farDistance as float, maxSliceCount as integer) as boolean
+      camera = rendererObj.camera as Camera3d
+      fovDeg = camera.fieldOfViewDegrees
+      'origin = camera.position
+      slices as PerspectiveSlice[] = []
+      halfFov = BGE.Math.DegreesToRadians(fovDeg / 2)
+      destWidth = camera.frameSize.x
+      destTop = rendererObj.camera.frameSize.y
+
+      srcTop = srcBmp.GetHeight()
+      srcSliceWidth = srcTop / maxSliceCount
+      midWidthBmp = srcBmp.GetWidth() / 2
+
+      'theta = BGE.Math.Atan2(nearDistance, origin.z)
+      cummulativeHeight = 0'nearDistance
+      tanHalfFov = tan(halfFov)
+      i = 0
+
+      firstHeight = 50
+
+      slicePt = cp.bottomLeft
+      leftLineSegment = BGE.Math.VectorOps.subtract(cp.topLeft, cp.bottomLeft)
+      actualSliceVector = BGE.Math.VectorOps.scale(leftLineSegment, srcSliceWidth / BGE.Math.VectorOps.length(leftLineSegment))
+      for i = 0 to maxSliceCount - 1
+        distanceToSlice = nearDistance + srcSliceWidth * i
+        distanceToNextSlice = distanceToSlice + srcSliceWidth
+        'theta = BGE.Math.Atan2(distanceToNextSlice, origin.z)
+        halfSliceWidth = distanceToNextSlice * tanHalfFov
+        nextSlicePoint = BGE.Math.VectorOps.add(slicePt, actualSliceVector)
+
+        'theta = BGE.Math.GetAngleBetweenVectors(origin, slicePt, nextSlicePoint)
+        slicePt = nextSlicePoint
+        'destHeight = distanceToSlice * tan(theta) - tan(lastTheta) * 4'3
+        destHeight = Cint(BGE.Tweens.ExponentialEaseOut(firstHeight, 1, i, maxSliceCount)) '(distanceToNextSlice * tan(BGE.math.HALF_PI - theta) - cummulativeHeight)
+
+        'destHeight = 50 * tan(theta)
+        cummulativeHeight += destHeight
+        if destHeight < 1
+          destHeight = 1
+        end if
+        sliceWidth = BGE.Math.Max(1, (halfSliceWidth * 2))
+        slices.push({
+          srcWidth: halfSliceWidth * 2,
+          srcHeight: srcSliceWidth,
+          srcTopLeft: {x: midWidthBmp - halfSliceWidth, y: srcTop - srcSliceWidth * (i + 1)},
+          destHeight: destHeight,
+          scaleX: destWidth / sliceWidth,
+          scaleY: (destHeight) / srcSliceWidth
+        })
+      end for
+
+      if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> destWidth or m.tempBitmap.GetHeight() <> destTop
+        m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: destTop, AlphaEnable: true})
+      end if
+      if invalid = m.tempBitmap
+        print "failed to create temp bitmap for perspective slices"
+        return false
+      end if
+      m.tempBitmap.Clear(&h00000000)
+
+      worked = true
+
+      horizonY = horizon[0].y ' TODO: need to account for camera roll
+
+      vertScale = (destTop - horizonY) / cummulativeHeight
+
+      ' destTop's per-slice advance is rounded to whole pixels (cint), but
+      ' each slice's own drawn height comes from a separate, unrounded scale
+      ' factor - the two can disagree by a fraction of a pixel, leaving a
+      ' thin gap (visible as a black seam) between adjacent slices. Draw
+      ' each slice a couple of pixels taller than its exact allotted band so
+      ' neighboring slices overlap slightly instead of gapping.
+      seamPaddingScale = 4 / srcSliceWidth
+
+      'print "Vertical scale: "; vertScale
+
+      for i = 0 to slices.count() - 1
+        'print "drawing slice "; i;" - destHeight: "; slices[i].destHeight; " - scaleY: "; slices[i].scaleY
+
+        slice = slices[i]
+        destTop -= cint(slice.destHeight * vertScale)
+        sliceRegion = CreateObject("roRegion", srcBmp, slice.srcTopLeft.x, slice.srcTopLeft.y, slice.srcWidth, slice.srcHeight)
+
+        sliceVertScale = slice.scaleY * vertScale + seamPaddingScale
+        worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, destTop, slice.scaleX, sliceVertScale, sliceRegion) and worked
+
+      end for
+
+      worked = worked and rendererObj.drawObject(0, 0, m.tempBitmap)
+      return worked
+    end function
+
+  end class
+
+end namespace
