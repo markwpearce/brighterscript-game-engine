@@ -1,0 +1,144 @@
+' Times the two ways of filling a rotated quad, to settle whether it's worth a
+' SceneObject knowing its own triangulation instead of going through
+' Renderer.drawPolygon:
+'
+'   drawPolygon  - runs QuickHull over the points to derive a triangulation, then
+'                  rasterizes the resulting triangles
+'   drawTriangle - two calls with the corner order known up front, no hull pass
+'
+' It also times each triangulation step on its own, with no drawing at all, so the
+' interpreter cost of the hull can be compared against the cost of the rasterization
+' it feeds. Results are printed to the debug console and drawn on screen.
+'
+' Every iteration uses a *differently rotated* quad, because Renderer's TriangleCache
+' would otherwise serve the same rasterized triangles over and over and flatter both
+' methods equally - a rotating quad in a real scene never gets that luxury.
+class QuadFillBenchmark extends RendererTest
+
+  private quadCount = 60
+  private repeats = 5
+  private quadSize = 240
+
+  private quads as BGE.Math.CornerPoints[] = []
+  private resultLines as string[] = []
+
+  sub new()
+    super("Quad Fill Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.buildQuads(renderer)
+    m.runBenchmark(renderer)
+  end sub
+
+  ' One quad per degree of rotation, so no two iterations rasterize the same shape.
+  private sub buildQuads(renderer as BGE.Renderer)
+    m.quads = []
+    center = renderer.getCanvasCenter()
+    half = m.quadSize / 2
+    for i = 0 to m.quadCount - 1
+      theta = BGE.Math.DegreesToRadians(i)
+      quad = new BGE.Math.CornerPoints()
+      quad.topLeft = m.rotateAbout(center, -half, -half, theta)
+      quad.topRight = m.rotateAbout(center, half, -half, theta)
+      quad.bottomRight = m.rotateAbout(center, half, half, theta)
+      quad.bottomLeft = m.rotateAbout(center, -half, half, theta)
+      m.quads.push(quad)
+    end for
+  end sub
+
+  private function rotateAbout(center as BGE.Math.Vector, dX as float, dY as float, theta as float) as BGE.Math.Vector
+    return BGE.Math.VectorOps.create(
+    center.x + dX * cos(theta) - dY * sin(theta),
+    center.y + dX * sin(theta) + dY * cos(theta))
+  end function
+
+  private function getQuadTriangles(corners as BGE.Math.CornerPoints) as BGE.Math.Vector[][]
+    return [
+      [corners.topLeft, corners.topRight, corners.bottomRight],
+      [corners.topLeft, corners.bottomRight, corners.bottomLeft]
+    ]
+  end function
+
+  private sub runBenchmark(renderer as BGE.Renderer)
+    color = BGE.Colors.Cyan
+    timer = CreateObject("roTimespan")
+    totalIterations = m.quadCount * m.repeats
+
+    ' --- filled, via drawPolygon (hull pass included) ---
+    timer.Mark()
+    for r = 0 to m.repeats - 1
+      for each quad in m.quads
+        renderer.drawPolygon(quad.toArray(), 0, 0, color, true)
+      end for
+    end for
+    polygonMs = timer.TotalMilliseconds()
+
+    ' --- filled, via two known triangles ---
+    timer.Mark()
+    for r = 0 to m.repeats - 1
+      for each quad in m.quads
+        for each triangle in m.getQuadTriangles(quad)
+          renderer.drawTriangle(triangle, 0, 0, color, true)
+        end for
+      end for
+    end for
+    trianglesMs = timer.TotalMilliseconds()
+
+    ' --- triangulation only, no drawing ---
+    timer.Mark()
+    for r = 0 to m.repeats - 1
+      for each quad in m.quads
+        BGE.QuickHull.getTrianglesFromPoints(quad.toArray(), true)
+      end for
+    end for
+    hullOnlyMs = timer.TotalMilliseconds()
+
+    timer.Mark()
+    for r = 0 to m.repeats - 1
+      for each quad in m.quads
+        m.getQuadTriangles(quad)
+      end for
+    end for
+    knownOnlyMs = timer.TotalMilliseconds()
+
+    m.resultLines = [
+      `iterations per method: ${totalIterations} (quad ${m.quadSize}px, unique rotation each)`,
+      "",
+      `FILL  drawPolygon (with hull):  ${polygonMs} ms  (${m.perOp(polygonMs, totalIterations)} ms/quad)`,
+      `FILL  2x drawTriangle (known):  ${trianglesMs} ms  (${m.perOp(trianglesMs, totalIterations)} ms/quad)`,
+      `      difference:               ${polygonMs - trianglesMs} ms  (${m.percentOf(polygonMs - trianglesMs, polygonMs)}% of drawPolygon)`,
+      "",
+      `TRIANGULATION ONLY, no drawing:`,
+      `      QuickHull:                ${hullOnlyMs} ms  (${m.perOp(hullOnlyMs, totalIterations)} ms/quad)`,
+      `      known corner order:       ${knownOnlyMs} ms  (${m.perOp(knownOnlyMs, totalIterations)} ms/quad)`,
+      `      hull overhead:            ${hullOnlyMs - knownOnlyMs} ms  (${m.percentOf(hullOnlyMs - knownOnlyMs, polygonMs)}% of a drawPolygon fill)`
+    ]
+
+    print "=== Quad Fill Benchmark ==="
+    for each line in m.resultLines
+      print line
+    end for
+    print "=== end ==="
+  end sub
+
+  private function perOp(totalMs as integer, iterations as integer) as string
+    return Str(totalMs / iterations).trim()
+  end function
+
+  private function percentOf(part as integer, whole as integer) as string
+    if whole = 0
+      return "n/a"
+    end if
+    return Str(cint(100.0 * part / whole)).trim()
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    y = 80
+    for each line in m.resultLines
+      renderer.drawText(line, 60, y, BGE.Colors.White)
+      y += 28
+    end for
+  end sub
+
+end class
