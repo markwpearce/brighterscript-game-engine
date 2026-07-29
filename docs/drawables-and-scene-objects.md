@@ -27,7 +27,7 @@ the `SceneObject` side.
 | `Image`               | `SceneObjectImage`       | A single bitmap region - the basic sprite.                                  |
 | `Sprite`              | `SceneObjectImage`       | An `Image` subclass that indexes into a sprite sheet by frame number.        |
 | `AnimatedImage`       | `SceneObjectImage`       | A `Sprite` that advances its own frame index over time.                     |
-| `DrawableRectangle`   | `SceneObjectPolygon`     | A filled or outlined rectangle.                                             |
+| `DrawableRectangle`   | `SceneObjectRectangle`   | A filled and/or outlined rectangle.                                         |
 | `DrawablePolygon`     | `SceneObjectPolygon`     | An arbitrary filled or outlined polygon.                                    |
 | `DrawableLine`        | `SceneObjectLine`        | A single line segment between two points.                                   |
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
@@ -38,6 +38,103 @@ the `SceneObject` side.
 Every `SceneObject` subclass lives under `src/source/engine/renderer/sceneObjects/`. If you're
 adding a new visual primitive, the pair goes together: a `Drawable` subclass that computes its own
 geometry/transform, and a `SceneObject` subclass whose `addToScene` call the `Drawable` invokes.
+
+## Rectangles
+
+`DrawableRectangle` is the primitive to reach for when you want a solid block of color - a paddle, a
+brick, a health bar, a HUD panel. `GameEntity.addRectangle` builds and attaches one in a single call:
+
+```brighterscript
+' a 150x20 white paddle, drawn from the entity's position
+m.addRectangle("body", 150, 20, {color: BGE.ColorsRGB.White})
+```
+
+`color` and `outlineRGBA` are **packed RGB** (`0xRRGGBB`), which is what every `Drawable` takes -
+`BGE.ColorsRGB` is the named-color enum in that format, and `alpha` is a separate field. That's a
+different format from the packed **RGBA** (`0xRRGGBBAA`) that the `Renderer.draw*` calls and
+`BGE.Colors` use, and mixing the two up gives you a plausible-looking wrong color rather than an
+error.
+
+A rectangle is anchored at its **top left corner** and extends right and downwards on screen, the
+same as an `Image` - so an entity whose `position` is meant to be its center wants the drawable
+offset by half its size:
+
+```brighterscript
+cornerOffset = BGE.Math.VectorOps.create(-width / 2, height / 2)
+m.addRectangle("body", width, height, {color: BGE.ColorsRGB.Yellow, offset: cornerOffset})
+' a RectangleCollider covers the same area for the same offset, so the two line up
+m.addRectangleCollider("body", width, height, cornerOffset.x, cornerOffset.y)
+```
+
+To resize one later, call `setSize(width, height)` rather than assigning to `width`/`height`
+directly (they're deliberately not public). A resize isn't *movement*, so the renderer's
+dirty-checking can't see it - `setSize` calls `Drawable.invalidateGeometry()`, which bumps a
+`geometryVersion` the `SceneObject` compares against to know it must recompute projected geometry
+even though nothing moved. Any `Drawable` that changes shape in place should do the same.
+
+### Outlines
+
+Setting `outlineRGBA` on **any** billboard drawable - a rectangle, a polygon, an image, text -
+strokes an outline around it. There's no separate on/off flag: a color means yes, `invalid` (the
+default) means no, and the renderer skips all outline work when there isn't one. `outlineWidth` sets
+the thickness in pixels.
+
+```brighterscript
+' a lime rectangle with a 2px white border
+m.addRectangle("brick", 112, 30, {
+  color: BGE.ColorsRGB.Lime,
+  outlineRGBA: BGE.ColorsRGB.White,
+  outlineWidth: 2
+})
+
+' outline only, no fill - needs an outline color, or nothing is drawn at all
+m.addRectangle("frame", 200, 100, {filled: false, outlineRGBA: BGE.ColorsRGB.Cyan})
+```
+
+The stroke lives on `SceneObjectBillboard`, which draws it over the top of the fill each frame along
+the object's canvas corner points. Two consequences worth knowing:
+
+- The outline is stroked in **canvas space**, so it stays a constant width rather than warping with
+  perspective in the `oriented` draw modes. For a 1-2px stroke that generally looks better than the
+  alternative, but it does mean an outline isn't baked into the cached temp bitmap and is re-stroked
+  on every frame - which is why it's opt-in via `outlineRGBA`.
+- A `SceneObject` whose shape isn't a single quad has to opt out by returning `invalid` from
+  `getOutlineCanvasPoints()`, which is what `SceneObjectModel` does - outlining a triangle mesh means
+  the `wireFrame` draw modes, not this. `SceneObjectPolygon` overrides the same hook to stroke along
+  its own point list instead of the inherited quad.
+
+In the `wireFrame` draw modes the outline *is* the entire drawing, so it's stroked once by
+`drawToCanvas` and skipped by the hook. Those modes fall back to the fill color when no `outlineRGBA`
+is set, which is why they look the same as they always did.
+
+### How a rectangle is drawn, and why it's a billboard
+
+`SceneObjectRectangle` extends `SceneObjectBillboard`, so a rectangle orients and foreshortens in 3D
+just like an image (see `examples/3d`'s RectanglesRoom, which cycles a ring of panels through every
+draw mode). But unlike an image it has no texture to sample - it's one flat color - so it never uses
+the inherited **pinned-corners** path: filling the projected quad produces identical pixels for far
+less work, and `DrawableRectangle` never has to hold a bitmap of its own. That's how
+`SceneObjectPolygon` draws, for the same reason.
+
+It does still cache that fill into a **temp bitmap** in the oriented draw modes, exactly like a
+polygon does. Filling a rotated quad means rasterizing two triangles through scratch bitmaps, which
+is far too expensive to repeat every frame for something that hasn't moved - skipping the cache here
+cost `examples/3d`'s RectanglesRoom about two thirds of its frame rate (22 FPS vs 63) before it was
+put back. Whether a `SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which
+`SceneObjectRectangle` overrides to also require `filled` - an outline-only rectangle has no fill
+worth caching.
+
+In the direct (billboard) draw modes with no rotation - which is the 2D case, since a `Camera2d`
+resolves `matchCamera` to `directToCamera` - it takes a shorter path still, going out as a single
+`DrawRect` with no triangle rasterization and no bitmap at all. That's the path `examples/breakout`
+runs on for its paddle, ball and every brick.
+
+Keeping the billboard base (rather than making a rectangle a 4-point `DrawablePolygon`) is what buys
+the rest: backface culling and per-face `isShaded` shading, both of which need the surface normal a
+quad has and an arbitrary polygon doesn't; the direct/billboard draw modes, which
+`SceneObjectPolygon` ignores entirely; and a frustum check over the 4 already-computed world corners
+instead of `SceneObjectPolygon.getPositionsForFrustumCheck`'s scan-every-vertex bounding cube (whose
+8 corners collapse to the same 4 points for a flat quad anyway - pure overhead here).
 
 ## SceneObjectDrawMode
 
@@ -55,6 +152,8 @@ and perspective:
 
 This is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard capability (see
 `examples/3d`) - `examples/rendererTest` has a runnable demo per mode (`DemoList.bs`).
+`BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
+lets you cycle through them (`examples/3d`'s BaseRoom displays it on screen).
 
 ## How `Renderer.drawScene()` actually draws a frame
 
