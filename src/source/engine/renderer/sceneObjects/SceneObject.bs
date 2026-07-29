@@ -151,6 +151,9 @@ namespace BGE
     ' The drawable's `geometryVersion` as of the last completed draw - see geometryChanged()
     protected lastGeometryVersion as integer = -1
 
+    ' The draw mode this object last drew in - see drawModeChanged()
+    protected lastDrawMode as integer = -1
+
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       m.name = name
       m.drawable = drawableObj
@@ -190,16 +193,16 @@ namespace BGE
     sub update(cameraObj as Camera)
       objMovedLastFrame = m.drawable.movedLastFrame(true)
       m.isFirstFrameSinceEnabled = (m.isEnabled() and not m.wasEnabledLastFrame)
-      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled or m.geometryChanged()
+      sceneObjDrawMode = m.getActualDrawMode(cameraObj)
+      drawModeChanged = m.drawModeChanged(sceneObjDrawMode)
+      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or drawModeChanged
       if forceRecompute
         m.drawable.computeTransformationMatrix()
         BGE.math.Matrix44.setFrom(m.transformationMatrix, BGE.math.Matrix44.multiply(m.drawable.transformationMatrix, m.drawable.owner.transformationMatrix))
-        sceneObjDrawMode = m.getActualDrawMode(cameraObj)
         m.hasValidWorldPosition = m.updateWorldPosition(sceneObjDrawMode)
       end if
-      if cameraObj.movedLastFrame() or objMovedLastFrame
-        drawModeToUse = m.getActualDrawMode(cameraObj)
-        m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.getPositionForCameraDistance(drawModeToUse))
+      if cameraObj.movedLastFrame() or objMovedLastFrame or drawModeChanged
+        m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.getPositionForCameraDistance(sceneObjDrawMode))
       end if
       m.wasEnabledLastFrame = m.isEnabled()
     end sub
@@ -238,9 +241,13 @@ namespace BGE
     ' @param {Renderer} rendererObj
     sub draw(rendererObj as Renderer)
       didDraw = false
-      if m.isPotentiallyOnScreen(rendererObj.camera)
-        drawModeToUse = m.getActualDrawMode(rendererObj.camera)
-        if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged()
+      drawModeToUse = m.getActualDrawMode(rendererObj.camera)
+      modeChanged = m.drawModeChanged(drawModeToUse)
+      ' A mode change bypasses the on-screen shortcut as well as the geometry cache: that
+      ' shortcut declines to re-examine an object that failed to draw last frame until
+      ' something moves, so a stationary object in a new draw mode would never be reconsidered.
+      if modeChanged or m.isPotentiallyOnScreen(rendererObj.camera)
+        if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or modeChanged
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
         end if
         if m.hasValidCanvasPosition
@@ -257,7 +264,24 @@ namespace BGE
       end if
       m.isFirstFrameSinceEnabled = false
       m.lastGeometryVersion = m.drawable.geometryVersion
+      m.lastDrawMode = drawModeToUse
     end sub
+
+
+    ' Whether this object is drawing in a different draw mode than it last drew in.
+    '
+    ' Changing draw mode has to force a recompute, because the modes don't want the same
+    ' geometry as each other - `directScaled` wants a quad built facing the camera, while the
+    ' oriented modes want the object's own quad projected. World and canvas geometry are
+    ' otherwise only recomputed when the object or camera moves, so without this a stationary
+    ' object switched between modes would keep drawing from geometry computed for the mode it
+    ' was in before, and (since nothing is moving) would never recover.
+    '
+    ' @param {SceneObjectDrawMode} drawMode the mode about to be drawn in
+    ' @return {boolean} true if it differs from the last drawn mode
+    protected function drawModeChanged(drawMode as SceneObjectDrawMode) as boolean
+      return m.lastDrawMode <> drawMode
+    end function
 
 
     ' Whether the drawable changed shape since this object last drew. Movement is
