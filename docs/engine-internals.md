@@ -88,33 +88,14 @@ coordinate-space mismatches worth understanding structurally rather than pattern
 
 ## Renderer, SceneObjects, and draw modes
 
-A `Renderer` doesn't draw `Drawable`s directly - a `Drawable.addToScene(renderer)` call registers
-a `SceneObject` subclass (`SceneObjectImage`, `SceneObjectBillboard`, `SceneObjectLine`,
-`SceneObjectPolygon`, `SceneObjectText`, `SceneObjectModel`), and the `Renderer` iterates those
-each frame. Each `SceneObjectDrawMode` controls how an object reacts to camera rotation/perspective:
-
-| Draw mode                             | Behavior                                                               |
-| ------------------------------------- | ---------------------------------------------------------------------- |
-| `matchCamera`                         | Follows the camera's rotation/perspective like a normal 3D object.     |
-| `directToCamera`                      | Always faces the camera (billboard), ignoring its own rotation.        |
-| `directScaled`                        | Like `directToCamera`, but also compensates scale for camera distance. |
-| `oriented` / `orientedDrawBackFace`   | Respects its own rotation in 3D, optionally drawing back faces.        |
-| `wireFrame` / `wireFrameDrawBackFace` | Outline-only rendering of the triangle mesh.                           |
-| `solid` / `solidDrawBackFace`         | Filled triangle rendering.                                             |
-
-This is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard capability (see
-`examples/3d`) - `examples/rendererTest` has a runnable demo per mode (`DemoList.bs`).
-
-Two supporting pieces worth knowing about if you're touching rendering performance:
-
-- **`TriangleCache`** caches rasterized triangle bitmaps - triangle drawing (`drawBitmapTriangleTo`,
-  `drawPinnedCorners`) is comparatively expensive per call, since it checks out and rasterizes
-  scratch bitmaps internally. Code that draws the same triangle-heavy shape every frame should
-  render once into a cached bitmap and blit that, rather than redoing the full draw at 60fps -
-  `examples/rendererTest/CornerPinGridTest.bs` is a worked example of this pattern (and of what
-  happens without it: most of a 26-tile grid silently failed to render after the first few tiles).
-- **`ScratchBitmapPool`** hands out reusable off-screen bitmaps for exactly this kind of
-  intermediate rendering work, so it doesn't need to allocate a fresh `roBitmap` every frame.
+A `Renderer` doesn't draw `Drawable`s directly - a `Drawable.addToScene(renderer)` call registers a
+`SceneObject` subclass, and the `Renderer` iterates those each frame, sorted back-to-front and
+dispatched through a `SceneObjectDrawMode` that controls how each one reacts to camera
+rotation/perspective (this is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard
+capability - see `examples/3d`). See [Drawables and SceneObjects](/drawables-and-scene-objects) for
+the full per-type reference, the draw-mode table, a walkthrough of exactly how `Renderer.drawScene()`
+processes a frame, and a deep dive on `SceneObjectPlane` (the ground-plane renderer used by
+`examples/terrain`).
 
 ## Collision, concretely
 

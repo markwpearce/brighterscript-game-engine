@@ -158,6 +158,14 @@ This tells you paused-at-breakpoint vs. idle/unchanged in one call — no more m
 `console` for a few seconds and grepping for the debugger prompt. `active-app` is still useful
 alongside it to confirm which app is in the foreground.
 
+`screenshot` (and `press ... --screenshot`) intermittently fails with `Error: Screenshot not ok`
+even when the app is running fine — this looks like a transient ECP/ screenshot-service hiccup on
+the device, not a crash. Don't treat one failure as evidence of a problem; check `active-app`/
+`debugger-state` (both come back normal) and just retry the screenshot call a couple of times with
+a short pause in between. A `launch` also does **not** reset a still-running app's state (heading,
+position, etc.) — if you need a truly clean start, `sideload ... --deleteDevChannel` then `launch`
+again, not just `launch` alone.
+
 Two crashes seen so far, for reference:
 - `asteroids` on brs-desktop (the BrightScript Simulator): background bitmap is a `.jpg`
   (`spacebackground.jpg`) and fails to decode (`loadBitmap()` logs "Bitmap not created"), which
@@ -183,3 +191,4 @@ channel back to Home).
 | `quickstart` | Minimal scaffold-template app: one white square, moves freely. Good smoke-test for "is the toolchain working." | arrows (any direction, free movement via `input.x`/`input.y`) |
 | `rendererTest` | Categorized, menu-driven suite of `BGE.Renderer` demos - deliberately **not** built on `BGE.Game`/`Room` (see `CLAUDE.md`'s "Manually exercising the Renderer" note for the architecture and how to add a new demo). Grouped by category on an on-screen menu. | `up`/`down` = select in menu, `select` (OK) = run selected demo / demo-specific action, `back` = return to menu. Can also skip the menu entirely via a launch param: `rokubot launch dev --param demo=<id>` (see `DemoList.bs` for valid ids) |
 | `hybrid` | Fixed (was previously broken — stale `getImage` call). Now: SceneGraph side plays a sample video; roScreen/BGE side is a ball-to-target minigame that switches back to SceneGraph on collision. | Ball game: arrows move the ball, reaching the green target switches to video. `back` (either side) toggles/quits |
+| `terrain` | Demonstrates `BGE.DrawablePlane`/`SceneObjectPlane` (a Mode-7-style textured ground plane) — no vehicle/kart entity, just a camera driving around above the plane. Camera starts centered directly above the plane's origin. | `left`/`right` steer (yaw about world y), `up`/`down` drive forward/back along the current heading, `select` (OK) toggles the ground texture between the Mario Kart track image and a plain checkerboard, `options` (`*`) toggles the debug entity-details overlay, `back` quits |
