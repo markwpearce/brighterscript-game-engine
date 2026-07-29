@@ -50,6 +50,17 @@ namespace BGE
     return not isDirectDrawMode(drawMode)
   end function
 
+  ' The draw modes that keep an object square to the screen rather than turning it in 3D -
+  ' the billboard modes. `directScaled` belongs here even though `isOrientedDrawMode` groups
+  ' it with the oriented modes: it faces the camera like `directToCamera` and only differs in
+  ' taking its size from how far away it is (a Doom-style sprite).
+  '
+  ' @param {SceneObjectDrawMode} drawMode
+  ' @return {boolean}
+  function isScreenAlignedDrawMode(drawMode as SceneObjectDrawMode) as boolean
+    return isDirectDrawMode(drawMode) or drawMode = SceneObjectDrawMode.directScaled
+  end function
+
   function isWireFrameDrawMode(drawMode as SceneObjectDrawMode) as boolean
     return drawMode = SceneObjectDrawMode.wireFrame or drawMode = SceneObjectDrawMode.wireFrameDrawBackFace
   end function
@@ -62,6 +73,30 @@ namespace BGE
   function isFullDrawMode(drawMode as SceneObjectDrawMode) as boolean
     return drawMode = SceneObjectDrawMode.oriented or drawMode = SceneObjectDrawMode.orientedDrawBackFace or drawMode = SceneObjectDrawMode.matchCamera or drawMode = SceneObjectDrawMode.directToCamera
   end function
+
+  ' The name of a draw mode, as written in the `SceneObjectDrawMode` enum - handy for
+  ' debug overlays and for examples that let you cycle through the draw modes.
+  '
+  ' @param {SceneObjectDrawMode} drawMode
+  ' @return {string} the mode's name, or "unknown" for a value outside the enum
+  function getDrawModeName(drawMode as SceneObjectDrawMode) as string
+    names = [
+      "matchCamera",
+      "directToCamera",
+      "directScaled",
+      "oriented",
+      "orientedDrawBackFace",
+      "wireFrame",
+      "wireFrameDrawBackFace",
+      "solid",
+      "solidDrawBackFace"
+    ]
+    if drawMode < 0 or drawMode > MAX_DRAW_MODE
+      return "unknown"
+    end if
+    return names[drawMode]
+  end function
+
 
   function getDrawModeBooleanLookupArray(defaultValue = false as boolean) as boolean[]
     arr = []
@@ -113,6 +148,9 @@ namespace BGE
 
     protected isLowEndDevice = false
 
+    ' The drawable's `geometryVersion` as of the last completed draw - see geometryChanged()
+    protected lastGeometryVersion as integer = -1
+
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       m.name = name
       m.drawable = drawableObj
@@ -152,7 +190,7 @@ namespace BGE
     sub update(cameraObj as Camera)
       objMovedLastFrame = m.drawable.movedLastFrame(true)
       m.isFirstFrameSinceEnabled = (m.isEnabled() and not m.wasEnabledLastFrame)
-      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled
+      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled or m.geometryChanged()
       if forceRecompute
         m.drawable.computeTransformationMatrix()
         BGE.math.Matrix44.setFrom(m.transformationMatrix, BGE.math.Matrix44.multiply(m.drawable.transformationMatrix, m.drawable.owner.transformationMatrix))
@@ -202,7 +240,7 @@ namespace BGE
       didDraw = false
       if m.isPotentiallyOnScreen(rendererObj.camera)
         drawModeToUse = m.getActualDrawMode(rendererObj.camera)
-        if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled
+        if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged()
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
         end if
         if m.hasValidCanvasPosition
@@ -218,7 +256,22 @@ namespace BGE
         m.framesSinceDrawn++
       end if
       m.isFirstFrameSinceEnabled = false
+      m.lastGeometryVersion = m.drawable.geometryVersion
     end sub
+
+
+    ' Whether the drawable changed shape since this object last drew. Movement is
+    ' dirty-checked via `MotionChecker`, but a change in shape - a resized rectangle, a
+    ' polygon's points being replaced - isn't movement, so it's declared explicitly by
+    ' `Drawable.invalidateGeometry()` and picked up here. Tracked as a version number rather
+    ' than a flag so that one `Drawable` registered with more than one `Renderer` (the game
+    ' canvas and the UI canvas, say) can't have one of its SceneObjects clear the flag
+    ' before the other has seen it.
+    '
+    ' @return {boolean} true if the drawable's geometry changed since the last draw
+    protected function geometryChanged() as boolean
+      return m.lastGeometryVersion <> m.drawable.geometryVersion
+    end function
 
 
     ' Get the actual draw mode based on the camera

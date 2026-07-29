@@ -12,12 +12,11 @@ reading/editing its source.
 
 ## Setup
 
-- Device credentials live in `.env` at the repo root as `ROKU_HOST`/`ROKU_PASSWORD` — **do not
-  try to read `.env`**, it's blocked by a harness-level guardrail (even a value-free `grep` for
-  key names gets denied). Export the two vars yourself for the session instead:
-  `export ROKU_HOST=... ROKU_PASSWORD=...` (ask the user for values if not already known in the
-  conversation — e.g. brs-desktop, the BrightScript Simulator, is commonly `127.0.0.1` /
-  `rokudev`).
+- Device credentials live in `.env` at the repo root as `ROKU_HOST`/`ROKU_PASSWORD`. **rokubot
+  reads `.env` itself** — just run its commands with no `--host`/`--password` and no exported
+  vars. Do not `source .env`, `export ROKU_HOST=...`, or otherwise reference those variables in a
+  shell command: reading `.env` is blocked by a harness-level guardrail (even a value-free `grep`
+  for the key names gets denied), and it's unnecessary.
 - rokubot needs its `dist/` built — `npm install` at the repo root handles this automatically
   now (it has a `prepare` script as of rokubot 0.1.1+). If `node_modules/rokubot/dist` is ever
   missing, `cd node_modules/rokubot && npm install && npm run build`.
@@ -138,11 +137,11 @@ Use the repo's own fan-out scripts rather than hand-rolling `bsc`/zip calls:
   example, `cd examples/<name> && npm run package` builds just that zip.
 
 ```
-node node_modules/rokubot/dist/cli.js sideload ./examples/<name>/out/bge-<name>.zip --deleteDevChannel --host $ROKU_HOST --password $ROKU_PASSWORD
-node node_modules/rokubot/dist/cli.js launch dev --host $ROKU_HOST --password $ROKU_PASSWORD
+node node_modules/rokubot/dist/cli.js sideload ./examples/<name>/out/bge-<name>.zip --deleteDevChannel
+node node_modules/rokubot/dist/cli.js launch dev
 ```
 
-(`--host`/`--password` can be omitted once `ROKU_HOST`/`ROKU_PASSWORD` are exported.)
+(No `--host`/`--password` needed — rokubot picks those up from `.env` itself.)
 
 ## Debugging a crash or unresponsive screen
 
@@ -185,10 +184,11 @@ channel back to Home).
 | `pong` | Playable 2-paddle pong vs. a same-speed, zero-latency CPU. Ball always spawns dead-center; `MainRoom`/`Ball.bs`/`Computer.bs` are short reads. | `up`/`down` move paddle, `select` (OK) at title screen starts, `back` quits, `info` (options) toggles debug overlay |
 | `asteroids` | Ship-vs-asteroids splash + gameplay. Crashes on brs-desktop (see above) — background JPEG fails to load. | untested past splash on simulator |
 | `snake` | Real playable snake: red = food, green segments = snake, score counter. Title screen is "Press OK To Play". | `select` starts, `up`/`down`/`left`/`right` steer, `play` pauses (`PauseHandler`), `back` quits, `info` toggles debug |
-| `3d` | Multi-room 3D renderer showcase — `ImagesRoom` (start), `TextRoom`, `ModelRoom`, `CubesRoom`, `PolyRoom`, `TreesRoom`, cycled in that fixed order (`getRoomNames()` in `main.bs`) and wrapping around. Self-documents its own controls on screen. Confirmed live: `fwd` does advance rooms — a single press from `ImagesRoom` lands on `TextRoom`, whose default camera framing just doesn't show anything eye-catching, which can look like "nothing happened" if you only check one press. | `select` (OK) = per-entity rotation toggle, `info` (`*`) = change rotation axis, arrows = move/rotate camera, `rev`/`fwd` (`<`/`>`) = prev/next room, `instantreplay` = toggle debug info, `play` = change draw mode/wireframe |
+| `3d` | Multi-room 3D renderer showcase — `ImagesRoom` (start), `TextRoom`, `ModelRoom`, `CubesRoom`, `RectanglesRoom`, `PolyRoom`, `TreesRoom`, cycled in that fixed order (`getRoomNames()` in `main.bs`) and wrapping around. Self-documents its own controls on screen, including the current draw mode's name. Confirmed live: `fwd` does advance rooms — a single press from `ImagesRoom` lands on `TextRoom`, whose default camera framing just doesn't show anything eye-catching, which can look like "nothing happened" if you only check one press. | `select` (OK) = per-entity rotation toggle, `info` (`*`) = change rotation axis / regenerate the room's shapes, arrows = move/rotate camera, `rev`/`fwd` (`<`/`>`) = prev/next room, `instantreplay` = toggle debug info, `play` = cycle `SceneObjectDrawMode` for every entity (9 modes, wrapping; the name of the current one is drawn on screen) |
+| `breakout` | Playable Breakout clone: 10x5 grid of colored bricks with white bevel outlines, a paddle, and a ball that launches off the paddle. Score/lives HUD along the top. Everything is drawn with `BGE.DrawableRectangle`, and positions are in the engine's world space (y-up, origin bottom left) rather than canvas space. | `left`/`right` move the paddle, `select` (OK) launches the ball and restarts after a win/game over, `play` pauses, `info` (options) toggles the debug overlay, `back` quits |
 | `pixels` | Multi-room draw-mode/sprite showcase. Room graph was fixed (was previously a broken 2-cycle orphaning 2 of the 4 rooms — see git history) to match `3d`'s pattern: `getRoomNames()`/`goToNextRoom()` in `main.bs`, cycling `PolygonRoom → RectangleRoom → SpriteRoom → GhostRoom → PolygonRoom`, confirmed live in both directions. | From any room: `fwd`/`rev` = next/previous room. `PolygonRoom`: `select` (OK) = regenerate shapes, `info` (options) = cycle `SceneObjectDrawMode` 1-7, `up`/`down` = change shape count. `RectangleRoom`: `select` = regenerate, `info` = recolor, `up`/`down` = change grid size. `SpriteRoom`/`GhostRoom`: `select` = add more sprites/ghosts |
 | `canvas` | Demonstrates panning/scaling the whole game **canvas** (offset/scale), not an on-screen entity. On-screen text/rectangle are drawn on the separate UI layer, so the pan/scale effect isn't visible in a screenshot even though it's working — don't mistake that for a bug. | arrows = pan canvas, `info`/`instantreplay` = scale up/down, `play` = re-center |
 | `quickstart` | Minimal scaffold-template app: one white square, moves freely. Good smoke-test for "is the toolchain working." | arrows (any direction, free movement via `input.x`/`input.y`) |
-| `rendererTest` | Categorized, menu-driven suite of `BGE.Renderer` demos - deliberately **not** built on `BGE.Game`/`Room` (see `CLAUDE.md`'s "Manually exercising the Renderer" note for the architecture and how to add a new demo). Grouped by category on an on-screen menu. | `up`/`down` = select in menu, `select` (OK) = run selected demo / demo-specific action, `back` = return to menu. Can also skip the menu entirely via a launch param: `rokubot launch dev --param demo=<id>` (see `DemoList.bs` for valid ids) |
+| `rendererTest` | Categorized, menu-driven suite of `BGE.Renderer` demos - deliberately **not** built on `BGE.Game`/`Room` (see `CLAUDE.md`'s "Manually exercising the Renderer" note for the architecture and how to add a new demo). Grouped by category on an on-screen menu. Every demo shows an automatic timing line (fps / frame ms / update ms / draw ms / draw calls), so this is the place to *measure* a draw-cost question rather than reason about it - the `quad-fill-benchmark` demo times two fill approaches head to head in one run. | `up`/`down` = select in menu, `select` (OK) = run selected demo / demo-specific action, `back` = return to menu. Can also skip the menu entirely via a launch param: `rokubot launch dev --param demo=<id>` (see `DemoList.bs` for valid ids) |
 | `hybrid` | Fixed (was previously broken — stale `getImage` call). Now: SceneGraph side plays a sample video; roScreen/BGE side is a ball-to-target minigame that switches back to SceneGraph on collision. | Ball game: arrows move the ball, reaching the green target switches to video. `back` (either side) toggles/quits |
 | `terrain` | Demonstrates `BGE.DrawablePlane`/`SceneObjectPlane` (a Mode-7-style textured ground plane) — no vehicle/kart entity, just a camera driving around above the plane. Camera starts centered directly above the plane's origin. | `left`/`right` steer (yaw about world y), `up`/`down` drive forward/back along the current heading, `select` (OK) toggles the ground texture between the Mario Kart track image and a plain checkerboard, `options` (`*`) toggles the debug entity-details overlay, `back` quits |
