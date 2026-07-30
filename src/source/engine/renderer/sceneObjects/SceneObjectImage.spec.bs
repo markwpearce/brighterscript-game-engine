@@ -173,6 +173,13 @@ namespace tests
     ' has definitely settled into a clean state before the mode changes.
     private function drawFrames(count as integer) as integer
       for i = 1 to count
+        ' Mirrors the Game loop calling this every frame regardless of whether anything
+        ' actually moved: only a repeated call lets GameEntity's own MotionChecker notice
+        ' the position is unchanged and reset its moved flag. Without this, the entity
+        ' never "settles" - it stays permanently moved from the single initial call in each
+        ' test - and objMovedInRelationToCamera() never goes false, so a SceneObject's
+        ' cull/draw cache is never actually reachable no matter how many frames are drawn.
+        m.entity.updateTransformationMatrix()
         m.renderer.resetDrawCallCounter()
         m.renderer.setupCameraForFrame()
         m.renderer.drawScene()
@@ -200,6 +207,113 @@ namespace tests
 
       imageDrawable.drawMode = BGE.SceneObjectDrawMode.oriented
       m.assertTrue(m.drawFrames(2) > 0)
+    end function
+
+    @describe("recovering from a failed draw")
+
+    ' A draw that fails must not latch the object off. The frustum-cull shortcut in
+    ' isPotentiallyOnScreen() declines to re-examine a culled object until something moves,
+    ' and nothing here moves - so if a failure is treated as a cull, performDraw is never
+    ' reached again and the object can never recover. See issue #48.
+    '
+    ' These assert on attempts rather than the renderer's draw-call count because the
+    ' double's performDraw is faked and draws nothing. Real drawing recovering after a real
+    ' cull is covered by the camera field-of-view test added in a later task.
+    @it("keeps attempting the draw every frame while it is failing")
+    function _()
+      imageDrawable = m.newImage()
+      failing = new tests.FailingSceneObjectImage("failing", imageDrawable)
+      ' SceneObjectImage's own `drawable as Image` field redeclaration re-initializes
+      ' `drawable` to invalid partway through the super constructor chain - normally
+      ' patched up by Drawable.addSceneObjectToRenderer() right after construction, which
+      ' this test bypasses since it registers the test double directly.
+      failing.drawable = imageDrawable
+      m.renderer.addSceneObject(failing)
+      m.entity.updateTransformationMatrix()
+
+      m.drawFrames(3)
+      m.assertEqual(3, failing.drawAttempts)
+    end function
+
+    @it("attempts the draw again on the very next frame after the failure clears")
+    function _()
+      imageDrawable = m.newImage()
+      failing = new tests.FailingSceneObjectImage("failing", imageDrawable)
+      failing.drawable = imageDrawable
+      m.renderer.addSceneObject(failing)
+      m.entity.updateTransformationMatrix()
+      m.drawFrames(3)
+
+      attemptsWhileFailing = failing.drawAttempts
+      failing.shouldFail = false
+      m.drawFrames(1)
+      m.assertEqual(attemptsWhileFailing + 1, failing.drawAttempts)
+    end function
+
+    ' The other half of the contract: a genuine cull must still latch, or the optimisation
+    ' this shortcut exists for is gone and every off-screen object pays full rasterization
+    ' cost every frame. Placed far enough off to the side to sit outside the camera frustum.
+    @it("stops attempting the draw once the frustum has genuinely culled it")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100000, 0, 0)
+      imageDrawable = m.newImage()
+      failing = new tests.FailingSceneObjectImage("offscreen", imageDrawable)
+      failing.drawable = imageDrawable
+      m.renderer.addSceneObject(failing)
+      m.entity.updateTransformationMatrix()
+
+      ' frame 1 is the first frame since enabled, so it attempts once; frame 2's frustum
+      ' check culls it; frame 3 short-circuits on the latch without reaching performDraw
+      m.drawFrames(3)
+      m.assertEqual(1, failing.drawAttempts)
+
+      ' and the cull must be CACHED, not recomputed: across 3 drawn frames the frustum check
+      ' itself only runs once (verified against a real run, not assumed - frame 1 never
+      ' reaches the frustum loop at all, via the first-frame-since-enabled bypass; frame 2
+      ' runs it and latches; frame 3 short-circuits on the latch before reaching it again).
+      ' A latch-free implementation - confirmed by temporarily disabling both
+      ' isPotentiallyOnScreen() short-circuits - runs the frustum check on frames 2 AND 3
+      ' and leaves drawAttempts at 1 regardless, which is why the attempt count alone is not
+      ' enough to pin this; the frustum-check count is.
+      m.assertEqual(1, failing.frustumChecks)
+    end function
+
+    @describe("recovering from a camera projection change")
+
+    ' A culled object is deliberately not reconsidered until it or the camera moves - but a
+    ' change to the camera's frame size or field of view is not movement, so without an
+    ' explicit signal the object stays culled through a projection change that should have
+    ' brought it back into view. Nothing moves here. See issue #48.
+    '
+    ' This asserts that the object is RECONSIDERED (performDraw is reached again), not that it
+    ' then draws: whether a given point survives the frustum test at a given field of view is
+    ' governed by an approximation that is wrong away from the default 90 degrees - see issue
+    ' #70. Driving that here would tie this test to a bug, and break when the bug is fixed.
+    @it("reconsiders a culled object when the camera projection changes")
+    function _()
+      ' far enough off-axis to be culled at the default field of view, and still culled once
+      ' issue #70 is fixed (78 degrees off-axis at this distance, against a 45 degree half-FOV)
+      m.entity.position = BGE.Math.VectorOps.create(5000, 0, 0)
+      imageDrawable = m.newImage()
+      failing = new tests.FailingSceneObjectImage("offscreen", imageDrawable)
+      failing.drawable = imageDrawable
+      m.renderer.addSceneObject(failing)
+      m.entity.updateTransformationMatrix()
+
+      ' frame 1 attempts, frame 2's frustum check culls it, frame 3 short-circuits on the latch
+      m.drawFrames(3)
+      attemptsWhileCulled = failing.drawAttempts
+      m.assertEqual(1, attemptsWhileCulled)
+
+      m.renderer.camera.bumpProjectionVersion()
+      m.drawFrames(1)
+      m.assertEqual(attemptsWhileCulled + 1, failing.drawAttempts)
+
+      ' and it must settle straight back into the latch rather than re-entering the draw
+      ' path every frame - the bypass frame records the new version, so the next frame runs
+      ' the real frustum check, culls again, and latches again
+      m.drawFrames(1)
+      m.assertEqual(attemptsWhileCulled + 1, failing.drawAttempts)
     end function
 
   end class

@@ -191,10 +191,17 @@ but most of the expensive work is skipped unless something actually changed:
   camera moved since last frame, `update()` skips recomputing the transformation matrix and world
   position entirely.
 - **`isPotentiallyOnScreen(cameraObj)`** - a cheap frustum check gate in `draw()`. If the object
-  hasn't moved relative to the camera and was on-screen last frame, it skips straight to drawing;
-  otherwise it checks the camera's frustum before doing any real work.
+  drew last frame **and nothing has moved since**, it skips straight to drawing; if the frustum
+  *culled* it last frame and nothing has moved since, it stays culled without re-checking, which is
+  what makes a static off-screen object free. A moving object always re-checks the frustum either
+  way. Only a genuine cull latches this way: a draw that was attempted and failed is retried on the
+  very next frame, because `findCanvasPosition()` and `performDraw()` are both
+  transient-failure-prone and both already recover. A camera *projection* change - its frame size
+  or field of view, neither of which counts as camera movement - lifts the latch too, via
+  `Camera.projectionVersion`.
 - **`findCanvasPosition(rendererObj, drawMode)`** - only re-run when `objMovedInRelationToCamera()`
-  is true (the object or camera moved) or there's no valid canvas position yet. This is where a
+  is true (the object or camera moved), there's no valid canvas position yet, or the camera's
+  projection changed (`Camera.projectionVersion`, same signal as above). This is where a
   `SceneObject` subclass computes whatever camera-relative geometry it needs before drawing (e.g.
   `SceneObjectPlane` computes the frustum-to-plane intersection here - see below).
 - **`performDraw(rendererObj, drawMode)`** - the actual draw call. Several `SceneObject` subclasses
