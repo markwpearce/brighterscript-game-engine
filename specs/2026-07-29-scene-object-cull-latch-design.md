@@ -120,25 +120,78 @@ It deliberately does **not** feed `update()`'s `forceRecompute`, because FOV and
 
 `lastProjectionVersion` is assigned at the end of `draw()` alongside `lastGeometryVersion` and `lastDrawMode`.
 
+**Amended during planning.** A version bump alone is not sufficient: on a projection change the
+camera's own derived state is stale too, so `isInView` would answer from the old projection and
+the un-latched object would simply be culled again. `Camera3d.frustumNormals` is rebuilt only when
+the *orientation* changes (`Camera3d.bs:127`); `frustumRays` and `frustrumConvergence` only on
+movement; and `Camera2d`'s `top`/`bottom`/`left`/`right` inside `computeWorldToCameraMatrix()`,
+which the renderer calls only when the camera moved. So `checkProjectionChange()` also invokes an
+`onProjectionChange()` hook — rebuilding the projection matrix on the base class, and the full
+frustum on `Camera3d` via an extracted `recomputeFrustum(recomputeNormals)`.
+
 ## Testing
 
-Rooibos specs following `SceneObjectImage.spec.bs`'s black-box pattern: `setupCameraForFrame()` then `drawScene()`, asserting on `getDrawCallsLastFrame()`, with its `drawFrames(count)` helper for settling a stationary object over several frames. A spec must call `setupCameraForFrame()` before `drawScene()`, or a `Camera3d`'s frustum normals are uninitialised and `isInView` fails for reasons unrelated to the test.
+Rooibos specs following `SceneObjectImage.spec.bs`'s black-box pattern, with its
+`drawFrames(count)` helper for settling a stationary object over several frames. A spec must call
+`setupCameraForFrame()` before `drawScene()`, or a `Camera3d`'s frustum normals are uninitialised
+and `isInView` fails for reasons unrelated to the test.
 
-**Camera invalidation** — needs no test doubles. Place an object outside a narrow FOV, draw several frames so it settles into the culled-and-latched state, widen `fieldOfViewDegrees`, draw again, assert it draws. This test fails against today's code.
+Assertions are on a test double's *draw-attempt count*, not on the renderer's draw-call count.
+`FailingSceneObjectImage` (`SceneObjectTestDoubles.spec.bs`) overrides `performDraw()` to fake a
+failure on demand and counts its own invocations. Attempts are what distinguish the three states
+this design turns on — drew, culled, attempted-and-failed — where a draw-call count distinguishes
+only two.
 
-**Failure recovery** — a transient draw failure cannot be induced through the public API, so this needs a minimal test-only `SceneObjectImage` subclass overriding `protected performDraw()` to return false on demand. Draw frames with it failing, stop failing, assert the next frame draws. This test fails against today's code.
+**Failure recovery** — with the double failing, an on-screen object must attempt the draw every
+frame (3 attempts in 3 frames). If a failure latched, it would attempt once.
 
-**`Camera.spec.bs`** — assert `projectionVersion` bumps after an `fieldOfViewDegrees` write followed by `checkMovement()`, and holds steady across a `checkMovement()` with no projection change.
+**Cull latching** — the other half of the contract. An object outside the frustum must attempt
+once, latch, and stop attempting (1 attempt in 3 frames). Without this assertion the optimisation
+can be removed entirely while every recovery test still passes — which is exactly what happened in
+the first implementation of this design.
 
-### One mechanical question for the plan to resolve
+**Projection-change recovery** — a culled, latched object must be reconsidered after
+`Camera.bumpProjectionVersion()`, and must then re-latch rather than re-enter the draw path every
+frame.
 
-Where the failure-recovery helper subclass lives. A second class in the same `.spec.bs` file is untested water given the documented Rooibos metadata-corruption gotcha — that gotcha is specifically about two `@suite` classes, so a plain unannotated helper is probably fine, but not certainly. Try the same-file helper first; if Rooibos misbehaves, fall back to a `*.spec.bs` file containing only the helper and no `@suite`, which keeps it out of production builds for free since `bsconfig.build.json` excludes by that glob.
+**`Camera.spec.bs` / `Camera3d.spec.bs`** — `projectionVersion` bumps on a frame-size or
+field-of-view change and holds steady otherwise; a field-of-view change rebuilds `frustumRays`.
+
+Nothing here keys off the angular relationship between `fieldOfViewDegrees` and `isInView`, and
+that is deliberate. `CameraFrustumNormals.setNormals` uses each frustum plane's boundary edge
+direction as its normal, which is a correct angular test only at the default 90°; measurement
+showed the relationship is in fact inverted, a wider field of view accepting *less*. That is issue
+#70 — pre-existing and out of scope here. A test written against today's behaviour would break the
+moment #70 is fixed.
+
+### Where the test doubles live
+
+In `SceneObjectTestDoubles.spec.bs`, which contains no `@suite`. The alternative of a second class
+inside an existing spec file was skipped: it costs nothing to avoid, and the documented Rooibos
+failure mode is a silent metadata corruption that surfaces as a crash in an unrelated suite.
+
+Two brighterscript `1.0.0-alpha.52` bugs shape that file, both commented in it:
+
+- A subclass of a `BGE` class declared in another namespace crashes at transpile — the synthesized
+  implicit constructor carries the parent's parameter types over unqualified, so they don't
+  resolve. Worked around with an explicit fully-qualified constructor. Filed upstream as
+  [rokucommunity/brighterscript#1767](https://github.com/rokucommunity/brighterscript/issues/1767).
+- `super.<protectedMethod>()` across namespaces is rejected as a member-access violation even from
+  a genuine subclass. Worked around by not delegating to `super` at all — the double fakes its
+  return value outright.
 
 ## Out of scope
 
 - A periodic retry backstop (re-examining a latched object every N frames regardless of cause). Rejected: recovery would be delayed by an arbitrary N, correctly-culled objects would pay for the re-check, and a genuinely broken object would retry forever.
 - A three-state `drew`/`culled`/`failed` outcome enum. The third state buys nothing functionally today; the boolean can be widened later if a debug overlay genuinely wants to surface repeated `performDraw` failure.
 - `update()` does not include `cameraObj.movedLastFrame()` in `forceRecompute`, which may matter for `directScaled`'s camera-facing quad. Possibly a latent issue, unrelated to this one — worth filing separately rather than folding in here.
+- Fixing `CameraFrustumNormals.setNormals`, which uses frustum edge directions as plane normals —
+  wrong at any field of view but the default 90°, and inverted. Found while writing these tests,
+  filed as #70.
+- Fixing the `drawable` field redeclaration on every `SceneObject` subclass, which transpiles to
+  `m.drawable = invalid` after the base constructor sets it. Masked on every engine path by
+  `Drawable.addSceneObjectToRenderer()`, but it bites anything constructing a scene object
+  directly — including the test double here. Filed as #69.
 
 ## Verification
 
