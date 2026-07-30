@@ -34,7 +34,7 @@ The bug is confined to that one gate. Both inner failure paths already self-heal
 
 ### The same trap, second instance
 
-`Camera.movedLastFrame()` dirty-checks only `position` and `orientation` (`Camera.bs:52`). So a change to the camera's projection that is not movement also leaves a legitimately-culled stationary object culled. Of the candidates:
+`Camera.movedLastFrame()` dirty-checks only `position` and `orientation` (see `Camera.checkMovement()`). So a change to the camera's projection that is not movement also leaves a legitimately-culled stationary object culled. Of the candidates:
 
 - **`fieldOfViewDegrees`** (`Camera3d.bs:100`) — affected, and it is a bare public field, so no setter can intercept a write to it.
 - **`frameSize`** (`Camera.bs:12`) — affected.
