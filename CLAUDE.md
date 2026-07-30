@@ -13,6 +13,8 @@ Run from the repo root unless noted.
 - `npm run build` — clean, then compile the engine with `bsc` (output to `build/`)
 - `npm run validate` — type-checks the engine both without tests (`bsconfig.build.json`) and with tests (`bsconfig.test.json`) — always run it after changing engine code.
 - `npm run lint` — run `bslint` (rules configured in `bslint.json`)
+- `npm run check` — run the standard local quality gate: lint, validate, and headless tests
+- `npm run check:all` — run the standard quality gate, then validate every example project
 - `npm run clean` — remove build artifacts (`out/`, `build/`, `test-build/`, `*.tgz`)
 - `npm run docs` — regenerate the JSDoc HTML site into `docs-site/` from the API doc comments plus the hand-written guides in `docs/` (config in `jsdoc.json`)
 - `npm run docs-server` — build then serve the site locally via `scripts/docsServer.js`, which mirrors `docs-site/` under the same `opts.basePath` prefix (`/brighterscript-game-engine`) it's actually deployed at on GitHub Pages — serving `docs-site/` directly at a local server's root 404s every generated asset/nav link, since none of them are basePath-agnostic
