@@ -46,29 +46,54 @@ Two independent changes, both under `src/source/engine/renderer/`.
 
 ### 1. Latch on cull, not on "didn't draw"
 
-In `SceneObject`, delete `framesSinceDrawn` and `resetFrameSinceDrawn()` and replace them with `protected lastFrameWasCulled = false`.
+In `SceneObject`, delete `framesSinceDrawn` and `resetFrameSinceDrawn()` and replace them with two booleans: `protected lastFrameWasCulled = false` and `protected lastFrameDidDraw = false`.
 
-`draw()` captures whether execution entered the draw path at all:
+Two flags rather than one, because there are **three** outcomes a frame can have and the old single counter collapsed them into two. An object can have drawn, been culled by the frustum, or entered the draw path and failed. Only the middle one may latch; the third must retry; and — this is the part that needs a flag of its own — the third is also the state the frustum check has to be *reachable* from.
+
+`draw()` records both:
 
 ```brightscript
+didDraw = false
 enteredDrawPath = modeChanged or projectionChanged or m.isPotentiallyOnScreen(rendererObj.camera)
 if enteredDrawPath
-  ' unchanged: findCanvasPosition / performDraw / afterDraw
+  ' unchanged: findCanvasPosition / performDraw / afterDraw, setting didDraw
 end if
 m.lastFrameWasCulled = not enteredDrawPath
+m.lastFrameDidDraw = didDraw
 ```
 
-`isPotentiallyOnScreen()`'s first test becomes:
+and `isPotentiallyOnScreen()` becomes:
 
 ```brightscript
-if not m.lastFrameWasCulled or m.isFirstFrameSinceEnabled
+if m.isFirstFrameSinceEnabled
   return true
 end if
+if not m.objMovedInRelationToCamera(cameraObj) and not m.geometryChanged()
+  if m.lastFrameWasCulled
+    return false
+  end if
+  if m.lastFrameDidDraw
+    return true
+  end if
+end if
+' Either something changed, or last frame neither drew nor culled - it entered the draw
+' path and failed. Run the real frustum check: it is what puts the object into the culled
+' state in the first place, and what lets a failed object discover it is still on screen.
+' (frustum loop unchanged, its result returned)
 ```
 
-The initial state is behaviourally identical to today: `framesSinceDrawn = 0` and `lastFrameWasCulled = false` both mean "reconsider me", so nothing changes on the first frame or while an object draws normally.
+**Why the frustum check must be the base case.** The obvious formulation — short-circuit on `not m.lastFrameWasCulled`, set `lastFrameWasCulled = not enteredDrawPath` — is circular and silently disables culling altogether. `lastFrameWasCulled` would then only ever be set by `isPotentiallyOnScreen()` returning false, which it could only do if the flag were already set; starting at `false`, it can never become `true`, and the frustum loop is dead code. This was in an earlier draft of this document and was caught in review of the first implementation.
 
-The optimisation is preserved exactly. An object the frustum genuinely rejected still costs one boolean test per frame until something moves. What changes is that a `findCanvasPosition()` or `performDraw()` failure no longer sets the latch, so the two existing inner retry paths become reachable and the object recovers on the next frame.
+The trap is that the old code's cull state was **not** bootstrapped by the frustum check at all — `framesSinceDrawn++` on any non-draw was what put an object into it, and the frustum check merely re-evaluated an already-latched object once something moved. Removing that increment therefore removed the only entry into the culled state. Anything replacing it has to supply a new one.
+
+Behaviour, traced:
+
+| Case | Frames |
+| --- | --- |
+| Static object on screen | Frame 1 draws (first-frame-since-enabled). Frame 2 onward: nothing moved, `lastFrameDidDraw` → one boolean, draws. Unchanged from today. |
+| Static object off screen | Frame 1 enters and fails. Frame 2: neither flag set, so the frustum check runs, rejects it, and latches. Frame 3 onward: one boolean. One extra frustum check versus today; culling preserved. |
+| Transient failure, on screen | Frame 1 fails. Frame 2: frustum check runs, says in-view, the draw is retried and recovers. **This is the bug fixed.** |
+| Recovery after a genuine cull | Unchanged: whatever moves lifts the latch, as today. |
 
 `SceneObjectPlane` overrides `isPotentiallyOnScreen()` to return true unconditionally, so it is never latched. No change needed there, and its own `hasAccurateTempBitmap` caching is untouched.
 
