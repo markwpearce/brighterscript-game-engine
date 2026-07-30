@@ -147,6 +147,13 @@ namespace BGE
     ' performDraw() both already retry on the following frame, and treating their failure
     ' as a cull is what made one bad frame permanent. See issue #48.
     protected lastFrameWasCulled = false
+
+    ' Whether the last frame's draw actually happened. Distinct from lastFrameWasCulled
+    ' because a frame has three possible outcomes, not two: drew, was culled by the
+    ' frustum, or entered the draw path and failed. Only a cull may latch; a failure must
+    ' retry; and the failure state is also what makes the frustum check reachable, which
+    ' is what puts an object into the culled state in the first place.
+    protected lastFrameDidDraw = false
     protected hasValidWorldPosition = false
     protected hasValidCanvasPosition = false
     protected wasEnabledLastFrame = false
@@ -246,6 +253,7 @@ namespace BGE
     '
     ' @param {Renderer} rendererObj
     sub draw(rendererObj as Renderer)
+      didDraw = false
       drawModeToUse = m.getActualDrawMode(rendererObj.camera)
       modeChanged = m.drawModeChanged(drawModeToUse)
       ' A mode change bypasses the on-screen shortcut as well as the geometry cache: that
@@ -257,12 +265,14 @@ namespace BGE
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
         end if
         if m.hasValidCanvasPosition
-          if m.performDraw(rendererObj, drawModeToUse)
+          didDraw = m.performDraw(rendererObj, drawModeToUse)
+          if didDraw
             m.afterDraw()
           end if
         end if
       end if
       m.lastFrameWasCulled = not enteredDrawPath
+      m.lastFrameDidDraw = didDraw
       m.isFirstFrameSinceEnabled = false
       m.lastGeometryVersion = m.drawable.geometryVersion
       m.lastDrawMode = drawModeToUse
@@ -347,15 +357,27 @@ namespace BGE
       return m.drawable.movedLastFrame(true) or cameraObj.movedLastFrame()
     end function
 
-    ' Check if the object is potentially on screen
-    ' Does a quick check on if it was on screen last frame, and if not, checks if it is in the camera's frustum
+    ' Check if the object is potentially on screen.
+    '
+    ' Repeats last frame's answer for free when nothing has changed, and otherwise runs the
+    ' real frustum check. The frustum check is deliberately reachable from the "entered the
+    ' draw path and failed" state as well as from movement: it is what puts an object into
+    ' the culled state at all, and what lets a failed object discover it is still on screen
+    ' and retry. Latching on any non-draw - which is what the old framesSinceDrawn counter
+    ' did - is what made a single failed frame permanent. See issue #48.
+    '
     ' @param {Camera} cameraObj
     protected function isPotentiallyOnScreen(cameraObj as Camera) as boolean
-      if not m.lastFrameWasCulled or m.isFirstFrameSinceEnabled
+      if m.isFirstFrameSinceEnabled
         return true
       end if
-      if not m.objMovedInRelationToCamera(cameraObj)
-        return false
+      if not m.objMovedInRelationToCamera(cameraObj) and not m.geometryChanged()
+        if m.lastFrameWasCulled
+          return false
+        end if
+        if m.lastFrameDidDraw
+          return true
+        end if
       end if
       inCamera = false
       frustumCheckPositions = m.getPositionsForFrustumCheck(m.getActualDrawMode(cameraObj))
