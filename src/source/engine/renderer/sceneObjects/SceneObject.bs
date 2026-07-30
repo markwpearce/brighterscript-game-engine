@@ -140,7 +140,13 @@ namespace BGE
     ' The Current Transformation Matrix
     transformationMatrix = BGE.Math.getFloat44Identity()
 
-    protected framesSinceDrawn = 0
+    ' Whether the last frame's draw was skipped because the frustum rejected this object.
+    ' Only a genuine cull latches: nothing moved, so re-running the check would give the
+    ' same answer, and skipping it is what makes a static off-screen object free. A draw
+    ' that was attempted and *failed* must not latch - findCanvasPosition() and
+    ' performDraw() both already retry on the following frame, and treating their failure
+    ' as a cull is what made one bad frame permanent. See issue #48.
+    protected lastFrameWasCulled = false
     protected hasValidWorldPosition = false
     protected hasValidCanvasPosition = false
     protected wasEnabledLastFrame = false
@@ -240,28 +246,23 @@ namespace BGE
     '
     ' @param {Renderer} rendererObj
     sub draw(rendererObj as Renderer)
-      didDraw = false
       drawModeToUse = m.getActualDrawMode(rendererObj.camera)
       modeChanged = m.drawModeChanged(drawModeToUse)
       ' A mode change bypasses the on-screen shortcut as well as the geometry cache: that
-      ' shortcut declines to re-examine an object that failed to draw last frame until
-      ' something moves, so a stationary object in a new draw mode would never be reconsidered.
-      if modeChanged or m.isPotentiallyOnScreen(rendererObj.camera)
+      ' shortcut declines to re-examine a culled object until something moves, so a
+      ' stationary object in a new draw mode would never be reconsidered.
+      enteredDrawPath = modeChanged or m.isPotentiallyOnScreen(rendererObj.camera)
+      if enteredDrawPath
         if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or modeChanged
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
         end if
         if m.hasValidCanvasPosition
-          didDraw = m.performDraw(rendererObj, drawModeToUse)
-          if didDraw
+          if m.performDraw(rendererObj, drawModeToUse)
             m.afterDraw()
           end if
         end if
       end if
-      if didDraw
-        m.resetFrameSinceDrawn()
-      else
-        m.framesSinceDrawn++
-      end if
+      m.lastFrameWasCulled = not enteredDrawPath
       m.isFirstFrameSinceEnabled = false
       m.lastGeometryVersion = m.drawable.geometryVersion
       m.lastDrawMode = drawModeToUse
@@ -340,11 +341,6 @@ namespace BGE
       ' No op - needs to be overriden in Specific types of scene objects
     end sub
 
-    ' Reset the frame count since the object was drawn
-    protected sub resetFrameSinceDrawn()
-      m.framesSinceDrawn = 0
-    end sub
-
     ' Check if the object has moved since it was last drawn
     ' @param {Camera} cameraObj
     protected function objMovedInRelationToCamera(cameraObj as Camera) as boolean
@@ -355,7 +351,7 @@ namespace BGE
     ' Does a quick check on if it was on screen last frame, and if not, checks if it is in the camera's frustum
     ' @param {Camera} cameraObj
     protected function isPotentiallyOnScreen(cameraObj as Camera) as boolean
-      if m.framesSinceDrawn = 0 or m.isFirstFrameSinceEnabled
+      if not m.lastFrameWasCulled or m.isFirstFrameSinceEnabled
         return true
       end if
       if not m.objMovedInRelationToCamera(cameraObj)
