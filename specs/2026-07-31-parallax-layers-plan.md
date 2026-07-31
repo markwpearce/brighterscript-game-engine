@@ -564,6 +564,16 @@ git commit -m "Add parallax-factor coverage for SceneObjectParallaxLayer"
 
     @it("draws one renderer draw call per tile")
     function _()
+      ' The +1 safety-margin tile in computeAxisTilePositions is only ever fully needed
+      ' at one specific phase (wrapped close to -tileSize) - at most other phases,
+      ' including wrapped = 0 (the default entity position used elsewhere in this file),
+      ' the last computed tile lands entirely off-canvas and doesn't produce a draw
+      ' call, which would make this assertion phase-dependent rather than a real test
+      ' of "every computed tile draws". Position.x = 4 puts wrapped at -28 (worked out
+      ' by hand: wrapped = basePos.x - tileWidth * Fix(basePos.x / tileWidth), then
+      ' subtract tileWidth since it's > 0 -> 4 - 32 = -28), the phase where all 8
+      ' computed tiles genuinely overlap the 200px canvas.
+      m.entity.position = BGE.Math.VectorOps.create(4, 0, 0)
       layer = m.newLayer({repeatX: true, repeatY: false})
       sceneObj = layer.addToScene(m.renderer)
       m.renderer.setupCameraForFrame()
@@ -620,7 +630,11 @@ Expected: FAIL (still only ever returns `[basePos]`, a single tile).
         wrapped = wrapped - tileSize
       end if
 
-      tileCount = -Fix(-viewportSize / tileSize) + 1 ' ceil(viewportSize / tileSize) + 1
+      ' Fix() truncates toward zero, not floor - -Fix(-x) only equals ceil(x) for
+      ' negative x, not positive. Int() is a true floor (rounds toward negative
+      ' infinity), so -Int(-x) correctly gives ceil(x) here since viewportSize/tileSize
+      ' is always positive.
+      tileCount = -Int(-viewportSize / tileSize) + 1 ' ceil(viewportSize / tileSize) + 1
       positions = []
       for i = 0 to tileCount - 1
         positions.push(wrapped + i * tileSize)
