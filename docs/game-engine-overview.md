@@ -154,6 +154,40 @@ end sub
 "rotational velocity" convenience - update `rotation` yourself in `onUpdate` if you want continuous
 spin).
 
+## Tweens
+
+For movement that isn't velocity-driven - a UI panel sliding in, a paddle easing into position,
+anything that animates from A to B over a fixed duration - `Game.tweenManager` ticks every live
+tween once per frame and writes the interpolated value straight onto whatever field(s) you target,
+so there's no manual per-frame bookkeeping:
+
+```
+override sub onCreate(args as roAssociativeArray)
+  ' ...set up position/Drawable as above, then...
+  m.game.tweenManager.to(m.position, {x: 100, y: 50}, 1000, BGE.Tweens.Easing.QuadraticEaseInOut, {
+    owner: m
+  })
+end sub
+```
+
+`target` is the object to write onto directly - `m.position` above, or a `Drawable`, or a plain
+associative array - not the owning entity itself, and not a dot-path string. Passing `owner: m` (a
+`GameEntity`) lets the manager clean the tween up automatically once that entity is no longer
+valid, including when a room change destroys it; without an owner, hang onto the returned handle
+and call `game.tweenManager.cancel(handle)` yourself when you're done with it.
+
+For a packed color field (`0xRRGGBB`/`0xRRGGBBAA`), use `toColorRGB()`/`toColorRGBA()` instead of
+`to()` - lerping the packed integer directly gives the wrong color, since each channel needs to be
+interpolated separately and repacked:
+
+```
+m.game.tweenManager.toColorRGB(myDrawable, "color", BGE.ColorsRGB.Red, 500)
+```
+
+`options` also accepts `onComplete` (a `sub(target as object)` called once, with the tween's
+target, when it retires), `loop` (`BGE.Tweens.TweenLoopMode.restart`/`.pingPong`, default `.none`),
+and `delay` (milliseconds before the tween starts).
+
 ## Colliders and collisions
 
 Attach a collider the same way you attach a `Drawable` - `addCircleCollider`/

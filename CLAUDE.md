@@ -77,7 +77,7 @@ Everything lives in the `BGE` namespace. `rootDir` is `src`, `outDir` is `build`
 `Game` is the top-level engine object (constructed once per app with canvas/UI dimensions). Its `Play()` method runs the single main loop, each frame:
 
 1. **Input/event collection** — reads Roku universal control events, ECP input, audio events, and URL transfer events off message ports.
-2. **Update** (`processEntitiesPreDraw`) — for every `GameEntity` (current room processed first, then `sortedEntities` in reverse): dispatch `onInput`/`onECPKeyboard`/`onECPInput`/`onAudioEvent`/`onUrlEvent`/`onUpdate`, then apply velocity to position (`processEntityMovement`).
+2. **Update** (`processEntitiesPreDraw`) — for every `GameEntity` (current room processed first, then `sortedEntities` in reverse): dispatch `onInput`/`onECPKeyboard`/`onECPInput`/`onAudioEvent`/`onUrlEvent`/`onUpdate`, then apply velocity to position (`processEntityMovement`). Once every entity has been processed, `Game.tweenManager` is ticked once (`BGE.TweenManager`, see `engine/TweenManager.bs`), writing any live tween's interpolated value onto its target field(s) — this runs after velocity integration, so a tween wins over velocity if both drive the same field that frame.
 3. **Collisions** (`processEntitiesCollisions`) — per entity, checks each `Collider` against the `roCompositor`, and calls `onCollision(myCollider, otherCollider, otherEntity)` for every hit.
 4. **Draw** (`drawEntities`) — calls `onDrawBegin`/`onDrawEnd` around a `Renderer.drawScene()` pass; the game canvas and UI canvas are rendered separately, then debug overlays.
 5. **UI / Debug UI** — `gameUi` and `debugUi` (both `UiContainer` trees) get their own update+draw pass on a separate `uiCanvas`, drawn on top of the game canvas.
