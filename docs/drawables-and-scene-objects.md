@@ -55,9 +55,14 @@ different format from the packed **RGBA** (`0xRRGGBBAA`) that the `Renderer.draw
 `BGE.Colors` use, and mixing the two up gives you a plausible-looking wrong color rather than an
 error.
 
-A rectangle is anchored at its **top left corner** and extends right and downwards on screen, the
-same as an `Image` - so an entity whose `position` is meant to be its center wants the drawable
-offset by half its size:
+A rectangle is anchored at its **top left corner** by default (anchor `(0, 0)`) and extends right
+and downwards on screen, the same as an `Image`. Call `setAnchor(x, y)` with normalized 0-1
+coordinates to pivot around a different point instead - `setAnchor(0.5, 0.5)` centers it on the
+entity's position, `setAnchor(0.5, 1)` plants its bottom edge there (handy for a sprite that should
+grow from the ground up rather than from its center). Every `Drawable` with a rectangular
+width/height (`Image`, `Sprite`/`AnimatedImage`, `DrawableRectangle`, `DrawableText`) supports this
+the same way. Without `setAnchor()`, nothing changes - offsetting the drawable by half its size to
+fake a centered anchor still works exactly as before:
 
 ```brighterscript
 cornerOffset = BGE.Math.VectorOps.create(-width / 2, height / 2)
