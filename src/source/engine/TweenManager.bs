@@ -1,12 +1,55 @@
 namespace BGE
 
+  ' How a managed tween writes its interpolated value onto its target - internal, not part
+  ' of the public API. "fields" is what to()/addManagedTween() uses for plain named-field
+  ' targets; the color variants repack channels back into a single packed int instead.
+  enum TweenApplyMode
+    fields = "fields"
+    colorRGB = "colorRGB"
+    colorRGBA = "colorRGBA"
+  end enum
+
+  ' One tween TweenManager is tracking - internal bookkeeping, not part of the public API a
+  ' consumer touches directly (that's to()/toColorRGB()/toColorRGBA()/cancel()).
+  interface ManagedTween
+    ' The underlying BGE.Tweens tween object (see CreateTweenObject) - a plain
+    ' associative array, not a class instance, hence roAssociativeArray rather than a
+    ' dedicated interface: BGE.Tweens predates this file and isn't being retyped here.
+    tweenObj as roAssociativeArray
+    ' The object setAnchor()-style consumers pass to to()/toColorRGB()/toColorRGBA() -
+    ' genuinely arbitrary (a Vector, a Drawable, a plain associative array), so there's no
+    ' narrower type to give it.
+    target as object
+    applyMode as TweenApplyMode
+    ' Only set (to the field on target holding the packed color) when applyMode is
+    ' colorRGB/colorRGBA - invalid for applyMode = fields.
+    optional fieldName as string
+    ' The GameEntity to validate every tick via isValidEntity(), or invalid for a tween
+    ' with no automatic cleanup - see TweenManager's class doc.
+    optional owner as BGE.GameEntity
+    ' sub(target as object), called once when this tween retires, or invalid - see
+    ' to()'s doc.
+    optional onComplete as function
+    loopMode as BGE.Tweens.TweenLoopMode
+    delayMs as integer
+    ' Only non-invalid while a nonzero delay hasn't elapsed yet.
+    optional delayTimer as BGE.GameTimer
+    ' The tween's original start/dest fields, before any pingPong ChangeTweenDest() calls
+    ' have swapped tweenObj's own start/dest - pingPong alternates between these two fixed
+    ' endpoints forever, rather than drifting based on whatever the current leg left behind.
+    originalStart as roAssociativeArray
+    originalDest as roAssociativeArray
+    pingPongForwardNext as boolean
+  end interface
+
   ' Ticks every live tween once per frame (see Game.tweenManager) and writes interpolated
   ' values straight onto arbitrary target object fields - no manual per-frame HandleTween()
   ' bookkeeping required. Wraps BGE.Tweens.CreateTweenObject()/HandleTween() per managed
   ' tween rather than reimplementing interpolation.
   class TweenManager
 
-    private tweens as object = {}
+    ' Keyed by handle (as a string - associative array keys must be strings).
+    private tweens as roAssociativeArray = {}
     private nextId as integer = 0
 
     ' Tweens one or more fields on target from their current values to destFields' values.
@@ -15,7 +58,7 @@ namespace BGE
     ' a dot-path string.
     '
     ' @param {object} target
-    ' @param {object} destFields - {fieldName: destValue, ...}
+    ' @param {roAssociativeArray} destFields - {fieldName: destValue, ...}
     ' @param {integer} duration - milliseconds
     ' @param {BGE.Tweens.Easing} [easing=LinearTween]
     ' @param {roAssociativeArray} [options] - owner (GameEntity, for automatic cleanup once
@@ -24,15 +67,15 @@ namespace BGE
     '   BrightScript function value can't reliably carry either once detached from its
     '   original owner), loop, delay
     ' @return {integer} a handle for cancel()
-    function to(target as object, destFields as object, duration as integer, easing = BGE.Tweens.Easing.LinearTween as BGE.Tweens.Easing, options = {} as roAssociativeArray) as integer
+    function to(target as object, destFields as roAssociativeArray, duration as integer, easing = BGE.Tweens.Easing.LinearTween as BGE.Tweens.Easing, options = {} as roAssociativeArray) as integer
       startFields = {}
       for each key in destFields
         startFields[key] = target[key]
       end for
-      return m.addManagedTween(target, startFields, destFields, duration, easing, options, "fields", invalid)
+      return m.addManagedTween(target, startFields, destFields, duration, easing, options, TweenApplyMode.fields, invalid)
     end function
 
-    private function addManagedTween(target as object, startFields as object, destFields as object, duration as integer, easing as BGE.Tweens.Easing, options as roAssociativeArray, applyMode as string, fieldName as dynamic) as integer
+    private function addManagedTween(target as object, startFields as roAssociativeArray, destFields as roAssociativeArray, duration as integer, easing as BGE.Tweens.Easing, options as roAssociativeArray, applyMode as TweenApplyMode, fieldName as string or dynamic) as integer
       id = m.nextId
       m.nextId++
 
@@ -50,7 +93,7 @@ namespace BGE
         delayTimer = new BGE.GameTimer()
       end if
 
-      m.tweens[id.toStr()] = {
+      managed = {
         tweenObj: BGE.Tweens.CreateTweenObject(startFields, destFields, duration, easing),
         target: target,
         applyMode: applyMode,
@@ -63,7 +106,8 @@ namespace BGE
         originalStart: startFields,
         originalDest: destFields,
         pingPongForwardNext: false
-      }
+      } as ManagedTween
+      m.tweens[id.toStr()] = managed
       return id
     end function
 
@@ -90,7 +134,7 @@ namespace BGE
         g: (destColor >> 8) and &hFF,
         b: destColor and &hFF
       }
-      return m.addManagedTween(target, startFields, destFields, duration, easing, options, "colorRGB", fieldName)
+      return m.addManagedTween(target, startFields, destFields, duration, easing, options, TweenApplyMode.colorRGB, fieldName)
     end function
 
     ' Same as toColorRGB() but for a packed RGBA (0xRRGGBBAA) field.
@@ -116,7 +160,7 @@ namespace BGE
         b: (destColor >> 8) and &hFF,
         a: destColor and &hFF
       }
-      return m.addManagedTween(target, startFields, destFields, duration, easing, options, "colorRGBA", fieldName)
+      return m.addManagedTween(target, startFields, destFields, duration, easing, options, TweenApplyMode.colorRGBA, fieldName)
     end function
 
     sub cancel(handle as integer)
@@ -140,7 +184,7 @@ namespace BGE
 
       idsToRemove = []
       for each key in m.tweens
-        managed = m.tweens[key]
+        managed = m.tweens[key] as ManagedTween
         if invalid <> managed.owner and not BGE.isValidEntity(managed.owner)
           idsToRemove.push(key)
         else if invalid <> managed.delayTimer and managed.delayTimer.TotalMilliseconds() < managed.delayMs
@@ -160,11 +204,12 @@ namespace BGE
               BGE.Tweens.ChangeTweenDest(managed.tweenObj, nextDest)
             else
               if invalid <> managed.onComplete
-                ' Passed the target, not invoked bare - a BrightScript function value has
-                ' no reliable `m` once it's been detached from its original owner (a bound
-                ' instance method's `m` only rebinds correctly via dot-syntax on that same
-                ' owner, which the manager doesn't have), so onComplete gets what it needs
-                ' as a plain argument instead of relying on closure/m state.
+                ' Called through a local variable, not invoked bare off the interface
+                ' field - a BrightScript function value has no reliable `m` once it's been
+                ' detached from its original owner (a bound instance method's `m` only
+                ' rebinds correctly via dot-syntax on that same owner, which the manager
+                ' doesn't have), so onComplete gets what it needs as a plain argument
+                ' instead of relying on closure/m state.
                 onCompleteFn = managed.onComplete
                 onCompleteFn(managed.target)
               end if
@@ -185,7 +230,7 @@ namespace BGE
     ' @param {integer} pausedTimeMs
     sub onResume(pausedTimeMs as integer)
       for each key in m.tweens
-        managed = m.tweens[key]
+        managed = m.tweens[key] as ManagedTween
         managed.tweenObj.timer.RemoveTime(pausedTimeMs)
         if invalid <> managed.delayTimer
           managed.delayTimer.RemoveTime(pausedTimeMs)
@@ -193,15 +238,15 @@ namespace BGE
       end for
     end sub
 
-    private sub applyTween(managed as object)
-      if managed.applyMode = "fields"
+    private sub applyTween(managed as ManagedTween)
+      if managed.applyMode = TweenApplyMode.fields
         for each key in managed.tweenObj.current
           managed.target[key] = managed.tweenObj.current[key]
         end for
-      else if managed.applyMode = "colorRGB"
+      else if managed.applyMode = TweenApplyMode.colorRGB
         c = managed.tweenObj.current
         managed.target[managed.fieldName] = (cint(c.r) << 16) + (cint(c.g) << 8) + cint(c.b)
-      else if managed.applyMode = "colorRGBA"
+      else if managed.applyMode = TweenApplyMode.colorRGBA
         c = managed.tweenObj.current
         managed.target[managed.fieldName] = (cint(c.r) << 24) + (cint(c.g) << 16) + (cint(c.b) << 8) + cint(c.a)
       end if
