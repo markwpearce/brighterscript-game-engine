@@ -153,8 +153,15 @@ end class
 
 `options` (all optional):
 - `owner as GameEntity` - see Validity below.
-- `onComplete as function` - called once, with no args, when the tween retires (finishes
-  with `loop = none`, or is `cancel()`led). Not called per-cycle for a looping tween.
+- `onComplete as function(target as object)` - called once, with the tween's own `target`
+  as its argument, when the tween retires (finishes with `loop = none`; not called on
+  `cancel()`, and not called per-cycle for a looping tween). Takes `target` as a plain
+  parameter rather than relying on `m`/closure state: a BrightScript anonymous `sub()`
+  cannot close over outer local variables at all (a compile error, discovered while
+  writing this feature's own tests), and a bound instance method's `m` only rebinds
+  correctly when invoked via dot-syntax on its original owner - which `TweenManager`
+  doesn't have once the function value has been detached from it. A parameter the
+  callback can mutate directly sidesteps both constraints.
 - `loop as BGE.Tweens.TweenLoopMode` - default `none`.
 - `delay as integer` - milliseconds before the tween starts ticking (target fields are left
   untouched until the delay elapses).

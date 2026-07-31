@@ -19,7 +19,10 @@ namespace BGE
     ' @param {integer} duration - milliseconds
     ' @param {BGE.Tweens.Easing} [easing=LinearTween]
     ' @param {roAssociativeArray} [options] - owner (GameEntity, for automatic cleanup once
-    '   it's no longer valid), onComplete, loop, delay
+    '   it's no longer valid), onComplete (a sub(target as object), called once with this
+    '   tween's target when it retires - not a closure/`m`-bound callback, since a
+    '   BrightScript function value can't reliably carry either once detached from its
+    '   original owner), loop, delay
     ' @return {integer} a handle for cancel()
     function to(target as object, destFields as object, duration as integer, easing = BGE.Tweens.Easing.LinearTween as BGE.Tweens.Easing, options = {} as roAssociativeArray) as integer
       startFields = {}
@@ -33,12 +36,33 @@ namespace BGE
       id = m.nextId
       m.nextId++
 
+      loopMode = BGE.Tweens.TweenLoopMode.none
+      if invalid <> options.loop
+        loopMode = options.loop
+      end if
+
+      delayMs = 0
+      if invalid <> options.delay
+        delayMs = options.delay
+      end if
+      delayTimer = invalid
+      if delayMs > 0
+        delayTimer = new BGE.GameTimer()
+      end if
+
       m.tweens[id.toStr()] = {
         tweenObj: BGE.Tweens.CreateTweenObject(startFields, destFields, duration, easing),
         target: target,
         applyMode: applyMode,
         fieldName: fieldName,
-        owner: options.owner
+        owner: options.owner,
+        onComplete: options.onComplete,
+        loopMode: loopMode,
+        delayMs: delayMs,
+        delayTimer: delayTimer,
+        originalStart: startFields,
+        originalDest: destFields,
+        pingPongForwardNext: false
       }
       return id
     end function
@@ -59,11 +83,33 @@ namespace BGE
         managed = m.tweens[key]
         if invalid <> managed.owner and not BGE.isValidEntity(managed.owner)
           idsToRemove.push(key)
+        else if invalid <> managed.delayTimer and managed.delayTimer.TotalMilliseconds() < managed.delayMs
+          ' still waiting out its delay - nothing to apply yet
         else
           finished = BGE.Tweens.HandleTween(managed.tweenObj)
           m.applyTween(managed)
           if finished
-            idsToRemove.push(key)
+            if managed.loopMode = BGE.Tweens.TweenLoopMode.restart
+              managed.tweenObj.timer.Mark()
+            else if managed.loopMode = BGE.Tweens.TweenLoopMode.pingPong
+              nextDest = managed.originalStart
+              if managed.pingPongForwardNext
+                nextDest = managed.originalDest
+              end if
+              managed.pingPongForwardNext = not managed.pingPongForwardNext
+              BGE.Tweens.ChangeTweenDest(managed.tweenObj, nextDest)
+            else
+              if invalid <> managed.onComplete
+                ' Passed the target, not invoked bare - a BrightScript function value has
+                ' no reliable `m` once it's been detached from its original owner (a bound
+                ' instance method's `m` only rebinds correctly via dot-syntax on that same
+                ' owner, which the manager doesn't have), so onComplete gets what it needs
+                ' as a plain argument instead of relying on closure/m state.
+                onCompleteFn = managed.onComplete
+                onCompleteFn(managed.target)
+              end if
+              idsToRemove.push(key)
+            end if
           end if
         end if
       end for
