@@ -42,13 +42,18 @@ In scope:
 - Per-axis parallax factor and per-axis repeat flags.
 - Correct behavior under camera movement, including sub-pixel accumulation (no stutter on
   slow layers).
-- A `rendererTest` demo proving the mechanics and measuring cost.
+- A dedicated `examples/parallax` example, demonstrating this through a real
+  `Game`/`Room`/`Camera2d.setTarget()`-follow setup with a controllable entity and 2-3
+  layers at different depths (plus a foreground layer, to show `factor > 1`). This
+  replaces a `rendererTest` demo as this issue's own proof/demonstration: `rendererTest`
+  deliberately never exercises `Drawable`/`SceneObject`/`GameEntity` (every existing demo
+  calls `Renderer`'s raw draw methods directly), and `DrawableParallaxLayer` requires a
+  `GameEntity` owner (which itself requires a real `Game`) - the same reason no other
+  `Drawable`/`SceneObject` pair (`Image`, `DrawableRectangle`, etc.) has a `rendererTest`
+  demo either. `examples/parallax` is built as part of this same issue rather than as a
+  deferred follow-up.
 
 Out of scope (explicitly deferred):
-- Any dedicated end-to-end example (`examples/parallax` or similar) demonstrating this via
-  a real `Game`/`Room`/`Camera2d.setTarget()`-follow setup — filed as its own follow-up
-  issue once this lands, matching how #79 followed #60 (`TweenManager`) with
-  `examples/tweens`. Not needed for this issue's own definition of done.
 - A general "explicit draw layer"/priority system (#59) — v1 relies entirely on the
   existing distance-from-camera sort.
 - Non-image content (solid color fill, lines, rectangles) — bitmap/image only.
@@ -129,25 +134,54 @@ Responsibilities:
    `drawScaledObject()` if `scale <> {1,1}`), each call already counted by the renderer's
    existing `drawCallsLastFrame` bookkeeping — no separate cost-tracking needed.
 
-### Camera-movement dirty-checking (the one real gotcha)
+### Camera-movement dirty-checking (the one real gotcha — resolved without touching `SceneObject`)
 
-`SceneObject.update()`'s `forceRecompute` (`SceneObject.bs:214`) is currently gated on the
-*drawable* having moved, not the camera — correct for ordinary drawables, wrong for a
-parallax layer whose *effective* position changes purely from camera movement even when
-the drawable itself is static. `SceneObjectParallaxLayer` overrides the recompute
-condition to also fire when `cameraObj.movedLastFrame()` is true, mirroring how
-`negDistanceFromCamera`'s own recompute already ORs in camera movement at
-`SceneObject.bs:220`. Without this, a parallax layer would visibly freeze on every frame
-where only the camera pans.
+The original concern here: `SceneObject.update()`'s `forceRecompute` (`SceneObject.bs:214`)
+is gated on the *drawable* having moved, not the camera, and `update()` is explicitly
+documented "Do not override this function!" — so a naive override was never actually an
+option.
+
+Closer reading of `SceneObject.bs` found this doesn't need solving in `update()` at all.
+`SceneObject.draw()` (also not to be overridden) decides whether to recompute *canvas*
+position via `objMovedInRelationToCamera(cameraObj)`, and that method's **default
+implementation already ORs in camera movement**:
+`m.drawable.movedLastFrame(true) or cameraObj.movedLastFrame()` (`SceneObject.bs:375`).
+That means the parallax math belongs entirely in an overridden `findCanvasPosition()` —
+called from `draw()`, already re-invoked correctly whenever the camera moves, with zero
+changes to the shared base class. `updateWorldPosition()` (the `update()`-phase hook)
+keeps the inherited default (`m.worldPosition = m.drawable.getWorldPosition()` —
+just the plain owner-relative position, unaffected by parallax); the parallax shift and
+tile enumeration both happen in `findCanvasPosition()`:
+
+```brightscript
+protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+  cameraPos = rendererObj.camera.position
+  delta = BGE.Math.VectorOps.subtract(cameraPos, m.referencePosition)
+  shift = BGE.Math.VectorOps.multiply(BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.create(1, 1), m.drawable.parallaxFactor), delta)
+  effective = BGE.Math.VectorOps.add(m.worldPosition, shift)
+  baseCanvasPos = rendererObj.worldPointToCanvasPoint(effective)
+  ' ... tile enumeration (below) builds m.tileCanvasPositions from baseCanvasPos
+  return invalid <> baseCanvasPos
+end function
+```
+
+`m.referencePosition` is captured once (first call) as `m.worldPosition` at that point —
+the fixed baseline the camera-relative shift is measured against, per the effective-
+position formula above. This composes cleanly with `worldPointToCanvasPoint()`'s existing
+camera subtraction: passing `effective` through the normal projection (which already
+subtracts `cameraPosition` once) combined with `effective`'s own `(1 - factor)` term
+nets out to exactly `-factor` sensitivity to camera movement — `factor = 1` cancels to
+ordinary 1:1 scrolling, `factor = 0` pins to the camera, and no separate case is needed
+for either end of the range.
 
 ### Sub-pixel accumulation
 
-The per-axis parallax offset must be carried as a float through to the final canvas
-position, and only rounded (`cint()`/similar) at the point of handing coordinates to
-`renderer.drawObject()` — the same rounding boundary `Game.shouldUseIntegerMovement`
-already respects elsewhere. Rounding earlier would make slow layers (small factor, moving
-a fraction of a pixel per frame) visibly stutter. This falls out naturally as long as step
-1 above stays in float world-space math until the very last conversion.
+Resolved the same way, for free: `Camera2d.worldPointToCanvasPoint()` already does the
+one and only rounding (`fix()`) at the very end of its own conversion. As long as
+`findCanvasPosition()` keeps `effective` in float world-space and calls the existing
+`worldPointToCanvasPoint()` rather than rounding anything itself, there's no separate
+"don't round early" mechanism to build — this falls out of reusing the existing camera
+projection rather than reimplementing any part of it.
 
 ### Draw order
 
@@ -178,14 +212,10 @@ left to #59.
 ## Definition of done
 
 - `DrawableParallaxLayer`/`SceneObjectParallaxLayer` implemented and unit-tested per above.
-- A `rendererTest` demo (real, permanent — registered in `DemoList.bs`, not a scratch
-  spike) showing 2-3 procedurally-drawn layers (flat-color shapes via `roBitmap` draw
-  calls — mountains/hills/sun, no external image assets needed) at different parallax
-  factors scrolling as a simulated camera pans, with the automatic fps/draw-call timing
-  every `rendererTest` demo gets for free.
+- `examples/parallax` (scaffolded via `npm run create-example -- parallax "Parallax
+  Example"`): a real `Game`/`Room`, a controllable entity, `Camera2d.setTarget()` following
+  it, and 2-3 procedurally-drawn layers (flat-color shapes via `roBitmap` draw calls —
+  mountains/hills/sun, no external image assets needed) at different parallax factors,
+  including at least one foreground layer (`factor > 1`).
 - `docs/drawables-and-scene-objects.md` updated alongside the other drawable/scene-object
   pairs.
-- A follow-up issue filed for a dedicated `examples/parallax` (or folded into
-  `examples/platformer`, #62, once that exists) demonstrating this through a real
-  `Game`/`Room`/`Camera2d.setTarget()`-follow setup — not required for this issue's own
-  completion.
