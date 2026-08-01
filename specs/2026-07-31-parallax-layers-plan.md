@@ -672,53 +672,41 @@ No production code changes expected (per the design spec, this already falls out
 ```brightscript
     @describe("sub-pixel accumulation - no premature rounding")
 
-    @it("several small camera moves land at the same canvas position as one equivalent big move")
+    ' findCanvasPosition() recomputes the parallax shift fresh each frame from a frozen
+    ' referencePosition and the camera's current absolute position - it is a stateless
+    ' function of the current frame's inputs, not an incremental accumulator carried
+    ' frame to frame. That means a "several small moves vs. one big move" comparison
+    ' can't actually distinguish correct (round-only-at-the-end) behavior from a bug
+    ' that rounds early: both paths evaluate the identical final expression against the
+    ' identical final camera position, so a uniformly-applied premature round() would
+    ' affect both equally and the comparison would still pass. Instead, this picks a
+    ' single frame whose exact (pre-truncation) canvas position is deliberately
+    ' fractional at a point where truncating it (fix(), what worldPointToCanvasPoint()
+    ' actually does) and rounding it to the nearest integer (cint(), what a premature-
+    ' rounding bug might do instead) land on DIFFERENT integers - only that lets the
+    ' assertion actually catch a stray round/cint/fix call added before the final
+    ' projection step.
+    '
+    ' Worked out by hand: findCanvasPosition()'s effective_x = worldPosition.x +
+    ' (1 - factor.x) * (cameraPos.x - referencePosition.x); referencePosition is
+    ' captured as worldPosition.x on the first frame. With worldPosition.x = 100 and
+    ' factor.x = 0.9, and Camera2d's raster_x = worldX - camera.x + halfCanvasWidth
+    ' (verified in Task 2/3's reviews), the pre-truncation raster x simplifies to
+    ' `factor.x * (100 - cameraPos.x) + halfCanvasWidth`. Moving the camera from its
+    ' default x=100 to 106 (a +6 move) gives `0.9 * (100 - 106) + 100 = 94.6` -
+    ' `fix(94.6) = 94` (correct), but `cint(94.6) = 95` (rounds up) - a premature round
+    ' would produce 95, not 94.
+    @it("does not lose sub-pixel precision to premature rounding before the final canvas conversion")
     function _()
       m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
-      ' A small factor so a whole-pixel camera move is still a fractional shift here -
-      ' 0.9 factor means a 10px camera move is only a 1px shift, easy to lose to
-      ' premature rounding if it happened before the final canvas conversion.
-      layerA = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.9, 0.9)})
-      sceneObjA = layerA.addToScene(m.renderer)
-      m.runFrame(sceneObjA)
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.9, 0.9)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
 
-      for i = 1 to 10
-        m.renderer.camera.position.x += 1
-        m.runFrame(sceneObjA)
-      end for
-      accumulatedX = sceneObjA["tileCanvasPositions"][0].x
+      m.renderer.camera.position.x += 6
+      m.runFrame(sceneObj)
 
-      ' A second, independent layer/entity pair that takes the same total 10px camera
-      ' move in one step instead of ten 1px steps.
-      entityB = new BGE.GameEntity(m.game, {name: "TestEntityB"})
-      entityB.position = BGE.Math.VectorOps.create(100, 50, 0)
-      layerB = new BGE.DrawableParallaxLayer(entityB, m.newRegion(), {repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.9, 0.9)})
-      sceneObjB = layerB.addToScene(m.renderer)
-
-      ' Not m.runFrame() here - it hardcodes m.entity.updateTransformationMatrix(), not
-      ' entityB's, which would leave entityB stuck at its default identity transform
-      ' (world position (0,0,0)) instead of its real (100,50). Both frames below need
-      ' renderer.setupCameraForFrame() explicitly too, for the same reason noted below.
-      m.renderer.camera.position.x -= 10 ' reset camera back to its starting position
-      m.renderer.setupCameraForFrame()
-      entityB.updateTransformationMatrix()
-      sceneObjB.update(m.renderer.camera)
-      sceneObjB.draw(m.renderer)
-
-      m.renderer.camera.position.x += 10
-      ' renderer.setupCameraForFrame() is what actually refreshes Camera2d's cached
-      ' projection matrix for the new camera position - worldPointToCanvasPoint() only
-      ' recomputes that matrix lazily when it's invalid, not just because
-      ' camera.position changed, so skipping this call would project through a stale
-      ' matrix left over from the frame above.
-      m.renderer.setupCameraForFrame()
-      entityB.updateTransformationMatrix()
-      sceneObjB.update(m.renderer.camera)
-      sceneObjB.draw(m.renderer)
-
-      oneStepX = sceneObjB["tileCanvasPositions"][0].x
-
-      m.assertEqual(oneStepX, accumulatedX)
+      m.assertEqual(94, sceneObj["tileCanvasPositions"][0].x)
     end function
 ```
 
