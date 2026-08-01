@@ -9,6 +9,15 @@ namespace BGE
     ' confused with Drawable.anchor, the unrelated normalized 0-1 pivot-point concept.
     private optional referencePosition as BGE.Math.Vector
 
+    ' The most recent camera position seen by either isPotentiallyOnScreen() or
+    ' findCanvasPosition() - getPositionsForFrustumCheck() has no camera parameter of its
+    ' own and needs one to recompute the effective position. Refreshed every frame from
+    ' isPotentiallyOnScreen() (which does get a fresh cameraObj), not just from
+    ' findCanvasPosition(): the latter alone would leave this stale on any frame the object
+    ' is culled (findCanvasPosition doesn't run then), which would wrongly keep it culled
+    ' forever once the camera stops moving again.
+    private optional lastCameraPosition as BGE.Math.Vector
+
     ' This frame's draw positions, one per visible tile (or a single entry when neither
     ' repeatX nor repeatY is set). Recomputed in findCanvasPosition(), consumed in
     ' performDraw().
@@ -29,11 +38,8 @@ namespace BGE
       end if
 
       cameraPos = rendererObj.camera.position
-      factor = m.drawable.parallaxFactor
-      inverseFactor = BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.create(1, 1), factor)
-      delta = BGE.Math.VectorOps.subtract(cameraPos, m.referencePosition)
-      shift = BGE.Math.VectorOps.multiply(inverseFactor, delta)
-      effective = BGE.Math.VectorOps.add(m.worldPosition, shift)
+      m.lastCameraPosition = BGE.Math.VectorOps.copy(cameraPos)
+      effective = m.computeEffectiveWorldPosition(cameraPos)
 
       baseCanvasPos = rendererObj.worldPointToCanvasPoint(effective)
       if invalid = baseCanvasPos
@@ -43,6 +49,56 @@ namespace BGE
 
       m.tileCanvasPositions = m.computeTilePositions(baseCanvasPos, rendererObj.camera.frameSize)
       return true
+    end function
+
+    ' The parallax-shifted world position this layer actually projects/draws at, given a
+    ' camera position - factored out of findCanvasPosition() so getPositionsForFrustumCheck()
+    ' can use the same math for on-screen testing.
+    private function computeEffectiveWorldPosition(cameraPos as BGE.Math.Vector) as BGE.Math.Vector
+      factor = m.drawable.parallaxFactor
+      inverseFactor = BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.create(1, 1), factor)
+      delta = BGE.Math.VectorOps.subtract(cameraPos, m.referencePosition)
+      shift = BGE.Math.VectorOps.multiply(inverseFactor, delta)
+      return BGE.Math.VectorOps.add(m.worldPosition, shift)
+    end function
+
+    ' A repeating axis's tile enumeration (computeAxisTilePositions) always fills the
+    ' current viewport around whatever canvas position the base tile lands at - it's
+    ' visually infinite along that axis regardless of how far raw world/camera distance
+    ' has drifted, so the inherited raw-position frustum check would incorrectly cull a
+    ' layer that is, by construction, still covering the screen.
+    protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      ' Refresh the cached camera position here, not just in findCanvasPosition(), since
+      ' this runs first each frame (see SceneObject.draw()): findCanvasPosition() only runs
+      ' when the object is judged on-screen, so if the frustum check below used a
+      ' last-findCanvasPosition-frame-old camera position instead, a same-frame camera jump
+      ' would evaluate the effective position against where the camera USED to be, cull the
+      ' layer, and (since findCanvasPosition never runs to update the cache) never recover on
+      ' its own. Updating it here keeps it current even through a culled frame.
+      m.lastCameraPosition = BGE.Math.VectorOps.copy(cameraObj.position)
+      if m.drawable.repeatX or m.drawable.repeatY
+        return true
+      end if
+      return super.isPotentiallyOnScreen(cameraObj)
+    end function
+
+    ' The base SceneObject default returns the raw (un-shifted) drawable world position,
+    ' which is wrong for a parallax layer: its actual on-screen position is the
+    ' parallax-shifted "effective" position, which can stay within the camera's frustum
+    ' indefinitely (the whole point of factor < 1) even while the raw owning-entity
+    ' position drifts arbitrarily far from the camera as it roams. Only reached for a
+    ' non-repeating layer (isPotentiallyOnScreen() above already short-circuits the
+    ' repeating case). Uses m.lastCameraPosition rather than requiring a fresh camera
+    ' parameter here (this method has none) - kept current every frame by
+    ' isPotentiallyOnScreen() above, so this is never more than momentarily stale. Falls
+    ' back to the raw world position only before either method has ever run - moot in
+    ' practice, since isPotentiallyOnScreen() already returns true unconditionally on the
+    ' first frame via isFirstFrameSinceEnabled, without ever reaching this method.
+    protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      if invalid = m.referencePosition or invalid = m.lastCameraPosition
+        return [m.worldPosition]
+      end if
+      return [m.computeEffectiveWorldPosition(m.lastCameraPosition)]
     end function
 
     ' Expands a single base canvas position into every tile position needed to cover the
