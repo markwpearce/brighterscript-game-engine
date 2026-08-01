@@ -1267,7 +1267,95 @@ git commit -m "Use the real ansimuz parallax mountain art pack in examples/paral
 
 ---
 
-### Task 10: Final quality gate and PR
+### Task 10: Debug info overlay and draw-mode cycling in `examples/parallax`
+
+Two small additions the user requested after seeing the example running: a toggleable
+debug info overlay (fps/input state), and a way to cycle every entity's draw mode, both
+matching conventions already established in other examples (`examples/3d`'s `BaseRoom`).
+
+**Files:**
+- Modify: `examples/parallax/src/source/Rooms/MainRoom.bs`
+- Modify: `examples/parallax/src/source/util.bs`
+
+**Interfaces:** none new - reuses `BGE.Game.debugShowUi(enabled as boolean)` and the
+already-scaffolded (currently unused) `updateDrawMode(entity as BGE.GameEntity)` in
+`util.bs`.
+
+- [ ] **Step 1: Wire up the debug info toggle**
+
+`main.bs` (scaffolded by `create-example`) already adds `BGE.Debug.FpsDisplay`/
+`BGE.Debug.InputDisplay` to the debug UI - they just aren't visible yet, since
+`Game.debugShowUi()` defaults to off and nothing calls it. Add a toggle in `MainRoom.bs`,
+matching `examples/3d/src/source/Rooms/BaseRoom.bs`'s pattern (`onInput`, `"info"` per this
+engine's own convention for a debug-toggle button - see CLAUDE.md's note that `info` is the
+idiomatic choice, unlike `examples/3d`'s legacy use of `"replay"`):
+
+```brightscript
+class MainRoom extends BGE.Room
+
+  player as Player
+  debugEnabled as boolean = false
+
+  ' ... (new/onCreate/onUpdate unchanged) ...
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press
+      return
+    end if
+    if input.isButton("back")
+      m.game.End()
+    else if input.isButton("info")
+      m.debugEnabled = not m.debugEnabled
+      m.game.debugShowUi(m.debugEnabled)
+    else if input.isButton("play")
+      m.cycleDrawModes()
+    end if
+  end sub
+
+  private sub cycleDrawModes()
+    for each entity in m.game.sortedEntities
+      updateDrawMode(entity)
+    end for
+  end sub
+
+end class
+```
+
+(`updateDrawMode` is the existing free function already sitting unused in `util.bs` - it
+cycles every drawable on one entity through `BGE.SceneObjectDrawMode`'s full range and wraps
+around. `m.game.sortedEntities` is the same flat entity list `Game.bs` itself iterates for
+per-frame update/draw, per this repo's documented game-loop architecture.)
+
+Note the existing `onInput` only handled `"back"` with no `input.press` guard - restructure
+it as shown so `press`-gating applies to all three buttons uniformly, not just add the two
+new ones as a separate un-gated block.
+
+- [ ] **Step 2: Remove `util.bs`'s dead `goToNextRoom`**
+
+This was flagged as unused scaffold boilerplate during Task 7's review (`examples/parallax`
+has exactly one room, so a next/previous-room cycler never applies). Delete the
+`goToNextRoom` function from `util.bs`, keeping `updateDrawMode` (now actually used).
+
+- [ ] **Step 3: Build and verify on-device**
+
+`cd examples/parallax && npm run build`, then sideload/launch via `rokubot`. Confirm:
+- Pressing `info` toggles the fps/input debug overlay on and off.
+- Pressing `play` visibly cycles every layer/player through the draw mode range (most modes
+  won't look meaningfully different for a flat 2D scene rendered through `Camera2d` - that's
+  expected, not a bug; the point is demonstrating the mechanism exists and doesn't crash
+  across the full mode range, same as `examples/3d`'s equivalent).
+- Normal movement/camera-follow/parallax behavior from Tasks 7-9 is unaffected.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add examples/parallax
+git commit -m "Add debug info toggle and draw-mode cycling to examples/parallax"
+```
+
+---
+
+### Task 11: Final quality gate and PR
 
 **Files:** none (verification only).
 
