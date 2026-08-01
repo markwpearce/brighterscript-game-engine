@@ -1286,9 +1286,12 @@ already-scaffolded (currently unused) `updateDrawMode(entity as BGE.GameEntity)`
 `main.bs` (scaffolded by `create-example`) already adds `BGE.Debug.FpsDisplay`/
 `BGE.Debug.InputDisplay` to the debug UI - they just aren't visible yet, since
 `Game.debugShowUi()` defaults to off and nothing calls it. Add a toggle in `MainRoom.bs`,
-matching `examples/3d/src/source/Rooms/BaseRoom.bs`'s pattern (`onInput`, `"info"` per this
-engine's own convention for a debug-toggle button - see CLAUDE.md's note that `info` is the
-idiomatic choice, unlike `examples/3d`'s legacy use of `"replay"`):
+matching `examples/3d/src/source/Rooms/BaseRoom.bs`'s pattern (`onInput`, `"options"` -
+BGE's real internal button name for this key, confirmed via `BGE.buttonNameFromCode` and
+used by every other example that has a debug toggle; `"info"` is only the name `rokubot`'s
+ECP key alias uses for driving the same physical button from the CLI, not the string
+`GameInput.isButton()` checks - don't conflate the two, `examples/3d`'s own use of
+`"replay"` for this same toggle is a legacy inconsistency, not something to copy either):
 
 ```brightscript
 class MainRoom extends BGE.Room
@@ -1304,7 +1307,7 @@ class MainRoom extends BGE.Room
     end if
     if input.isButton("back")
       m.game.End()
-    else if input.isButton("info")
+    else if input.isButton("options")
       m.debugEnabled = not m.debugEnabled
       m.game.debugShowUi(m.debugEnabled)
     else if input.isButton("play")
