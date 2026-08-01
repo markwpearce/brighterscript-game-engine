@@ -1,0 +1,119 @@
+class MainRoom extends BGE.Room
+
+  player as Player
+  debugEnabled as boolean = false
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainRoom"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.player = new Player(m.game)
+    m.player.position = BGE.Math.VectorOps.create(m.game.canvas.getWidth() * 0.5, m.game.canvas.getHeight() * 0.5, 0)
+    m.game.addEntity(m.player)
+
+    background = new BGE.GameEntity(m.game, {name: "Background"})
+    background.position = BGE.Math.VectorOps.create(m.player.position.x, m.player.position.y, -500)
+    m.game.addEntity(background)
+
+    m.game.loadBitmap("bg", "pkg:/sprites/parallax-mountain-bg.png")
+    m.game.loadBitmap("mountainFar", "pkg:/sprites/parallax-mountain-montain-far.png")
+    m.game.loadBitmap("mountains", "pkg:/sprites/parallax-mountain-mountains.png")
+    m.game.loadBitmap("trees", "pkg:/sprites/parallax-mountain-trees.png")
+    m.game.loadBitmap("foregroundTrees", "pkg:/sprites/parallax-mountain-foreground-trees.png")
+
+    ' Front-to-back depth order: foreground-trees -> trees -> mountains -> mountain-far -> bg.
+    ' Parallax factors increase back-to-front; DrawableParallaxLayer draws each tile from a
+    ' computed top-left corner rather than centering it on the owning entity, so repeatY is
+    ' needed on every layer to keep the canvas covered vertically regardless of where that
+    ' corner lands - each image has enough sky/transparent margin at the top for this to be
+    ' visually unnoticeable. `bg` is a single wide sky/moon backdrop rather than a genuinely
+    ' tileable strip, but its scaled-to-fit-canvas-height width (~1224px) is narrower than a
+    ' 1280px canvas, so repeatX: false left a bare vertical gap at the right edge - repeatX:
+    ' true instead (the clouds tile acceptably, and covers a wandering camera regardless).
+    '
+    ' Each layer also gets its own zOffset (front-to-back: trees, mountains, mountainFar,
+    ' bg) rather than sharing the background entity's single Z - the docs' documented
+    ' draw-order mechanism is "give each layer a suitably negative/positive Z", and these
+    ' four would otherwise all tie at the same Z and depend on array-sort stability instead.
+    background.addDrawable("bg", m.newLayer("bg", 0.02, true, background, -300))
+    background.addDrawable("mountainFar", m.newLayer("mountainFar", 0.1, true, background, -200))
+    background.addDrawable("mountains", m.newLayer("mountains", 0.3, true, background, -100))
+    background.addDrawable("trees", m.newLayer("trees", 0.6, true, background, 0))
+
+    foregroundEntity = new BGE.GameEntity(m.game, {name: "Foreground"})
+    foregroundEntity.position = BGE.Math.VectorOps.create(m.player.position.x, m.player.position.y, 500)
+    m.game.addEntity(foregroundEntity)
+    foregroundEntity.addDrawable("foregroundTrees", m.newLayer("foregroundTrees", 1.4, true, foregroundEntity))
+  end sub
+
+  override sub onUpdate(dt as float)
+    m.game.canvas.renderer.camera.setTarget(m.player.position)
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press
+      return
+    end if
+    if input.isButton("back")
+      m.game.End()
+    else if input.isButton("options")
+      m.debugEnabled = not m.debugEnabled
+      m.game.debugShowUi(m.debugEnabled)
+    else if input.isButton("play")
+      m.cycleDrawModes()
+    end if
+  end sub
+
+  private sub cycleDrawModes()
+    for each entity in m.game.sortedEntities
+      updateDrawMode(entity)
+    end for
+  end sub
+
+  private function newLayer(bitmapName as string, factor as float, repeatX as boolean, owner as BGE.GameEntity, zOffset = 0 as float) as BGE.DrawableParallaxLayer
+    bmp = m.game.getBitmap(bitmapName)
+    region = CreateObject("roRegion", bmp, 0, 0, bmp.getWidth(), bmp.getHeight())
+    canvasWidth = m.game.canvas.getWidth()
+    canvasHeight = m.game.canvas.getHeight()
+    factorY = factor * 0.2
+
+    ' These source PNGs are pixel-art strips far smaller than the canvas - scale each one
+    ' up uniformly so it fills the canvas vertically edge-to-edge instead of drawing at
+    ' native resolution as a tiny stamp. SceneObjectParallaxLayer's tiling math is already
+    ' scale-aware (it factors in drawable.scale when computing tile positions), so this is
+    ' just a config value, no engine changes needed.
+    layerScale = canvasHeight / bmp.getHeight()
+
+    ' DrawableParallaxLayer has no anchor/centering support - it always draws from a
+    ' top-left-anchored canvas position. Both background/foreground entities sit at the
+    ' player's spawn point, so without compensation every tile's top-left corner would
+    ' start at canvas center rather than (0,0).
+    '
+    ' A naive constant canvas-space offset isn't enough, though:
+    ' SceneObjectParallaxLayer.computeEffectiveWorldPosition() captures this drawable's
+    ' worldPosition (owner position + offset) as a fixed "referencePosition" on the first
+    ' frame, then every frame re-derives the drawn position as
+    ' worldPosition + (1 - parallaxFactor) * (cameraPos - referencePosition). Since the
+    ' camera is targeting the owner's own un-offset position, cameraPos - referencePosition
+    ' collapses to exactly -offset every frame (not zero), which means the *effective*
+    ' spawn-frame position ends up worldPosition - offset*(1-parallaxFactor), i.e. only
+    ' offset*parallaxFactor of our constant offset actually survives per axis. So the
+    ' offset needed to land the tile's top-left corner at canvas (0,0) has to be
+    ' pre-divided by that axis's parallaxFactor to compensate - see the derivation above.
+    ' factor/factorY must be non-zero - this offset scales as 1/factor and diverges (float
+    ' precision, then literal divide-by-zero at exactly 0) as it approaches 0; a fully
+    ' camera-pinned layer (factor = 0) would need a different anchoring approach than this
+    ' offset trick.
+    offset = BGE.Math.VectorOps.create(-canvasWidth / (2 * factor), canvasHeight / (2 * factorY), zOffset)
+    return new BGE.DrawableParallaxLayer(owner, region, {
+      offset: offset,
+      parallaxFactor: BGE.Math.VectorOps.create(factor, factorY),
+      repeatX: repeatX,
+      repeatY: true,
+      scale: BGE.Math.createScaleVector(layerScale)
+    })
+  end function
+
+end class

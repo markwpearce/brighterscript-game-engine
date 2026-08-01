@@ -1,0 +1,305 @@
+namespace tests
+
+  ' SceneObjectParallaxLayer does the actual drawing for a DrawableParallaxLayer. Tests
+  ' drive the same two per-frame passes Renderer.drawScene() runs (update, then draw)
+  ' against a real Renderer over a real bitmap - same harness SceneObjectRectangle.spec.bs
+  ' uses. The default Camera2d centers on its canvas (useDefaultCameraTarget()), so for a
+  ' 200x100 bitmap the camera starts at world (100, 50).
+  @suite("BGE.SceneObjectParallaxLayer")
+  class SceneObjectParallaxLayerTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    entity as BGE.GameEntity
+    sourceBitmap as roBitmap
+    canvasBitmap as roBitmap
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.entity = new BGE.GameEntity(m.game, {name: "TestEntity"})
+      m.sourceBitmap = CreateObject("roBitmap", {width: 32, height: 24, alphaEnable: true})
+      m.canvasBitmap = CreateObject("roBitmap", {width: 200, height: 100, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.canvasBitmap)
+    end function
+
+    private function newRegion(width = 32 as integer, height = 24 as integer) as roRegion
+      return CreateObject("roRegion", m.sourceBitmap, 0, 0, width, height)
+    end function
+
+    private function newLayer(args = {} as roAssociativeArray) as BGE.DrawableParallaxLayer
+      return new BGE.DrawableParallaxLayer(m.entity, m.newRegion(), args)
+    end function
+
+    ' Runs one simulated frame: camera setup (so frameSize/movement tracking are current),
+    ' then the same update+draw pass Renderer.drawScene() runs per scene object.
+    private sub runFrame(sceneObj as BGE.SceneObject)
+      m.renderer.setupCameraForFrame()
+      m.entity.updateTransformationMatrix()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+    end sub
+
+    @describe("factor {1,1} - baseline (behaves like an ordinary drawable)")
+
+    @it("draws at the entity's own canvas position regardless of camera position")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+
+      positions = sceneObj["tileCanvasPositions"]
+      m.assertEqual(1, positions.count())
+      ' World (100,50) is the camera's own default target - canvas center, (100,50) on a
+      ' 200x100 bitmap. Float, not Integer: Task 4's computeTilePositions() always
+      ' constructs its output via BGE.Math.VectorOps.create(), whose params are typed
+      ' `as float` (with an explicit `x * 1.0`) - the one reliable way to get a real
+      ' Float per this suite's own CLAUDE.md - so every position, tiled or not, is a
+      ' Float now, matching BGE.Math.Vector's own declared `x as float` field.
+      m.assertEqual(100.0, positions[0].x)
+      m.assertEqual(50.0, positions[0].y)
+    end function
+
+    @it("moves 1:1 with camera movement, same as an ordinary drawable")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      firstX = sceneObj["tileCanvasPositions"][0].x
+
+      m.renderer.camera.position.x += 20
+      m.runFrame(sceneObj)
+      secondX = sceneObj["tileCanvasPositions"][0].x
+
+      ' The world didn't move but the camera did - an ordinary (non-parallax) object
+      ' shifts on canvas by the exact opposite of the camera's own movement.
+      m.assertEqual(firstX - 20, secondX)
+    end function
+
+    @describe("parallax factor shifts the effective position relative to the camera")
+
+    @it("factor {0,0} pins the layer to the camera - it never moves on canvas")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0, 0)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      firstX = sceneObj["tileCanvasPositions"][0].x
+
+      m.renderer.camera.position.x += 20
+      m.runFrame(sceneObj)
+      secondX = sceneObj["tileCanvasPositions"][0].x
+
+      m.assertEqual(firstX, secondX)
+    end function
+
+    @it("factor {0.5,0.5} moves at half the camera's own movement")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.5, 0.5)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      firstX = sceneObj["tileCanvasPositions"][0].x
+
+      m.renderer.camera.position.x += 20
+      m.runFrame(sceneObj)
+      secondX = sceneObj["tileCanvasPositions"][0].x
+
+      m.assertEqual(firstX - 10, secondX)
+    end function
+
+    @it("factor > 1 (a foreground layer) moves faster than the camera's own movement")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(1.5, 1.5)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      firstX = sceneObj["tileCanvasPositions"][0].x
+
+      m.renderer.camera.position.x += 20
+      m.runFrame(sceneObj)
+      secondX = sceneObj["tileCanvasPositions"][0].x
+
+      m.assertEqual(firstX - 30, secondX)
+    end function
+
+    @it("x and y factors are independent")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0, 1)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      first = sceneObj["tileCanvasPositions"][0]
+
+      m.renderer.camera.position.x += 20
+      m.renderer.camera.position.y += 20
+      m.runFrame(sceneObj)
+      second = sceneObj["tileCanvasPositions"][0]
+
+      m.assertEqual(first.x, second.x) ' factor 0 on x - pinned
+      ' Camera2d's y axis is inverted relative to world space (canvas y increases
+      ' downward, world y increases upward), so ordinary (factor 1) scrolling moves
+      ' canvas y in the SAME direction as the camera's own world-y movement - the
+      ' opposite sign relationship from x. This is pre-existing Camera2d behavior
+      ' (see worldPointToCanvasPoint), not something specific to parallax.
+      m.assertEqual(first.y + 20, second.y) ' factor 1 on y - ordinary scrolling
+    end function
+
+    @describe("tiling (repeatX/repeatY)")
+
+    @it("draws a single tile when neither repeatX nor repeatY is set")
+    function _()
+      layer = m.newLayer({repeatX: false, repeatY: false})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      m.assertEqual(1, sceneObj["tileCanvasPositions"].count())
+    end function
+
+    @it("repeatX covers the full viewport width with enough tiles, including the safety tile")
+    function _()
+      ' region is 32px wide, canvas (frameSize) is 200px wide: ceil(200/32) + 1 = 8 tiles.
+      layer = m.newLayer({repeatX: true, repeatY: false})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      m.assertEqual(8, sceneObj["tileCanvasPositions"].count())
+    end function
+
+    @it("repeatX tile positions are tileWidth apart and the leftmost one is <= 0")
+    function _()
+      layer = m.newLayer({repeatX: true, repeatY: false})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      positions = sceneObj["tileCanvasPositions"]
+      m.assertTrue(positions[0].x <= 0)
+      m.assertEqual(positions[0].x + 32.0, positions[1].x)
+    end function
+
+    @it("repeatX and repeatY together tile in a full grid")
+    function _()
+      ' 200/32 -> 8 tiles wide, 100/24 -> ceil(100/24)+1 = 6 tiles tall. 8 * 6 = 48.
+      layer = m.newLayer({repeatX: true, repeatY: true})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+      m.assertEqual(48, sceneObj["tileCanvasPositions"].count())
+    end function
+
+    @it("draws one renderer draw call per tile")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(4, 0, 0)
+      layer = m.newLayer({repeatX: true, repeatY: false})
+      sceneObj = layer.addToScene(m.renderer)
+      m.renderer.setupCameraForFrame()
+      m.entity.updateTransformationMatrix()
+      sceneObj.update(m.renderer.camera)
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      m.assertEqual(8, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @describe("sub-pixel accumulation - no premature rounding")
+
+    ' findCanvasPosition() recomputes the parallax shift fresh each frame from a frozen
+    ' referencePosition and the camera's current absolute position - it is a stateless
+    ' function of the current frame's inputs, not an incremental accumulator carried
+    ' frame to frame. That means a "several small moves vs. one big move" comparison
+    ' can't actually distinguish correct (round-only-at-the-end) behavior from a bug
+    ' that rounds early: both paths evaluate the identical final expression against the
+    ' identical final camera position, so a uniformly-applied premature round() would
+    ' affect both equally and the comparison would still pass. Instead, this picks a
+    ' single frame whose exact (pre-truncation) canvas position is deliberately
+    ' fractional at a point where truncating it (fix(), what worldPointToCanvasPoint()
+    ' actually does) and rounding it to the nearest integer (cint(), what a premature-
+    ' rounding bug might do instead) land on DIFFERENT integers - only that lets the
+    ' assertion actually catch a stray round/cint/fix call added before the final
+    ' projection step.
+    '
+    ' Worked out by hand: findCanvasPosition()'s effective_x = worldPosition.x +
+    ' (1 - factor.x) * (cameraPos.x - referencePosition.x); referencePosition is
+    ' captured as worldPosition.x on the first frame. With worldPosition.x = 100 and
+    ' factor.x = 0.9, and Camera2d's raster_x = worldX - camera.x + halfCanvasWidth
+    ' (verified in Task 2/3's reviews), the pre-truncation raster x simplifies to
+    ' `factor.x * (100 - cameraPos.x) + halfCanvasWidth`. Moving the camera from its
+    ' default x=100 to 106 (a +6 move) gives `0.9 * (100 - 106) + 100 = 94.6` -
+    ' `fix(94.6) = 94` (correct), but `cint(94.6) = 95` (rounds up) - a premature round
+    ' would produce 95, not 94.
+    @it("does not lose sub-pixel precision to premature rounding before the final canvas conversion")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.9, 0.9)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+
+      m.renderer.camera.position.x += 6
+      m.runFrame(sceneObj)
+
+      ' Float, not Integer, to match assertEqual's type-strictness (see this suite's own
+      ' notes) - computeTilePositions() always constructs its output via
+      ' BGE.Math.VectorOps.create(), whose params are `as float`, so the value under test
+      ' is a Float even though fix() itself returns an Integer.
+      m.assertEqual(94.0, sceneObj["tileCanvasPositions"][0].x)
+    end function
+
+    @describe("scale <> 1 (every layer in examples/parallax uses this)")
+
+    @it("scales both tile spacing (computeTilePositions) and the drawScaledObject() draw path")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      layer = m.newLayer({repeatX: true, repeatY: false, scale: BGE.Math.createScaleVector(2.0)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.renderer.resetDrawCallCounter()
+      m.runFrame(sceneObj)
+
+      positions = sceneObj["tileCanvasPositions"]
+      ' region is 32px wide - at scale 2.0, consecutive tiles must be 64px apart, not 32.
+      m.assertEqual(positions[0].x + 64.0, positions[1].x)
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @describe("frustum culling stays correct as the camera moves far from a static owning entity")
+
+    @it("a non-repeating layer is still drawn once the camera has moved far enough that the RAW entity position would be culled, as long as its parallax-shifted position is still on canvas")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      ' A small factor so the shifted position lags far behind the raw camera position -
+      ' the raw entity position (100,50) becomes frustum-invisible long before the
+      ' shifted one does.
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.05, 0.05)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+
+      ' Camera to (400,50): raw worldPos.x=100 is nowhere near the frustum around x=400
+      ' (bounds roughly [280,520] with Camera2d's 20% fudge) - the OLD (buggy) frustum
+      ' check, which tests the raw position, would cull this and draw zero times. The
+      ' shifted position (100 + 0.95*(400-100) = 385) is well inside that same frustum,
+      ' so the FIXED check must not cull it.
+      m.renderer.camera.position.x = 400
+      m.renderer.resetDrawCallCounter()
+      m.runFrame(sceneObj)
+
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("a repeating layer is never culled by raw distance from its owning entity, however far the camera travels")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      ' factor {1,1} (ordinary scrolling) is deliberately the least favorable case for
+      ' this fix - if it passes here, it passes for every factor, since a repeating axis
+      ' must stay visible regardless of parallax factor.
+      layer = m.newLayer({repeatX: true, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(1, 1)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+
+      ' A huge move - the raw entity position is nowhere near any plausible frustum
+      ' bound after this, but the tiling still covers the viewport around wherever the
+      ' wrapped base position lands.
+      m.renderer.camera.position.x += 100000
+      m.renderer.resetDrawCallCounter()
+      m.runFrame(sceneObj)
+
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+  end class
+
+end namespace

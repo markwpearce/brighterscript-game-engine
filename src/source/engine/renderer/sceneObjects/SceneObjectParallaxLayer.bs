@@ -1,0 +1,177 @@
+namespace BGE
+
+  class SceneObjectParallaxLayer extends SceneObject
+
+    drawable as DrawableParallaxLayer
+
+    ' The layer's own base world position at rest, captured once (first findCanvasPosition
+    ' call) - the fixed baseline the camera-relative shift is measured against. Not to be
+    ' confused with Drawable.anchor, the unrelated normalized 0-1 pivot-point concept.
+    private optional referencePosition as BGE.Math.Vector
+
+    ' The most recent camera position seen by either isPotentiallyOnScreen() or
+    ' findCanvasPosition() - getPositionsForFrustumCheck() has no camera parameter of its
+    ' own and needs one to recompute the effective position. Refreshed every frame from
+    ' isPotentiallyOnScreen() (which does get a fresh cameraObj), not just from
+    ' findCanvasPosition(): the latter alone would leave this stale on any frame the object
+    ' is culled (findCanvasPosition doesn't run then), which would wrongly keep it culled
+    ' forever once the camera stops moving again.
+    private optional lastCameraPosition as BGE.Math.Vector
+
+    ' This frame's draw positions, one per visible tile (or a single entry when neither
+    ' repeatX nor repeatY is set). Recomputed in findCanvasPosition(), consumed in
+    ' performDraw().
+    private tileCanvasPositions as BGE.Math.Vector[] = []
+
+    sub new(name as string, drawableObj as DrawableParallaxLayer)
+      super(name, drawableObj, BGE.SceneObjectType.ParallaxLayer)
+    end sub
+
+    ' Computes this frame's canvas draw position(s). Called from the base SceneObject.draw()
+    ' (never overridden directly - see class doc), already re-invoked correctly whenever the
+    ' camera moves: objMovedInRelationToCamera()'s default implementation already ORs in
+    ' cameraObj.movedLastFrame(), so no change to the shared SceneObject/update() machinery
+    ' is needed for this to stay live under camera movement.
+    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if invalid = m.referencePosition
+        m.referencePosition = BGE.Math.VectorOps.copy(m.worldPosition)
+      end if
+
+      cameraPos = rendererObj.camera.position
+      m.lastCameraPosition = BGE.Math.VectorOps.copy(cameraPos)
+      effective = m.computeEffectiveWorldPosition(cameraPos)
+
+      baseCanvasPos = rendererObj.worldPointToCanvasPoint(effective)
+      if invalid = baseCanvasPos
+        m.tileCanvasPositions = []
+        return false
+      end if
+
+      m.tileCanvasPositions = m.computeTilePositions(baseCanvasPos, rendererObj.camera.frameSize)
+      return true
+    end function
+
+    ' The parallax-shifted world position this layer actually projects/draws at, given a
+    ' camera position - factored out of findCanvasPosition() so getPositionsForFrustumCheck()
+    ' can use the same math for on-screen testing.
+    private function computeEffectiveWorldPosition(cameraPos as BGE.Math.Vector) as BGE.Math.Vector
+      factor = m.drawable.parallaxFactor
+      inverseFactor = BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.create(1, 1), factor)
+      delta = BGE.Math.VectorOps.subtract(cameraPos, m.referencePosition)
+      shift = BGE.Math.VectorOps.multiply(inverseFactor, delta)
+      return BGE.Math.VectorOps.add(m.worldPosition, shift)
+    end function
+
+    ' A repeating axis's tile enumeration (computeAxisTilePositions) always fills the
+    ' current viewport around whatever canvas position the base tile lands at - it's
+    ' visually infinite along that axis regardless of how far raw world/camera distance
+    ' has drifted, so the inherited raw-position frustum check would incorrectly cull a
+    ' layer that is, by construction, still covering the screen.
+    protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      ' Refresh the cached camera position here, not just in findCanvasPosition(), since
+      ' this runs first each frame (see SceneObject.draw()): findCanvasPosition() only runs
+      ' when the object is judged on-screen, so if the frustum check below used a
+      ' last-findCanvasPosition-frame-old camera position instead, a same-frame camera jump
+      ' would evaluate the effective position against where the camera USED to be, cull the
+      ' layer, and (since findCanvasPosition never runs to update the cache) never recover on
+      ' its own. Updating it here keeps it current even through a culled frame.
+      m.lastCameraPosition = BGE.Math.VectorOps.copy(cameraObj.position)
+      if m.drawable.repeatX or m.drawable.repeatY
+        return true
+      end if
+      return super.isPotentiallyOnScreen(cameraObj)
+    end function
+
+    ' The base SceneObject default returns the raw (un-shifted) drawable world position,
+    ' which is wrong for a parallax layer: its actual on-screen position is the
+    ' parallax-shifted "effective" position, which can stay within the camera's frustum
+    ' indefinitely (the whole point of factor < 1) even while the raw owning-entity
+    ' position drifts arbitrarily far from the camera as it roams. Only reached for a
+    ' non-repeating layer (isPotentiallyOnScreen() above already short-circuits the
+    ' repeating case). Uses m.lastCameraPosition rather than requiring a fresh camera
+    ' parameter here (this method has none) - kept current every frame by
+    ' isPotentiallyOnScreen() above, so this is never more than momentarily stale. Falls
+    ' back to the raw world position only before either method has ever run - moot in
+    ' practice, since isPotentiallyOnScreen() already returns true unconditionally on the
+    ' first frame via isFirstFrameSinceEnabled, without ever reaching this method.
+    protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      if invalid = m.referencePosition or invalid = m.lastCameraPosition
+        return [m.worldPosition]
+      end if
+      return [m.computeEffectiveWorldPosition(m.lastCameraPosition)]
+    end function
+
+    ' Expands a single base canvas position into every tile position needed to cover the
+    ' viewport along the axes with repeatX/repeatY enabled (a single entry, exactly basePos,
+    ' on an axis that doesn't repeat).
+    private function computeTilePositions(basePos as BGE.Math.Vector, frameSize as BGE.Math.Vector) as BGE.Math.Vector[]
+      tileWidth = m.drawable.getSize().width * m.drawable.scale.x
+      tileHeight = m.drawable.getSize().height * m.drawable.scale.y
+
+      xPositions = m.computeAxisTilePositions(basePos.x, frameSize.x, tileWidth, m.drawable.repeatX)
+      yPositions = m.computeAxisTilePositions(basePos.y, frameSize.y, tileHeight, m.drawable.repeatY)
+
+      positions = []
+      for each y in yPositions
+        for each x in xPositions
+          positions.push(BGE.Math.VectorOps.create(x, y))
+        end for
+      end for
+      return positions
+    end function
+
+    ' The tile start positions along one axis. Not repeating on this axis is the
+    ' zero-tiling-cost special case: a single position, exactly basePos.
+    '
+    ' @param {float} basePos - this axis's un-tiled canvas position
+    ' @param {float} viewportSize - the canvas size along this axis
+    ' @param {float} tileSize - the tile's on-screen size along this axis
+    ' @param {boolean} repeat
+    ' @return {float[]} tile start positions, left-to-right / top-to-bottom
+    private function computeAxisTilePositions(basePos as float, viewportSize as float, tileSize as float, repeat as boolean) as float[]
+      if not repeat or tileSize <= 0
+        return [basePos]
+      end if
+
+      ' Float-safe remainder (BrightScript's MOD truncates to integers, which would throw
+      ' away sub-pixel precision) - wrapped lands in (-tileSize, 0] so the leftmost/topmost
+      ' visible tile is always at or before the viewport edge.
+      wrapped = basePos - tileSize * Fix(basePos / tileSize)
+      if wrapped > 0
+        wrapped = wrapped - tileSize
+      end if
+
+      ' ceil(viewportSize / tileSize) + 1. Ceiling-via-negation (`-floor(-x)`) needs a true
+      ' floor (round toward -infinity); BrightScript's Fix() truncates toward zero instead
+      ' (e.g. Fix(-6.25) = -6, not -7), which would silently under-count whenever the ratio
+      ' isn't a whole number. Int() is the one that floors in BrightScript, so it's used
+      ' here instead - Fix() above is deliberately kept for the wrapped remainder, which
+      ' wants truncation, not flooring.
+      tileCount = -Int(-viewportSize / tileSize) + 1
+      positions = []
+      for i = 0 to tileCount - 1
+        positions.push(wrapped + i * tileSize)
+      end for
+      return positions
+    end function
+
+    protected override function performDraw(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if invalid = m.drawable.region
+        return false
+      end if
+      drewAny = false
+      scaleX = m.drawable.scale.x
+      scaleY = m.drawable.scale.y
+      for each tilePos in m.tileCanvasPositions
+        if scaleX = 1.0 and scaleY = 1.0
+          drewAny = rendererObj.drawObject(cint(tilePos.x), cint(tilePos.y), m.drawable.region) or drewAny
+        else
+          drewAny = rendererObj.drawScaledObject(cint(tilePos.x), cint(tilePos.y), scaleX, scaleY, m.drawable.region) or drewAny
+        end if
+      end for
+      return drewAny
+    end function
+
+  end class
+
+end namespace

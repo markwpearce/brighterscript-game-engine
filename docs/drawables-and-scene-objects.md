@@ -33,6 +33,7 @@ the `SceneObject` side.
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
+| `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
 | _(billboard drawables, e.g. images used with `directToCamera`/`directScaled` draw modes)_ | `SceneObjectBillboard` | Always faces the camera regardless of its own rotation. |
 
 Every `SceneObject` subclass lives under `src/source/engine/renderer/sceneObjects/`. If you're
@@ -298,3 +299,53 @@ side that isn't - it does **not** wrap or repeat the texture to fill the screen.
   which orbits the camera around it as its own position changes, rather than rotating the camera's
   own view. Set `camera.orientation` directly from your desired look direction instead (see
   `examples/terrain/src/source/Rooms/MainRoom.bs`'s `updateCameraOrientation`).
+
+## Parallax layers (`DrawableParallaxLayer`)
+
+`DrawableParallaxLayer` scrolls a bitmap at a configurable per-axis fraction of the
+camera's movement (`parallaxFactor`, a `BGE.Math.Vector`): `{1,1}` (the default) behaves
+like an ordinary drawable, `{0,0}` pins it to the camera, `0 < factor < 1` gives a
+background layer that drifts slower than the world, and `factor > 1` gives a foreground
+layer that scrolls faster. `repeatX`/`repeatY` (defaulting to `true`/`false`) tile the
+bitmap to cover the viewport along either axis.
+
+Unlike every other billboard drawable, `SceneObjectParallaxLayer` extends `SceneObject`
+directly rather than `SceneObjectBillboard` - a parallax layer is always flat 2D and may
+draw several tiled copies in a single frame, so it skips the 3D/orientation/temp-bitmap
+machinery entirely and just issues one `Renderer.drawObject()`/`drawScaledObject()` call
+per visible tile. It also doesn't honor `Drawable`'s anchor (`setAnchor()`), rotation,
+color/outline, or `drawMode` fields - `SceneObjectParallaxLayer.performDraw()` ignores all
+of them and always draws from a top-left-anchored canvas position.
+
+Attach one to an entity the same way as any other drawable:
+
+```brighterscript
+region = CreateObject("roRegion", bmp, 0, 0, bmp.getWidth(), bmp.getHeight())
+owner.addDrawable("mountains", new BGE.DrawableParallaxLayer(owner, region, {
+  parallaxFactor: BGE.Math.VectorOps.create(0.3, 0.06),
+  repeatX: true,
+  repeatY: true
+}))
+```
+
+`examples/parallax` is a small, playable demo with several stacked background/foreground
+layers and a camera that follows the player (`examples/parallax/src/source/Rooms/MainRoom.bs`).
+
+`SceneObjectParallaxLayer` overrides three `SceneObject` methods to make this work:
+`findCanvasPosition()` does the actual parallax math and tile enumeration - the base
+`SceneObject.draw()`'s existing `objMovedInRelationToCamera()` check already re-triggers
+it whenever the camera moves (its default implementation already ORs in
+`cameraObj.movedLastFrame()`), so no change to the shared `SceneObject`/`Drawable` update
+machinery was needed for this part. `isPotentiallyOnScreen()` and
+`getPositionsForFrustumCheck()` correct the renderer's frustum-culling check, which
+otherwise tests distance from the owning entity's raw (un-shifted) position: a repeating
+layer (`repeatX`/`repeatY`) always returns `true` from `isPotentiallyOnScreen()` and is
+never culled, since a repeating axis re-tiles to cover the viewport regardless of how far
+the raw owning entity has drifted from the camera; a non-repeating layer is instead tested
+against its actual parallax-shifted screen position (via `getPositionsForFrustumCheck()`),
+not its raw owner position, so it stays correctly visible/hidden even once that raw
+position is far outside the frustum.
+
+Draw order relies entirely on the ordinary distance-from-camera sort - give a background
+layer's owning entity a suitably negative Z (or positive, for a foreground layer) so it
+falls out of `Renderer.drawScene()`'s existing sort with no renderer changes.
