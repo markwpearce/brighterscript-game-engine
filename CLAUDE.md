@@ -120,7 +120,7 @@ A demo can also be launched directly, skipping the menu, via a `demo` deep-link 
 
 ### UI (`engine/ui/`)
 
-`UiContainer`/`UiWidget`/`Label`/`Style`/`Alignment` implement a small retained-mode widget tree, drawn to its own canvas layer above the game world. `Game.gameUi`/`Game.debugUi` are the two top-level containers; debug windows (`engine/debug/`: `DebugWindow`, `FpsDisplay`, `GarbageCollectorDisplay`, `MemoryDisplay`, `InputDisplay`) attach under `debugUi` and are toggled via `Game.debugShowUi()`/`debugDrawColliders()`/etc.
+`UiContainer`/`UiWidget`/`Label`/`Style`/`Alignment` implement a small retained-mode widget tree, drawn to its own canvas layer above the game world. `Game.gameUi`/`Game.debugUi` are the two top-level containers; debug windows (`engine/debug/`: `DebugWindow`, `FpsDisplay`, `GarbageCollectorDisplay`, `MemoryDisplay`, `InputDisplay`, `LogDisplay`) attach under `debugUi` and are toggled via `Game.debugShowUi()`/`debugDrawColliders()`/etc. `Game.enableStandardDebugUi(args = {})` wires up all five of these in one call (pass e.g. `{log: false}` to skip one) instead of adding each by hand.
 
 ### Collision (`engine/colliders/`)
 
