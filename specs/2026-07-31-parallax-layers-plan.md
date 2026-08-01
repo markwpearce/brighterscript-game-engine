@@ -973,7 +973,301 @@ git commit -m "Add examples/parallax demonstrating DrawableParallaxLayer with ca
 
 ---
 
-### Task 8: Final quality gate and PR
+### Task 8: Fix parallax layer frustum culling for a camera-distant owning entity
+
+**Discovered via Task 7's real on-device testing** (not part of the original design spec):
+holding a direction for ~10 seconds made every layer in `examples/parallax` vanish to solid
+black, recovering only once the player moved back near its spawn point. Root cause:
+`SceneObjectParallaxLayer` never overrides `getPositionsForFrustumCheck()`, so it inherits
+the base `SceneObject` default, which frustum-tests the **raw, un-shifted** entity/drawable
+world position (`m.worldPosition`) — not the parallax-shifted "effective" position that
+`findCanvasPosition()` actually projects and draws. A parallax layer's whole purpose is to
+stay visually on-screen while its owning entity's raw position and the camera drift apart
+(that's what `parallaxFactor < 1` means), but the inherited frustum check has no idea of
+this and culls the entire layer once raw distance from the camera exceeds the frustum
+bounds — regardless of whether the layer's real, shifted screen position is still on
+canvas, and regardless of tiling.
+
+Two distinct fixes are needed:
+
+1. **Non-repeating layers** should be frustum-tested against their real (parallax-shifted)
+   position, not the raw one — `getPositionsForFrustumCheck()` needs to return the same
+   "effective" position `findCanvasPosition()` computes.
+2. **Repeating layers** (`repeatX` or `repeatY`) should never be culled by raw/absolute
+   distance at all: `computeAxisTilePositions()` already wraps the base canvas position
+   modulo the tile size and fills outward to cover the whole viewport, regardless of what
+   that base position numerically is — a repeating axis is, by construction, visually
+   infinite and always covers the screen along that axis. Frustum-culling it based on
+   distance from a static anchor point is testing an irrelevant quantity; `isPotentiallyOnScreen()`
+   should short-circuit `true` whenever either axis repeats.
+
+**Files:**
+- Modify: `src/source/engine/renderer/sceneObjects/SceneObjectParallaxLayer.bs`
+- Modify: `src/source/engine/renderer/sceneObjects/SceneObjectParallaxLayer.spec.bs`
+
+**Interfaces:**
+- Produces: `private function computeEffectiveWorldPosition(cameraPos as BGE.Math.Vector) as BGE.Math.Vector` — the parallax-shifted world position, factored out of `findCanvasPosition()` so both it and the new frustum-check override share one implementation.
+- Produces: `private optional lastCameraPosition as BGE.Math.Vector` — the camera position `findCanvasPosition()` last saw, since `getPositionsForFrustumCheck()` has no camera parameter of its own and needs one to compute the effective position. One frame stale at most (updated every time `findCanvasPosition()` runs), which is immaterial next to `Camera2d.isInView()`'s existing 20% fudge margin.
+- Modifies: `protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean` (new override) and `protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]` (new override).
+
+- [ ] **Step 1: Write the failing tests**
+
+```brightscript
+    @describe("frustum culling stays correct as the camera moves far from a static owning entity")
+
+    @it("a non-repeating layer is still drawn once the camera has moved far enough that the RAW entity position would be culled, as long as its parallax-shifted position is still on canvas")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      ' A small factor so the shifted position lags far behind the raw camera position -
+      ' the raw entity position (100,50) becomes frustum-invisible long before the
+      ' shifted one does.
+      layer = m.newLayer({repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.05, 0.05)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+
+      ' Camera to (400,50): raw worldPos.x=100 is nowhere near the frustum around x=400
+      ' (bounds roughly [280,520] with Camera2d's 20% fudge) - the OLD (buggy) frustum
+      ' check, which tests the raw position, would cull this and draw zero times. The
+      ' shifted position (100 + 0.95*(400-100) = 385) is well inside that same frustum,
+      ' so the FIXED check must not cull it.
+      m.renderer.camera.position.x = 400
+      m.renderer.resetDrawCallCounter()
+      m.runFrame(sceneObj)
+
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("a repeating layer is never culled by raw distance from its owning entity, however far the camera travels")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(100, 50, 0)
+      ' factor {1,1} (ordinary scrolling) is deliberately the least favorable case for
+      ' this fix - if it passes here, it passes for every factor, since a repeating axis
+      ' must stay visible regardless of parallax factor.
+      layer = m.newLayer({repeatX: true, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(1, 1)})
+      sceneObj = layer.addToScene(m.renderer)
+      m.runFrame(sceneObj)
+
+      ' A huge move - the raw entity position is nowhere near any plausible frustum
+      ' bound after this, but the tiling still covers the viewport around wherever the
+      ' wrapped base position lands.
+      m.renderer.camera.position.x += 100000
+      m.renderer.resetDrawCallCounter()
+      m.runFrame(sceneObj)
+
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `npm run build-tests && node scripts/run-tests-ci.js`
+Expected: FAIL — both scenarios currently produce 0 draw calls (culled).
+
+- [ ] **Step 3: Implement the fix**
+
+```brightscript
+' In SceneObjectParallaxLayer.bs - add a new private field alongside the existing ones:
+    private optional lastCameraPosition as BGE.Math.Vector
+
+' Modify findCanvasPosition() to cache the camera position and use the new shared helper:
+    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if invalid = m.referencePosition
+        m.referencePosition = BGE.Math.VectorOps.copy(m.worldPosition)
+      end if
+
+      cameraPos = rendererObj.camera.position
+      m.lastCameraPosition = BGE.Math.VectorOps.copy(cameraPos)
+      effective = m.computeEffectiveWorldPosition(cameraPos)
+
+      baseCanvasPos = rendererObj.worldPointToCanvasPoint(effective)
+      if invalid = baseCanvasPos
+        m.tileCanvasPositions = []
+        return false
+      end if
+
+      m.tileCanvasPositions = m.computeTilePositions(baseCanvasPos, rendererObj.camera.frameSize)
+      return true
+    end function
+
+    ' The parallax-shifted world position this layer actually projects/draws at, given a
+    ' camera position - factored out of findCanvasPosition() so getPositionsForFrustumCheck()
+    ' can use the same math for on-screen testing.
+    private function computeEffectiveWorldPosition(cameraPos as BGE.Math.Vector) as BGE.Math.Vector
+      factor = m.drawable.parallaxFactor
+      inverseFactor = BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.create(1, 1), factor)
+      delta = BGE.Math.VectorOps.subtract(cameraPos, m.referencePosition)
+      shift = BGE.Math.VectorOps.multiply(inverseFactor, delta)
+      return BGE.Math.VectorOps.add(m.worldPosition, shift)
+    end function
+
+    ' A repeating axis's tile enumeration (computeAxisTilePositions) always fills the
+    ' current viewport around whatever canvas position the base tile lands at - it's
+    ' visually infinite along that axis regardless of how far raw world/camera distance
+    ' has drifted, so the inherited raw-position frustum check would incorrectly cull a
+    ' layer that is, by construction, still covering the screen.
+    protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      if m.drawable.repeatX or m.drawable.repeatY
+        return true
+      end if
+      return super.isPotentiallyOnScreen(cameraObj)
+    end function
+
+    ' The base SceneObject default returns the raw (un-shifted) drawable world position,
+    ' which is wrong for a parallax layer: its actual on-screen position is the
+    ' parallax-shifted "effective" position, which can stay within the camera's frustum
+    ' indefinitely (the whole point of factor < 1) even while the raw owning-entity
+    ' position drifts arbitrarily far from the camera as it roams. Only reached for a
+    ' non-repeating layer (isPotentiallyOnScreen() above already short-circuits the
+    ' repeating case). Uses the last camera position findCanvasPosition() saw rather than
+    ' requiring a fresh one here (this method has no camera parameter) - one frame stale
+    ' at most, immaterial next to Camera2d.isInView()'s existing 20% fudge margin. Falls
+    ' back to the raw world position only before findCanvasPosition() has ever run - moot
+    ' in practice, since isPotentiallyOnScreen() already returns true unconditionally on
+    ' that same first frame via isFirstFrameSinceEnabled, without ever reaching this method.
+    protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      if invalid = m.referencePosition or invalid = m.lastCameraPosition
+        return [m.worldPosition]
+      end if
+      return [m.computeEffectiveWorldPosition(m.lastCameraPosition)]
+    end function
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `npm run build-tests && node scripts/run-tests-ci.js`
+Expected: all tests PASS, including the two new ones and everything from Tasks 1-5 (unchanged behavior for the common case).
+
+- [ ] **Step 5: Re-verify on-device**
+
+Rebuild `examples/parallax` (`cd examples/parallax && npm run build`, since it consumes the
+engine via a raw source copy, not ropm - confirm via its `bsconfig.json` whether a fresh
+`npm install`/engine rebuild step is needed first), sideload, launch, and repeat Task 7's
+"hold `left` for ~10 seconds" scenario via `rokubot` - confirm the layers no longer vanish.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/source/engine/renderer/sceneObjects/SceneObjectParallaxLayer.bs src/source/engine/renderer/sceneObjects/SceneObjectParallaxLayer.spec.bs
+git commit -m "Fix SceneObjectParallaxLayer frustum culling for a camera-distant owning entity"
+```
+
+---
+
+### Task 9: Swap examples/parallax's procedural art for the provided image pack
+
+The user supplied a real 5-layer parallax asset pack (CC0-licensed, by Luis Zuno /
+@ansimuz, ansimuz.com) at `/Users/mpearce/Downloads/parallax_mountain_pack/layers/`:
+`parallax-mountain-bg.png`, `parallax-mountain-montain-far.png`,
+`parallax-mountain-mountains.png`, `parallax-mountain-trees.png`,
+`parallax-mountain-foreground-trees.png` — each a horizontally-tileable strip with a
+transparent background. Front-to-back order (confirmed by the user):
+`foreground-trees` → `trees` → `mountains` → `mountain-far` → `bg`.
+
+This replaces Task 7's three procedurally-painted layers with these five real images,
+loaded the normal way (`Game.loadBitmap()`), instead of `BackgroundArt.bs`'s scratch-
+renderer painting. Keep the same camera-follow/`MainRoom` structure Task 7 already built.
+
+**Files:**
+- Delete: `examples/parallax/src/source/BackgroundArt.bs` (no longer needed)
+- Create: `examples/parallax/src/sprites/` — copy the 5 PNGs from the source path above
+- Create: `examples/parallax/src/sprites/CREDITS.md` (or similar) — attribution
+- Modify: `examples/parallax/src/source/Rooms/MainRoom.bs`
+
+- [ ] **Step 1: Copy the images and add attribution**
+
+```bash
+mkdir -p examples/parallax/src/sprites
+cp /Users/mpearce/Downloads/parallax_mountain_pack/layers/*.png examples/parallax/src/sprites/
+```
+
+Write `examples/parallax/src/sprites/CREDITS.md`:
+
+```markdown
+# Art Credits
+
+The parallax background layers (`parallax-mountain-*.png`) were created by
+[Luis Zuno (@ansimuz)](https://ansimuz.com) and are licensed
+[CC0](http://creativecommons.org/publicdomain/zero/1.0/) - free to copy, modify, and
+distribute, even commercially, without asking permission. Get more of Luis's resources at
+[ansimuz.com](https://ansimuz.com).
+```
+
+- [ ] **Step 2: Load the bitmaps and replace the layer setup in `MainRoom.bs`**
+
+Replace the `BackgroundArt.bs`-based tile painting with `Game.loadBitmap()` + `CreateObject("roRegion", ...)`, sized to each PNG's actual dimensions (check them - `sips -g pixelWidth -g pixelHeight <file>` on macOS, or load once and call `.getWidth()`/`.getHeight()` on the resulting bitmap - do not assume a fixed size). Five layers instead of three, with the front-to-back order and roughly-increasing parallax factors going back-to-front (feel free to tune once seen on-device, but starting values):
+
+```brightscript
+  override sub onCreate(args as roAssociativeArray)
+    m.player = new Player(m.game)
+    m.player.position = BGE.Math.VectorOps.create(m.game.canvas.getWidth() * 0.5, m.game.canvas.getHeight() * 0.5, 0)
+    m.game.addEntity(m.player)
+
+    background = new BGE.GameEntity(m.game, {name: "Background"})
+    background.position = BGE.Math.VectorOps.create(m.player.position.x, m.player.position.y, -500)
+    m.game.addEntity(background)
+
+    m.game.loadBitmap("bg", "pkg:/sprites/parallax-mountain-bg.png")
+    m.game.loadBitmap("mountainFar", "pkg:/sprites/parallax-mountain-montain-far.png")
+    m.game.loadBitmap("mountains", "pkg:/sprites/parallax-mountain-mountains.png")
+    m.game.loadBitmap("trees", "pkg:/sprites/parallax-mountain-trees.png")
+    m.game.loadBitmap("foregroundTrees", "pkg:/sprites/parallax-mountain-foreground-trees.png")
+
+    background.addDrawable("bg", m.newLayer("bg", 0.02, false, background))
+    background.addDrawable("mountainFar", m.newLayer("mountainFar", 0.1, true, background))
+    background.addDrawable("mountains", m.newLayer("mountains", 0.3, true, background))
+    background.addDrawable("trees", m.newLayer("trees", 0.6, true, background))
+
+    foregroundEntity = new BGE.GameEntity(m.game, {name: "Foreground"})
+    foregroundEntity.position = BGE.Math.VectorOps.create(m.player.position.x, m.player.position.y, 500)
+    m.game.addEntity(foregroundEntity)
+    foregroundEntity.addDrawable("foregroundTrees", m.newLayer("foregroundTrees", 1.4, true, foregroundEntity))
+  end sub
+
+  private function newLayer(bitmapName as string, factor as float, repeatX as boolean, owner as BGE.GameEntity) as BGE.DrawableParallaxLayer
+    bmp = m.game.getBitmap(bitmapName)
+    region = CreateObject("roRegion", bmp, 0, 0, bmp.getWidth(), bmp.getHeight())
+    return new BGE.DrawableParallaxLayer(owner, region, {
+      parallaxFactor: BGE.Math.VectorOps.create(factor, factor * 0.2),
+      repeatX: repeatX,
+      repeatY: true
+    })
+  end function
+```
+
+(`repeatY: true` for the same reason Task 7 found necessary - `DrawableParallaxLayer` has
+no anchor/centering support yet, so a non-repeating axis draws from a top-left corner and
+would leave part of the canvas uncovered; each of these images has enough plain
+sky/transparent margin at the top that vertical tiling isn't visually obvious. `bg` doesn't
+repeat horizontally since it's a single wide sky/moon backdrop, not a tileable strip -
+confirm this against the actual image before committing to `repeatX: false` for it; if it
+turns out to tile fine, `repeatX: true` is safer for a wandering camera.)
+
+Verify `BGE.Game.getBitmap(name)` is the actual accessor name (grep
+`src/source/engine/Game.bs` for `getBitmap`/`Bitmaps` before assuming this signature).
+
+- [ ] **Step 3: Delete `BackgroundArt.bs`**
+
+```bash
+rm examples/parallax/src/source/BackgroundArt.bs
+```
+
+- [ ] **Step 4: Build and verify on-device**
+
+`cd examples/parallax && npm run build`, then sideload/launch/screenshot via `rokubot` per
+the `rokubot-examples` skill. Confirm all 5 layers render, scroll at visibly distinct
+rates matching their depth order, and (per Task 8's fix) never vanish even after a long
+hold in one direction.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add examples/parallax
+git commit -m "Use the real ansimuz parallax mountain art pack in examples/parallax"
+```
+
+---
+
+### Task 10: Final quality gate and PR
 
 **Files:** none (verification only).
 
