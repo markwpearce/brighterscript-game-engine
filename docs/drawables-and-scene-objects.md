@@ -313,14 +313,38 @@ Unlike every other billboard drawable, `SceneObjectParallaxLayer` extends `Scene
 directly rather than `SceneObjectBillboard` - a parallax layer is always flat 2D and may
 draw several tiled copies in a single frame, so it skips the 3D/orientation/temp-bitmap
 machinery entirely and just issues one `Renderer.drawObject()`/`drawScaledObject()` call
-per visible tile.
+per visible tile. It also doesn't honor `Drawable`'s anchor (`setAnchor()`), rotation,
+color/outline, or `drawMode` fields - `SceneObjectParallaxLayer.performDraw()` ignores all
+of them and always draws from a top-left-anchored canvas position.
 
-All of the parallax math and tile enumeration live in one overridden
-`findCanvasPosition()` - the base `SceneObject.draw()`'s existing
-`objMovedInRelationToCamera()` check already re-triggers it whenever the camera moves
-(its default implementation already ORs in `cameraObj.movedLastFrame()`), so no change to
-the shared `SceneObject`/`Drawable` update machinery was needed to make a parallax layer
-stay live as the camera pans.
+Attach one to an entity the same way as any other drawable:
+
+```brighterscript
+region = CreateObject("roRegion", bmp, 0, 0, bmp.getWidth(), bmp.getHeight())
+owner.addDrawable("mountains", new BGE.DrawableParallaxLayer(owner, region, {
+  parallaxFactor: BGE.Math.VectorOps.create(0.3, 0.06),
+  repeatX: true,
+  repeatY: true
+}))
+```
+
+`examples/parallax` is a small, playable demo with several stacked background/foreground
+layers and a camera that follows the player (`examples/parallax/src/source/Rooms/MainRoom.bs`).
+
+`SceneObjectParallaxLayer` overrides three `SceneObject` methods to make this work:
+`findCanvasPosition()` does the actual parallax math and tile enumeration - the base
+`SceneObject.draw()`'s existing `objMovedInRelationToCamera()` check already re-triggers
+it whenever the camera moves (its default implementation already ORs in
+`cameraObj.movedLastFrame()`), so no change to the shared `SceneObject`/`Drawable` update
+machinery was needed for this part. `isPotentiallyOnScreen()` and
+`getPositionsForFrustumCheck()` correct the renderer's frustum-culling check, which
+otherwise tests distance from the owning entity's raw (un-shifted) position: a repeating
+layer (`repeatX`/`repeatY`) always returns `true` from `isPotentiallyOnScreen()` and is
+never culled, since a repeating axis re-tiles to cover the viewport regardless of how far
+the raw owning entity has drifted from the camera; a non-repeating layer is instead tested
+against its actual parallax-shifted screen position (via `getPositionsForFrustumCheck()`),
+not its raw owner position, so it stays correctly visible/hidden even once that raw
+position is far outside the frustum.
 
 Draw order relies entirely on the ordinary distance-from-camera sort - give a background
 layer's owning entity a suitably negative Z (or positive, for a foreground layer) so it
