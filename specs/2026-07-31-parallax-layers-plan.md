@@ -694,12 +694,28 @@ No production code changes expected (per the design spec, this already falls out
       entityB.position = BGE.Math.VectorOps.create(100, 50, 0)
       layerB = new BGE.DrawableParallaxLayer(entityB, m.newRegion(), {repeatX: false, repeatY: false, parallaxFactor: BGE.Math.VectorOps.create(0.9, 0.9)})
       sceneObjB = layerB.addToScene(m.renderer)
+
+      ' Not m.runFrame() here - it hardcodes m.entity.updateTransformationMatrix(), not
+      ' entityB's, which would leave entityB stuck at its default identity transform
+      ' (world position (0,0,0)) instead of its real (100,50). Both frames below need
+      ' renderer.setupCameraForFrame() explicitly too, for the same reason noted below.
       m.renderer.camera.position.x -= 10 ' reset camera back to its starting position
-      m.runFrame(sceneObjB)
-      m.renderer.camera.position.x += 10
+      m.renderer.setupCameraForFrame()
       entityB.updateTransformationMatrix()
       sceneObjB.update(m.renderer.camera)
       sceneObjB.draw(m.renderer)
+
+      m.renderer.camera.position.x += 10
+      ' renderer.setupCameraForFrame() is what actually refreshes Camera2d's cached
+      ' projection matrix for the new camera position - worldPointToCanvasPoint() only
+      ' recomputes that matrix lazily when it's invalid, not just because
+      ' camera.position changed, so skipping this call would project through a stale
+      ' matrix left over from the frame above.
+      m.renderer.setupCameraForFrame()
+      entityB.updateTransformationMatrix()
+      sceneObjB.update(m.renderer.camera)
+      sceneObjB.draw(m.renderer)
+
       oneStepX = sceneObjB["tileCanvasPositions"][0].x
 
       m.assertEqual(oneStepX, accumulatedX)
