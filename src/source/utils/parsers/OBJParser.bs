@@ -1,0 +1,97 @@
+namespace BGE.Parsers
+
+  ' Loads and parses a Wavefront .obj file's geometry.
+  '
+  ' @param {string} filePath
+  ' @return {BGE.Model3d}
+  function parseOBJFile(filePath as string) as BGE.Model3d
+    content = ReadAsciiFile(filePath)
+    if rodash.isNotInvalid(content)
+      return parseOBJContent(content)
+    end if
+    return invalid
+  end function
+
+  ' Parses the geometry of a Wavefront .obj file's content: `v` vertices and `f` faces,
+  ' fan-triangulating any face with more than 3 vertices (a quad or n-gon). `vt`/`vn`
+  ' indices in a face line (`v/vt/vn`, `v//vn`, `v/vt`, or bare `v`) are read only far
+  ' enough to skip over them correctly - texture coordinates and per-vertex normals
+  ' aren't retained yet, since Model3dFace only supports one flat normal/color per face
+  ' and texture mapping is separate follow-up work (see issue #89). Every face's normal
+  ' is instead computed from its own vertex geometry (Model3dFaceOps.create()'s default
+  ' when no normal is given), the same as an STL face with a missing/zero normal.
+  ' `mtllib`/`usemtl` material references are ignored entirely, per that same issue.
+  '
+  ' @param {string} content - the raw text content of a .obj file
+  ' @return {BGE.Model3d}
+  function parseOBJContent(content as string) as BGE.Model3d
+    lines = content.Split(chr(10))
+
+    vertices = [] as BGE.Math.Vector[]
+    faces = [] as BGE.Model3dFace[]
+    name = "OBJModel"
+    hasName = false
+
+    for each rawLine in lines
+      tokens = rodash.compact(rawLine.Trim().Split(" "))
+      if tokens.count() > 0
+        keyword = tokens[0]
+        if keyword = "v" and tokens.count() >= 4
+          vertices.push(BGE.Math.VectorOps.create(BGE.stringToFloat(tokens[1]), BGE.stringToFloat(tokens[2]), BGE.stringToFloat(tokens[3])))
+        else if (keyword = "o" or keyword = "g") and tokens.count() >= 2 and not hasName
+          name = tokens[1]
+          hasName = true
+        else if keyword = "f" and tokens.count() >= 4
+          appendOBJFace(faces, resolveOBJFaceVertices(tokens, vertices))
+        end if
+      end if
+    end for
+
+    model = new BGE.Model3d(faces)
+    model.name = name
+    return model
+  end function
+
+  ' Resolves a face line's `v`/`v/vt`/`v//vn`/`v/vt/vn` tokens (tokens[1..]) to the
+  ' actual vertex positions they reference.
+  '
+  ' @param {string[]} faceTokens - the full tokenized face line, including the leading "f"
+  ' @param {BGE.Math.Vector[]} vertices - every vertex parsed so far
+  ' @return {BGE.Math.Vector[]}
+  function resolveOBJFaceVertices(faceTokens as string[], vertices as BGE.Math.Vector[]) as BGE.Math.Vector[]
+    faceVertices = [] as BGE.Math.Vector[]
+    for i = 1 to faceTokens.count() - 1
+      vIndex = resolveOBJIndex(faceTokens[i].Split("/")[0], vertices.count())
+      if vIndex >= 0 and vIndex < vertices.count()
+        faceVertices.push(vertices[vIndex])
+      end if
+    end for
+    return faceVertices
+  end function
+
+  ' Fan-triangulates a face's already-resolved vertices (3 for a plain triangle, more
+  ' for a quad/n-gon) and appends the resulting triangle(s) to `faces`.
+  '
+  ' @param {BGE.Model3dFace[]} faces
+  ' @param {BGE.Math.Vector[]} faceVertices
+  sub appendOBJFace(faces as BGE.Model3dFace[], faceVertices as BGE.Math.Vector[])
+    for i = 1 to faceVertices.count() - 2
+      faces.push(BGE.Model3dFaceOps.create([faceVertices[0], faceVertices[i], faceVertices[i + 1]]))
+    end for
+  end sub
+
+  ' Resolves a single (1-based, or negative/relative per the .obj spec) OBJ index string
+  ' to a 0-based index into an array of the given count.
+  '
+  ' @param {string} indexStr
+  ' @param {integer} count - the current length of the array this index is into
+  ' @return {integer}
+  function resolveOBJIndex(indexStr as string, count as integer) as integer
+    index = indexStr.ToInt()
+    if index < 0
+      return count + index
+    end if
+    return index - 1
+  end function
+
+end namespace
