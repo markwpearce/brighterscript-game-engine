@@ -141,19 +141,26 @@ namespace BGE
     ' The Current Transformation Matrix
     transformationMatrix = BGE.Math.getFloat44Identity()
 
-    ' Whether the last frame's draw was skipped because the frustum rejected this object.
-    ' Only a genuine cull latches: nothing moved, so re-running the check would give the
-    ' same answer, and skipping it is what makes a static off-screen object free. A draw
-    ' that was attempted and *failed* must not latch - findCanvasPosition() and
-    ' performDraw() both already retry on the following frame, and treating their failure
-    ' as a cull is what made one bad frame permanent. See issue #48.
+    ' Whether the last frame's draw was skipped because the frustum rejected this object,
+    ' or because a subsequent draw attempt failed deterministically (see
+    ' isDeterministicDrawFailure()). Both latch: nothing moved, so re-running the check
+    ' would give the same answer, and skipping it is what makes a static off-screen object
+    ' free. A draw that was attempted and *failed for a reason that could change without
+    ' anything moving* (e.g. a transient scratch-bitmap-pool exhaustion) must not latch -
+    ' findCanvasPosition() and performDraw() both already retry on the following frame,
+    ' and treating that kind of failure as a cull is what made one bad frame permanent.
+    ' See issue #48 (the original cull-latch fix) and issue #73 (extending it to
+    ' deterministic draw failures, like a backface or an off-canvas rejection, which used
+    ' to re-run the full frustum check every single frame with no latch at all).
     protected lastFrameWasCulled = false
 
     ' Whether the last frame's draw actually happened. Distinct from lastFrameWasCulled
-    ' because a frame has three possible outcomes, not two: drew, was culled by the
-    ' frustum, or entered the draw path and failed. Only a cull may latch; a failure must
-    ' retry; and the failure state is also what makes the frustum check reachable, which
-    ' is what puts an object into the culled state in the first place.
+    ' because a frame has four possible outcomes, not two: drew, was culled by the
+    ' frustum, entered the draw path and failed deterministically, or entered the draw
+    ' path and failed transiently. Only the first kind of failure may latch (folded into
+    ' lastFrameWasCulled); a transient failure must retry; and reaching a failure at all is
+    ' what makes the frustum check reachable, which is what puts an object into the culled
+    ' state in the first place.
     protected lastFrameDidDraw = false
     protected hasValidWorldPosition = false
     protected hasValidCanvasPosition = false
@@ -265,6 +272,7 @@ namespace BGE
       ' as the geometry cache: that shortcut declines to re-examine a culled object until
       ' something moves, and neither of these counts as movement.
       enteredDrawPath = modeChanged or projectionChanged or m.isPotentiallyOnScreen(rendererObj.camera)
+      deterministicFailure = false
       if enteredDrawPath
         if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or modeChanged or projectionChanged
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
@@ -273,10 +281,12 @@ namespace BGE
           didDraw = m.performDraw(rendererObj, drawModeToUse)
           if didDraw
             m.afterDraw()
+          else
+            deterministicFailure = m.isDeterministicDrawFailure(rendererObj, drawModeToUse)
           end if
         end if
       end if
-      m.lastFrameWasCulled = not enteredDrawPath
+      m.lastFrameWasCulled = not enteredDrawPath or deterministicFailure
       m.lastFrameDidDraw = didDraw
       m.isFirstFrameSinceEnabled = false
       m.lastGeometryVersion = m.drawable.geometryVersion
@@ -417,6 +427,37 @@ namespace BGE
     ' @return {BGE.Math.Vector}
     protected function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
       return[m.worldPosition]
+    end function
+
+    ' Whether performDraw() just returning false is a failure that will keep happening
+    ' every frame until something moves or the geometry changes - and so is safe to latch
+    ' exactly like a frustum cull (see lastFrameWasCulled) - as opposed to a transient
+    ' failure (e.g. a scratch bitmap checkout failing) that must keep retrying. Only
+    ' called immediately after performDraw() returns false.
+    '
+    ' Override this when a subclass has a cheap, already-necessary check that explains a
+    ' draw failure this precisely - e.g. SceneObjectBillboard overrides it for a backface
+    ' cull and for a canvas position that's within the frustum but entirely off-canvas
+    ' (see issue #73). The default assumes any failure could be transient, which is always
+    ' safe - it just means this subclass's draw failures keep retrying every frame, same
+    ' as before this existed.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function isDeterministicDrawFailure(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      return false
+    end function
+
+    ' Whether this object was culled (skipped entirely) on the last frame drawn - either
+    ' by the camera frustum, or by a deterministic draw failure (see
+    ' isDeterministicDrawFailure()) that's being treated the same way. Game code can use
+    ' this (e.g. via GameEntity.isOnScreen()/Drawable.isOnScreen()) to skip its own
+    ' expensive per-frame work for an entity that isn't currently visible - see issue #75.
+    '
+    ' @return {boolean}
+    function isCulled() as boolean
+      return m.lastFrameWasCulled
     end function
 
   end class
