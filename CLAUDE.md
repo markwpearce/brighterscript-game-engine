@@ -29,6 +29,8 @@ Working with the example apps (each example under `examples/<name>` is its own n
 - `npm run validate-examples` — validate the engine, then `bsc --validate --create-package=false` in every example
 - `npm run clean-all` — clean the engine and every example
 - `npm run create-example -- <name> ["Display Title"]` — scaffold a new `examples/<name>` from `scripts/exampleTemplate` (manifest, bsconfig, generated icon/splash images, minimal `MainRoom`), and register it in the root `.vscode/tasks.json` example picker
+- `npm run create-entity -- <example> <EntityName>` — scaffold `examples/<example>/src/source/Entities/<EntityName>.bs` from `scripts/entityTemplate.bs` (a `BGE.GameEntity` subclass with `onCreate`/`onUpdate`/`onInput`/`onCollision` stubs)
+- `npm run create-room -- <example> <RoomName>` — scaffold `examples/<example>/src/source/Rooms/<RoomName>.bs` from `scripts/roomTemplate.bs` (a `BGE.Room` subclass with `onCreate`/`onInput` stubs); still needs a manual `game.defineRoom(...)`/`game.changeRoom(...)` wired up in `main.bs` (and an entry in that example's `getRoomNames()`, if it has one)
 
 All of the `*-examples` scripts fan out via `scripts/examples.js`, which iterates every `examples/*/` directory and runs the given command in each (a failure in one example doesn't stop the others, matching the original shell scripts this replaced). To act on a single example, `cd examples/<name>` and run its own npm scripts directly (`npm run build`, `npm run package`) instead. All `scripts/*.js` tooling is plain Node (no shell scripts) so it runs the same on Windows as macOS/Linux.
 
