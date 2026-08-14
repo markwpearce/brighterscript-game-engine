@@ -134,6 +134,7 @@ Install dependencies:
 ```
 cd brighterscript-game-engine
 npm install
+npx ropm install
 ```
 
 You will need to set up each project in the examples directories. You can do this by using this script:
