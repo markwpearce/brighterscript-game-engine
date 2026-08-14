@@ -28,6 +28,8 @@ the `SceneObject` side.
 | `Sprite`              | `SceneObjectImage`       | An `Image` subclass that indexes into a sprite sheet by frame number.        |
 | `AnimatedImage`       | `SceneObjectImage`       | A `Sprite` that advances its own frame index over time.                     |
 | `DrawableRectangle`   | `SceneObjectRectangle`   | A filled and/or outlined rectangle.                                         |
+| `DrawableCircle`      | `SceneObjectCircle`      | A filled and/or outlined circle - foreshortens into an ellipse when oriented in 3D. |
+| `DrawableSphere`      | `SceneObjectCircle`      | A `DrawableCircle` that always renders as an undistorted circle, regardless of camera angle. |
 | `DrawablePolygon`     | `SceneObjectPolygon`     | An arbitrary filled or outlined polygon.                                    |
 | `DrawableLine`        | `SceneObjectLine`        | A single line segment between two points.                                   |
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
@@ -141,6 +143,52 @@ quad has and an arbitrary polygon doesn't; the direct/billboard draw modes, whic
 `SceneObjectPolygon` ignores entirely; and a frustum check over the 4 already-computed world corners
 instead of `SceneObjectPolygon.getPositionsForFrustumCheck`'s scan-every-vertex bounding cube (whose
 8 corners collapse to the same 4 points for a flat quad anyway - pure overhead here).
+
+## Circles and Spheres
+
+`DrawableCircle` is a filled (and optionally outlined) circle. `GameEntity.addCircle` builds and
+attaches one the same way `addRectangle` does, just with a radius instead of a width/height:
+
+```brighterscript
+' an 80-radius red circle with a white outline
+m.addCircle("body", 80, {color: BGE.ColorsRGB.Red, outlineRGBA: BGE.ColorsRGB.White, outlineWidth: 2})
+```
+
+Like a rectangle, a circle is anchored at the top left of its bounding square by default and
+extends `radius * 2` right and down - `setAnchor`/`setSize`-style resizing works the same way too,
+via `setRadius(radius)` rather than assigning `radius` directly (a resize isn't movement, so it has
+to call `invalidateGeometry()` for the same reason `DrawableRectangle.setSize` does).
+
+Where a circle differs from a rectangle is *how* it's drawn - it has no cheap way to fill itself,
+so it uses two different techniques for its fill and its outline:
+
+- **Fill**: a texture blit, not a rasterized shape. `Renderer.getCircleResource()` rasterizes a
+  circle once (lazily, the first time anything asks for it) and every `DrawableCircle`/
+  `DrawableSphere` in that `Renderer` shares the same bitmap - `SceneObjectCircle` just returns a
+  region of it from `getRegionWithIdToDraw()`, exactly the way `SceneObjectImage` returns a region
+  of the bitmap its `Image` was constructed with. This gets the same pinned-corners warp,
+  color-tinting, and temp-bitmap caching an `Image` gets in the oriented draw modes, for free.
+- **Outline**: computed fresh, not baked into the texture. `outlineSegments` (default 24) points
+  are placed around the ellipse inscribed in the object's own already-transformed quad -
+  `SceneObjectCircle.getOutlineCanvasPoints()` derives the ellipse's two axes directly from the
+  quad's own corner vectors, so the outline automatically foreshortens along with the fill in the
+  oriented draw modes without a second world-to-canvas transform pass.
+
+A texture-backed fill means a circle pays the same **pinned-corners** cost an `Image` pays in the
+oriented/solid draw modes - real per-pixel perspective warping, not the cheap flat 2-triangle fill
+`DrawableRectangle`/`DrawablePolygon` get away with, since neither of those has a texture to sample.
+`SceneObjectCircle` opts `solid`/`solidDrawBackFace` into the same temp-bitmap caching the oriented
+modes already get (`useTempBitmapMap`), since - unlike `DrawableRectangle`, whose solid-mode fill is
+cheap enough not to need it - a circle's solid fill is exactly as expensive as its oriented fill.
+
+`DrawableSphere` is a `DrawableCircle` that forces `drawMode = SceneObjectDrawMode.directScaled` in
+its own constructor, so it renders identically in every way except one: it never turns to face a
+direction and never foreshortens into an ellipse, because a sphere looks the same from every angle.
+No separate `SceneObjectSphere` class exists for this - `SceneObject.getActualDrawMode()` only
+resolves the `matchCamera` default through the camera, so any other explicit `drawMode` (this one
+included) is used exactly as given. `examples/3d`'s CirclesRoom puts a ring of alternating
+`CirclePanel`/`SpherePanel` entities side by side, so orbiting the camera shows the difference
+directly: the circles turn edge-on and thin out, the spheres next to them don't move at all.
 
 ## SceneObjectDrawMode
 
