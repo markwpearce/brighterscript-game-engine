@@ -4,6 +4,7 @@ namespace BGE
   const TriangleDrawThreshold = 4
   const TriangleQuickDrawThreshold = 64
   const TriangleQuickDrawThresholdForSimulator = 32
+  const DEPTH_TIE_EPSILON = 0.5
 
   interface LevelOfDetailOptions
     levelOffset as integer
@@ -209,11 +210,27 @@ namespace BGE
       return m.sceneObjects.count()
     end function
 
+    ' The current array index of the SceneObject with the given id, or -1 if none
+    ' matches. Exposed for testing stable sort order - not meant for game logic.
+    '
+    ' @param {string} id
+    ' @return {integer}
+    function getSceneObjectIndexById(id as string) as integer
+      for i = 0 to m.sceneObjects.count() - 1
+        if m.sceneObjects[i].id = id
+          return i
+        end if
+      end for
+      return -1
+    end function
 
     sub addSceneObject(sceneObj as SceneObject)
       sceneObj.setId(m.nextSceneObjectId.toStr().trim())
       m.nextSceneObjectId++
       m.sceneObjects.push(sceneObj)
+      ' Initialize lastSortIndex to the current insertion position so objects added
+      ' at the same time are ordered by their addition order even before the first sort.
+      sceneObj.setLastSortIndex(m.sceneObjects.count() - 1)
       m.needsDepthSort = true
     end sub
 
@@ -258,7 +275,22 @@ namespace BGE
 
       m.lastFrameDidSort = m.needsDepthSort
       if m.needsDepthSort
-        m.sceneObjects.sortBy("negDistanceFromCamera")
+        ' A combined key: the quantized depth dominates, with the previous frame's
+        ' sort position as the tie-breaker for anything that quantizes to the same
+        ' bucket. The multiplier is scaled to the actual object count (rather than a
+        ' fixed large constant) so lastSortIndex - which never reaches the object
+        ' count - can never spill into the next depth bucket, while keeping the
+        ' combined key's magnitude small enough that Float32 precision doesn't silently
+        ' round the tie-break term away at larger depth values.
+        sortKeyMultiplier = m.sceneObjects.count() + 1
+        for each sceneObj in m.sceneObjects
+          quantizedDepth = Int(sceneObj.negDistanceFromCamera / DEPTH_TIE_EPSILON)
+          sceneObj.stableSortKey = (quantizedDepth * sortKeyMultiplier) + sceneObj.getLastSortIndex()
+        end for
+        m.sceneObjects.sortBy("stableSortKey")
+        for i = 0 to m.sceneObjects.count() - 1
+          m.sceneObjects[i].setLastSortIndex(i)
+        end for
         m.needsDepthSort = false
       end if
 
