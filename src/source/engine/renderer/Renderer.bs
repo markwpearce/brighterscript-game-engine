@@ -55,7 +55,8 @@ namespace BGE
 
     resources as {
       rightTriangle as BGE.RendererHelpers.TriangleBitmap,
-      circle as ifDraw2d
+      circle as ifDraw2d,
+      circleRegionWithId as BGE.RendererHelpers.RegionWithId
     } = {}
 
 
@@ -86,8 +87,78 @@ namespace BGE
         m.drawTriangleFromScratchTo(rightTriBitmap, rightTriPoints, 0, 0, -1, false, true)
         m.resources.rightTriangle = BGE.RendererHelpers.createTriangleBitmap(rightTriBitmap, rightTriPoints)
       end if
-
     end sub
+
+
+    ' The renderer's shared circle texture (see DrawableCircle/DrawableSphere/drawCircle),
+    ' rasterized lazily on first use rather than eagerly in loadResources() - rasterizing
+    ' it (there is no native filled-circle draw call, so it's approximated with a
+    ' row-by-row scanline fill) is expensive enough that building one for every single
+    ' Renderer constructed - which is every single Game constructed, most of which never
+    ' draw a circle at all - was measurably slowing down the entire test suite. Cached in
+    ' resources.circle after the first call, exactly like resources.rightTriangle, just
+    ' built on demand instead of upfront.
+    '
+    ' @return {ifDraw2d} the rasterized circle bitmap, or invalid if it couldn't be created
+    function getCircleResource() as ifDraw2d
+      if invalid = m.resources.circle
+        m.resources.circle = m.createCircleResource()
+      end if
+      return m.resources.circle
+    end function
+
+
+    ' The single shared roRegion wrapping getCircleResource(), cached after the first
+    ' call - every DrawableCircle/DrawableSphere instance draws the exact same region,
+    ' so SceneObjectCircle fetches this once per renderer instead of calling
+    ' CreateObject("roRegion", ...) fresh on every single frame for every circle (which
+    ' measurably tanked FPS with more than a couple on screen at once - unlike
+    ' SceneObjectImage, which already caches its own region on the drawable at
+    ' construction, this had no per-instance drawable to cache on, so it lives here).
+    '
+    ' @return {BGE.RendererHelpers.RegionWithId}
+    function getCircleRegionWithId() as BGE.RendererHelpers.RegionWithId
+      if invalid = m.resources.circleRegionWithId
+        circleBitmap = m.getCircleResource()
+        if invalid = circleBitmap
+          ' Not cached - a struct with an invalid .region, never bare `invalid` itself,
+          ' matching the convention every other getRegionWithIdToDraw() override follows
+          ' (e.g. SceneObjectImage's, via a drawable whose own .region can be invalid).
+          ' SceneObjectBillboard.drawToCanvas dereferences `regionToDraw.region` before
+          ' its own invalid-check, so a bare `invalid` return here would crash instead
+          ' of gracefully failing.
+          return BGE.RendererHelpers.createRegionWithId(invalid, "__bge_circle")
+        end if
+        region = CreateObject("roRegion", circleBitmap, 0, 0, circleBitmap.getWidth(), circleBitmap.getHeight())
+        m.resources.circleRegionWithId = BGE.RendererHelpers.createRegionWithId(region, "__bge_circle")
+      end if
+      return m.resources.circleRegionWithId
+    end function
+
+
+    ' Filling this as a many-sided polygon (via drawPolygonTo's fan triangulation) leaves
+    ' visible seam lines radiating from the center, where each triangle's own blended edge
+    ' meets the still-transparent background of a neighboring triangle - fine for a single
+    ' opaque shape drawn once to a canvas, but visible here since every triangle shares
+    ' this bitmap's edges. A row-by-row scanline fill has no adjacent shapes to seam
+    ' against - each row is one flat, fully-opaque DrawRect - so it's used instead, even
+    ' though it's conceptually simpler than reusing the polygon fill machinery.
+    private function createCircleResource() as ifDraw2d
+      margin = 2
+      radius = (RendererResourceSize / 2) - margin
+      center = RendererResourceSize / 2
+      circleBitmap = CreateObject("roBitmap", {width: RendererResourceSize, height: RendererResourceSize, AlphaEnable: true})
+      if invalid = circleBitmap
+        return invalid
+      end if
+      for y = -radius to radius
+        halfWidth = Sqr((radius * radius) - (y * y))
+        if halfWidth > 0
+          m.drawRectangleTo(circleBitmap, center - halfWidth, center + y, halfWidth * 2, 1, &hFFFFFFFF)
+        end if
+      end for
+      return circleBitmap
+    end function
 
     sub setDraw2d(draw2d as ifDraw2d)
       m.draw2d = draw2d
@@ -246,6 +317,30 @@ namespace BGE
       draw2d.DrawRect(x, y, width, height, rgba)
       m.drawCallsLastFrame++
       return true
+    end function
+
+
+    ' Draws a filled circle, centered at (x, y). There is no native filled-circle draw
+    ' call, so this scales the renderer's own pre-rasterized circle resource
+    ' (see getCircleResource()) rather than rasterizing a polygon fresh every call, the
+    ' same way drawRectangle draws a native DrawRect instead of rasterizing a quad.
+    '
+    ' @param {float} x center x
+    ' @param {float} y center y
+    ' @param {float} radius
+    ' @param {integer} rgba fill color to tint the circle resource with
+    ' @return {boolean} true if anything was drawn
+    function drawCircle(x as float, y as float, radius as float, rgba as integer) as boolean
+      return m.drawCircleTo(m.draw2d, x, y, radius, rgba)
+    end function
+
+    function drawCircleTo(draw2d as ifDraw2d, x as float, y as float, radius as float, rgba as integer) as boolean
+      circleBitmap = m.getCircleResource()
+      if invalid = circleBitmap
+        return false
+      end if
+      scale = (radius * 2) / RendererResourceSize
+      return m.drawScaledObjectTo(draw2d, x - radius, y - radius, scale, scale, circleBitmap, rgba)
     end function
 
     ' Draws text to the screen

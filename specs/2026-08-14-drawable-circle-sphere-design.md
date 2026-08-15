@@ -1,0 +1,79 @@
+# DrawableCircle and DrawableSphere
+
+Design for [#100](https://github.com/markwpearce/brighterscript-game-engine/issues/100).
+
+## Problem
+
+There is no way to attach a circle or sphere to a `GameEntity`. `Draw2D` has no native filled-ellipse primitive, so this needs a new `Drawable`/`SceneObject` pair (following the existing `DrawableRectangle`/`SceneObjectRectangle` and `DrawablePolygon`/`SceneObjectPolygon` pattern), plus a shipped image asset for the fill.
+
+Two shapes are in scope:
+
+- **`DrawableCircle`** — a flat disc. Like `DrawableRectangle`, it can be `oriented`/`solid`/`wireFrame` in 3D and will foreshorten into an ellipse when viewed at an angle, the same as any other billboard.
+- **`DrawableSphere`** — always renders as an undistorted circle regardless of camera angle, because a sphere looks the same from every direction. It reuses everything about `DrawableCircle` except this billboard-always behavior.
+
+## Rendering approach
+
+Two rendering concerns, two different techniques:
+
+**Fill** — via a shipped image asset, not per-frame triangle rasterization. `SceneObjectCircle extends SceneObjectBillboard` and overrides `getRegionWithIdToDraw()` to return a region of a new `circle.png` asset (white circle on transparent background), exactly the way `SceneObjectImage` supplies its own region. This means the fill gets `SceneObjectBillboard`'s existing pinned-corners draw path — perspective warp in oriented 3D modes, color tinting, temp-bitmap caching — for free, and needs zero new Renderer draw methods. A texture blit is far cheaper than rasterizing a many-sided polygon every frame, which is why this was chosen over drawing the fill as a regular N-gon through `Renderer.drawPolygon`.
+
+**Outline** — via the existing generic outline hook, not a new draw primitive. `SceneObjectBillboard.drawOutlineToCanvas()` already strokes whatever `getOutlineCanvasPoints()` returns through `Renderer.drawPolygonOutline` (this is exactly how `SceneObjectPolygon` supplies its own point list instead of the default 4 quad corners). `SceneObjectCircle` overrides `getOutlineCanvasPoints()` to return N points around the ellipse inscribed in the already-transformed `canvasPoints` quad — computed from the quad's own corner vectors as the ellipse's basis, not from a fresh world-to-canvas transform pass. This automatically gets outline color/width and correct foreshortening in oriented 3D modes, with no new Renderer method.
+
+## `DrawableCircle`
+
+Mirrors `DrawableRectangle`'s shape (`src/source/engine/drawables/DrawableRectangle.bs`):
+
+```
+class DrawableCircle extends Drawable
+
+  radius as float
+
+  ' Regular-polygon segment count used only for the outline (the fill is a
+  ' texture blit, not a polygon, so this doesn't affect fill smoothness).
+  outlineSegments as integer = 24
+
+  sub new(owner as GameEntity, radius as float, args = {} as roAssociativeArray)
+
+  ' Resizes the circle. Like DrawableRectangle.setSize, calls
+  ' invalidateGeometry() since a resize isn't movement.
+  sub setRadius(radius as float)
+
+  override function addToScene(rendererObj as Renderer) as BGE.SceneObject
+end class
+```
+
+`color` (fill tint), `outlineRGBA`, `outlineWidth`, and `alpha` are inherited from `Drawable` unchanged — same convention as every other drawable.
+
+## `SceneObjectCircle`
+
+`src/source/engine/renderer/sceneObjects/SceneObjectCircle.bs`, extends `SceneObjectBillboard`:
+
+- `getRegionWithIdToDraw()` — returns a region of the shipped circle bitmap, sized/scaled to `drawable.radius * 2` for width and height (same anchor convention as `Image`/`DrawableRectangle`: top-left of the drawable's own world position, extending right/down).
+- `getOutlineCanvasPoints()` — returns `drawable.outlineSegments` points around the ellipse inscribed in `m.canvasPoints`, only computed/used when `drawable.hasOutline()` (mirrors `SceneObjectRectangle.usesTempBitmap`'s pattern of skipping work when there's nothing to draw).
+- No override needed for fill/tint/caching — inherited from `SceneObjectBillboard` as-is, same as `SceneObjectImage`.
+
+## `DrawableSphere`
+
+No new `SceneObject` class needed. `SceneObject.getActualDrawMode()` (`SceneObject.bs`) only resolves `SceneObjectDrawMode.matchCamera` through the camera (`cam.getDrawMode()`) — any other explicit `drawMode` value on the `Drawable` is used as-is, regardless of camera type. So `DrawableSphere extends DrawableCircle` and simply sets `m.drawMode = SceneObjectDrawMode.directScaled` in its constructor: `directScaled` billboards (never rotates/foreshortens) while still scaling with camera distance in 3D, which is exactly "always looks like a circle from any angle." `addToScene` is inherited unchanged from `DrawableCircle` and still produces a `SceneObjectCircle` — the forced draw mode alone is what makes it behave as a sphere.
+
+## Circle asset
+
+A new `src/source/images/circle.png` (white circle, anti-aliased edge, transparent background) ships with the engine — the engine's first shipped binary asset. It's **generated by a small Node script using `pureimage`** (already a devDependency, used today by `scripts/generate-example-images.js` for scaffolded icon/splash images), not hand-authored, so it's reproducible and can be regenerated if the resolution/quality needs to change. The generated PNG is committed to the repo, like the `scripts/exampleTemplate/src/images/*.png` files are.
+
+Non-`.bs` files are copied verbatim by `bsc` (`bsconfig.build.json`'s `files: ["**/*", "!**/*.spec.bs"]`), confirmed by spiking a placeholder PNG through the full pipeline: it lands at `build/source/images/circle.png` after `npm run build`, and is included in `npm pack`'s file list.
+
+**The runtime `pkg:/` path differs between the two ways this engine gets consumed, confirmed by spiking both:**
+- A real `ropm install` nests it under the package's ropm module name: `pkg:/source/roku_modules/brighterscriptgameengine/images/circle.png`.
+- `examples/*`'s file-copy trick (`bsconfig.json`'s `{src: "../../../src/**/*", dest: "source/roku_modules"}`) has no such nesting: `pkg:/source/roku_modules/source/images/circle.png`.
+
+A hardcoded path can't cover both, so the engine locates its own asset at runtime the same way `Game.setUpFonts()` already locates consumer-supplied fonts: via `roFileSystem.FindRecurse`. `Game` gets a new private `setUpCircleAsset()` (called from the constructor alongside `setUpFonts()`) that runs `m.filesystem.FindRecurse("pkg:/source/", "circle.png")` once, loads the first match via the existing `loadBitmap()`/`Bitmaps` registry under a fixed internal key, and caches the resulting `roRegion` for every `DrawableCircle`/`DrawableSphere` instance to share.
+
+## Testing
+
+- Rooibos specs for `DrawableCircle`/`DrawableSphere`, following `DrawableRectangle.spec.bs`: `radius`/`setRadius`/`invalidateGeometry` behavior, and the ellipse-inscribed-in-quad outline point math (a pure function, testable without a real `Game`).
+- **Not `examples/rendererTest`** - that harness is deliberately built without `BGE.Game`/`GameEntity` (see CLAUDE.md), which `DrawableCircle` requires, and it exists specifically to demo new raw `Renderer` capabilities - this design adds none (fill/outline both reuse existing primitives). Instead, add a `CircleRoom` to `examples/pixels` ("a tour of drawables... one room per shape"), mirroring the existing `RectangleRoom`/`PolygonRoom` pattern: a `CircleEntity` and a `SphereEntity`, cycling draw modes the same way `PolygonRoom.changeDrawMode()` does, to visually confirm the sphere stays round while the circle foreshortens in oriented 3D modes.
+
+## Out of scope
+
+- Shaded/lit spheres (the issue mentions this as a "perhaps" - not attempted here; `DrawableSphere` is flat-shaded like everything else in this 2D-renderer-based engine).
+- Texture-mapped circles/spheres (only solid-color tinting, matching every other non-`Image` drawable).

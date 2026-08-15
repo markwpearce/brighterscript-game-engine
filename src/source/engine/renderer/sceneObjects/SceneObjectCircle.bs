@@ -1,0 +1,87 @@
+namespace BGE
+
+  ' Draws a DrawableCircle. The fill is inherited, unmodified SceneObjectBillboard
+  ' machinery (pinned-corners texture warp, tinting, temp-bitmap caching) blitting the
+  ' renderer's shared circle resource (Renderer.getCircleResource(), built lazily on
+  ' first use) - exactly like SceneObjectImage, just with a fixed texture instead of one
+  ' supplied by the drawable. Only the outline differs from a plain Image: it's stroked
+  ' as an N-gon inscribed in this object's own already-transformed canvasPoints quad (via
+  ' the generic getOutlineCanvasPoints() hook), which is far cheaper than rasterizing the
+  ' fill itself as a many-sided polygon and needs no new Renderer draw method.
+  class SceneObjectCircle extends SceneObjectBillboard
+
+    drawable as DrawableCircle
+
+    sub new(name as string, drawableObj as DrawableCircle)
+      super(name, drawableObj, SceneObjectType.Circle)
+    end sub
+
+
+    ' Every DrawableCircle/DrawableSphere instance shares the exact same region, so this
+    ' fetches the renderer's own cached one (built once, on first use) rather than
+    ' allocating a fresh roRegion here every single frame.
+    protected override function getRegionWithIdToDraw(rendererObj as BGE.Renderer) as BGE.RendererHelpers.RegionWithId
+      return rendererObj.getCircleRegionWithId()
+    end function
+
+
+    ' The base class only caches a temp bitmap for the oriented modes by default,
+    ' because its own solid-mode fill (a flat drawPolygon, no texture) is cheap enough
+    ' not to need it - see SceneObjectRectangle.usesTempBitmap, which overrides this
+    ' same hook for its own reason (skipping the cache for an unfilled rectangle). A
+    ' circle's solid fill is the same expensive pinned-corners texture warp the
+    ' oriented modes use, so it needs the same reuse-across-frames caching too, or
+    ' drawToCanvas's inherited solid branch (see below) would re-run that warp from
+    ' scratch on every single frame with no caching at all.
+    protected override function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+      return super.usesTempBitmap(drawMode) or isSolidDrawMode(drawMode)
+    end function
+
+
+    ' The base class's own wireFrame branch draws the plain 4-corner quad directly (a
+    ' square) - correct for DrawableRectangle, whose fill genuinely is its own quad, but
+    ' wrong for a circle. Routed through drawOutlineToCanvas()/getOutlineCanvasPoints()
+    ' below instead (same pattern SceneObjectRectangle uses). solid mode needs no
+    ' override here at all now that usesTempBitmap() opts it in above - drawToCanvas is
+    ' only ever called for draw modes that don't use a temp bitmap, so the base class's
+    ' solid branch is simply never reached for a circle; the inherited drawToTempBitmap
+    ' already draws the right thing (getRegionWithIdToDraw's circular region, via
+    ' drawPinnedCornersTo) and caches it exactly like oriented mode does.
+    protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if isWireFrameDrawMode(drawMode)
+        return m.drawOutlineToCanvas(rendererObj, drawMode)
+      end if
+      return super.drawToCanvas(rendererObj, drawMode)
+    end function
+
+
+    ' N points around the ellipse inscribed in this object's own transformed
+    ' canvasPoints quad, computed from the quad's own corner vectors as the ellipse's
+    ' basis rather than a fresh world-to-canvas transform pass - so this automatically
+    ' gets the same foreshortening the quad itself has in oriented 3D draw modes.
+    '
+    ' No hasOutline() check here, matching the base class's own default implementation -
+    ' that gating already happens at the "stroke on top of the fill" call site
+    ' (performDraw), and a wireFrame draw mode (see drawToCanvas above) needs these
+    ' points regardless of whether an outline color was ever set, the same way
+    ' SceneObjectRectangle's wireFrame mode still strokes with the fill color when no
+    ' outlineRGBA is set (see Drawable.getOutlineColorRGBA's fallback).
+    protected override function getOutlineCanvasPoints() as BGE.Math.Vector[]
+      center = m.canvasPoints.getCenter()
+      halfAcross = BGE.Math.VectorOps.scale(BGE.Math.VectorOps.subtract(m.canvasPoints.topRight, m.canvasPoints.topLeft), 0.5)
+      halfDown = BGE.Math.VectorOps.scale(BGE.Math.VectorOps.subtract(m.canvasPoints.bottomLeft, m.canvasPoints.topLeft), 0.5)
+      segments = m.drawable.outlineSegments
+      points = []
+      for i = 0 to segments - 1
+        theta = (2 * BGE.Math.PI) * (i / segments)
+        offset = BGE.Math.VectorOps.add(
+        BGE.Math.VectorOps.scale(halfAcross, cos(theta)),
+        BGE.Math.VectorOps.scale(halfDown, sin(theta)))
+        points.push(BGE.Math.VectorOps.add(center, offset))
+      end for
+      return points
+    end function
+
+  end class
+
+end namespace
