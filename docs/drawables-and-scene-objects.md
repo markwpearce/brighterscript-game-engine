@@ -178,8 +178,10 @@ A texture-backed fill means a circle pays the same **pinned-corners** cost an `I
 oriented/solid draw modes - real per-pixel perspective warping, not the cheap flat 2-triangle fill
 `DrawableRectangle`/`DrawablePolygon` get away with, since neither of those has a texture to sample.
 `SceneObjectCircle` opts `solid`/`solidDrawBackFace` into the same temp-bitmap caching the oriented
-modes already get (`useTempBitmapMap`), since - unlike `DrawableRectangle`, whose solid-mode fill is
-cheap enough not to need it - a circle's solid fill is exactly as expensive as its oriented fill.
+modes already get, by overriding `usesTempBitmap()` (the same extension point
+`SceneObjectRectangle` overrides for its own reason - skipping the cache for an unfilled
+rectangle), since - unlike `DrawableRectangle`, whose solid-mode fill is cheap enough not to need
+it - a circle's solid fill is exactly as expensive as its oriented fill.
 
 `DrawableSphere` is a `DrawableCircle` that forces `drawMode = SceneObjectDrawMode.directScaled` in
 its own constructor, so it renders identically in every way except one: it never turns to face a
