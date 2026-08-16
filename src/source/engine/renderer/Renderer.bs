@@ -38,6 +38,17 @@ namespace BGE
     private lastFrameDidSort as boolean = false
     private overlapClusters as BGE.SceneObject[][] = []
 
+    ' Whether drawScene() computes overlap clusters (BGE.DepthSort.groupIntoClusters)
+    ' this frame. Off by default: nothing in the engine's actual draw path consumes
+    ' getOverlapClusters() yet (that's a future follow-up - see #59's Plan 2), the cost
+    ' of the O(n^2)-ish broad phase across every scene object hasn't been measured
+    ' on-device, and the design's own requirement is that a solo (non-overlapping)
+    ' scene sees zero regression from today's cost. Set this true to opt in (see
+    ' examples/depthsort's ClusterVisualizerRoom, which visualizes the result) -
+    ' TieBreakRoom deliberately does NOT opt in, since it only demonstrates the
+    ' tie-break fix, not clustering.
+    public computeOverlapClusters as boolean = false
+
     camera as Camera
 
     triangleCache = new TriangleCache(5)
@@ -211,9 +222,11 @@ namespace BGE
       return m.sceneObjects.count()
     end function
 
-    ' This frame's overlap clusters - most objects are alone in a cluster of one.
-    ' Computed every frame for now (Plan 2 will use this to decide caching/draw
-    ' behavior; for now it's purely diagnostic/visualized by examples/depthsort).
+    ' This frame's overlap clusters - most objects are alone in a cluster of one. Only
+    ' computed when computeOverlapClusters is true (off by default - see that field);
+    ' otherwise this returns whatever was last computed (or [] if never enabled). Plan 2
+    ' will use this to decide caching/draw behavior; for now it's purely diagnostic/
+    ' visualized by examples/depthsort.
     '
     ' @return {BGE.SceneObject[][]} each cluster as an array of its member SceneObjects
     function getOverlapClusters() as BGE.SceneObject[][]
@@ -260,6 +273,23 @@ namespace BGE
       sceneObjToRemove.id = ""
     end sub
 
+    ' Scene objects worth handing to BGE.DepthSort.groupIntoClusters() this frame:
+    ' disabled objects and already-culled objects are excluded, since neither will
+    ' actually be drawn this frame - clustering them would waste the (unmeasured, opt-in
+    ' only) O(n^2)-ish broad-phase cost on objects whose transforms may also be stale
+    ' (a culled object's geometry isn't guaranteed to have been recomputed this frame).
+    '
+    ' @return {BGE.SceneObject[]}
+    private function getClusterCandidates() as BGE.SceneObject[]
+      candidates = []
+      for each sceneObj in m.sceneObjects
+        if sceneObj.isEnabled() and not sceneObj.isCulled()
+          candidates.push(sceneObj)
+        end if
+      end for
+      return candidates
+    end function
+
     private sub updateSceneObjects()
       for each sceneObj in m.sceneObjects
         if sceneObj.isEnabled()
@@ -283,7 +313,9 @@ namespace BGE
     sub drawScene()
       m.updateSceneObjects()
 
-      m.overlapClusters = BGE.DepthSort.groupIntoClusters(m.sceneObjects, m)
+      if m.computeOverlapClusters
+        m.overlapClusters = BGE.DepthSort.groupIntoClusters(m.getClusterCandidates(), m)
+      end if
 
       m.lastFrameDidSort = m.needsDepthSort
       if m.needsDepthSort
