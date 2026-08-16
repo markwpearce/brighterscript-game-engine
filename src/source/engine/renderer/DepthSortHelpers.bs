@@ -294,68 +294,83 @@ namespace BGE.DepthSort
     return {min: minProj, max: maxProj}
   end function
 
+  ' The result of groupIntoClusters(): the computed clusters, plus the sorted-by-minX
+  ' ordering it used this frame - feed sortedIds back in as previousOrderIds next frame
+  ' to keep the incremental sort cheap (see sortByMinXIncremental).
+  interface ClusterResult
+    clusters as BGE.SceneObject[][]
+    sortedIds as string[]
+  end interface
+
   ' Groups objects into overlap clusters: connected components over the "these two
-  ' objects' bounds overlap" relation (broad phase, then narrow phase to reject false
-  ' positives). Most objects end up alone in a cluster of one - only objects that
-  ' mutually, genuinely overlap end up grouped together.
+  ' objects' bounds overlap" relation (broad phase via sort-and-sweep, then narrow
+  ' phase to reject false positives). Most objects end up alone in a cluster of one -
+  ' only objects that mutually, genuinely overlap end up grouped together.
   '
   ' @param {BGE.SceneObject[]} objects
   ' @param {BGE.Renderer} rendererObj
-  ' @return {BGE.SceneObject[][]} each cluster as an array of its member SceneObjects
-  function groupIntoClusters(objects as BGE.SceneObject[], rendererObj as BGE.Renderer) as BGE.SceneObject[][]
-    screenBoundsByIndex = [] as ScreenBounds[]
-    hullByIndex = [] as BGE.Math.Vector[][]
+  ' @param {string[]} previousOrderIds - last frame's sorted order (see ClusterResult.sortedIds); pass [] on the first call
+  ' @return {ClusterResult}
+  function groupIntoClusters(objects as BGE.SceneObject[], rendererObj as BGE.Renderer, previousOrderIds as string[]) as ClusterResult
+    screenBoundsById = {}
+    hullById = {}
     for each obj in objects
       boundingPoints = obj.getBoundingPoints(rendererObj.camera)
-      screenBoundsByIndex.push(getScreenBounds(boundingPoints, rendererObj))
+      screenBoundsById[obj.id] = getScreenBounds(boundingPoints, rendererObj)
       projectedPoints = projectPointsToScreen(boundingPoints, rendererObj)
       if projectedPoints.count() < MIN_VALID_HULL_POINTS
         ' Fewer than MIN_VALID_HULL_POINTS points survived projection (e.g. some/all of
-        ' this object's bounding points are behind the camera - worldPointToCanvasPoint
-        ' silently drops those - or it only ever had 1-2 bounding points to begin with,
-        ' like SceneObjectPlane/SceneObjectParallaxLayer's single-point default). Do NOT
-        ' call BGE.QuickHull.QuickHull on this: it does not return [] for fewer-than-3
-        ' points, it can return [invalid, invalid], which would crash later in
-        ' hullsOverlap/getEdgeNormals. Treat this object as having no valid hull this
-        ' frame - hullsOverlap()'s own isValidHull guard then keeps it out of every
-        ' cluster, i.e. it draws solo, same as being alone.
+        ' this object's bounding points are behind the camera, or it only ever had 1-2
+        ' bounding points to begin with, like SceneObjectPlane/SceneObjectParallaxLayer's
+        ' single-point default). Treat this object as having no valid hull this frame -
+        ' hullsOverlap()'s own isValidHull guard then keeps it out of every cluster.
         hull = []
       else
         hull = BGE.QuickHull.QuickHull(projectedPoints)
       end if
-      hullByIndex.push(hull)
+      hullById[obj.id] = hull
     end for
 
-    ' Union-find over object indices.
+    sortedObjects = sortByMinXIncremental(objects, previousOrderIds, screenBoundsById)
+
+    ' Union-find over indexes into sortedObjects.
     parent = [] as integer[]
-    for i = 0 to objects.count() - 1
+    for i = 0 to sortedObjects.count() - 1
       parent.push(i)
     end for
 
-    for i = 0 to objects.count() - 1
-      for j = i + 1 to objects.count() - 1
-        if boundsOverlap(screenBoundsByIndex[i], screenBoundsByIndex[j])
-          if hullsOverlap(hullByIndex[i], hullByIndex[j])
-            union(parent, i, j)
-          end if
+    for each pairIndexes in sweepForCandidatePairIndexes(sortedObjects, screenBoundsById)
+      i = pairIndexes[0]
+      j = pairIndexes[1]
+      idA = sortedObjects[i].id
+      idB = sortedObjects[j].id
+      if boundsOverlap(screenBoundsById[idA], screenBoundsById[idB])
+        if hullsOverlap(hullById[idA], hullById[idB])
+          union(parent, i, j)
         end if
-      end for
+      end if
     end for
 
     clustersByRoot = {}
-    for i = 0 to objects.count() - 1
+    for i = 0 to sortedObjects.count() - 1
       root = find(parent, i).toStr()
       if invalid = clustersByRoot[root]
         clustersByRoot[root] = [] as BGE.SceneObject[]
       end if
-      clustersByRoot[root].push(objects[i])
+      clustersByRoot[root].push(sortedObjects[i])
     end for
 
     clusters = [] as BGE.SceneObject[][]
     for each item in clustersByRoot.items()
       clusters.push(item.value)
     end for
-    return clusters
+
+    sortedIds = [] as string[]
+    for each obj in sortedObjects
+      sortedIds.push(obj.id)
+    end for
+
+    return {clusters: clusters, sortedIds: sortedIds}
   end function
 
   function projectPointsToScreen(worldPoints as BGE.Math.Vector[], rendererObj as BGE.Renderer) as BGE.Math.Vector[]
