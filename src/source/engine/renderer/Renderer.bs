@@ -4,6 +4,7 @@ namespace BGE
   const TriangleDrawThreshold = 4
   const TriangleQuickDrawThreshold = 64
   const TriangleQuickDrawThresholdForSimulator = 32
+  const DEPTH_TIE_EPSILON = 0.5
 
   interface LevelOfDetailOptions
     levelOffset as integer
@@ -33,6 +34,20 @@ namespace BGE
     private draw2d as ifDraw2D = invalid
 
     private sceneObjects as SceneObject[] = []
+    private needsDepthSort as boolean = true
+    private lastFrameDidSort as boolean = false
+    private overlapClusters as BGE.SceneObject[][] = []
+
+    ' Whether drawScene() computes overlap clusters (BGE.DepthSort.groupIntoClusters)
+    ' this frame. Off by default: nothing in the engine's actual draw path consumes
+    ' getOverlapClusters() yet (that's a future follow-up - see #59's Plan 2), the cost
+    ' of the O(n^2)-ish broad phase across every scene object hasn't been measured
+    ' on-device, and the design's own requirement is that a solo (non-overlapping)
+    ' scene sees zero regression from today's cost. Set this true to opt in (see
+    ' examples/depthsort's ClusterVisualizerRoom, which visualizes the result) -
+    ' TieBreakRoom deliberately does NOT opt in, since it only demonstrates the
+    ' tie-break fix, not clustering.
+    public computeOverlapClusters as boolean = false
 
     camera as Camera
 
@@ -191,11 +206,55 @@ namespace BGE
       return m.drawCallsLastFrame
     end function
 
+    ' Whether drawScene() actually re-sorted the scene objects last frame, or skipped
+    ' the sort because nothing that could change draw order happened. Exposed for
+    ' testing/diagnostics, not meant to drive game logic.
+    '
+    ' @return {boolean}
+    function didSortLastFrame() as boolean
+      return m.lastFrameDidSort
+    end function
+
+    ' How many SceneObjects are currently registered with this renderer.
+    '
+    ' @return {integer}
+    function getSceneObjectCount() as integer
+      return m.sceneObjects.count()
+    end function
+
+    ' This frame's overlap clusters - most objects are alone in a cluster of one. Only
+    ' computed when computeOverlapClusters is true (off by default - see that field);
+    ' otherwise this returns whatever was last computed (or [] if never enabled). Plan 2
+    ' will use this to decide caching/draw behavior; for now it's purely diagnostic/
+    ' visualized by examples/depthsort.
+    '
+    ' @return {BGE.SceneObject[][]} each cluster as an array of its member SceneObjects
+    function getOverlapClusters() as BGE.SceneObject[][]
+      return m.overlapClusters
+    end function
+
+    ' The current array index of the SceneObject with the given id, or -1 if none
+    ' matches. Exposed for testing stable sort order - not meant for game logic.
+    '
+    ' @param {string} id
+    ' @return {integer}
+    function getSceneObjectIndexById(id as string) as integer
+      for i = 0 to m.sceneObjects.count() - 1
+        if m.sceneObjects[i].id = id
+          return i
+        end if
+      end for
+      return -1
+    end function
 
     sub addSceneObject(sceneObj as SceneObject)
       sceneObj.setId(m.nextSceneObjectId.toStr().trim())
       m.nextSceneObjectId++
       m.sceneObjects.push(sceneObj)
+      ' Initialize lastSortIndex to the current insertion position so objects added
+      ' at the same time are ordered by their addition order even before the first sort.
+      sceneObj.setLastSortIndex(m.sceneObjects.count() - 1)
+      m.needsDepthSort = true
     end sub
 
     sub removeSceneObject(sceneObjToRemove as SceneObject)
@@ -209,14 +268,35 @@ namespace BGE
       end for
       if indexToDelete >= 0
         m.sceneObjects.delete(indexToDelete)
+        m.needsDepthSort = true
       end if
       sceneObjToRemove.id = ""
     end sub
+
+    ' Scene objects worth handing to BGE.DepthSort.groupIntoClusters() this frame:
+    ' disabled objects and already-culled objects are excluded, since neither will
+    ' actually be drawn this frame - clustering them would waste the (unmeasured, opt-in
+    ' only) O(n^2)-ish broad-phase cost on objects whose transforms may also be stale
+    ' (a culled object's geometry isn't guaranteed to have been recomputed this frame).
+    '
+    ' @return {BGE.SceneObject[]}
+    private function getClusterCandidates() as BGE.SceneObject[]
+      candidates = []
+      for each sceneObj in m.sceneObjects
+        if sceneObj.isEnabled() and not sceneObj.isCulled()
+          candidates.push(sceneObj)
+        end if
+      end for
+      return candidates
+    end function
 
     private sub updateSceneObjects()
       for each sceneObj in m.sceneObjects
         if sceneObj.isEnabled()
           sceneObj.update(m.camera)
+          if sceneObj.depthChangedThisFrame
+            m.needsDepthSort = true
+          end if
         end if
       end for
     end sub
@@ -233,7 +313,35 @@ namespace BGE
     sub drawScene()
       m.updateSceneObjects()
 
-      m.sceneObjects.sortBy("negDistanceFromCamera")
+      if m.computeOverlapClusters
+        m.overlapClusters = BGE.DepthSort.groupIntoClusters(m.getClusterCandidates(), m)
+      end if
+
+      m.lastFrameDidSort = m.needsDepthSort
+      if m.needsDepthSort
+        ' A combined key: the quantized depth dominates, with the previous frame's
+        ' sort position as the tie-breaker for anything that quantizes to the same
+        ' bucket. This is bucket quantization, not a true epsilon-tolerance comparison -
+        ' two depths that differ by far less than DEPTH_TIE_EPSILON but straddle a
+        ' bucket boundary (Int() truncation) still land in different buckets and can
+        ' still swap order; only depths that quantize into the *same* bucket are
+        ' guaranteed to keep their previous relative order. The multiplier is scaled to
+        ' the actual object count (rather than a fixed large constant) so lastSortIndex
+        ' - which never reaches the object count - can never spill into the next depth
+        ' bucket, while keeping the combined key's magnitude small enough that Float32
+        ' precision doesn't silently round the tie-break term away at larger depth
+        ' values.
+        sortKeyMultiplier = m.sceneObjects.count() + 1
+        for each sceneObj in m.sceneObjects
+          quantizedDepth = Int(sceneObj.negDistanceFromCamera / DEPTH_TIE_EPSILON)
+          sceneObj.stableSortKey = (quantizedDepth * sortKeyMultiplier) + sceneObj.getLastSortIndex()
+        end for
+        m.sceneObjects.sortBy("stableSortKey")
+        for i = 0 to m.sceneObjects.count() - 1
+          m.sceneObjects[i].setLastSortIndex(i)
+        end for
+        m.needsDepthSort = false
+      end if
 
       'TODO - Do proper occlusion culling
       ' draw planes first

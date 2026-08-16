@@ -179,6 +179,23 @@ namespace BGE
     ' The camera's `projectionVersion` as of the last draw - see projectionChanged()
     protected lastProjectionVersion as integer = -1
 
+    ' True for exactly the frame this object's negDistanceFromCamera was recomputed -
+    ' Renderer.updateSceneObjects() ORs these together to decide whether the whole
+    ' scene needs a re-sort this frame, instead of always resorting even when nothing
+    ' that could change draw order actually happened.
+    depthChangedThisFrame as boolean = true
+
+    ' What Renderer actually sorts by - negDistanceFromCamera quantized into
+    ' DEPTH_TIE_EPSILON-wide buckets, combined with this object's sort position from
+    ' the previous frame, so two objects whose depths quantize into the same bucket
+    ' keep their previous relative order instead of swapping from floating-point jitter
+    ' alone. This is bucket quantization, not a true epsilon-tolerance comparison -
+    ' two depths closer together than the epsilon can still straddle a bucket boundary
+    ' and swap order. A genuine depth crossover still swaps order correctly, since the
+    ' quantized depth term dominates the combined key.
+    stableSortKey as float = 0
+    private lastSortIndex as integer = 0
+
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       m.name = name
       m.drawable = drawableObj
@@ -209,6 +226,14 @@ namespace BGE
       end if
     end sub
 
+    sub setLastSortIndex(index as integer)
+      m.lastSortIndex = index
+    end sub
+
+    function getLastSortIndex() as integer
+      return m.lastSortIndex
+    end function
+
     ' Update the scene object for the current frame.
     ' Updates the world position and checks if the object should be drawn.
     ' Updates negDistanceFromCamera for depth sorting.
@@ -226,7 +251,8 @@ namespace BGE
         BGE.math.Matrix44.setFrom(m.transformationMatrix, BGE.math.Matrix44.multiply(m.drawable.transformationMatrix, m.drawable.owner.transformationMatrix))
         m.hasValidWorldPosition = m.updateWorldPosition(sceneObjDrawMode)
       end if
-      if cameraObj.movedLastFrame() or objMovedLastFrame or drawModeChanged
+      m.depthChangedThisFrame = cameraObj.movedLastFrame() or objMovedLastFrame or drawModeChanged
+      if m.depthChangedThisFrame
         m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.getPositionForCameraDistance(sceneObjDrawMode))
       end if
       m.wasEnabledLastFrame = m.isEnabled()
@@ -424,10 +450,29 @@ namespace BGE
 
     ' Get the bounding positions of the object for frustum checks
     '
+    ' This single-point default is also what BGE.DepthSort's overlap clustering (via
+    ' getBoundingPoints() below) sees for any subclass that doesn't override this -
+    ' currently SceneObjectPlane and SceneObjectParallaxLayer. A single point can't form
+    ' a real convex hull (BGE.DepthSort.MIN_VALID_HULL_POINTS requires 3), so both types
+    ' are excluded from clustering entirely rather than participating in it - a known,
+    ' disclosed limitation (see #59 follow-ups), not a silent gap: they fail closed
+    ' (never falsely cluster) rather than fail open (falsely cluster with anything whose
+    ' AABB happens to contain that one point).
+    '
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {BGE.Math.Vector}
     protected function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
       return[m.worldPosition]
+    end function
+
+    ' Public wrapper around getPositionsForFrustumCheck(), for cross-object callers
+    ' (e.g. BGE.DepthSort's overlap detection) that need this object's own bounding
+    ' points but aren't a SceneObject subclass themselves.
+    '
+    ' @param {Camera} cameraObj
+    ' @return {BGE.Math.Vector[]}
+    function getBoundingPoints(cameraObj as Camera) as BGE.Math.Vector[]
+      return m.getPositionsForFrustumCheck(m.getActualDrawMode(cameraObj))
     end function
 
     ' Whether performDraw() just returning false is a failure that will keep happening

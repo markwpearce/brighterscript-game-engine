@@ -1,0 +1,303 @@
+namespace BGE.DepthSort
+
+  ' The minimum number of world-space bounding points that must survive projection to
+  ' screen space before this object can be trusted to form a real convex hull (3 points
+  ' is the minimum for a hull with any area/edges at all). Anything short of this - a
+  ' point behind the camera silently drops out of worldPointToCanvasPoint()'s output
+  ' (see projectPointsToScreen), or an object like SceneObjectPlane/
+  ' SceneObjectParallaxLayer that only ever has one bounding point to begin with (see
+  ' SceneObject.getPositionsForFrustumCheck()'s single-point default) - is treated as
+  ' having no valid overlap candidate this frame: it fails closed into its own solo
+  ' cluster rather than risk a degenerate/invalid hull reaching QuickHull or the SAT
+  ' test. This also sidesteps a pre-existing landmine in BGE.QuickHull.QuickHull([]):
+  ' it does not return [] for empty input, it can return [invalid, invalid] (count 2),
+  ' which would otherwise slip past a naive count-based guard and crash in
+  ' getEdgeNormals doing VectorOps.subtract against invalid.
+  const MIN_VALID_HULL_POINTS = 3
+
+  ' A screen-space AABB plus a camera-relative depth range, both derived from the same
+  ' set of world-space bounding points a SceneObject already computes for its frustum
+  ' check (getPositionsForFrustumCheck) - the broad phase of overlap detection reuses
+  ' that geometry rather than computing anything new.
+  interface ScreenBounds
+    minX as float
+    maxX as float
+    minY as float
+    maxY as float
+    minDepth as float
+    maxDepth as float
+  end interface
+
+  ' Sentinel magnitude used by getEmptyScreenBounds() - large enough that no real
+  ' canvas/depth coordinate could ever reach it, and arranged so min > max on every
+  ' axis, which makes boundsOverlap()'s comparisons false against literally any other
+  ' (finite) ScreenBounds. A dedicated `valid` flag would need every existing bounds
+  ' literal (including ones hand-built in tests) to grow a new required field; this
+  ' sentinel keeps the ScreenBounds interface and its callers unchanged.
+  const EMPTY_SCREEN_BOUNDS_SENTINEL = 1.0e18
+
+  ' A ScreenBounds that can never overlap anything - used whenever this object's own
+  ' geometry can't be trusted to produce a meaningful AABB this frame (see
+  ' MIN_VALID_HULL_POINTS).
+  '
+  ' @return {ScreenBounds}
+  function getEmptyScreenBounds() as ScreenBounds
+    return {
+      minX: EMPTY_SCREEN_BOUNDS_SENTINEL,
+      maxX: -EMPTY_SCREEN_BOUNDS_SENTINEL,
+      minY: EMPTY_SCREEN_BOUNDS_SENTINEL,
+      maxY: -EMPTY_SCREEN_BOUNDS_SENTINEL,
+      minDepth: EMPTY_SCREEN_BOUNDS_SENTINEL,
+      maxDepth: -EMPTY_SCREEN_BOUNDS_SENTINEL
+    }
+  end function
+
+  ' Projects a set of world-space points into a ScreenBounds: a screen-space AABB (via
+  ' the renderer's own camera projection) and a depth range (via the camera's
+  ' distanceFromCameraFront, the same function SceneObject.update() already calls once
+  ' per object - here called once per bounding point instead).
+  '
+  ' @param {BGE.Math.Vector[]} worldPoints
+  ' @param {BGE.Renderer} rendererObj
+  ' @return {ScreenBounds}
+  function getScreenBounds(worldPoints as BGE.Math.Vector[], rendererObj as BGE.Renderer) as ScreenBounds
+    if invalid = worldPoints or worldPoints.count() < 1
+      return {minX: 0.0, maxX: 0.0, minY: 0.0, maxY: 0.0, minDepth: 0.0, maxDepth: 0.0}
+    end if
+
+    canvasPoints = []
+    depths = []
+    for each worldPoint in worldPoints
+      canvasPoint = rendererObj.worldPointToCanvasPoint(worldPoint)
+      if invalid <> canvasPoint
+        canvasPoints.push(canvasPoint)
+      end if
+      depths.push(rendererObj.camera.distanceFromCameraFront(worldPoint))
+    end for
+
+    ' Defense in depth: groupIntoClusters() already excludes an object from clustering
+    ' entirely once fewer than MIN_VALID_HULL_POINTS of its points survive projection
+    ' for hull purposes (see projectPointsToScreen), but getScreenBounds() is a small
+    ' standalone function other callers could reach directly. An AABB itself only needs
+    ' 1+ real points to be meaningful (unlike a hull, which needs 3 for any edges at
+    ' all) - the actual bug this guards is *zero* points surviving projection (e.g.
+    ' every bounding point landed behind the camera), which used to fall through to
+    ' BGE.Math.getBounds([]) and silently produce a bounds anchored at canvas origin
+    ' (0,0) that could spuriously overlap any other object actually near that corner.
+    if canvasPoints.count() < 1
+      return getEmptyScreenBounds()
+    end if
+
+    screenBoundPoints = BGE.Math.getBounds(canvasPoints)
+    minDepth = depths[0]
+    maxDepth = depths[0]
+    for each depth in depths
+      minDepth = BGE.Math.Min(minDepth, depth)
+      maxDepth = BGE.Math.Max(maxDepth, depth)
+    end for
+
+    if screenBoundPoints.count() < 2
+      return getEmptyScreenBounds()
+    end if
+
+    return {
+      minX: screenBoundPoints[0].x,
+      maxX: screenBoundPoints[1].x,
+      minY: screenBoundPoints[0].y,
+      maxY: screenBoundPoints[1].y,
+      minDepth: minDepth,
+      maxDepth: maxDepth
+    }
+  end function
+
+  ' Whether two ScreenBounds overlap in both screen space and depth - the broad-phase
+  ' overlap test. Deliberately loose (an AABB overexpands for a rotated/diagonal
+  ' shape) - true here only means "worth the narrow-phase check", not "these objects
+  ' actually need to interleave".
+  '
+  ' @param {ScreenBounds} a
+  ' @param {ScreenBounds} b
+  ' @return {boolean}
+  function boundsOverlap(a as ScreenBounds, b as ScreenBounds) as boolean
+    xOverlap = a.minX <= b.maxX and b.minX <= a.maxX
+    yOverlap = a.minY <= b.maxY and b.minY <= a.maxY
+    depthOverlap = a.minDepth <= b.maxDepth and b.minDepth <= a.maxDepth
+    return xOverlap and yOverlap and depthOverlap
+  end function
+
+  ' Separating-axis theorem (SAT) test between two convex 2D polygons (already-computed
+  ' hulls - a billboard's 4 corners, or a model's bounding-cube projection reduced to
+  ' its convex hull via BGE.QuickHull). Two convex shapes overlap unless there exists
+  ' an axis (perpendicular to one of either shape's edges) that separates them - so
+  ' this checks every candidate axis from both shapes and returns false the moment one
+  ' actually separates them.
+  '
+  ' @param {BGE.Math.Vector[]} hullA points in perimeter order
+  ' @param {BGE.Math.Vector[]} hullB points in perimeter order
+  ' @return {boolean} true if the two convex shapes overlap
+  function hullsOverlap(hullA as BGE.Math.Vector[], hullB as BGE.Math.Vector[]) as boolean
+    if not isValidHull(hullA) or not isValidHull(hullB)
+      ' A degenerate hull (fewer than MIN_VALID_HULL_POINTS real points - e.g. an
+      ' object with 0/1/2 points surviving projection, or BGE.QuickHull.QuickHull([])'s
+      ' pre-existing landmine of returning [invalid, invalid] for empty input) can't be
+      ' tested for overlap at all. Treat it as not overlapping - i.e. solo, the same as
+      ' being alone in the scene - rather than risk a false positive or a crash further
+      ' down in getEdgeNormals/VectorOps.subtract.
+      return false
+    end if
+    for each axis in getEdgeNormals(hullA)
+      if isSeparatingAxis(axis, hullA, hullB)
+        return false
+      end if
+    end for
+    for each axis in getEdgeNormals(hullB)
+      if isSeparatingAxis(axis, hullA, hullB)
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  ' Whether a hull has enough real geometry to be tested for overlap: at least
+  ' MIN_VALID_HULL_POINTS points, and every one of them an actual Vector, never
+  ' `invalid` (which BGE.QuickHull.QuickHull([]) can return - see MIN_VALID_HULL_POINTS).
+  '
+  ' @param {BGE.Math.Vector[]} hull
+  ' @return {boolean}
+  function isValidHull(hull as BGE.Math.Vector[]) as boolean
+    if invalid = hull or hull.count() < MIN_VALID_HULL_POINTS
+      return false
+    end if
+    for each point in hull
+      if invalid = point or invalid = point.x or invalid = point.y
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  function getEdgeNormals(hull as BGE.Math.Vector[]) as BGE.Math.Vector[]
+    ' Defense in depth - hullsOverlap() already guards against a degenerate hull ever
+    ' reaching here, but this is cheap insurance for any other caller path.
+    if not isValidHull(hull)
+      return []
+    end if
+    normals = []
+    for i = 0 to hull.count() - 1
+      p1 = hull[i]
+      p2 = hull[(i + 1) mod hull.count()]
+      edge = BGE.Math.VectorOps.subtract(p2, p1)
+      ' perpendicular to the edge, in 2D: (x, y) -> (-y, x)
+      normals.push(BGE.Math.VectorOps.create(-edge.y, edge.x))
+    end for
+    return normals
+  end function
+
+  function isSeparatingAxis(axis as BGE.Math.Vector, hullA as BGE.Math.Vector[], hullB as BGE.Math.Vector[]) as boolean
+    projA = projectHull(axis, hullA)
+    projB = projectHull(axis, hullB)
+    return projA.max < projB.min or projB.max < projA.min
+  end function
+
+  function projectHull(axis as BGE.Math.Vector, hull as BGE.Math.Vector[]) as {min as float, max as float}
+    minProj = (axis.x * hull[0].x) + (axis.y * hull[0].y)
+    maxProj = minProj
+    for each point in hull
+      proj = (axis.x * point.x) + (axis.y * point.y)
+      minProj = BGE.Math.Min(minProj, proj)
+      maxProj = BGE.Math.Max(maxProj, proj)
+    end for
+    return {min: minProj, max: maxProj}
+  end function
+
+  ' Groups objects into overlap clusters: connected components over the "these two
+  ' objects' bounds overlap" relation (broad phase, then narrow phase to reject false
+  ' positives). Most objects end up alone in a cluster of one - only objects that
+  ' mutually, genuinely overlap end up grouped together.
+  '
+  ' @param {BGE.SceneObject[]} objects
+  ' @param {BGE.Renderer} rendererObj
+  ' @return {BGE.SceneObject[][]} each cluster as an array of its member SceneObjects
+  function groupIntoClusters(objects as BGE.SceneObject[], rendererObj as BGE.Renderer) as BGE.SceneObject[][]
+    screenBoundsByIndex = [] as ScreenBounds[]
+    hullByIndex = [] as BGE.Math.Vector[][]
+    for each obj in objects
+      boundingPoints = obj.getBoundingPoints(rendererObj.camera)
+      screenBoundsByIndex.push(getScreenBounds(boundingPoints, rendererObj))
+      projectedPoints = projectPointsToScreen(boundingPoints, rendererObj)
+      if projectedPoints.count() < MIN_VALID_HULL_POINTS
+        ' Fewer than MIN_VALID_HULL_POINTS points survived projection (e.g. some/all of
+        ' this object's bounding points are behind the camera - worldPointToCanvasPoint
+        ' silently drops those - or it only ever had 1-2 bounding points to begin with,
+        ' like SceneObjectPlane/SceneObjectParallaxLayer's single-point default). Do NOT
+        ' call BGE.QuickHull.QuickHull on this: it does not return [] for fewer-than-3
+        ' points, it can return [invalid, invalid], which would crash later in
+        ' hullsOverlap/getEdgeNormals. Treat this object as having no valid hull this
+        ' frame - hullsOverlap()'s own isValidHull guard then keeps it out of every
+        ' cluster, i.e. it draws solo, same as being alone.
+        hull = []
+      else
+        hull = BGE.QuickHull.QuickHull(projectedPoints)
+      end if
+      hullByIndex.push(hull)
+    end for
+
+    ' Union-find over object indices.
+    parent = [] as integer[]
+    for i = 0 to objects.count() - 1
+      parent.push(i)
+    end for
+
+    for i = 0 to objects.count() - 1
+      for j = i + 1 to objects.count() - 1
+        if boundsOverlap(screenBoundsByIndex[i], screenBoundsByIndex[j])
+          if hullsOverlap(hullByIndex[i], hullByIndex[j])
+            union(parent, i, j)
+          end if
+        end if
+      end for
+    end for
+
+    clustersByRoot = {}
+    for i = 0 to objects.count() - 1
+      root = find(parent, i).toStr()
+      if invalid = clustersByRoot[root]
+        clustersByRoot[root] = [] as BGE.SceneObject[]
+      end if
+      clustersByRoot[root].push(objects[i])
+    end for
+
+    clusters = [] as BGE.SceneObject[][]
+    for each item in clustersByRoot.items()
+      clusters.push(item.value)
+    end for
+    return clusters
+  end function
+
+  function projectPointsToScreen(worldPoints as BGE.Math.Vector[], rendererObj as BGE.Renderer) as BGE.Math.Vector[]
+    canvasPoints = []
+    for each worldPoint in worldPoints
+      canvasPoint = rendererObj.worldPointToCanvasPoint(worldPoint)
+      if invalid <> canvasPoint
+        canvasPoints.push(canvasPoint)
+      end if
+    end for
+    return canvasPoints
+  end function
+
+  function find(parent as integer[], i as integer) as integer
+    if parent[i] <> i
+      parent[i] = find(parent, parent[i])
+    end if
+    return parent[i]
+  end function
+
+  sub union(parent as integer[], i as integer, j as integer)
+    rootI = find(parent, i)
+    rootJ = find(parent, j)
+    if rootI <> rootJ
+      parent[rootI] = rootJ
+    end if
+  end sub
+
+end namespace

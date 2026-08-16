@@ -1,0 +1,354 @@
+namespace tests
+
+  ' DepthSortHelpers.getScreenBounds/boundsOverlap are pure functions over already-
+  ' computed bounding points (the same points getPositionsForFrustumCheck() returns),
+  ' so they're tested directly against a real Renderer/Camera without needing a full
+  ' SceneObject.
+  @suite("BGE.DepthSort broad phase")
+  class DepthSortBroadPhaseTests extends rooibos.BaseTestSuite
+
+    bitmap as roBitmap
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.bitmap = CreateObject("roBitmap", {width: 400, height: 400, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.bitmap)
+    end function
+
+    @describe("groupIntoClusters")
+
+    @it("puts two non-overlapping objects in their own single-member clusters")
+    function _()
+      game = new BGE.Game(320, 240)
+      entityA = new BGE.GameEntity(game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(-200, 0, 0)
+      entityB = new BGE.GameEntity(game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(200, 0, 0)
+      rectA = new BGE.DrawableRectangle(entityA, 20, 20)
+      rectB = new BGE.DrawableRectangle(entityB, 20, 20)
+      sceneObjA = rectA.addToScene(m.renderer)
+      sceneObjB = rectB.addToScene(m.renderer)
+      entityA.updateTransformationMatrix()
+      entityB.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObjA.update(m.renderer.camera)
+      sceneObjB.update(m.renderer.camera)
+
+      clusters = BGE.DepthSort.groupIntoClusters([sceneObjA, sceneObjB], m.renderer)
+      m.assertEqual(2, clusters.count())
+    end function
+
+    @it("puts two overlapping objects in the same cluster")
+    function _()
+      game = new BGE.Game(320, 240)
+      entityA = new BGE.GameEntity(game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(-5, 0, 0)
+      entityB = new BGE.GameEntity(game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(5, 0, 0)
+      rectA = new BGE.DrawableRectangle(entityA, 20, 20)
+      rectB = new BGE.DrawableRectangle(entityB, 20, 20)
+      sceneObjA = rectA.addToScene(m.renderer)
+      sceneObjB = rectB.addToScene(m.renderer)
+      entityA.updateTransformationMatrix()
+      entityB.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObjA.update(m.renderer.camera)
+      sceneObjB.update(m.renderer.camera)
+
+      clusters = BGE.DepthSort.groupIntoClusters([sceneObjA, sceneObjB], m.renderer)
+      m.assertEqual(1, clusters.count())
+      m.assertEqual(2, clusters[0].count())
+    end function
+
+    @describe("getBoundingPoints (SceneObjectPolygon/SceneObjectModel regression)")
+
+    ' SceneObjectPolygon/SceneObjectModel extend SceneObjectBillboard, but their
+    ' drawables never set width/height, so they must NOT inherit
+    ' SceneObjectBillboard.computeBillboardWorldCorners()-based bounding points (that
+    ' would collapse them to a single repeated point) - they need to keep falling
+    ' through to the base SceneObject.getBoundingPoints() wrapper, which correctly
+    ' delegates to their own getPositionsForFrustumCheck() overrides.
+    @it("SceneObjectPolygon.getBoundingPoints returns its real multi-point polygon geometry, not a collapsed single point")
+    function _()
+      game = new BGE.Game(320, 240)
+      entity = new BGE.GameEntity(game, {name: "Poly"})
+      points = [
+        BGE.Math.VectorOps.create(0, -20, 0),
+        BGE.Math.VectorOps.create(-20, 20, 0),
+        BGE.Math.VectorOps.create(20, 20, 0)
+      ]
+      polygon = new BGE.DrawablePolygon(entity, points)
+      sceneObj = polygon.addToScene(m.renderer)
+      entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+
+      boundingPoints = sceneObj.getBoundingPoints(m.renderer.camera)
+      m.assertEqual(3, boundingPoints.count())
+      m.assertTrue(boundingPoints[0].x <> boundingPoints[1].x or boundingPoints[0].y <> boundingPoints[1].y)
+    end function
+
+    @it("SceneObjectModel.getBoundingPoints returns its real multi-point bounding-cube geometry, not a collapsed single point")
+    function _()
+      game = new BGE.Game(320, 240)
+      entity = new BGE.GameEntity(game, {name: "Model"})
+      face = BGE.Model3dFaceOps.create([
+        BGE.Math.VectorOps.create(-10, -10, 0),
+        BGE.Math.VectorOps.create(10, -10, 0),
+        BGE.Math.VectorOps.create(0, 10, 0)
+      ])
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(entity, model)
+      sceneObj = drawableModel.addToScene(m.renderer)
+      entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+
+      boundingPoints = sceneObj.getBoundingPoints(m.renderer.camera)
+      m.assertTrue(boundingPoints.count() > 1)
+      ' getBoundingCubePoints() returns [minCorner, ..., maxCorner] - compare the two
+      ' extremes rather than adjacent points, since two adjacent corners of a bounding
+      ' cube can legitimately share an axis (here, a flat z=0 triangle).
+      lastIndex = boundingPoints.count() - 1
+      m.assertTrue(boundingPoints[0].x <> boundingPoints[lastIndex].x or boundingPoints[0].y <> boundingPoints[lastIndex].y or boundingPoints[0].z <> boundingPoints[lastIndex].z)
+    end function
+
+    @describe("getScreenBounds")
+
+    @it("projects world points to a screen-space AABB and a camera-relative depth range")
+    function _()
+      ' A 2D camera centered on its canvas: world (0,0,z) projects near canvas center,
+      ' and distanceFromCameraFront is just camera.position.z - point.z.
+      points = [
+        BGE.Math.VectorOps.create(-50, -50, 0),
+        BGE.Math.VectorOps.create(50, 50, 20)
+      ]
+      bounds = BGE.DepthSort.getScreenBounds(points, m.renderer)
+      m.assertTrue(bounds.minX < bounds.maxX)
+      m.assertTrue(bounds.minY < bounds.maxY)
+      m.assertTrue(bounds.minDepth < bounds.maxDepth)
+    end function
+
+    @it("returns a degenerate bounds (all zeros) when given an empty array")
+    function _()
+      ' Empty array should gracefully return a degenerate ScreenBounds, not crash or error
+      bounds = BGE.DepthSort.getScreenBounds([], m.renderer)
+      m.assertEqual(bounds.minX, 0.0)
+      m.assertEqual(bounds.maxX, 0.0)
+      m.assertEqual(bounds.minY, 0.0)
+      m.assertEqual(bounds.maxY, 0.0)
+      m.assertEqual(bounds.minDepth, 0.0)
+      m.assertEqual(bounds.maxDepth, 0.0)
+    end function
+
+    @describe("boundsOverlap")
+
+    @it("returns true for two identical bounds")
+    function _()
+      bounds = {minX: 0.0, maxX: 10.0, minY: 0.0, maxY: 10.0, minDepth: 0.0, maxDepth: 10.0}
+      m.assertTrue(BGE.DepthSort.boundsOverlap(bounds, bounds))
+    end function
+
+    @it("returns false when screen X ranges don't overlap, even if depth ranges do")
+    function _()
+      a = {minX: 0.0, maxX: 10.0, minY: 0.0, maxY: 10.0, minDepth: 0.0, maxDepth: 10.0}
+      b = {minX: 20.0, maxX: 30.0, minY: 0.0, maxY: 10.0, minDepth: 0.0, maxDepth: 10.0}
+      m.assertFalse(BGE.DepthSort.boundsOverlap(a, b))
+    end function
+
+    @it("returns false when depth ranges don't overlap, even if screen bounds do")
+    function _()
+      a = {minX: 0.0, maxX: 10.0, minY: 0.0, maxY: 10.0, minDepth: 0.0, maxDepth: 10.0}
+      b = {minX: 0.0, maxX: 10.0, minY: 0.0, maxY: 10.0, minDepth: 100.0, maxDepth: 110.0}
+      m.assertFalse(BGE.DepthSort.boundsOverlap(a, b))
+    end function
+
+    @it("returns true when both screen bounds and depth ranges overlap")
+    function _()
+      a = {minX: 0.0, maxX: 10.0, minY: 0.0, maxY: 10.0, minDepth: 0.0, maxDepth: 10.0}
+      b = {minX: 5.0, maxX: 15.0, minY: 5.0, maxY: 15.0, minDepth: 5.0, maxDepth: 15.0}
+      m.assertTrue(BGE.DepthSort.boundsOverlap(a, b))
+    end function
+
+    @describe("hullsOverlap (narrow phase - separating axis theorem)")
+
+    @it("returns true for two overlapping squares")
+    function _()
+      squareA = [
+        BGE.Math.VectorOps.create(0, 0),
+        BGE.Math.VectorOps.create(10, 0),
+        BGE.Math.VectorOps.create(10, 10),
+        BGE.Math.VectorOps.create(0, 10)
+      ]
+      squareB = [
+        BGE.Math.VectorOps.create(5, 5),
+        BGE.Math.VectorOps.create(15, 5),
+        BGE.Math.VectorOps.create(15, 15),
+        BGE.Math.VectorOps.create(5, 15)
+      ]
+      m.assertTrue(BGE.DepthSort.hullsOverlap(squareA, squareB))
+    end function
+
+    @it("returns false for two separated squares, even when their AABBs would overlap")
+    function _()
+      ' A thin diagonal "wall" from (0,0) to (100,100) has an AABB covering the whole
+      ' 100x100 area - a small square sitting in the empty corner of that AABB (e.g.
+      ' near (90, 10)) must not be reported as overlapping the wall itself.
+      diagonalWall = [
+        BGE.Math.VectorOps.create(-2, 2),
+        BGE.Math.VectorOps.create(2, -2),
+        BGE.Math.VectorOps.create(102, 98),
+        BGE.Math.VectorOps.create(98, 102)
+      ]
+      nearbySquare = [
+        BGE.Math.VectorOps.create(85, 5),
+        BGE.Math.VectorOps.create(95, 5),
+        BGE.Math.VectorOps.create(95, 15),
+        BGE.Math.VectorOps.create(85, 15)
+      ]
+      m.assertFalse(BGE.DepthSort.hullsOverlap(diagonalWall, nearbySquare))
+    end function
+
+    @it("returns false for two squares that share only a touching edge's exterior, no interior overlap")
+    function _()
+      squareA = [
+        BGE.Math.VectorOps.create(0, 0),
+        BGE.Math.VectorOps.create(10, 0),
+        BGE.Math.VectorOps.create(10, 10),
+        BGE.Math.VectorOps.create(0, 10)
+      ]
+      squareB = [
+        BGE.Math.VectorOps.create(20, 0),
+        BGE.Math.VectorOps.create(30, 0),
+        BGE.Math.VectorOps.create(30, 10),
+        BGE.Math.VectorOps.create(20, 10)
+      ]
+      m.assertFalse(BGE.DepthSort.hullsOverlap(squareA, squareB))
+    end function
+
+    ' Final-review Critical 1: hullsOverlap/getEdgeNormals used to assume real hull
+    ' geometry, but QuickHull is called on the output of projectPointsToScreen(), which
+    ' silently drops any point that projects to invalid (behind the camera). 0/1/2
+    ' surviving points - or QuickHull's own empty-input landmine ([invalid, invalid]) -
+    ' used to slip past a `hull.count() < 2` guard and crash doing
+    ' VectorOps.subtract against invalid. These hand-build the degenerate hulls
+    ' directly, rather than requiring a real behind-camera camera/object setup.
+    @describe("hullsOverlap - degenerate hull guard (final review Critical 1)")
+
+    @it("returns false (not a crash) when one hull is empty")
+    function _()
+      squareA = [
+        BGE.Math.VectorOps.create(0, 0),
+        BGE.Math.VectorOps.create(10, 0),
+        BGE.Math.VectorOps.create(10, 10),
+        BGE.Math.VectorOps.create(0, 10)
+      ]
+      m.assertFalse(BGE.DepthSort.hullsOverlap(squareA, []))
+    end function
+
+    @it("returns false (not a crash) when one hull contains invalid points")
+    function _()
+      squareA = [
+        BGE.Math.VectorOps.create(0, 0),
+        BGE.Math.VectorOps.create(10, 0),
+        BGE.Math.VectorOps.create(10, 10),
+        BGE.Math.VectorOps.create(0, 10)
+      ]
+      degenerateHull = [invalid, invalid]
+      m.assertFalse(BGE.DepthSort.hullsOverlap(squareA, degenerateHull))
+    end function
+
+    @it("returns false (not a crash) when both hulls are degenerate")
+    function _()
+      m.assertFalse(BGE.DepthSort.hullsOverlap([invalid, invalid], []))
+    end function
+
+    @it("getEdgeNormals returns an empty array (not a crash) for a degenerate hull")
+    function _()
+      m.assertEqual(0, BGE.DepthSort.getEdgeNormals([invalid, invalid]).count())
+    end function
+
+    @it("groupIntoClusters puts an object with a degenerate (too-few-point) hull into its own solo cluster rather than crashing")
+    function _()
+      game = new BGE.Game(320, 240)
+      entityA = new BGE.GameEntity(game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 0)
+      rectA = new BGE.DrawableRectangle(entityA, 20, 20)
+      sceneObjA = rectA.addToScene(m.renderer)
+      entityA.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObjA.update(m.renderer.camera)
+
+      ' A second object whose AABB genuinely overlaps entityA's, but whose bounding
+      ' points all project to invalid (simulating "behind the camera" without needing a
+      ' real camera-relative setup) - groupIntoClusters must not crash, and must not
+      ' cluster this degenerate object with anything.
+      entityB = new BGE.GameEntity(game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(0, 0, 0)
+      rectB = new BGE.DrawableRectangle(entityB, 20, 20)
+      sceneObjB = rectB.addToScene(m.renderer)
+      entityB.updateTransformationMatrix()
+      sceneObjB.update(m.renderer.camera)
+
+      ' Force sceneObjB's bounding points to fail projection (Camera2d.
+      ' worldPointToCanvasPoint returns invalid once transformed camera-space z >= 0,
+      ' which happens for a world z far enough past the camera's own position) -
+      ' simulating "behind the camera" without needing a full off-camera setup.
+      entityB.position.z = m.renderer.camera.position.z + 10000000
+      entityB.updateTransformationMatrix()
+      sceneObjB.update(m.renderer.camera)
+
+      clusters = BGE.DepthSort.groupIntoClusters([sceneObjA, sceneObjB], m.renderer)
+      ' No crash, and the degenerate object (B) never joins a multi-member cluster.
+      for each cluster in clusters
+        if cluster.count() > 1
+          for each member in cluster
+            m.assertNotEqual(sceneObjB.id, member.id)
+          end for
+        end if
+      end for
+    end function
+
+    ' Final review Important 7: SceneObjectPlane/SceneObjectParallaxLayer don't override
+    ' getBoundingPoints(), so they fall through to the base SceneObject's single-point
+    ' default. After the Critical-1 fix, a single-point "hull" is degenerate (fewer than
+    ' MIN_VALID_HULL_POINTS) and must be excluded from clustering entirely - simulated
+    ' here directly with a hand-built single-point bounding list, rather than
+    ' constructing a real SceneObjectPlane/SceneObjectParallaxLayer.
+    @describe("single-point bounding list (SceneObjectPlane/SceneObjectParallaxLayer regression, final review Important 7)")
+
+    @it("a single-point hull never falsely clusters with a neighboring object whose AABB contains that point")
+    function _()
+      squareHull = [
+        BGE.Math.VectorOps.create(-50, -50),
+        BGE.Math.VectorOps.create(50, -50),
+        BGE.Math.VectorOps.create(50, 50),
+        BGE.Math.VectorOps.create(-50, 50)
+      ]
+      singlePointHull = [BGE.Math.VectorOps.create(0, 0)]
+      ' The single point sits well inside squareHull's AABB, but hullsOverlap must
+      ' still reject it outright as degenerate rather than reporting a false overlap.
+      m.assertFalse(BGE.DepthSort.hullsOverlap(squareHull, singlePointHull))
+    end function
+
+    @describe("getScreenBounds - zero-valid-points sentinel (final review Important 8)")
+
+    @it("returns a sentinel bounds that can never overlap anything when every point projects to invalid")
+    function _()
+      ' Camera2d.worldPointToCanvasPoint returns invalid once the transformed camera-
+      ' space z is >= 0 - which, given Camera2d's orthographic matrix and default
+      ' position/near-plane, happens for a world z far enough past the camera's own
+      ' position. Placing both points there simulates "every bounding point failed to
+      ' project" without needing a real off-camera object.
+      points = [
+        BGE.Math.VectorOps.create(0, 0, 1000000),
+        BGE.Math.VectorOps.create(10, 10, 2000000)
+      ]
+      bounds = BGE.DepthSort.getScreenBounds(points, m.renderer)
+      otherBounds = {minX: -1000000.0, maxX: 1000000.0, minY: -1000000.0, maxY: 1000000.0, minDepth: -1000000.0, maxDepth: 1000000.0}
+      m.assertFalse(BGE.DepthSort.boundsOverlap(bounds, otherBounds))
+    end function
+
+  end class
+
+end namespace
