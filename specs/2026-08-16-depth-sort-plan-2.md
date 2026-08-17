@@ -18,8 +18,8 @@ pre-existing `QuickHull([])` bug this plan's own broad-phase code touches again.
 
 **Tech Stack:** BrighterScript, Rooibos tests, `rokubot` for on-device verification.
 
-**Spec:** [specs/2026-08-16-depth-sort-plan-2-design.md](../../../specs/2026-08-16-depth-sort-plan-2-design.md)
-(and the original [specs/2026-08-15-depth-sort-design.md](../../../specs/2026-08-15-depth-sort-design.md)
+**Spec:** [specs/2026-08-16-depth-sort-plan-2-design.md](2026-08-16-depth-sort-plan-2-design.md)
+(and the original [specs/2026-08-15-depth-sort-design.md](2026-08-15-depth-sort-design.md)
 this continues from).
 
 ## Global Constraints
