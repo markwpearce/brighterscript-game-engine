@@ -62,7 +62,7 @@ namespace BGE.DepthSort
   ' @return {ScreenBounds}
   function getScreenBounds(worldPoints as BGE.Math.Vector[], rendererObj as BGE.Renderer) as ScreenBounds
     if invalid = worldPoints or worldPoints.count() < 1
-      return {minX: 0.0, maxX: 0.0, minY: 0.0, maxY: 0.0, minDepth: 0.0, maxDepth: 0.0}
+      return getEmptyScreenBounds()
     end if
 
     canvasPoints = []
@@ -123,6 +123,90 @@ namespace BGE.DepthSort
     yOverlap = a.minY <= b.maxY and b.minY <= a.maxY
     depthOverlap = a.minDepth <= b.maxDepth and b.minDepth <= a.maxDepth
     return xOverlap and yOverlap and depthOverlap
+  end function
+
+  ' Reorders `objects` by ascending screen-space minX, using `previousOrderIds` (last
+  ' frame's sorted order, by SceneObject.id) as the starting arrangement before sorting -
+  ' most objects don't move far frame-to-frame, so this starting point is usually already
+  ' nearly sorted, and an insertion sort on a nearly-sorted list is close to O(n) rather
+  ' than the O(n log n) a fresh sort would cost every single frame. An id in
+  ' previousOrderIds with no matching object this frame is silently skipped (the object
+  ' was removed, disabled, or culled out of the candidate set); an object with no
+  ' matching id in previousOrderIds (new this frame, or the very first frame) is
+  ' appended at the end before sorting, so it still ends up in the right place, just at
+  ' typical fresh-object cost.
+  '
+  ' @param {BGE.SceneObject[]} objects
+  ' @param {string[]} previousOrderIds
+  ' @param {object} screenBoundsById - associative array keyed by SceneObject.id
+  ' @return {BGE.SceneObject[]}
+  function sortByMinXIncremental(objects as BGE.SceneObject[], previousOrderIds as string[], screenBoundsById as object) as BGE.SceneObject[]
+    objectById = {}
+    for each obj in objects
+      objectById[obj.id] = obj
+    end for
+
+    seeded = [] as BGE.SceneObject[]
+    seenIds = {}
+    for each id in previousOrderIds
+      obj = objectById[id]
+      if invalid <> obj
+        seeded.push(obj)
+        seenIds[id] = true
+      end if
+    end for
+    for each obj in objects
+      if invalid = seenIds[obj.id]
+        seeded.push(obj)
+      end if
+    end for
+
+    ' Insertion sort by minX - close to O(n) when `seeded` is already close to sorted
+    ' (the common case), correct regardless of how scrambled it is.
+    for i = 1 to seeded.count() - 1
+      current = seeded[i]
+      currentMinX = screenBoundsById[current.id].minX
+      j = i - 1
+      while j >= 0 and screenBoundsById[seeded[j].id].minX > currentMinX
+        seeded[j + 1] = seeded[j]
+        j--
+      end while
+      seeded[j + 1] = current
+    end for
+
+    return seeded
+  end function
+
+  ' Sweeps `sortedObjects` (already sorted ascending by minX) left to right, returning
+  ' only the index pairs whose screen-space X ranges actually overlap - this is the
+  ' broad phase's real cost-saving step. An object is dropped from the "active" set
+  ' once its maxX has been passed by the sweep, so a later object is only ever compared
+  ' against objects it could plausibly overlap, not the whole list - this is what turns
+  ' the broad phase from O(n^2) into roughly O(n + k) for k actual overlapping pairs in
+  ' a typical scene, and specifically fixes the diagonal-wall pathology (a wide object's
+  ' cost is proportional to how many other objects its X range actually overlaps, not
+  ' the whole scene).
+  '
+  ' @param {BGE.SceneObject[]} sortedObjects - sorted ascending by ScreenBounds.minX (see sortByMinXIncremental)
+  ' @param {object} screenBoundsById - associative array keyed by SceneObject.id
+  ' @return {object} array of 2-element integer arrays [i, j], indexes into sortedObjects
+  function sweepForCandidatePairIndexes(sortedObjects as BGE.SceneObject[], screenBoundsById as object) as object
+    pairs = []
+    activeIndexes = [] as integer[]
+    for i = 0 to sortedObjects.count() - 1
+      currentBounds = screenBoundsById[sortedObjects[i].id]
+
+      stillActive = [] as integer[]
+      for each activeIndex in activeIndexes
+        if screenBoundsById[sortedObjects[activeIndex].id].maxX >= currentBounds.minX
+          stillActive.push(activeIndex)
+          pairs.push([activeIndex, i])
+        end if
+      end for
+      activeIndexes = stillActive
+      activeIndexes.push(i)
+    end for
+    return pairs
   end function
 
   ' Separating-axis theorem (SAT) test between two convex 2D polygons (already-computed
@@ -210,68 +294,83 @@ namespace BGE.DepthSort
     return {min: minProj, max: maxProj}
   end function
 
+  ' The result of groupIntoClusters(): the computed clusters, plus the sorted-by-minX
+  ' ordering it used this frame - feed sortedIds back in as previousOrderIds next frame
+  ' to keep the incremental sort cheap (see sortByMinXIncremental).
+  interface ClusterResult
+    clusters as BGE.SceneObject[][]
+    sortedIds as string[]
+  end interface
+
   ' Groups objects into overlap clusters: connected components over the "these two
-  ' objects' bounds overlap" relation (broad phase, then narrow phase to reject false
-  ' positives). Most objects end up alone in a cluster of one - only objects that
-  ' mutually, genuinely overlap end up grouped together.
+  ' objects' bounds overlap" relation (broad phase via sort-and-sweep, then narrow
+  ' phase to reject false positives). Most objects end up alone in a cluster of one -
+  ' only objects that mutually, genuinely overlap end up grouped together.
   '
   ' @param {BGE.SceneObject[]} objects
   ' @param {BGE.Renderer} rendererObj
-  ' @return {BGE.SceneObject[][]} each cluster as an array of its member SceneObjects
-  function groupIntoClusters(objects as BGE.SceneObject[], rendererObj as BGE.Renderer) as BGE.SceneObject[][]
-    screenBoundsByIndex = [] as ScreenBounds[]
-    hullByIndex = [] as BGE.Math.Vector[][]
+  ' @param {string[]} previousOrderIds - last frame's sorted order (see ClusterResult.sortedIds); pass [] on the first call
+  ' @return {ClusterResult}
+  function groupIntoClusters(objects as BGE.SceneObject[], rendererObj as BGE.Renderer, previousOrderIds as string[]) as ClusterResult
+    screenBoundsById = {}
+    hullById = {}
     for each obj in objects
       boundingPoints = obj.getBoundingPoints(rendererObj.camera)
-      screenBoundsByIndex.push(getScreenBounds(boundingPoints, rendererObj))
+      screenBoundsById[obj.id] = getScreenBounds(boundingPoints, rendererObj)
       projectedPoints = projectPointsToScreen(boundingPoints, rendererObj)
       if projectedPoints.count() < MIN_VALID_HULL_POINTS
         ' Fewer than MIN_VALID_HULL_POINTS points survived projection (e.g. some/all of
-        ' this object's bounding points are behind the camera - worldPointToCanvasPoint
-        ' silently drops those - or it only ever had 1-2 bounding points to begin with,
-        ' like SceneObjectPlane/SceneObjectParallaxLayer's single-point default). Do NOT
-        ' call BGE.QuickHull.QuickHull on this: it does not return [] for fewer-than-3
-        ' points, it can return [invalid, invalid], which would crash later in
-        ' hullsOverlap/getEdgeNormals. Treat this object as having no valid hull this
-        ' frame - hullsOverlap()'s own isValidHull guard then keeps it out of every
-        ' cluster, i.e. it draws solo, same as being alone.
+        ' this object's bounding points are behind the camera, or it only ever had 1-2
+        ' bounding points to begin with, like SceneObjectPlane/SceneObjectParallaxLayer's
+        ' single-point default). Treat this object as having no valid hull this frame -
+        ' hullsOverlap()'s own isValidHull guard then keeps it out of every cluster.
         hull = []
       else
         hull = BGE.QuickHull.QuickHull(projectedPoints)
       end if
-      hullByIndex.push(hull)
+      hullById[obj.id] = hull
     end for
 
-    ' Union-find over object indices.
+    sortedObjects = sortByMinXIncremental(objects, previousOrderIds, screenBoundsById)
+
+    ' Union-find over indexes into sortedObjects.
     parent = [] as integer[]
-    for i = 0 to objects.count() - 1
+    for i = 0 to sortedObjects.count() - 1
       parent.push(i)
     end for
 
-    for i = 0 to objects.count() - 1
-      for j = i + 1 to objects.count() - 1
-        if boundsOverlap(screenBoundsByIndex[i], screenBoundsByIndex[j])
-          if hullsOverlap(hullByIndex[i], hullByIndex[j])
-            union(parent, i, j)
-          end if
+    for each pairIndexes in sweepForCandidatePairIndexes(sortedObjects, screenBoundsById)
+      i = pairIndexes[0]
+      j = pairIndexes[1]
+      idA = sortedObjects[i].id
+      idB = sortedObjects[j].id
+      if boundsOverlap(screenBoundsById[idA], screenBoundsById[idB])
+        if hullsOverlap(hullById[idA], hullById[idB])
+          union(parent, i, j)
         end if
-      end for
+      end if
     end for
 
     clustersByRoot = {}
-    for i = 0 to objects.count() - 1
+    for i = 0 to sortedObjects.count() - 1
       root = find(parent, i).toStr()
       if invalid = clustersByRoot[root]
         clustersByRoot[root] = [] as BGE.SceneObject[]
       end if
-      clustersByRoot[root].push(objects[i])
+      clustersByRoot[root].push(sortedObjects[i])
     end for
 
     clusters = [] as BGE.SceneObject[][]
     for each item in clustersByRoot.items()
       clusters.push(item.value)
     end for
-    return clusters
+
+    sortedIds = [] as string[]
+    for each obj in sortedObjects
+      sortedIds.push(obj.id)
+    end for
+
+    return {clusters: clusters, sortedIds: sortedIds}
   end function
 
   function projectPointsToScreen(worldPoints as BGE.Math.Vector[], rendererObj as BGE.Renderer) as BGE.Math.Vector[]

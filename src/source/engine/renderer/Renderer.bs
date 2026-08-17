@@ -37,6 +37,21 @@ namespace BGE
     private needsDepthSort as boolean = true
     private lastFrameDidSort as boolean = false
     private overlapClusters as BGE.SceneObject[][] = []
+    ' Last frame's overlap-cluster sort order (by SceneObject.id) - fed back into
+    ' groupIntoClusters() as previousOrderIds so its sort-and-sweep broad phase can do
+    ' an incremental (nearly-sorted) insertion sort instead of a fresh one every frame.
+    private lastClusterSortOrder as string[] = []
+
+    ' Whether computeOverlapClusters was true on the previous frame - see drawScene()'s
+    ' clusterMemberCount reset-to-1 loop, which uses this to skip itself on any frame
+    ' where clustering has never been (or is no longer) turned on, rather than running
+    ' unconditionally every single frame regardless of whether it's needed.
+    private wasComputingOverlapClusters as boolean = false
+
+    ' SceneObjects deferred from the normal per-object draw path this frame because
+    ' their clusterMemberCount > 1 - see SceneObject.draw()/addPendingClusterDraw().
+    ' Drawn all together, interleaved by primitive depth, at the end of drawScene().
+    private pendingClusterDraws as object[] = []
 
     ' Whether drawScene() computes overlap clusters (BGE.DepthSort.groupIntoClusters)
     ' this frame. Off by default: nothing in the engine's actual draw path consumes
@@ -47,6 +62,10 @@ namespace BGE
     ' examples/depthsort's ClusterVisualizerRoom, which visualizes the result) -
     ' TieBreakRoom deliberately does NOT opt in, since it only demonstrates the
     ' tie-break fix, not clustering.
+    '
+    ' Known limitation: see drawPendingClusterPrimitives()'s doc comment for a
+    ' disclosed draw-order gap affecting objects excluded from cluster candidacy
+    ' entirely (lines, planes, or anything else with a degenerate bounding-point set).
     public computeOverlapClusters as boolean = false
 
     camera as Camera
@@ -257,6 +276,15 @@ namespace BGE
       m.needsDepthSort = true
     end sub
 
+    ' Registers a SceneObject as deferred to the end-of-frame interleaved cluster draw
+    ' pass - called by SceneObject.draw() when clusterMemberCount > 1. Not meant to be
+    ' called directly by game code.
+    '
+    ' @param {SceneObject} sceneObj
+    sub addPendingClusterDraw(sceneObj as SceneObject)
+      m.pendingClusterDraws.push(sceneObj)
+    end sub
+
     sub removeSceneObject(sceneObjToRemove as SceneObject)
       indexToDelete = -1
       for i = 0 to m.sceneObjects.count()
@@ -275,15 +303,20 @@ namespace BGE
 
     ' Scene objects worth handing to BGE.DepthSort.groupIntoClusters() this frame:
     ' disabled objects and already-culled objects are excluded, since neither will
-    ' actually be drawn this frame - clustering them would waste the (unmeasured, opt-in
-    ' only) O(n^2)-ish broad-phase cost on objects whose transforms may also be stale
-    ' (a culled object's geometry isn't guaranteed to have been recomputed this frame).
+    ' actually be drawn this frame - clustering them would waste the broad-phase cost on
+    ' objects whose transforms may also be stale (a culled object's geometry isn't
+    ' guaranteed to have been recomputed this frame). Objects that opt out via
+    ' participatesInOverlapDetection() (e.g. SceneObjectLine - see its doc comment) are
+    ' excluded too - for a line specifically, this is pure cost avoidance for a
+    ' computation that was always going to reject it anyway (its 2-point hull can never
+    ' pass the narrow phase's MIN_VALID_HULL_POINTS check), not a tolerated correctness
+    ' gap.
     '
     ' @return {BGE.SceneObject[]}
     private function getClusterCandidates() as BGE.SceneObject[]
       candidates = []
       for each sceneObj in m.sceneObjects
-        if sceneObj.isEnabled() and not sceneObj.isCulled()
+        if sceneObj.isEnabled() and not sceneObj.isCulled() and sceneObj.participatesInOverlapDetection()
           candidates.push(sceneObj)
         end if
       end for
@@ -301,6 +334,51 @@ namespace BGE
       end for
     end sub
 
+    ' Draws every deferred multi-member-cluster object's primitives in one combined
+    ' depth order, then calls afterDraw() once per object (matching the normal
+    ' single-object draw path's bookkeeping). Called once per frame, at the end of
+    ' drawScene(), after every SceneObject.draw() call has either drawn directly or
+    ' deferred here.
+    '
+    ' Deliberately one GLOBAL primitive list spanning every deferred cluster this
+    ' frame, not one list scoped per cluster (the design spec's original description) -
+    ' (a) it's simpler than sorting each cluster separately, (b) it's correct as long as
+    ' every SceneObject's getPrimitiveDepth() shares one convention (negative in front of
+    ' camera, ascending = farthest-first - see SceneObject.getPrimitiveDepth()'s doc
+    ' comment), which is now guaranteed, and (c) cross-cluster ordering is harmless even
+    ' though it's somewhat arbitrary: two different clusters are non-overlapping by
+    ' definition (union-find only merges objects whose hulls actually overlap), so their
+    ' relative draw order against each other was never meaningful to begin with.
+    '
+    ' Known limitation: this runs after both the plane loop and the main sorted loop in
+    ' drawScene(), which is correct for a genuinely solo object (anything overlapping a
+    ' cluster is itself pulled into that cluster by union-find) but NOT for an object
+    ' that's excluded from cluster candidacy entirely - SceneObjectLine/SceneObjectPlane/
+    ' SceneObjectParallaxLayer (see participatesInOverlapDetection() and the degenerate
+    ' <3-point-hull case in getPositionsForFrustumCheck()'s doc comment). Such an object
+    ' can be nearer to the camera than a cluster while never joining it, and would then
+    ' incorrectly draw underneath that cluster's members, since clusters are always
+    ' deferred to the end of the frame. This is a real, disclosed gap in the current
+    ' design (not a silent one) - a real fix would mean drawing each cluster at its
+    ' farthest member's normal sorted position instead of always at the end, which is a
+    ' larger architectural change deliberately left out of this fix round.
+    private sub drawPendingClusterPrimitives()
+      primitiveEntries = []
+      for each sceneObj in m.pendingClusterDraws
+        for i = 0 to sceneObj.getPrimitiveCount() - 1
+          primitiveEntries.push({sceneObj: sceneObj, index: i, depth: sceneObj.getPrimitiveDepth(i)})
+        end for
+      end for
+      primitiveEntries.SortBy("depth")
+      for each entry in primitiveEntries
+        entry.sceneObj.drawPrimitive(m, entry.index)
+      end for
+      for each sceneObj in m.pendingClusterDraws
+        sceneObj.afterDraw()
+      end for
+      m.pendingClusterDraws = []
+    end sub
+
     sub setupCameraForFrame()
       m.camera.setFrameSize(m.draw2d.getWidth(), m.draw2d.getHeight())
       m.camera.checkMovement()
@@ -314,8 +392,28 @@ namespace BGE
       m.updateSceneObjects()
 
       if m.computeOverlapClusters
-        m.overlapClusters = BGE.DepthSort.groupIntoClusters(m.getClusterCandidates(), m)
+        clusterResult = BGE.DepthSort.groupIntoClusters(m.getClusterCandidates(), m, m.lastClusterSortOrder)
+        m.overlapClusters = clusterResult.clusters
+        m.lastClusterSortOrder = clusterResult.sortedIds
+        for each cluster in m.overlapClusters
+          for each sceneObj in cluster
+            sceneObj.clusterMemberCount = cluster.count()
+          end for
+        end for
+      else if m.wasComputingOverlapClusters
+        ' Only reset clusterMemberCount back to 1 on the transition frame (clustering
+        ' was on last frame, off this frame) - every SceneObject defaults to 1 already
+        ' (see SceneObject.clusterMemberCount's own field default), so if clustering has
+        ' never been turned on this loop would otherwise run every single frame for
+        ' nothing, which breaks the "zero perf change when clustering is off" claim.
+        ' Running it on the transition frame (rather than skipping it entirely) is what
+        ' keeps this correct: any object left with a stale count > 1 from the last
+        ' clustered frame gets reset exactly once, here.
+        for each sceneObj in m.sceneObjects
+          sceneObj.clusterMemberCount = 1
+        end for
       end if
+      m.wasComputingOverlapClusters = m.computeOverlapClusters
 
       m.lastFrameDidSort = m.needsDepthSort
       if m.needsDepthSort
@@ -346,6 +444,8 @@ namespace BGE
       'TODO - Do proper occlusion culling
       ' draw planes first
 
+      m.pendingClusterDraws = []
+
       for each sceneObj in m.sceneObjects
         if sceneObj.isEnabled() and sceneObj.type = SceneObjectType.Plane
           if sceneObj.negDistanceFromCamera < 0 'and sceneObj.normnegDistanceFromCamera < 10000
@@ -364,6 +464,8 @@ namespace BGE
           end if
         end if
       end for
+
+      m.drawPendingClusterPrimitives()
     end sub
 
 

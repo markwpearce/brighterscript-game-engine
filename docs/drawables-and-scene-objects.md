@@ -280,6 +280,67 @@ Two supporting pieces worth knowing about if you're touching rendering performan
   still be there. Always `Clear()` a scratch region yourself before drawing into it unless you're
   certain your draw call will fully cover it.
 
+### The cluster draw contract (`getPrimitiveCount`/`getPrimitiveDepth`/`drawPrimitive`/`participatesInOverlapDetection`)
+
+`Renderer.computeOverlapClusters` (off by default) opts a renderer into detecting when two or
+more `SceneObject`s' projected screen bounds actually overlap (`BGE.DepthSort`'s sort-and-sweep
+broad phase plus a convex-hull narrow phase) and, for any multi-member cluster it finds,
+interleaving their draws by depth instead of drawing each object atomically. That interleaving is
+built on four small, overridable `SceneObject` methods:
+
+- **`getPrimitiveCount()`** - how many separately-orderable pieces this object currently has. The
+  base-class default (`1`) is correct for every billboard-family `SceneObject` - a quad, circle,
+  piece of text, etc. is always one piece regardless of draw mode.
+- **`getPrimitiveDepth(index)`** - the depth to sort primitive `index` by. The base-class default
+  returns the object's own `negDistanceFromCamera`, correct for the single-primitive case. Every
+  override must stay on the *same convention* - negative in front of the camera, ascending sort =
+  farthest-first (matching `negDistanceFromCamera` and the main scene's own painter's-algorithm
+  sort) - or its primitives will sort backwards against every other object's.
+- **`drawPrimitive(rendererObj, index)`** - draws primitive `index` now. The base-class default
+  delegates to the object's normal `performDraw()`, so a solo object's cluster-path draw and its
+  normal draw path are the same call, not a second implementation to keep in sync.
+- **`participatesInOverlapDetection()`** - whether this object is worth including in cluster
+  detection at all. The base-class default (`true`) is correct for anything with real area, which
+  the narrow phase can test via a convex hull of 3+ points.
+
+A **solo cluster** (an object nothing else overlaps - still the overwhelming common case) draws
+exactly as it does today: whole-object temp-bitmap caching, one `draw()` call, no primitive
+enumeration. Only a genuine multi-member cluster pays for `getPrimitiveCount()`/
+`getPrimitiveDepth()`/`drawPrimitive()` at all - `Renderer` collects every deferred cluster
+member's primitives into one combined list (spanning every cluster drawn that frame, not scoped
+per-cluster - harmless, since non-overlapping clusters were never going to visually interact
+anyway), sorts it once by depth, and calls `drawPrimitive()` in that order.
+
+`SceneObjectModel` is the one type that overrides all three draw-contract methods: it exposes its
+per-face list (`m.modelCanvasFaces`, already rebuilt every frame by `updateCanvasPosition()`,
+already correctly reflecting the resolved draw mode's backface-cull behavior) via
+`getPrimitiveCount()`/`getPrimitiveDepth()`, and `drawPrimitive()` draws one face directly through
+a shared `drawFaceToCanvas()` helper - deliberately bypassing its own whole-model temp-bitmap
+cache, which aggregates every face in the model's own internal order and can't represent this
+face being interleaved with a different object's primitives.
+
+**Known limitation** (tracked as [#112](https://github.com/markwpearce/brighterscript-game-engine/issues/112)):
+`getPrimitiveDepth()`'s farthest-first convention currently disagrees with `SceneObjectModel`'s own
+pre-existing intra-face draw order (its internal `SortBy("priority")` plus straight iteration,
+unrelated to and untouched by this feature, draws nearest-first instead). A model with genuinely
+self-overlapping faces can therefore paint them in reversed relative order depending on whether
+it's drawn solo or as part of a cluster that frame - rare in practice (most models are convex or
+backface-culled), and not fixed here since it would mean changing already-shipped model-rendering
+behavior with no dedicated testing budget for that specific change.
+
+`SceneObjectLine` and `SceneObjectPlane` both override `participatesInOverlapDetection()` to
+return `false`. Neither is a correctness workaround - a line's bounding points are always exactly
+its two endpoints, and a plane's default bounding point is a single point; neither can ever reach
+the narrow phase's minimum of 3 hull points, so both were always going to fail cluster candidacy
+regardless. The override just skips paying the broad-phase setup cost (screen-bounds projection,
+hull construction, sort/sweep bookkeeping) for a check that was guaranteed to reject them anyway -
+this matters in practice for a scene built from many line segments (e.g. `examples/3d`'s
+`TreesRoom`, each tree a bundle of `DrawableLine` branches), which would otherwise dominate the
+cluster-candidate count for zero possible benefit.
+
+See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `examples/depthsort`'s
+`ClusterVisualizerRoom` for a runnable demo of interleaved draw order taking visible effect.
+
 ## Deep dive: `SceneObjectPlane` (`DrawablePlane`)
 
 `DrawablePlane`/`SceneObjectPlane` render a textured, (mostly) infinite ground/floor plane -

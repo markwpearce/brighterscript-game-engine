@@ -24,14 +24,31 @@ namespace BGE
     protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       someWorked = false
       for each face in m.modelCanvasFaces
-        shadedColor = BGE.colorBrightness(face.color, face.brightness)
-        if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          someWorked = rendererObj.drawTriangle(face.vertices, 0, 0, shadedColor) or someWorked
-        else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
-          someWorked = rendererObj.drawTriangleOutline(face.vertices, shadedColor) or someWorked
-        end if
+        someWorked = m.drawFaceToCanvas(rendererObj, face, drawMode) or someWorked
       end for
       return someWorked
+    end function
+
+    ' Draws one face directly to the live canvas - the single place per-face draw
+    ' dispatch lives, shared by the normal solo draw path (drawToCanvas, above) and the
+    ' cluster draw path (drawPrimitive, below). Deliberately does not touch
+    ' m.modelCanvasFaces/m.tempBitmap - this always draws live, never builds or relies
+    ' on the whole-model temp-bitmap cache, since that cache aggregates every face in
+    ' this model's own internal order and can't represent this face being interleaved
+    ' with a different object's primitives.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {Model3dFace} face
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    private function drawFaceToCanvas(rendererObj as BGE.Renderer, face as BGE.Model3dFace, drawMode as SceneObjectDrawMode) as boolean
+      shadedColor = BGE.colorBrightness(face.color, face.brightness)
+      if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+        return rendererObj.drawTriangle(face.vertices, 0, 0, shadedColor)
+      else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
+        return rendererObj.drawTriangleOutline(face.vertices, shadedColor)
+      end if
+      return false
     end function
 
 
@@ -177,6 +194,58 @@ namespace BGE
         return 24
       end if
       return 64
+    end function
+
+    ' Overrides the base class's "always 1" default: a model's real primitive count is
+    ' its actual current face list, which m.modelCanvasFaces (rebuilt every frame by
+    ' updateCanvasPosition, above) already reflects correctly for whatever draw mode is
+    ' active - front-facing-only for oriented/solid/wireFrame, front+back for the
+    ' *DrawBackFace variants, and empty for matchCamera/directToCamera/directScaled
+    ' (which this class doesn't render at all via any path). No new draw-mode-awareness
+    ' is needed here - it's inherited for free from updateCanvasPosition's existing,
+    ' already-correct backface-cull logic.
+    '
+    ' @return {integer}
+    override function getPrimitiveCount() as integer
+      return m.modelCanvasFaces.count()
+    end function
+
+    ' `priority` (computed in updateCanvasPosition, above) is a positive value equal to
+    ' the distance of the face's closest vertex to the camera - larger for a farther
+    ' face. That's the OPPOSITE sign convention from the base class's
+    ' negDistanceFromCamera (negative in front of the camera, more negative = farther),
+    ' which is what Renderer.drawPendingClusterPrimitives()'s combined sort assumes for
+    ' every primitive regardless of SceneObject subtype. Negating it here converts to
+    ' that shared convention: -priority is negative, and more negative for a farther
+    ' face (e.g. a face 100 units out has priority 100 -> depth -100, versus a face 10
+    ' units out with priority 10 -> depth -10; ascending sort puts -100 before -10, i.e.
+    ' farthest first, matching negDistanceFromCamera and the main scene's own
+    ' painter's-algorithm sort).
+    '
+    ' KNOWN LIMITATION (see issue #112): this farthest-first order disagrees with this
+    ' model's OWN pre-existing intra-face order - updateCanvasPosition()'s
+    ' `m.modelCanvasFaces.SortBy("priority")` (ascending, unnegated) plus drawToCanvas()'s
+    ' straight iteration draw nearest-first/farthest-last instead. Neither of those was
+    ' touched here (they predate this method and #59's depth-sort work entirely - possibly
+    ' already backwards for a standard painter's algorithm, see #112). The practical
+    ' consequence: a model with genuinely self-overlapping faces can paint them in
+    ' reversed relative order depending on whether it's drawn solo or as part of a
+    ' multi-member overlap cluster that frame. Rare in practice (most models are convex
+    ' or backface-culled, which already discards most same-model self-occlusion), but
+    ' real - not fixed here since it would mean changing already-shipped model-rendering
+    ' behavior unrelated to clustering, without dedicated testing for that specific change.
+    '
+    ' @param {integer} index
+    ' @return {float}
+    override function getPrimitiveDepth(index as integer) as float
+      return -m.modelCanvasFaces[index].priority
+    end function
+
+    ' @param {Renderer} rendererObj
+    ' @param {integer} index
+    ' @return {boolean}
+    override function drawPrimitive(rendererObj as Renderer, index as integer) as boolean
+      return m.drawFaceToCanvas(rendererObj, m.modelCanvasFaces[index], m.lastDrawMode as SceneObjectDrawMode)
     end function
   end class
 

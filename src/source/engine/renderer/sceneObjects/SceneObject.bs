@@ -128,6 +128,13 @@ namespace BGE
     ' Unique Id
     id as string = ""
 
+    ' How many members are in this object's overlap cluster this frame (see
+    ' Renderer.getOverlapClusters()) - 1 means solo (the common case, and the only
+    ' value possible when Renderer.computeOverlapClusters is false). Set once per frame
+    ' by Renderer, right after it computes clusters - not meant to be set directly by
+    ' game code.
+    clusterMemberCount as integer = 1
+
     drawable as Drawable
 
     type as SceneObjectType
@@ -305,11 +312,20 @@ namespace BGE
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
         end if
         if m.hasValidCanvasPosition
-          didDraw = m.performDraw(rendererObj, drawModeToUse)
-          if didDraw
-            m.afterDraw()
+          if m.clusterMemberCount > 1
+            ' Defer to the interleaved cluster draw pass at the end of drawScene() -
+            ' this object's primitives get sorted together with the rest of its
+            ' cluster's members and drawn in one combined depth order, instead of
+            ' drawing this whole object atomically right now.
+            rendererObj.addPendingClusterDraw(m)
+            didDraw = true
           else
-            deterministicFailure = m.isDeterministicDrawFailure(rendererObj, drawModeToUse)
+            didDraw = m.performDraw(rendererObj, drawModeToUse)
+            if didDraw
+              m.afterDraw()
+            else
+              deterministicFailure = m.isDeterministicDrawFailure(rendererObj, drawModeToUse)
+            end if
           end if
         end if
       end if
@@ -400,6 +416,49 @@ namespace BGE
       return false
     end function
 
+    ' How many separately-orderable draw primitives this object currently has. The
+    ' base-class default (1) is correct for every billboard-family SceneObject - a
+    ' quad/circle/text/etc. is always drawn as one piece regardless of draw mode.
+    ' SceneObjectModel overrides this to return its actual per-face count, which does
+    ' vary with draw mode (backface-culled modes only count front-facing faces; the
+    ' *DrawBackFace variants count both).
+    '
+    ' @return {integer}
+    function getPrimitiveCount() as integer
+      return 1
+    end function
+
+    ' The depth to sort primitive `index` by, within a multi-member cluster's combined
+    ' primitive list. The base-class default (this object's own overall depth) is
+    ' correct for the single-primitive case.
+    '
+    ' Contract: the returned value must be on the same convention as
+    ' negDistanceFromCamera - negative in front of the camera, and ascending sort =
+    ' farthest-first (matching the main scene's own painter's-algorithm sort
+    ' convention). Every override (e.g. SceneObjectModel's per-face depth) must convert
+    ' to this same convention, or primitives from different SceneObject subtypes will
+    ' sort against each other backwards within a shared cluster.
+    '
+    ' @param {integer} index
+    ' @return {float}
+    function getPrimitiveDepth(index as integer) as float
+      return m.negDistanceFromCamera
+    end function
+
+    ' Draws primitive `index` now. The base-class default delegates to this object's
+    ' normal whole-object draw path (performDraw, with its normal caching behavior
+    ' intact) - correct for the single-primitive case, where "draw primitive 0" and
+    ' "draw the whole object" are the same operation. SceneObjectModel overrides this
+    ' to draw one face directly (bypassing its whole-model temp-bitmap cache, which
+    ' can't represent cross-object interleaving).
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} index
+    ' @return {boolean} whether this primitive actually drew something
+    function drawPrimitive(rendererObj as Renderer, index as integer) as boolean
+      return m.performDraw(rendererObj, m.lastDrawMode as SceneObjectDrawMode)
+    end function
+
 
 
     ' Handle any logic after the object has been drawn
@@ -473,6 +532,29 @@ namespace BGE
     ' @return {BGE.Math.Vector[]}
     function getBoundingPoints(cameraObj as Camera) as BGE.Math.Vector[]
       return m.getPositionsForFrustumCheck(m.getActualDrawMode(cameraObj))
+    end function
+
+    ' Whether this object is worth including in overlap-cluster detection
+    ' (BGE.DepthSort/Renderer.getOverlapClusters()) at all. The base-class default
+    ' (true) is correct for anything with real area/volume, which the narrow phase
+    ' (BGE.DepthSort.hullsOverlap) can actually test via a >=3-point convex hull.
+    ' SceneObjectLine overrides this to false: a line's own bounding points
+    ' (getPositionsForFrustumCheck) are always exactly 2 (its two endpoints), so its
+    ' projected hull can never reach MIN_VALID_HULL_POINTS - hullsOverlap() already
+    ' rejects it via isValidHull() unconditionally, meaning a line could never
+    ' actually be unioned into a real cluster with anything, before or after this
+    ' method existed. This isn't tolerating a small visual error - the scenario
+    ' ("two lines clustered in the wrong order") is structurally impossible under the
+    ' current hull-based narrow phase. What this method actually buys is skipping the
+    ' broad-phase setup cost (screen-bounds projection, hull construction, sort/sweep
+    ' entries) for objects that were always going to fail the narrow phase anyway -
+    ' this matters in practice for a scene built from many line segments (e.g.
+    ' examples/3d's TreesRoom, each tree a bundle of DrawableLine branches), which
+    ' would otherwise dominate the cluster-candidate count for zero possible benefit.
+    '
+    ' @return {boolean}
+    function participatesInOverlapDetection() as boolean
+      return true
     end function
 
     ' Whether performDraw() just returning false is a failure that will keep happening
