@@ -319,6 +319,15 @@ a shared `drawFaceToCanvas()` helper - deliberately bypassing its own whole-mode
 cache, which aggregates every face in the model's own internal order and can't represent this
 face being interleaved with a different object's primitives.
 
+**Known limitation** (tracked as [#112](https://github.com/markwpearce/brighterscript-game-engine/issues/112)):
+`getPrimitiveDepth()`'s farthest-first convention currently disagrees with `SceneObjectModel`'s own
+pre-existing intra-face draw order (its internal `SortBy("priority")` plus straight iteration,
+unrelated to and untouched by this feature, draws nearest-first instead). A model with genuinely
+self-overlapping faces can therefore paint them in reversed relative order depending on whether
+it's drawn solo or as part of a cluster that frame - rare in practice (most models are convex or
+backface-culled), and not fixed here since it would mean changing already-shipped model-rendering
+behavior with no dedicated testing budget for that specific change.
+
 `SceneObjectLine` and `SceneObjectPlane` both override `participatesInOverlapDetection()` to
 return `false`. Neither is a correctness workaround - a line's bounding points are always exactly
 its two endpoints, and a plane's default bounding point is a single point; neither can ever reach
