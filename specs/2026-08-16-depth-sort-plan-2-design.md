@@ -147,6 +147,21 @@ In `Renderer.drawScene()`, after `groupIntoClusters()` (still gated behind
   has its faces interleaved with the *other* members' primitives in one combined sort, not sorted
   against its own faces first and then placed as a block.
 
+  **Implementation deviation from this section, recorded deliberately**: the actual
+  `Renderer.drawPendingClusterPrimitives()` does not scope this primitive list per-cluster as
+  described above - it builds and sorts ONE combined list spanning *every* deferred cluster in the
+  frame, then draws that single sorted list start to finish. This was a considered decision, not
+  a shortcut that slipped through review, made after the final-review fix round for this plan fixed
+  a depth-sign mismatch between `SceneObjectModel`'s per-face depth and the base class's
+  `negDistanceFromCamera` convention (see the final review's Critical finding 1). Once every
+  `SceneObject` subtype's `getPrimitiveDepth()` shares one convention, the global-list approach is
+  strictly simpler and just as correct: (a) it avoids sorting N small lists instead of one, (b) it's
+  correct precisely because the depth convention is now consistent across every primitive
+  regardless of which cluster or object type it came from, and (c) cross-cluster ordering doesn't
+  need to be "correct" in any deeper sense - two different clusters are non-overlapping by
+  definition (union-find only merges objects whose hulls actually overlap), so their relative draw
+  order against each other was never visually meaningful to begin with.
+
 ### Cache invalidation on cluster membership change
 
 No new mechanism needed. Entering a multi-member cluster suspends that object's temp-bitmap
