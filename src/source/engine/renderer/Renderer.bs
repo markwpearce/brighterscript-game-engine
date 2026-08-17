@@ -42,6 +42,12 @@ namespace BGE
     ' an incremental (nearly-sorted) insertion sort instead of a fresh one every frame.
     private lastClusterSortOrder as string[] = []
 
+    ' Whether computeOverlapClusters was true on the previous frame - see drawScene()'s
+    ' clusterMemberCount reset-to-1 loop, which uses this to skip itself on any frame
+    ' where clustering has never been (or is no longer) turned on, rather than running
+    ' unconditionally every single frame regardless of whether it's needed.
+    private wasComputingOverlapClusters as boolean = false
+
     ' SceneObjects deferred from the normal per-object draw path this frame because
     ' their clusterMemberCount > 1 - see SceneObject.draw()/addPendingClusterDraw().
     ' Drawn all together, interleaved by primitive depth, at the end of drawScene().
@@ -56,6 +62,10 @@ namespace BGE
     ' examples/depthsort's ClusterVisualizerRoom, which visualizes the result) -
     ' TieBreakRoom deliberately does NOT opt in, since it only demonstrates the
     ' tie-break fix, not clustering.
+    '
+    ' Known limitation: see drawPendingClusterPrimitives()'s doc comment for a
+    ' disclosed draw-order gap affecting objects excluded from cluster candidacy
+    ' entirely (lines, planes, or anything else with a degenerate bounding-point set).
     public computeOverlapClusters as boolean = false
 
     camera as Camera
@@ -329,6 +339,29 @@ namespace BGE
     ' single-object draw path's bookkeeping). Called once per frame, at the end of
     ' drawScene(), after every SceneObject.draw() call has either drawn directly or
     ' deferred here.
+    '
+    ' Deliberately one GLOBAL primitive list spanning every deferred cluster this
+    ' frame, not one list scoped per cluster (the design spec's original description) -
+    ' (a) it's simpler than sorting each cluster separately, (b) it's correct as long as
+    ' every SceneObject's getPrimitiveDepth() shares one convention (negative in front of
+    ' camera, ascending = farthest-first - see SceneObject.getPrimitiveDepth()'s doc
+    ' comment), which is now guaranteed, and (c) cross-cluster ordering is harmless even
+    ' though it's somewhat arbitrary: two different clusters are non-overlapping by
+    ' definition (union-find only merges objects whose hulls actually overlap), so their
+    ' relative draw order against each other was never meaningful to begin with.
+    '
+    ' Known limitation: this runs after both the plane loop and the main sorted loop in
+    ' drawScene(), which is correct for a genuinely solo object (anything overlapping a
+    ' cluster is itself pulled into that cluster by union-find) but NOT for an object
+    ' that's excluded from cluster candidacy entirely - SceneObjectLine/SceneObjectPlane/
+    ' SceneObjectParallaxLayer (see participatesInOverlapDetection() and the degenerate
+    ' <3-point-hull case in getPositionsForFrustumCheck()'s doc comment). Such an object
+    ' can be nearer to the camera than a cluster while never joining it, and would then
+    ' incorrectly draw underneath that cluster's members, since clusters are always
+    ' deferred to the end of the frame. This is a real, disclosed gap in the current
+    ' design (not a silent one) - a real fix would mean drawing each cluster at its
+    ' farthest member's normal sorted position instead of always at the end, which is a
+    ' larger architectural change deliberately left out of this fix round.
     private sub drawPendingClusterPrimitives()
       primitiveEntries = []
       for each sceneObj in m.pendingClusterDraws
@@ -367,11 +400,20 @@ namespace BGE
             sceneObj.clusterMemberCount = cluster.count()
           end for
         end for
-      else
+      else if m.wasComputingOverlapClusters
+        ' Only reset clusterMemberCount back to 1 on the transition frame (clustering
+        ' was on last frame, off this frame) - every SceneObject defaults to 1 already
+        ' (see SceneObject.clusterMemberCount's own field default), so if clustering has
+        ' never been turned on this loop would otherwise run every single frame for
+        ' nothing, which breaks the "zero perf change when clustering is off" claim.
+        ' Running it on the transition frame (rather than skipping it entirely) is what
+        ' keeps this correct: any object left with a stale count > 1 from the last
+        ' clustered frame gets reset exactly once, here.
         for each sceneObj in m.sceneObjects
           sceneObj.clusterMemberCount = 1
         end for
       end if
+      m.wasComputingOverlapClusters = m.computeOverlapClusters
 
       m.lastFrameDidSort = m.needsDepthSort
       if m.needsDepthSort
