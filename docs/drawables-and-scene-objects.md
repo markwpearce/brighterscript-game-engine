@@ -553,4 +553,8 @@ depth-sort skip-optimization (see "How `Renderer.drawScene()` actually draws a f
 for the whole renderer, not just this emitter. See `specs/2026-08-18-particle-system-design.md`
 for the full reasoning, including the tradeoffs this accepts (particles from one emitter
 draw as a single atomic unit against the rest of the scene, and aren't depth-sorted against
-each other).
+each other). One consequence worth knowing: frustum culling is checked against the emitter's
+own anchor position only, not against where its particles actually drift, so a stationary
+emitter parked off-screen can have its particles culled and never re-checked even as they
+drift into view - keep a continuously-emitting emitter's own position on/near-screen, or
+nudge the owning entity periodically, to avoid this.
