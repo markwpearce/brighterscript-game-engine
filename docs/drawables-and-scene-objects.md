@@ -471,7 +471,7 @@ attaches one the same way `addRectangle`/`addCircle` do, just with a shape name 
 a size:
 
 ```brighterscript
-emitter = m.fireworks.addParticles("fireworks", "rectangle", {
+emitter = m.fireworks.addParticles("fireworks", BGE.ParticleShape.Rectangle, {
   lifetime: 1.0,
   lifetimeSpread: 0.3,
   velocitySpreadMagnitude: 300,
@@ -511,16 +511,16 @@ the live population; once reached, further spawns (continuous or `burst()`) are 
 dropped until a slot frees up via natural expiry - a safety net against a runaway or
 misconfigured emitter, not something you need to size exactly.
 
-### Animated sprite-sheet particles (`shape = "image"`)
+### Animated sprite-sheet particles (`shape = BGE.ParticleShape.Image`)
 
-An `"image"`-shape emitter can optionally animate each particle through a sprite sheet
+A `BGE.ParticleShape.Image` emitter can optionally animate each particle through a sprite sheet
 instead of drawing one static bitmap. Set `cellWidth`/`cellHeight` (pixels) alongside
 `image`, and each particle's current frame is driven by its own `age / lifetime` -
 mirroring `Sprite`'s own row-major grid-slicing convention, just with time-since-spawn
 in place of an explicit frame index:
 
 ```brighterscript
-emitter = m.fireballs.addParticles("fireballs", "image", {
+emitter = m.fireballs.addParticles("fireballs", BGE.ParticleShape.Image, {
   spawnRate: 8,
   lifetime: 1.2,
   velocitySpreadAngleDegrees: 360,
@@ -538,7 +538,7 @@ emitter.start()
 ```
 
 `cellWidth`/`cellHeight` default to `0`, meaning `image` draws as a single static bitmap -
-existing "image"-shape emitters are unaffected unless you opt in. `getFrameRegions()` slices
+existing `BGE.ParticleShape.Image` emitters are unaffected unless you opt in. `getFrameRegions()` slices
 `image` into its grid lazily on first use and caches the result, so a fade-style sheet
 (bright frame to a transparent one) reproduces its own fade with no extra frame-rate
 configuration - see `examples/particles`'s `AnimatedImageParticlesRoom`.
