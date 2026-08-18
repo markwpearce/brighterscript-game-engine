@@ -156,11 +156,19 @@ engine changes needed: `DrawableParticles` calls
   objects, `maxParticles` cap enforcement (continuous emission and
   `burst()`), `start()`/`stop()` toggling emission, color/alpha/size
   interpolation math at known `age/lifetime` fractions.
-- **`rendererTest` demo**: a new category exercising each shape at "hundreds
-  of particles" (per the issue's own performance concern), timed
-  automatically like every other `rendererTest` demo (fps/frame/update/draw
-  ms, draw-call count) — this is what informs whether the default
-  `maxParticles` needs tuning, not guesswork.
+- **New `examples/particles` example** (scaffolded via
+  `npm run create-example`), rather than a `rendererTest` demo:
+  `DrawableParticles` is a `Drawable` on a `GameEntity`, and `rendererTest`
+  is deliberately built without `BGE.Game`/`Room`/`GameEntity` at all — this
+  feature can't be exercised there without either standing up an
+  entity/room shim just for it or loosening a rule that's out of scope for
+  this PR. A dedicated example is the standard way this repo demonstrates a
+  new capability end-to-end, and it's where the mandatory on-device
+  verification (below) already has to happen anyway. Rooms: one per shape
+  (line/rectangle/image), one contrasting continuous emission vs.
+  `burst()`, and a "stress" room spawning near `maxParticles` to get real
+  fps/draw-call numbers on-device — this is what informs whether the
+  default `maxParticles` needs tuning, not guesswork.
 - **On-device/simulator verification** via the `rokubot-examples` skill is
   mandatory before considering this done, per the repo's standing rule that
   static analysis alone doesn't exercise example/runtime behavior.
