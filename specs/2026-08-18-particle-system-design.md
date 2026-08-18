@@ -7,10 +7,14 @@ Issue: [#86](https://github.com/markwpearce/brighterscript-game-engine/issues/86
 A `DrawableParticles` drawable (attached to a `GameEntity` like any other
 drawable) that emits and simulates lightweight particles — lines, rectangles,
 or images — with randomized velocity, acceleration, lifetime-driven fade and
-color interpolation, and a configurable population cap. Each live particle is
-backed by one `SceneObjectParticle`, a new minimal `SceneObject` subclass, so
-particles draw/cull/depth-sort through the existing `Renderer` pipeline with
-no renderer changes.
+color interpolation, and a configurable population cap. The whole emitter is
+backed by exactly **one** `SceneObjectParticle` (a new, minimal `SceneObject`
+subclass) which draws every live particle itself in a tight loop — not one
+`SceneObject` per particle — specifically to keep spawn/expire cheap at scale
+(see [Why one `SceneObjectParticle` per emitter, not per particle](#why-one-sceneobjectparticle-per-emitter-not-per-particle)
+below). The explicit priority for this feature is maximum particle count at
+the highest achievable FPS, not per-particle fidelity — every design choice
+below is made in that direction.
 
 ## Goals / non-goals
 
@@ -31,26 +35,64 @@ collision detection.
 
 ## Architecture
 
-### Why a new `SceneObjectParticle` rather than reusing existing types
+### Why one `SceneObjectParticle` per emitter, not per particle
 
-Considered reusing `SceneObjectLine`/`SceneObjectRectangle`/`SceneObjectImage`
-directly. Rejected because:
+Initially considered one `SceneObjectParticle` instance per live particle
+(analogous to every existing `Drawable`/`SceneObject` pair being 1:1).
+Rejected once its concrete cost became clear: `Renderer.addSceneObject()` and
+`removeSceneObject()` both set `needsDepthSort = true`
+(`Renderer.bs:269-302`). Depth-sort's entire performance win (issue #59) is
+*skipping* the per-frame sort when nothing that affects order changed. An
+emitter spawning and expiring particles every frame — the normal case for any
+continuous emission — would set that flag every single frame for as long as
+it's active, permanently defeating the skip-optimization for the *whole*
+renderer, not just this emitter's own objects. At the scale this feature is
+explicitly meant to support ("as many particles as possible, highest FPS
+possible"), that's the wrong tradeoff.
 
-- Every existing `SceneObject` reads its geometry/color/alpha from the single
-  `Drawable` it's permanently paired with — that model doesn't fit N
-  independent per-particle states under one `DrawableParticles`. Reusing them
-  would still require injecting per-particle overrides into three different
-  existing classes; no code reuse is actually saved.
-- `SceneObjectRectangle` and `SceneObjectImage` both extend
-  `SceneObjectBillboard`, which brings oriented-mode projection and
-  temp-bitmap caching that rectangle/line particles specifically don't want
-  (see below) — pulling that in per-particle at "hundreds of particles" scale
-  is the wrong tradeoff.
+Instead: **`DrawableParticles.addToScene()` registers exactly one
+`SceneObjectParticle` for the entire emitter**, exactly like every other
+drawable — zero `addSceneObject`/`removeSceneObject` churn as particles
+spawn and expire. That one `SceneObjectParticle` overrides `performDraw` to
+loop over the emitter's own live-particle array and issue one direct draw
+call per particle itself (`drawLine`/`drawRectangle`/`drawRegion`),
+computing each particle's own canvas position inline via
+`worldPointToCanvasPoint`.
 
-A single new `SceneObjectParticle` (extending plain `SceneObject`, the same
-lightweight base `SceneObjectLine` uses — not `SceneObjectBillboard`) with a
-per-shape branch in `performDraw`/`findCanvasPosition` is less code overall
-and keeps every particle on the cheapest available draw path.
+Consequences, accepted deliberately given the stated priority:
+
+- Particles from one emitter draw as a single atomic unit relative to
+  *other* scene objects in the renderer's depth sort — the same
+  whole-object-granularity tradeoff `SceneObjectModel` already makes for its
+  per-face list. This emitter doesn't get its own entry in the renderer's
+  cull-latch/depth-sort bookkeeping per particle.
+- Particles within the same emitter draw in spawn order, not depth-sorted
+  against each other — acceptable because inter-particle depth correctness
+  was never a goal (see non-goals: no 3D/camera-oriented particle
+  rendering).
+- Per-particle off-canvas skipping is a cheap inline bounds check inside the
+  draw loop, not the full per-object frustum-cull machinery every normal
+  `SceneObject` gets — correctly scoped, since these aren't independent
+  scene objects anymore.
+
+This also means `SceneObjectParticle` itself is a much smaller class than a
+1:1 design would need: it holds no per-instance color/alpha/size fields at
+all — it just reads straight from its owning `DrawableParticles`'s particle
+array at draw time.
+
+### Why not reuse `SceneObjectLine`/`SceneObjectRectangle`/`SceneObjectImage` directly
+
+Considered this too. Rejected because every existing `SceneObject` reads its
+geometry/color/alpha from the single `Drawable` it's permanently paired
+with — that model doesn't fit one object drawing N independent particle
+states in a loop, and `SceneObjectRectangle`/`SceneObjectImage` both extend
+`SceneObjectBillboard`, which brings oriented-mode projection and
+temp-bitmap caching this feature doesn't want anywhere near a per-particle
+draw loop (see per-shape draw cost below). A single new `SceneObjectParticle`
+(extending plain `SceneObject`, the same lightweight base `SceneObjectLine`
+uses — not `SceneObjectBillboard`) with a per-shape branch inside its one
+draw loop is less code overall and keeps every particle on the cheapest
+available draw path.
 
 ### Per-shape draw cost, by design
 
@@ -71,24 +113,30 @@ and keeps every particle on the cheapest available draw path.
 ### Component overview
 
 - **`DrawableParticles`** (`src/source/engine/drawables/DrawableParticles.bs`,
-  new `Drawable` subclass) — owns emitter config and the live-particle list.
-  Overrides `Drawable.update()` (the existing no-op hook every `Drawable`
-  already has, called for every drawable of every valid entity every frame
-  via `Game.bs`'s `processEntityPreDraw`, independent of the owning entity's
-  own `onUpdate()`/velocity — this is the same hook `AnimatedImage.update()`
-  already uses). Like `AnimatedImage`, it self-times elapsed time via its own
-  `GameTimer` rather than expecting a `dt` parameter.
+  new `Drawable` subclass) — owns emitter config and the live-particle
+  array, and captures the `Renderer` passed to `addToScene()` (the base
+  `Drawable` doesn't persist this itself — confirmed by reading every field
+  and every `addToScene` override — so `DrawableParticles` stores it in its
+  own field; in normal usage this is always `GameEntity.addDrawable`'s
+  `m.game.canvas.renderer`, called exactly once per drawable). Overrides
+  `Drawable.update()` (the existing no-op hook every `Drawable` already has,
+  called for every drawable of every valid entity every frame via
+  `Game.bs`'s `processEntityPreDraw`, independent of the owning entity's own
+  `onUpdate()`/velocity — this is the same hook `AnimatedImage.update()`
+  already uses) to run the simulation: spawn accumulator, per-particle
+  physics/fade/color integration, expiry. Like `AnimatedImage`, it
+  self-times elapsed time via its own `GameTimer` rather than expecting a
+  `dt` parameter.
 - **Particle record** — a plain associative array (not a class, to avoid
   per-particle class overhead at emitter scale): `position`, `velocity`,
   `age`, `lifetime`, `startColor`/`endColor`, `startSize`/`endSize`,
-  `sceneObject` (its linked `SceneObjectParticle`).
+  `rotation` (image shape only). No `sceneObject` field — there isn't one
+  per particle any more.
 - **`SceneObjectParticle`** (`src/source/engine/renderer/sceneObjects/`, new
-  `SceneObject` subclass) — holds its own per-instance `worldPosition`,
-  `color`, `alpha`, `size` (and, for image shape, `rotation`/`scale`), set
-  directly by `DrawableParticles.update()` each frame rather than derived
-  from the owning Drawable's own offset/rotation/scale. Overrides
-  `updateWorldPosition` to a no-op (position already pushed each frame) and
-  branches `performDraw`/`findCanvasPosition` by shape as above.
+  `SceneObject` subclass, one instance per emitter) — holds no per-particle
+  state of its own; `performDraw` iterates its owning `DrawableParticles`'s
+  live-particle array directly and draws each one, branching by shape as
+  below.
 
 ### Config / API surface
 
@@ -127,35 +175,41 @@ default.
 1. `Game.bs`'s `processEntityPreDraw` calls `drawable.update()` for every
    drawable of every valid entity, including each `DrawableParticles`.
 2. `DrawableParticles.update()`: advances its spawn accumulator (emits 0+
-   new particles this frame, respecting `maxParticles`), then for every live
-   particle: ages it, integrates `velocity += acceleration * dt` and
-   `position += velocity * dt`, interpolates alpha/color/size by
-   `age / lifetime`, and pushes the results directly onto that particle's
-   `SceneObjectParticle`. Particles whose `age >= lifetime` are expired:
-   their `SceneObjectParticle` is removed from the renderer
-   (`Renderer.removeSceneObject`) and dropped from the particle array.
-3. The normal `Renderer.drawScene()` pass (cull / depth-sort / draw) handles
-   every live `SceneObjectParticle` exactly like any other scene object — no
-   changes to `Renderer` itself.
+   new particle *records* into its own array this frame, respecting
+   `maxParticles` — no renderer/scene-object interaction at spawn time at
+   all), then for every live particle: ages it, integrates
+   `velocity += acceleration * dt` and `position += velocity * dt`,
+   interpolates alpha/color/size by `age / lifetime`. Particles whose
+   `age >= lifetime` are simply dropped from the array — no
+   `Renderer.removeSceneObject` call, since there's no per-particle scene
+   object to remove.
+3. The normal `Renderer.drawScene()` pass reaches this emitter's single
+   `SceneObjectParticle` exactly like any other scene object (one cull
+   check, one depth-sort entry); its `performDraw` then loops the
+   `DrawableParticles`'s current particle array and issues one direct draw
+   call per particle.
 
 ### Renderer registration
 
-`Drawable`'s existing `sceneObjects` dict / `getSceneObjects()` /
-`addSceneObjectToRenderer()` / `removeFromScene()` plumbing already supports
-one Drawable registering an arbitrary number of SceneObjects over its
-lifetime (confirmed generic, though no existing drawable exercises this
-today — every current `addToScene` override registers exactly one). No core
-engine changes needed: `DrawableParticles` calls
-`m.addSceneObjectToRenderer(...)` once per spawned particle and
-`rendererScene.removeSceneObject(...)` once per expired particle.
+Unlike the per-particle design this replaced, registration here is the
+*normal* single-`SceneObject`-per-`Drawable` case every other drawable
+already uses — `DrawableParticles.addToScene()` calls
+`m.addSceneObjectToRenderer(...)` exactly once, at attach time, and stores
+the given `Renderer` in its own field for `performDraw`'s projection calls.
+No core engine changes needed, and no per-particle `Renderer` calls of any
+kind.
 
 ## Testing
 
 - **Rooibos spec** (`DrawableParticles.spec.bs`): spawn-rate accounting over
-  simulated time, lifetime expiry removing particles and their scene
-  objects, `maxParticles` cap enforcement (continuous emission and
-  `burst()`), `start()`/`stop()` toggling emission, color/alpha/size
-  interpolation math at known `age/lifetime` fractions.
+  simulated time, lifetime expiry dropping particles from the array,
+  `maxParticles` cap enforcement (continuous emission and `burst()`),
+  `start()`/`stop()` toggling emission, color/alpha/size interpolation math
+  at known `age/lifetime` fractions. Separately, a
+  `SceneObjectParticle.spec.bs` covers the single scene object's draw loop
+  against a real `Renderer`/`roBitmap` (the `SceneObjectCircle.spec.bs`
+  isolation pattern), asserting draw-call counts scale with live particle
+  count.
 - **New `examples/particles` example** (scaffolded via
   `npm run create-example`), rather than a `rendererTest` demo:
   `DrawableParticles` is a `Drawable` on a `GameEntity`, and `rendererTest`
