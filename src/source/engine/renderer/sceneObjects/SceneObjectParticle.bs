@@ -1,10 +1,63 @@
 namespace BGE
-  ' TEMPORARY STUB - replaced with the real implementation in Task 3.
+  ' Draws an entire DrawableParticles emitter's live particles with a single SceneObject
+  ' - not one SceneObject per particle. See
+  ' specs/2026-08-18-particle-system-design.md ("Why one SceneObjectParticle per
+  ' emitter, not per particle") for why: per-particle SceneObjects would call
+  ' Renderer.addSceneObject/removeSceneObject every frame during continuous emission,
+  ' permanently defeating the depth-sort skip-optimization for the whole renderer.
   class SceneObjectParticle extends SceneObject
     drawable as DrawableParticles
 
     sub new(name as string, drawableObj as DrawableParticles)
       super(name, drawableObj, BGE.SceneObjectType.Particle)
     end sub
+
+    ' A multi-particle emitter can't pass the narrow-phase hull-validity check as a
+    ' single object, and clustering doesn't add anything here since particles already
+    ' draw as one batched unit - skip broad-phase candidacy entirely.
+    override function participatesInOverlapDetection() as boolean
+      return false
+    end function
+
+    protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      didDrawAny = false
+
+      for each particle in m.drawable.particles
+        canvasPos = rendererObj.worldPointToCanvasPoint(particle.position)
+        if canvasPos = invalid
+          continue for
+        end if
+
+        t = particle.age / particle.lifetime
+        color = BGE.lerpColorRGB(particle.startColor, particle.endColor, t)
+        alpha = BGE.Math.lerp(particle.startAlpha, particle.endAlpha, t) / 255.0
+        rgba = BGE.RGBAtoRGBA((color >> 16) and &hFF, (color >> 8) and &hFF, color and &hFF, alpha)
+        size = BGE.Math.lerp(particle.startSize, particle.endSize, t)
+
+        if m.drawable.shape = "line"
+          didDrawAny = m.drawLineParticle(rendererObj, particle, canvasPos, size, rgba) or didDrawAny
+        else if m.drawable.shape = "rectangle"
+          half = size / 2.0
+          didDrawAny = rendererObj.drawRectangle(canvasPos.x - half, canvasPos.y - half, size, size, rgba) or didDrawAny
+        else if m.drawable.shape = "image" and m.drawable.image <> invalid
+          didDrawAny = rendererObj.drawRegion(m.drawable.image, canvasPos.x, canvasPos.y, size, size, particle.rotation, rgba) or didDrawAny
+        end if
+      end for
+
+      return didDrawAny
+    end function
+
+    private function drawLineParticle(rendererObj as BGE.Renderer, particle as object, canvasPos as BGE.Math.Vector, length as float, rgba as integer) as boolean
+      direction = BGE.Math.VectorOps.create(1, 0)
+      if not BGE.Math.VectorOps.isZero(particle.velocity)
+        direction = BGE.Math.VectorOps.getNormalizedCopy(particle.velocity)
+      end if
+      endWorldPos = BGE.Math.VectorOps.add(particle.position, BGE.Math.VectorOps.scale(direction, length))
+      endCanvasPos = rendererObj.worldPointToCanvasPoint(endWorldPos)
+      if endCanvasPos = invalid
+        return false
+      end if
+      return rendererObj.drawLine(canvasPos.x, canvasPos.y, endCanvasPos.x, endCanvasPos.y, rgba)
+    end function
   end class
 end namespace
