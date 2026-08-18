@@ -36,6 +36,7 @@ the `SceneObject` side.
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
 | `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
+| `DrawableParticles`   | `SceneObjectParticle`    | A whole emitter's worth of simulated particles (lines, rectangles, or images), drawn through one `SceneObject` for the entire emitter (see below). |
 | _(billboard drawables, e.g. images used with `directToCamera`/`directScaled` draw modes)_ | `SceneObjectBillboard` | Always faces the camera regardless of its own rotation. |
 
 Every `SceneObject` subclass lives under `src/source/engine/renderer/sceneObjects/`. If you're
@@ -460,3 +461,100 @@ position is far outside the frustum.
 Draw order relies entirely on the ordinary distance-from-camera sort - give a background
 layer's owning entity a suitably negative Z (or positive, for a foreground layer) so it
 falls out of `Renderer.drawScene()`'s existing sort with no renderer changes.
+
+## Particles (`DrawableParticles`)
+
+`DrawableParticles` emits and simulates a population of lightweight particles - lines,
+rectangles, or images - with randomized velocity, constant acceleration, and
+lifetime-driven color/alpha/size interpolation. `GameEntity.addParticles` builds and
+attaches one the same way `addRectangle`/`addCircle` do, just with a shape name instead of
+a size:
+
+```brighterscript
+emitter = m.fireworks.addParticles("fireworks", BGE.ParticleShape.Rectangle, {
+  lifetime: 1.0,
+  lifetimeSpread: 0.3,
+  velocitySpreadMagnitude: 300,
+  startColor: BGE.ColorsRGB.Cyan,
+  endColor: BGE.ColorsRGB.Magenta,
+  startAlpha: 255,
+  endAlpha: 0,
+  startSize: 10,
+  endSize: 2,
+  maxParticles: 500
+})
+```
+
+Nothing spawns until you call `start()` (continuous emission at `spawnRate` particles/second)
+or `burst(count)` (spawns `count` particles immediately, regardless of `start()`/`stop()`
+state - see `examples/particles`'s `BurstRoom`, which fires 50 at a time on a button press).
+`stop()` halts continuous emission, but particles already alive keep simulating and drawing
+until they expire naturally:
+
+```brighterscript
+emitter.start()     ' begin continuous emission at spawnRate/sec
+emitter.stop()      ' stop spawning new ones; live particles finish out their lifetime
+emitter.burst(50)   ' spawn 50 right now, independent of start()/stop()
+```
+
+Each particle gets its own randomized `lifetime` (`lifetime` +/- `lifetimeSpread`) and
+initial `velocity`, spread around the emitter's base `velocity` by
+`velocitySpreadAngleDegrees` (direction) and `velocitySpreadMagnitude` (speed). If `velocity`
+is left at zero, particles instead radiate outward in a uniformly random direction at
+`velocitySpreadMagnitude` - the way to get a stationary explosion/burst effect rather than a
+directional spray. `acceleration` (e.g. gravity) is applied to every particle every frame.
+Over each particle's lifetime, `startColor`/`endColor` (packed RGB), `startAlpha`/`endAlpha`
+(0-255), and `startSize`/`endSize` all linearly interpolate by the particle's own
+`age / lifetime` - `startSize`/`endSize` mean a line's length, a rectangle's side length, or
+an image's scale multiplier (`1.0` = native size), depending on `shape`. `maxParticles` caps
+the live population; once reached, further spawns (continuous or `burst()`) are silently
+dropped until a slot frees up via natural expiry - a safety net against a runaway or
+misconfigured emitter, not something you need to size exactly.
+
+### Animated sprite-sheet particles (`shape = BGE.ParticleShape.Image`)
+
+A `BGE.ParticleShape.Image` emitter can optionally animate each particle through a sprite sheet
+instead of drawing one static bitmap. Set `cellWidth`/`cellHeight` (pixels) alongside
+`image`, and each particle's current frame is driven by its own `age / lifetime` -
+mirroring `Sprite`'s own row-major grid-slicing convention, just with time-since-spawn
+in place of an explicit frame index:
+
+```brighterscript
+emitter = m.fireballs.addParticles("fireballs", BGE.ParticleShape.Image, {
+  spawnRate: 8,
+  lifetime: 1.2,
+  velocitySpreadAngleDegrees: 360,
+  velocitySpreadMagnitude: 60,
+  startSize: 0.5,
+  endSize: 0.5,
+  startAlpha: 255,
+  endAlpha: 0,
+  cellWidth: 128,
+  cellHeight: 128,
+  maxParticles: 40
+})
+emitter.image = m.game.getBitmap("fireball")
+emitter.start()
+```
+
+`cellWidth`/`cellHeight` default to `0`, meaning `image` draws as a single static bitmap -
+existing `BGE.ParticleShape.Image` emitters are unaffected unless you opt in. `getFrameRegions()` slices
+`image` into its grid lazily on first use and caches the result, so a fade-style sheet
+(bright frame to a transparent one) reproduces its own fade with no extra frame-rate
+configuration - see `examples/particles`'s `AnimatedImageParticlesRoom`.
+
+Every particle from one emitter draws through a single `SceneObjectParticle` - the emitter's
+own `performDraw` loop issues one `drawLine`/`drawRectangle`/`drawRegion` call per live
+particle directly, rather than each particle getting its own `SceneObject`. That's a
+deliberate departure from every other pair in this guide's table, made specifically so that
+spawning and expiring particles every frame (the normal case for continuous emission) never
+touches `Renderer.addSceneObject`/`removeSceneObject`, which would otherwise defeat the
+depth-sort skip-optimization (see "How `Renderer.drawScene()` actually draws a frame" above)
+for the whole renderer, not just this emitter. See `specs/2026-08-18-particle-system-design.md`
+for the full reasoning, including the tradeoffs this accepts (particles from one emitter
+draw as a single atomic unit against the rest of the scene, and aren't depth-sorted against
+each other). One consequence worth knowing: frustum culling is checked against the emitter's
+own anchor position only, not against where its particles actually drift, so a stationary
+emitter parked off-screen can have its particles culled and never re-checked even as they
+drift into view - keep a continuously-emitting emitter's own position on/near-screen, or
+nudge the owning entity periodically, to avoid this.
