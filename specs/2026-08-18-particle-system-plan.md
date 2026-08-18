@@ -36,8 +36,13 @@
 | `src/source/engine/renderer/sceneObjects/SceneObjectParticle.spec.bs` (create) | Draw-call-count behavior against a real `Renderer`/`roBitmap`, isolation-tested like `SceneObjectCircle.spec.bs`. |
 | `src/source/engine/GameEntity.bs` (modify) | Add `addParticles(...)` convenience method, mirroring `addCircle`/`addRectangle`. |
 | `examples/particles/` (create, via scaffolding scripts) | Runnable demo: one room per shape, one contrasting continuous emission vs. `burst()`, one "stress" room near `maxParticles` for on-device fps/draw-call numbers. |
+| `examples/particles/src/sprites/fireball.png` (added mid-plan — Task 6/7) | opengameart.org "Fireball Particle Sheet" sprite sheet, CC-BY 3.0, for the animated sprite-sheet particle demo. |
+| `examples/particles/src/sprites/CREDITS.md` (added mid-plan — Task 7) | Attribution for `fireball.png`, following `examples/parallax/src/sprites/CREDITS.md`'s existing convention. |
+| `examples/particles/src/source/Rooms/AnimatedImageParticlesRoom.bs` (added mid-plan — Task 7) | Demonstrates sprite-sheet-animated image particles. |
 | `docs/drawables-and-scene-objects.md` (modify) | Document the `DrawableParticles`/`SceneObjectParticle` pair, following its existing per-pair walkthrough structure. |
 | `CLAUDE.md` (modify) | Add `DrawableParticles`/`SceneObjectParticle` to the existing drawable/scene-object subclass lists. |
+
+**Added mid-execution (not in the original design spec):** Tasks 6-7 below (animated sprite-sheet image particles) were added after Task 5 completed, per a direct user request mid-plan. See the SDD ledger for the ruling. `DrawableParticles.bs`/`DrawableParticles.spec.bs`/`SceneObjectParticle.bs`/`SceneObjectParticle.spec.bs` above get a second round of changes in Task 6, on top of Tasks 2-3's original ones.
 
 ---
 
@@ -987,7 +992,284 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Documentation
+### Task 6: Animated sprite-sheet particles (engine support)
+
+**Added mid-execution, per direct user request** (not in the original design spec) — see `specs/2026-08-18-particle-system-design.md`'s addendum, or the SDD ledger, for the reference asset (opengameart.org "Fireball Particle Sheet", CC-BY 3.0, a 4x4/16-frame grid whose frames already fade from bright to transparent). The `"image"` shape currently draws one static bitmap for a particle's whole life; this task adds an opt-in sprite-sheet mode, driven directly by `age/lifetime` rather than an independent frame-rate timer, since that's what makes a fade-style sheet like this one reproduce its own fade for free.
+
+This mirrors `Sprite.bs`'s existing `cellWidth`/`cellHeight` grid-slicing convention (`Sprite.bs:88-95`, row-major `CreateObject("roRegion", bitmap, col * cellWidth, row * cellHeight, cellWidth, cellHeight)`) rather than inventing new naming — deliberate consistency with how every other spritesheet-based drawable in this engine already names this concept.
+
+**Files:**
+- Modify: `src/source/engine/drawables/DrawableParticles.bs`
+- Modify: `src/source/engine/drawables/DrawableParticles.spec.bs`
+- Modify: `src/source/engine/renderer/sceneObjects/SceneObjectParticle.bs`
+- Modify: `src/source/engine/renderer/sceneObjects/SceneObjectParticle.spec.bs`
+
+**Interfaces:**
+- Consumes: `roRegion` construction (`CreateObject("roRegion", bitmap, x, y, w, h)`), same as `Sprite.setCellRegions()`.
+- Produces (for Task 7's example room): `DrawableParticles.cellWidth as integer = 0`, `DrawableParticles.cellHeight as integer = 0` (config fields — both `>0` opts a `shape: "image"` emitter into sprite-sheet mode), and `DrawableParticles.getFrameRegions() as roRegion[]` (lazily slices `image` into a row-major grid on first call, caches it; returns `invalid` if `image` isn't set yet or `cellWidth`/`cellHeight` aren't both `>0` — i.e. "not a sprite sheet, caller should fall back to the whole bitmap").
+- Produces: `SceneObjectParticle.performDraw`'s image branch picks a per-particle frame region via `getFrameRegions()[frameIndex]` when sprite-sheet mode is active, where `frameIndex` is `Int((particle.age / particle.lifetime) * frameCount)` manually bounds-checked into `[0, frameCount - 1]` (not `BGE.Math.Clamp`, which returns a `float` — an integer array index needs the manual bounds check shown in Step 5) — falls back to drawing `m.drawable.image` whole, unchanged from before this task, when `getFrameRegions()` returns `invalid`. Fully backward compatible: existing Task 3 tests (single static image, `cellWidth`/`cellHeight` left at their `0` default) must keep passing unmodified.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `src/source/engine/drawables/DrawableParticles.spec.bs` (existing `@suite` class):
+
+```brighterscript
+@describe("getFrameRegions")
+@it("returns invalid when cellWidth/cellHeight are not set (not a sprite sheet)")
+function _()
+  emitter = new BGE.DrawableParticles(m.entity, "image")
+  m.assertEqual(invalid, emitter.getFrameRegions())
+end function
+
+@it("returns invalid when image is not set, even with cellWidth/cellHeight set")
+function _()
+  emitter = new BGE.DrawableParticles(m.entity, "image", {cellWidth: 16, cellHeight: 16})
+  m.assertEqual(invalid, emitter.getFrameRegions())
+end function
+
+@it("slices a sprite sheet into a row-major grid of regions")
+function _()
+  sheet = CreateObject("roBitmap", {width: 64, height: 32, alphaEnable: true})
+  emitter = new BGE.DrawableParticles(m.entity, "image", {cellWidth: 16, cellHeight: 16})
+  emitter.image = sheet
+  regions = emitter.getFrameRegions()
+  m.assertEqual(8, regions.count()) ' 64/16=4 cols x 32/16=2 rows
+end function
+
+@it("caches the sliced regions across repeated calls")
+function _()
+  sheet = CreateObject("roBitmap", {width: 32, height: 16, alphaEnable: true})
+  emitter = new BGE.DrawableParticles(m.entity, "image", {cellWidth: 16, cellHeight: 16})
+  emitter.image = sheet
+  first = emitter.getFrameRegions()
+  second = emitter.getFrameRegions()
+  m.assertEqual(first.count(), second.count())
+end function
+```
+
+Add to `src/source/engine/renderer/sceneObjects/SceneObjectParticle.spec.bs` (existing `@suite` class):
+
+```brighterscript
+@describe("animated sprite-sheet image particles")
+@it("still draws one call per particle when the image emitter is configured as a sprite sheet")
+function _()
+  sheet = CreateObject("roBitmap", {width: 32, height: 16, alphaEnable: true})
+  emitter = new BGE.DrawableParticles(m.entity, "image", {cellWidth: 16, cellHeight: 16})
+  emitter.image = sheet
+  emitter.burst(4)
+  m.assertEqual(4, m.drawOnce(emitter))
+end function
+```
+
+- [ ] **Step 2: Build the tests and confirm they fail**
+
+Run: `npm run build-tests`
+Expected: FAIL — `getFrameRegions` is undefined.
+
+- [ ] **Step 3: Implement `DrawableParticles.getFrameRegions()`**
+
+Add to `src/source/engine/drawables/DrawableParticles.bs`, near the `image` field:
+
+```brighterscript
+    ' Width/height (pixels) of one animation cell if `image` is a sprite sheet, "image"
+    ' shape only. When both are >0, `image` is sliced into a row-major grid of frames and
+    ' each particle's current frame is driven by its own age/lifetime - a fade-style sheet
+    ' (bright to transparent) reproduces its own fade this way, with no extra frame-rate
+    ' config needed. 0 (the default) means `image` is drawn as a single static bitmap,
+    ' unchanged from previous behavior.
+    cellWidth as integer = 0
+    cellHeight as integer = 0
+
+    protected regions as roRegion[] = invalid
+```
+
+And this method, near `spawnParticle`:
+
+```brighterscript
+    ' Lazily slices `image` into a row-major grid of `cellWidth` x `cellHeight` regions
+    ' (built once, cached) - mirrors Sprite.setCellRegions()'s exact slicing convention.
+    '
+    ' @return {roRegion[]} the per-frame regions, or `invalid` if this emitter isn't
+    '   configured as a sprite sheet (cellWidth/cellHeight are 0) or `image` isn't set yet
+    function getFrameRegions() as roRegion[]
+      if m.image = invalid or m.cellWidth <= 0 or m.cellHeight <= 0
+        return invalid
+      end if
+      if m.regions = invalid
+        cols = cint(m.image.getWidth() / m.cellWidth)
+        rows = cint(m.image.getHeight() / m.cellHeight)
+        m.regions = []
+        for row = 0 to rows - 1
+          for col = 0 to cols - 1
+            m.regions.push(CreateObject("roRegion", m.image, col * m.cellWidth, row * m.cellHeight, m.cellWidth, m.cellHeight))
+          end for
+        end for
+      end if
+      return m.regions
+    end function
+```
+
+- [ ] **Step 4: Run the tests and confirm the new `DrawableParticles` tests pass**
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: PASS for the four new `getFrameRegions` tests. The `SceneObjectParticle` test still fails at this point (frame-region drawing isn't wired up yet) — that's expected.
+
+- [ ] **Step 5: Implement the frame-region draw path in `SceneObjectParticle`**
+
+In `src/source/engine/renderer/sceneObjects/SceneObjectParticle.bs`, replace the existing image branch in `performDraw`:
+
+```brighterscript
+        else if m.drawable.shape = "image" and m.drawable.image <> invalid
+          regionToDraw = m.drawable.image
+          frameRegions = m.drawable.getFrameRegions()
+          if frameRegions <> invalid and frameRegions.count() > 0
+            frameIndex = Int(t * frameRegions.count())
+            if frameIndex >= frameRegions.count()
+              frameIndex = frameRegions.count() - 1
+            end if
+            if frameIndex < 0
+              frameIndex = 0
+            end if
+            regionToDraw = frameRegions[frameIndex]
+          end if
+          didDrawAny = rendererObj.drawRegion(regionToDraw, canvasPos.x, canvasPos.y, size, size, particle.rotation, rgba) or didDrawAny
+        end if
+```
+
+- [ ] **Step 6: Run the full suite and confirm everything passes, including Task 3's original static-image test**
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: PASS for all tests, including the pre-existing "issues one draw call per live line/rectangle particle" tests from Task 3 (unaffected — they don't use `shape: "image"`) and the pre-existing image-shape behavior (no `cellWidth`/`cellHeight` set → `getFrameRegions()` returns `invalid` → falls back to `m.drawable.image` exactly as before this task).
+
+- [ ] **Step 7: Validate and commit**
+
+Run: `npm run validate`
+Expected: no type errors.
+
+```bash
+git add src/source/engine/drawables/DrawableParticles.bs src/source/engine/drawables/DrawableParticles.spec.bs src/source/engine/renderer/sceneObjects/SceneObjectParticle.bs src/source/engine/renderer/sceneObjects/SceneObjectParticle.spec.bs
+git commit -m "Support animated sprite-sheet image particles (#86)
+
+Opt-in via cellWidth/cellHeight (mirrors Sprite's own grid-slicing
+convention). Frame index is driven directly by age/lifetime rather than
+an independent frame-rate timer, so a fade-style sheet reproduces its own
+fade for free. Falls back to the existing single-bitmap behavior
+unchanged when not configured as a sheet.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 7: `AnimatedImageParticlesRoom` example + asset credit
+
+**Files:**
+- Add (asset — see note below): `examples/particles/src/sprites/fireball.png`
+- Create: `examples/particles/src/sprites/CREDITS.md`
+- Create: `examples/particles/src/source/Rooms/AnimatedImageParticlesRoom.bs` (via `npm run create-room`)
+- Modify: `examples/particles/src/source/main.bs` (load the bitmap, register the room, add it to the room-cycle array)
+
+**Interfaces:**
+- Consumes: `GameEntity.addParticles(...)` (Task 4), `DrawableParticles.cellWidth`/`cellHeight` (Task 6).
+
+**Asset:** `examples/particles/src/sprites/fireball.png` (the opengameart.org "Fireball Particle Sheet", CC-BY 3.0, credited to Davididev/davididev.com per the license page) is already in place, confirmed 512x512 pixels, a 4x4 grid of 16 frames — so **`cellWidth: 128, cellHeight: 128`** exactly (512/4 = 128 each dimension). Confirm the file is still there before starting (`ls -la examples/particles/src/sprites/fireball.png`), but the dimensions below are already verified, not a placeholder to fill in.
+
+- [ ] **Step 1: Confirm the asset is present**
+
+Run: `ls -la examples/particles/src/sprites/fireball.png`
+Expected: file exists (512x512 PNG). If missing, stop and report NEEDS_CONTEXT — do not substitute a placeholder.
+
+- [ ] **Step 2: Add the credits file**
+
+Create `examples/particles/src/sprites/CREDITS.md`, following the exact convention already established in `examples/parallax/src/sprites/CREDITS.md`:
+
+```markdown
+# Art Credits
+
+The fireball sprite sheet (`fireball.png`) is the
+["Fireball Particle Sheet"](https://opengameart.org/content/fireball-particle-sheet) by
+[Davididev](https://davididev.com), licensed
+[CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/) - attribution required.
+```
+
+- [ ] **Step 3: Scaffold the room**
+
+```bash
+npm run create-room -- particles AnimatedImageParticlesRoom
+```
+
+- [ ] **Step 4: Implement the room**
+
+Read `examples/particles/src/source/Rooms/ImageParticlesRoom.bs` first (Task 5) to match its exact structure/conventions (constructor vs. `onCreate`, back-navigation, room-cycling calls via `util.bs`'s `goToNextRoom`) — this room is the same shape with sprite-sheet config added:
+
+```brighterscript
+namespace examples.particles
+  class AnimatedImageParticlesRoom extends BGE.Room
+    fireballs as BGE.GameEntity
+
+    override sub onCreate()
+      m.fireballs = new BGE.GameEntity(m.game, {name: "Fireballs", position: BGE.Math.VectorOps.create(m.game.canvas.getWidth() / 2, m.game.canvas.getHeight() / 2)})
+      m.game.addEntity(m.fireballs)
+      emitter = m.fireballs.addParticles("fireballs", "image", {
+        spawnRate: 8
+        lifetime: 1.2
+        velocitySpreadAngleDegrees: 360
+        velocitySpreadMagnitude: 60
+        startSize: 0.5
+        endSize: 0.5
+        cellWidth: 128
+        cellHeight: 128
+        maxParticles: 40
+      })
+      emitter.image = m.game.getBitmap("fireball")
+      emitter.start()
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      if input.press and input.isButton("back")
+        m.game.End()
+      else if input.press and input.isButton("fastforward")
+        examples.particles.goToNextRoom(m, 1)
+      else if input.press and input.isButton("rewind")
+        examples.particles.goToNextRoom(m, -1)
+      end if
+    end sub
+  end class
+end namespace
+```
+
+`cellWidth`/`cellHeight` are already confirmed above (128/128, from the sheet's verified 512x512/4x4 dimensions) — not a placeholder. Match the `onInput`/room-cycling calls to whatever `util.bs` actually exports (Task 5's report says a `goToNextRoom(currentRoom, direction)` helper in `examples.particles`'s `util.bs` — read it to get the exact call signature right, the snippet above is illustrative). `startSize`/`endSize` of `0.5` scale the 128px frame down to a 64px on-canvas particle — adjust only if it looks visually wrong on-device in Step 7, not before.
+
+- [ ] **Step 5: Wire it into `main.bs`**
+
+Add `game.loadBitmap("fireball", "pkg:/sprites/fireball.png")` alongside the existing `game.loadBitmap("spark", ...)` call, add `AnimatedImageParticlesRoom` to the local `getRoomNames()` array (Task 5's fix for definition-order cycling) in whatever position makes sense in the cycle (e.g. right after `ImageParticlesRoom`), and register it via `game.defineRoom(...)` alongside the other five rooms.
+
+- [ ] **Step 6: Validate the build**
+
+```bash
+npm run build && cd examples/particles && npm run build && cd ../..
+```
+Expected: both build cleanly.
+
+- [ ] **Step 7: On-device verification for this one new room**
+
+Load the `rokubot-examples` skill and verify specifically: the fireball sheet's frames actually cycle/animate per-particle over each particle's lifetime (not a single static frame), the fade-to-transparent progression is visible, and cycling to/from this room via `fastforward`/`rewind` works cleanly alongside the other five rooms. You do not need to re-verify the other five rooms (Task 5 already did) — this is a scoped, single-room check.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add examples/particles
+git commit -m "Add AnimatedImageParticlesRoom demo (#86)
+
+Fireball sprite sheet by Davididev (opengameart.org), CC-BY 3.0 - see
+examples/particles/src/sprites/CREDITS.md.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: Documentation
 
 **Files:**
 - Modify: `docs/drawables-and-scene-objects.md`
@@ -1003,7 +1285,7 @@ Follow its existing per-drawable/scene-object-pair walkthrough structure and hea
 
 - [ ] **Step 2: Add the `DrawableParticles`/`SceneObjectParticle` section**
 
-Write a new subsection (matching the file's existing heading depth) covering: what it's for, the config surface (spawn rate, lifetime, velocity/spread, acceleration, color/alpha/size-over-lifetime, `maxParticles`), the `start()`/`stop()`/`burst()` API, and — as an aside, not a lead — the one-SceneObject-per-emitter batching rationale with a link to `specs/2026-08-18-particle-system-design.md` for the full reasoning.
+Write a new subsection (matching the file's existing heading depth) covering: what it's for, the config surface (spawn rate, lifetime, velocity/spread, acceleration, color/alpha/size-over-lifetime, `maxParticles`), the `start()`/`stop()`/`burst()` API, the opt-in `cellWidth`/`cellHeight` sprite-sheet animation mode for `"image"` particles (Task 6/7 — frame driven by `age/lifetime`, mirroring `Sprite`'s own grid-slicing convention), and — as an aside, not a lead — the one-SceneObject-per-emitter batching rationale with a link to `specs/2026-08-18-particle-system-design.md` for the full reasoning.
 
 - [ ] **Step 3: Update `CLAUDE.md`'s drawable/scene-object subclass lists**
 
@@ -1032,4 +1314,6 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - [ ] `npm run check` passes (lint, validate, headless tests).
 - [ ] `npm run validate-examples` passes, including the new `examples/particles`.
 - [ ] Task 5 Step 12's on-device verification actually happened and its findings (fps at max particles, any visual issues) are reported to the user, per `feedback_static_analysis_insufficient_for_examples` — do not claim this feature works on a real/simulated Roku without having run it.
+- [ ] Task 7 Step 7's on-device verification of `AnimatedImageParticlesRoom` actually happened (sheet frames genuinely cycle per-particle, not a static frame).
+- [ ] `examples/particles/src/sprites/CREDITS.md` correctly attributes the fireball sheet (CC-BY 3.0, Davididev).
 - [ ] `package.json`/`package-lock.json`'s local `brighterscript` `file:` link was never staged/committed in any of the above commits (per this branch's own housekeeping constraint).
