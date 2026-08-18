@@ -763,7 +763,7 @@ Add this `@it` block to the existing `@suite` class in `src/source/engine/GameEn
 @describe("addParticles")
 @it("adds a DrawableParticles configured with the given shape")
 function _()
-  emitter = m.entity.addParticles("sparks", "line", {spawnRate: 10})
+  emitter = m.entity.addParticles("sparks", "line", {spawnRate: 10.0})
   m.assertEqual("line", emitter.shape)
   m.assertEqual(10.0, emitter.spawnRate)
 end function
