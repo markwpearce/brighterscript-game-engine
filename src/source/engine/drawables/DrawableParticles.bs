@@ -1,0 +1,174 @@
+namespace BGE
+  ' Emits and simulates lightweight particles (lines, rectangles, or images) with
+  ' randomized velocity, constant acceleration, and lifetime-driven fade/color/size
+  ' interpolation. Draws through a single SceneObjectParticle per emitter rather than
+  ' one SceneObject per particle, so spawning/expiring particles never touches
+  ' Renderer.addSceneObject/removeSceneObject - see
+  ' specs/2026-08-18-particle-system-design.md for why that matters for depth-sort
+  ' performance.
+  class DrawableParticles extends Drawable
+    ' Shape drawn for every particle: "line", "rectangle", or "image".
+    shape as string = "rectangle"
+
+    ' Bitmap or region drawn for each particle when shape = "image". Ignored for other
+    ' shapes.
+    optional image as dynamic = invalid
+
+    ' Particles spawned per second while emitting (see start()/stop()).
+    spawnRate as float = 0.0
+
+    ' Base lifetime in seconds each particle survives, randomized by +/- lifetimeSpread.
+    lifetime as float = 1.0
+    lifetimeSpread as float = 0.0
+
+    ' Base emission velocity (world units/second) shared by every particle before
+    ' randomization is applied.
+    velocity as BGE.Math.Vector = BGE.Math.VectorOps.create()
+
+    ' Randomizes each particle's velocity direction by +/- this many degrees around
+    ' `velocity`.
+    velocitySpreadAngleDegrees as float = 0.0
+
+    ' Randomizes each particle's velocity magnitude by +/- this amount. If `velocity`
+    ' is zero, particles instead radiate outward in a uniformly random direction at this
+    ' magnitude - this is what makes a stationary emitter usable for an explosion/burst
+    ' effect.
+    velocitySpreadMagnitude as float = 0.0
+
+    ' Constant acceleration (world units/second^2) applied to every particle every
+    ' frame, e.g. gravity.
+    acceleration as BGE.Math.Vector = BGE.Math.VectorOps.create()
+
+    ' Packed RGB (0xRRGGBB) color interpolated over each particle's lifetime.
+    startColor as integer = &hFFFFFF
+    endColor as integer = &hFFFFFF
+
+    ' Alpha (0-255) interpolated over each particle's lifetime.
+    startAlpha as float = 255.0
+    endAlpha as float = 255.0
+
+    ' Size interpolated over each particle's lifetime - a line's length, a rectangle's
+    ' side length, or an image's scale multiplier (1.0 = the image's native size),
+    ' depending on `shape`.
+    startSize as float = 4.0
+    endSize as float = 4.0
+
+    ' Degrees/second of rotation applied to each particle. Only used when shape = "image"
+    ' - see the design spec for why line/rectangle particles never rotate.
+    rotationSpeed as float = 0.0
+
+    ' Hard cap on live particles. Once reached, further spawns (continuous emission or
+    ' burst()) are silently dropped until a slot frees up via natural expiry.
+    maxParticles as integer = 100
+
+    ' Live particle records, each a plain associative array with keys: position
+    ' (BGE.Math.Vector), velocity (BGE.Math.Vector), age (float), lifetime (float),
+    ' startColor/endColor (integer, packed RGB), startAlpha/endAlpha (float, 0-255),
+    ' startSize/endSize (float), rotation (float, degrees, image shape only).
+    particles as object[] = []
+
+    protected emitting as boolean = false
+    protected spawnAccumulator as float = 0.0
+    protected timer = new GameTimer()
+
+    sub new(owner as GameEntity, shape as string, args = {} as roAssociativeArray)
+      super(owner, args)
+      m.shape = shape
+      ' bs:disable-next-line: 1140
+      m.append(args)
+      m.timer.mark()
+    end sub
+
+    ' Starts continuous emission at `spawnRate` particles/second.
+    sub start()
+      m.emitting = true
+    end sub
+
+    ' Stops continuous emission. Already-live particles keep simulating and drawing
+    ' until they expire naturally.
+    sub stop()
+      m.emitting = false
+    end sub
+
+    ' Immediately spawns `count` particles, regardless of start()/stop() state.
+    '
+    ' @param {integer} count - number of particles to spawn right now
+    sub burst(count as integer)
+      for i = 1 to count
+        m.spawnParticle()
+      end for
+    end sub
+
+    override function addToScene(rendererScene as Renderer) as BGE.SceneObject
+      return m.addSceneObjectToRenderer(new SceneObjectParticle(m.getSceneObjectName("particles"), m), rendererScene)
+    end function
+
+    override sub update()
+      elapsedMs = m.timer.totalMilliseconds()
+      m.timer.mark()
+      dt = elapsedMs / 1000.0
+
+      if m.emitting and m.spawnRate > 0
+        m.spawnAccumulator += m.spawnRate * dt
+        while m.spawnAccumulator >= 1.0
+          m.spawnParticle()
+          m.spawnAccumulator -= 1.0
+        end while
+      end if
+
+      remaining = []
+      for each particle in m.particles
+        particle.age += dt
+        if particle.age < particle.lifetime
+          BGE.Math.VectorOps.plusEquals(particle.velocity, BGE.Math.VectorOps.scale(m.acceleration, dt))
+          BGE.Math.VectorOps.plusEquals(particle.position, BGE.Math.VectorOps.scale(particle.velocity, dt))
+          if m.shape = "image"
+            particle.rotation += m.rotationSpeed * dt
+          end if
+          remaining.push(particle)
+        end if
+      end for
+      m.particles = remaining
+    end sub
+
+    private sub spawnParticle()
+      if m.particles.count() >= m.maxParticles
+        return
+      end if
+
+      spawnVelocity = BGE.Math.VectorOps.copy(m.velocity)
+      spreadMagnitude = (rnd(0) * 2.0 - 1.0) * m.velocitySpreadMagnitude
+
+      if BGE.Math.VectorOps.isZero(spawnVelocity)
+        ' No base direction to spread around - radiate outward uniformly at random,
+        ' so a stationary emitter with velocitySpreadMagnitude set still produces an
+        ' explosion/burst-style spread instead of doing nothing.
+        randomAngle = rnd(0) * 360.0
+        direction = BGE.Math.RotateVectorAroundPoint2d(BGE.Math.VectorOps.create(1, 0), BGE.Math.VectorOps.create(), BGE.Math.DegreesToRadians(randomAngle))
+        spawnVelocity = BGE.Math.VectorOps.scale(direction, spreadMagnitude)
+      else
+        spreadAngle = (rnd(0) * 2.0 - 1.0) * m.velocitySpreadAngleDegrees
+        spawnVelocity = BGE.Math.RotateVectorAroundPoint2d(spawnVelocity, BGE.Math.VectorOps.create(), BGE.Math.DegreesToRadians(spreadAngle))
+        direction = BGE.Math.VectorOps.getNormalizedCopy(spawnVelocity)
+        BGE.Math.VectorOps.plusEquals(spawnVelocity, BGE.Math.VectorOps.scale(direction, spreadMagnitude))
+      end if
+
+      lifetimeVariance = (rnd(0) * 2.0 - 1.0) * m.lifetimeSpread
+      particleLifetime = BGE.Math.Max(0.01, m.lifetime + lifetimeVariance)
+
+      m.particles.push({
+        position: BGE.Math.VectorOps.copy(m.getWorldPosition()),
+        velocity: spawnVelocity,
+        age: 0.0,
+        lifetime: particleLifetime,
+        startColor: m.startColor,
+        endColor: m.endColor,
+        startAlpha: m.startAlpha,
+        endAlpha: m.endAlpha,
+        startSize: m.startSize,
+        endSize: m.endSize,
+        rotation: 0.0
+      })
+    end sub
+  end class
+end namespace
