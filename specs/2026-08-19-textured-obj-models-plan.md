@@ -37,7 +37,7 @@
   - `class Model3d` — new field `texturePath as string = invalid`.
   - `interface Model3dLoadOptions` — `optional texturePath as string`.
   - `namespace BGE.Model3dOps`:
-    - `function resolveEffectiveTexturePath(options as BGE.Model3dLoadOptions, model as BGE.Model3d) as string` — returns `options.texturePath` if non-invalid/non-empty, else `model.texturePath`, else `invalid`.
+    - `function resolveEffectiveTexturePath(options as BGE.Model3dLoadOptions, model as BGE.Model3d) as dynamic` — returns `options.texturePath` if non-invalid/non-empty, else `model.texturePath`, else `invalid`. (`as dynamic`, not `as string` — BrightScript's runtime enforces a return-type cast that `bsc --validate`'s static check does not catch, so a function declared `as string` that actually returns `invalid` crashes at real runtime with "Type Mismatch. Unable to cast Invalid to String," even though it validates and builds cleanly. Confirmed by direct testing during implementation; see ledger.)
     - `sub applyTexture(model as BGE.Model3d, bitmap as roBitmap, cacheId as string)` — builds one `roRegion` + one `BGE.RendererHelpers.RegionWithId` (id = `cacheId`) from `bitmap`, then for every face in `model.faces` with a non-invalid `Texture`, converts its 3 `points` from normalized (`u`, `v`) to pixel space (`u * bitmap.GetWidth()`, `(1 - v) * bitmap.GetHeight()`) and sets `.srcRegionWithId` to the one shared region.
 - Consumes: `BGE.RendererHelpers.createRegionWithId(region as roRegion, id as string) as BGE.RendererHelpers.RegionWithId` (existing, `RendererHelpers.bs:25`), `BGE.Math.VectorOps.create` (existing).
 
@@ -168,8 +168,8 @@ Add a new `Model3dOps` namespace after the closing `end namespace` of `Model3dFa
     '
     ' @param {BGE.Model3dLoadOptions} options
     ' @param {BGE.Model3d} model
-    ' @return {string}
-    function resolveEffectiveTexturePath(options as BGE.Model3dLoadOptions, model as BGE.Model3d) as string
+    ' @return {string|invalid}
+    function resolveEffectiveTexturePath(options as BGE.Model3dLoadOptions, model as BGE.Model3d) as dynamic
       if options <> invalid and options.texturePath <> invalid and options.texturePath <> ""
         return options.texturePath
       end if
