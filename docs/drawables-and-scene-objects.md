@@ -354,12 +354,15 @@ is closer to a classic SNES "Mode 7" renderer than to a sprite draw call.
 
 Each frame, `SceneObjectPlane` (in `findCanvasPosition`, via `getPerspectivePointsByCamera`):
 
-1. Casts a ray from each of the camera's four frustum corners (`Camera3d.frustumRays`) and
-   intersects each with the plane (`BGE.Math.intersectRayWithPlane`) - this gives the four
-   world-space points where the camera's view "hits the ground" at its corners. Corners whose rays
-   don't hit the plane at all (pointing above the horizon) are approximated instead by rotating a
-   point on the plane at `SCENE_OBJECT_PLANE_FAR_DISTANCE` around the plane's normal by half the
-   field of view.
+1. Casts a ray from each of the camera's four frustum corners and intersects each with the plane
+   (`BGE.Math.intersectRayWithPlane`) - this gives the four world-space points where the camera's
+   view "hits the ground" at its corners. When the camera isn't rolled, these rays are built fresh
+   each frame using a true (`atan`-derived) vertical field of view rather than reusing
+   `Camera3d.frustumRays` (which uses a cheaper linear approximation - accurate enough for frustum
+   culling, but not for this plane's own edges; see "Roll" below for the rolled case, which builds
+   its own rays too). Corners whose rays don't hit the plane at all (pointing above the horizon)
+   are approximated instead by rotating a point on the plane at `SCENE_OBJECT_PLANE_FAR_DISTANCE`
+   around the plane's normal by half the field of view.
 2. Converts those four world points into **texture pixel coordinates** via
    `BGE.Math.worldPointToTexturePixel` (see "Texture anchoring" below).
 3. `populatePerspectiveBmp()` un-warps the resulting quad: it rotates/translates the *entire*
@@ -367,9 +370,13 @@ Each frame, `SceneObjectPlane` (in `findCanvasPosition`, via `getPerspectivePoin
    rectangular "pre-perspective" bitmap - effectively turning "camera looking at a trapezoid on the
    ground" into "looking straight down at a flat rectangle."
 4. `drawPerspectiveBmpSlicesToByCamera()` slices that pre-perspective bitmap into `~50` thin
-   horizontal bands (near-to-far) and draws each one scaled to its correct on-screen size - bands
-   near the camera are large, bands near the horizon shrink toward a single line, which is what
-   produces the perspective effect.
+   horizontal bands (near-to-far). Each band's on-screen position comes from projecting its two
+   world-space boundary points through the camera's own perspective formula
+   (`projectPlanePointToCanvasY`, the same math `Camera3d.worldPointToCanvasPoint` uses for every
+   other 3D object) rather than an arbitrary curve - bands near the camera land large near the
+   bottom of the frame, bands near the horizon shrink toward it, which is what produces the
+   perspective effect, and what keeps the ground exactly aligned with any per-point-projected
+   object (a billboard, say) at the same world position.
 
 ### Texture anchoring
 
@@ -388,6 +395,19 @@ overlap the texture at all (a cheap early-out), and for partial overlaps, the pl
 real texture on the side that's in-bounds and the renderer's background (transparent/black) on the
 side that isn't - it does **not** wrap or repeat the texture to fill the screen.
 
+### Roll
+
+`Camera3d.rollDegrees` (rotation about the camera's own forward axis) can't be represented by this
+horizontal-band rasterizer directly - a tilted horizon isn't a stack of horizontal bands. Instead,
+whenever `rollDegrees <> 0`, every step above runs against an *unrolled* ("level") camera enlarged
+to cover the real frame's diagonal (`SceneObjectPlane.getRollCanvasSize`), using
+`Camera3d.getLevelUpVector()`/`getLevelRightVector()` and a true, `atan`-derived field of view
+(`getFovDegreesForCanvasSize`) for both axes. The resulting composite is then rotated by
+`rollDegrees` about its own center and cropped back down to the real frame (`performDraw`) -
+mathematically exact for a pure roll, since perspective division commutes with an in-plane
+rotation about the optical axis. See `specs/2026-08-19-camera-roll-and-plane-horizon-design.md`
+for the full design.
+
 ### Gotchas if you touch this code
 
 - **Scratch bitmaps are pooled and not cleared** (see the `ScratchBitmapPool` note above) - this bit
@@ -399,12 +419,11 @@ side that isn't - it does **not** wrap or repeat the texture to fill the screen.
   frame's* leftover pixels showing through - which happened to look like the track's own curb
   pattern, because that's literally what it was. Both bitmaps must be `Clear()`-ed before drawing
   into them each frame.
-- **Slice seams**: `drawPerspectiveBmpSlicesToByCamera`'s destination position for each slice
-  advances by a rounded (`cint`) pixel count, but each slice's own drawn height comes from a
-  separate, unrounded scale factor - the two can disagree by a fraction of a pixel, leaving a thin
-  black gap between adjacent slices (worst near the bottom of the screen, where slices are
-  tallest/nearest the camera). Each slice is drawn a few pixels taller than its exact allotted band
-  (`seamPaddingScale`) so neighbors overlap slightly instead of gapping.
+- **Slice seams**: each ground band's two boundary points are projected to screen-space Y
+  independently and rounded to whole pixels, so adjacent bands' rounded positions can disagree by
+  a fraction of a pixel, leaving a thin black gap between them (worst near the bottom of the
+  screen, where bands are tallest/nearest the camera). Each band is drawn a few pixels taller than
+  its exact allotted position (`seamPadding`) so neighbors overlap slightly instead of gapping.
 - **Camera-orientation coupling**: if you're building a "chase camera" or similar that follows a
   moving point, don't use `camera.setTarget(fixedPoint)` every frame if you want the camera to turn
   the way a driver's/person's head turns - `setTarget` points the camera *at* that fixed point,
