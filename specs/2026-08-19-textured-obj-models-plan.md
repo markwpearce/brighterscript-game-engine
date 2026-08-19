@@ -1285,7 +1285,111 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: Docs — close out issue #89's references in CLAUDE.md
+### Task 7: Fix intra-model face draw order (issue #112)
+
+**Why this is in scope for issue #89's work**: this pre-existing bug was already latent (affecting flat-shaded self-overlapping models), but the new textured car/D20 demos make it directly visible and noticeable — surfaced during Task 6's on-device verification. Added to this plan at the user's explicit request, since it now directly impacts how these models look.
+
+**Files:**
+- Modify: `src/source/engine/renderer/sceneObjects/SceneObjectModel.bs`
+- Test: `src/source/engine/renderer/sceneObjects/SceneObjectModel.spec.bs`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: no signature changes — `updateCanvasPosition`, `getPrimitiveDepth`, `drawPrimitive` keep their existing signatures. Only the internal sort direction of `m.modelCanvasFaces` changes.
+
+**Root cause** (per issue #112): `updateCanvasPosition()`'s `m.modelCanvasFaces.SortBy("priority")` (`SceneObjectModel.bs:224`) sorts ascending by `priority` — a positive value, larger for a face farther from the camera — so index 0 is the *nearest* face and the last index is the *farthest*. `drawToCanvas()`/`drawToTempBitmap()` iterate that list in stored order with no reversal (`for each face in m.modelCanvasFaces`), so the nearest face draws first and the farthest face draws last — on top, backwards from a standard painter's algorithm, where the farthest primitive should draw first (as background) and the nearest should draw last (on top, correctly occluding what's behind it).
+
+**Why this is safe to fix without touching the cluster path**: `getPrimitiveDepth(index)`/`drawPrimitive(rendererObj, index)` (`SceneObjectModel.bs:276-285`) look up `m.modelCanvasFaces[index]` by explicit index, never by iterating the array's order — and `Renderer.drawPendingClusterPrimitives()` (the cluster path's caller) builds its own combined `primitiveEntries` list by visiting every index `0..getPrimitiveCount()-1` and re-sorting that combined list itself by depth. Reversing `modelCanvasFaces`'s internal storage order has zero effect on the cluster path's correctness — only the solo `drawToCanvas`/`drawToTempBitmap` iteration order actually depends on it.
+
+**The fix**: change the sort to descending (farthest-first, matching the required draw order), so the two draw loops need no other change:
+
+```brighterscript
+m.modelCanvasFaces.SortBy("priority", "r")
+```
+
+(Roku's `roArray.SortBy(fieldName, flags)` accepts `"r"` in `flags` to reverse the sort — descending instead of ascending.)
+
+Also update the stale `KNOWN LIMITATION (see issue #112)` doc comment on `getPrimitiveDepth` (`SceneObjectModel.bs:261-272`), which currently describes the solo/cluster disagreement as an open, undisclosed inconsistency — replace it with a note that the fix landed and the two paths now agree, per issue #112's own closing note ("the disclosed solo-vs-clustered inconsistency... should be resolved for free").
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `src/source/engine/renderer/sceneObjects/SceneObjectModel.spec.bs`, inside `SceneObjectModelTests`, after the existing `@describe("getPrimitiveCount / getPrimitiveDepth / drawPrimitive (cluster draw contract)")` block's tests (after the "getPrimitiveDepth ranks a closer face as greater..." test):
+
+```brighterscript
+    @describe("intra-model solo draw order (issue #112)")
+
+    @it("stores the farthest face first and the nearest face last, so the solo draw loop paints farthest-first (painter's algorithm)")
+    function _()
+      ' Two faces at very different depths from the camera - faceFar should be
+      ' drawn first (as background), faceNear drawn last (on top, correctly
+      ' occluding faceFar if they overlapped on screen).
+      faceNear = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, -5), BGE.Math.VectorOps.create(10, -10, -5), BGE.Math.VectorOps.create(0, 10, -5)])
+      faceFar = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, -500), BGE.Math.VectorOps.create(10, -10, -500), BGE.Math.VectorOps.create(0, 10, -500)])
+      model = new BGE.Model3d([faceNear, faceFar])
+      drawableModel = new BGE.DrawableModel(m.entity, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+      m.assertEqual(2, sceneObj.getPrimitiveCount())
+      ' getPrimitiveDepth(index) reads -m.modelCanvasFaces[index].priority (more
+      ' negative = farther). Index 0 must be the farthest face (drawn first, as
+      ' background) and the last index must be the nearest face (drawn last, on
+      ' top) - this directly verifies modelCanvasFaces' stored order without
+      ' needing pixel-level rendering readback.
+      m.assertTrue(sceneObj.getPrimitiveDepth(0) < sceneObj.getPrimitiveDepth(1))
+    end function
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: FAIL — with the current ascending `SortBy("priority")`, index 0 is the nearest face (less negative depth) and index 1 is the farthest (more negative), so `getPrimitiveDepth(0) < getPrimitiveDepth(1)` is false as currently implemented.
+
+- [ ] **Step 3: Implement**
+
+In `src/source/engine/renderer/sceneObjects/SceneObjectModel.bs`, change line 224:
+
+```brighterscript
+      m.modelCanvasFaces.SortBy("priority", "r")
+```
+
+Update the doc comment on `getPrimitiveDepth` (replacing the `KNOWN LIMITATION` paragraph, `SceneObjectModel.bs:261-272`):
+
+```brighterscript
+    ' Fixed (issue #112): updateCanvasPosition()'s `m.modelCanvasFaces.SortBy("priority", "r")`
+    ' now sorts descending (farthest-first), matching this method's own farthest-first
+    ' convention - the solo draw loop (drawToCanvas/drawToTempBitmap, which iterate
+    ' modelCanvasFaces in stored order with no reversal) and the cluster draw path
+    ' (this method + drawPrimitive, which look up by index and get re-sorted by
+    ' Renderer.drawPendingClusterPrimitives independently) now agree: both draw a
+    ' model's self-overlapping faces farthest-first, nearest-last-on-top, regardless
+    ' of whether the model draws solo or as part of a multi-member overlap cluster.
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: PASS. Also re-run the full suite to confirm no regression in the other `SceneObjectModel.spec.bs` tests (which don't depend on inter-face ordering, only single-face or count-based assertions) or elsewhere.
+
+- [ ] **Step 5: Validate, on-device spot-check, and commit**
+
+Run: `npm run validate`
+
+Since this changes already-shipped model rendering behavior (not new code), do a quick on-device/simulator spot-check of `examples/3d`'s `ModelRoom` (the pre-existing bird model) and the new `CarRoom`/`D20Room` from Task 6, to confirm no visual regression — per issue #112's own suggested verification step.
+
+```bash
+git add src/source/engine/renderer/sceneObjects/SceneObjectModel.bs src/source/engine/renderer/sceneObjects/SceneObjectModel.spec.bs
+git commit -m "Fix intra-model face draw order: farthest-first, matching painter's algorithm (issue #112)
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: Docs — close out issue #89's references in CLAUDE.md
 
 **Files:**
 - Modify: `/Users/mpearce/redspace/roku/brighterscript-game-engine/CLAUDE.md`
