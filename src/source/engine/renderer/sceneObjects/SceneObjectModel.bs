@@ -25,9 +25,16 @@ namespace BGE
 
     protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       someWorked = false
+      usedTexture = false
       for each face in m.modelCanvasFaces
         someWorked = m.drawFaceToCanvas(rendererObj, face, drawMode) or someWorked
+        if face.Texture <> invalid
+          usedTexture = true
+        end if
       end for
+      if usedTexture
+        rendererObj.bmpPool.returnStagedRegions()
+      end if
       return someWorked
     end function
 
@@ -39,6 +46,14 @@ namespace BGE
     ' this model's own internal order and can't represent this face being interleaved
     ' with a different object's primitives.
     '
+    ' A textured face (face.Texture <> invalid) draws via drawBitmapTriangle, warping
+    ' the texture's UV points onto this face's canvas points, tinted by the same
+    ' brightness-shaded color a flat face gets - a caller batching many faces in one
+    ' draw pass (drawToCanvas/drawToTempBitmap) must call
+    ' rendererObj.bmpPool.returnStagedRegions() itself once after the whole batch, per
+    ' drawBitmapTriangleTo's staged-scratch-bitmap contract - this method does not do
+    ' that itself, since it draws exactly one face at a time.
+    '
     ' @param {Renderer} rendererObj
     ' @param {Model3dFace} face
     ' @param {SceneObjectDrawMode} drawMode
@@ -46,6 +61,9 @@ namespace BGE
     private function drawFaceToCanvas(rendererObj as BGE.Renderer, face as BGE.Model3dFace, drawMode as SceneObjectDrawMode) as boolean
       shadedColor = BGE.colorBrightness(face.color, face.brightness)
       if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+        if face.Texture <> invalid
+          return rendererObj.drawBitmapTriangle(face.Texture.srcRegionWithId, face.Texture.points, face.vertices, shadedColor)
+        end if
         return rendererObj.drawTriangle(face.vertices, 0, 0, shadedColor)
       else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
         return rendererObj.drawTriangleOutline(face.vertices, shadedColor)
@@ -59,6 +77,7 @@ namespace BGE
         return {worked: false, didFastDraw: false}
       end if
       someWorked = false
+      usedTexture = false
       offsetX = -canvasPointsTopLeftBound.x
       offsetY = -canvasPointsTopLeftBound.y
 
@@ -66,12 +85,24 @@ namespace BGE
         shadedColor = BGE.colorBrightness(face.color, face.brightness)
         thisWorked = true
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          thisWorked = rendererObj.drawTriangleTo(tempBitmap, face.vertices, offsetX, offsetY, shadedColor, allowFastDraw)
+          if face.Texture <> invalid
+            offsetPoints = [] as BGE.Math.Vector[]
+            for each vert in face.vertices
+              offsetPoints.push(BGE.Math.VectorOps.create(vert.x + offsetX, vert.y + offsetY, 0))
+            end for
+            thisWorked = rendererObj.drawBitmapTriangleTo(tempBitmap, face.Texture.srcRegionWithId, face.Texture.points, offsetPoints, shadedColor)
+            usedTexture = true
+          else
+            thisWorked = rendererObj.drawTriangleTo(tempBitmap, face.vertices, offsetX, offsetY, shadedColor, allowFastDraw)
+          end if
         else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
           thisWorked = rendererObj.drawTriangleOutlineTo(tempBitmap, face.vertices, face.color, {x: offsetX, y: offsetY})
         end if
         someWorked = thisWorked or someWorked
       end for
+      if usedTexture
+        rendererObj.bmpPool.returnStagedRegions()
+      end if
       return {worked: someWorked, didFastDraw: allowFastDraw}
     end function
 
