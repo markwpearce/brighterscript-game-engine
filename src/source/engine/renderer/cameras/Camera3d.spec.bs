@@ -128,6 +128,53 @@ namespace tests
       m.assertInvalid(horizon)
     end function
 
+    @describe("getFocalLength / getFovDegreesForCanvasSize")
+
+    @it("returns a larger field of view for a larger canvas at the same focal length")
+    function _()
+      m.camera.setFrameSize(200, 200)
+      m.camera.fieldOfViewDegrees = 90
+
+      ' Tolerance (not assertEqual) because this round-trips through tan()/Atan2() -
+      ' float precision leaves it a few 1e-5 off 90, not exactly equal. See the same
+      ' pattern for the same reason in the "rotates up toward the level right vector"
+      ' test above.
+      m.assertTrue(abs(m.camera.getFovDegreesForCanvasSize(200) - 90.0) < 0.001)
+      m.assertTrue(m.camera.getFovDegreesForCanvasSize(400) > 90)
+    end function
+
+    @describe("getLevelHorizonLine")
+
+    @it("matches getHorizonLine when the camera isn't rolled and the canvas matches the frame")
+    function _()
+      m.camera.position = BGE.Math.VectorOps.create(0, 10, 0)
+      m.camera.setFrameSize(200, 200)
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 10, -100))
+      m.camera.checkMovement()
+
+      real = m.camera.getHorizonLine(m.groundPlane)
+      level = m.camera.getLevelHorizonLine(m.groundPlane, 200)
+
+      m.assertEqual(real[0].x, level[0].x)
+      m.assertEqual(real[0].y, level[0].y)
+    end function
+
+    @it("stays the same for the level horizon regardless of rollDegrees")
+    function _()
+      m.camera.position = BGE.Math.VectorOps.create(0, 10, 0)
+      m.camera.setFrameSize(200, 200)
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 10, -100))
+      m.camera.checkMovement()
+
+      unrolled = m.camera.getLevelHorizonLine(m.groundPlane, 200)
+
+      m.camera.rollDegrees = 45
+      m.camera.checkMovement()
+      rolled = m.camera.getLevelHorizonLine(m.groundPlane, 200)
+
+      m.assertEqual(unrolled[0].y, rolled[0].y)
+    end function
+
     @describe("projectionVersion and the frustum")
 
     ' fieldOfViewDegrees is a plain public field, so no setter can intercept a write to it -
@@ -164,6 +211,108 @@ namespace tests
       m.camera.fieldOfViewDegrees = 45
       m.camera.checkMovement()
       m.assertNotEqual(before, m.camera.frustumRays.topLeft.direction.x)
+    end function
+
+    @describe("rollDegrees")
+
+    @it("matches the level up/right vectors when rollDegrees is 0")
+    function _()
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, -100))
+
+      m.assertTrue(BGE.Math.VectorOps.equals(m.camera.getLevelUpVector(), m.camera.getUpVector()))
+      m.assertTrue(BGE.Math.VectorOps.equals(m.camera.getLevelRightVector(), m.camera.getRightVector()))
+    end function
+
+    @it("rotates up toward the level right vector on a 90 degree right bank")
+    function _()
+      ' Default camera looks down -z with level up (0,1,0) and level right (1,0,0).
+      ' A 90 degree right-bank puts "up" where "right" used to point - the pilot's
+      ' view out the canopy now faces what used to be the horizontal right.
+      m.camera.rollDegrees = 90
+
+      ' Component-wise tolerance (not assertEqual) because these values come out of
+      ' cos()/sin() via RotateVectorAroundPoint3d - see math.spec.bs's own tests of
+      ' that function, which use the same pattern for the same reason: float
+      ' precision leaves a "should be zero" component off by a few 1e-7, not exact.
+      up = m.camera.getUpVector()
+      m.assertTrue(abs(up.x - 1.0) < 0.0001)
+      m.assertTrue(abs(up.y) < 0.0001)
+      m.assertTrue(abs(up.z) < 0.0001)
+    end function
+
+    @it("rotates right toward straight down on a 90 degree right bank")
+    function _()
+      m.camera.rollDegrees = 90
+
+      right = m.camera.getRightVector()
+      m.assertTrue(abs(right.x) < 0.0001)
+      m.assertTrue(abs(right.y - (-1.0)) < 0.0001)
+      m.assertTrue(abs(right.z) < 0.0001)
+    end function
+
+    @describe("worldPointToCanvasPoint with roll")
+
+    @it("projects a world point to a rotated raster position when the camera is rolled")
+    function _()
+      m.camera.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, -100))
+      m.camera.setFrameSize(200, 200)
+      m.camera.checkMovement()
+
+      ' A point straight above the camera's forward axis, level.
+      levelResult = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(0, 10, -100))
+
+      m.camera.rollDegrees = 90
+      ' Manually invalidate the cached world-to-camera matrix so the next projection
+      ' call recomputes it with the new roll applied via getUpVector()
+      m.camera.worldToCamera = invalid
+      rolledResult = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(0, 10, -100))
+
+      ' A 90 degree roll should move a point that was directly above center to
+      ' directly beside center instead - x and y raster offsets from the canvas
+      ' center should have swapped (up to which side, given rounding).
+      centerX = 100
+      centerY = 100
+      m.assertEqual(0, levelResult.x - centerX)
+      m.assertNotEqual(0, rolledResult.x - centerX)
+    end function
+
+    @describe("checkMovement with roll")
+
+    @it("rebuilds the frustum rays when only rollDegrees changes")
+    function _()
+      m.camera.setFrameSize(200, 200)
+      m.camera.checkMovement()
+      before = m.camera.frustumRays.topLeft.direction.y
+
+      m.camera.rollDegrees = 45
+      m.camera.checkMovement()
+
+      m.assertNotEqual(before, m.camera.frustumRays.topLeft.direction.y)
+    end function
+
+    @it("reports movedLastFrame true on a roll-only change")
+    function _()
+      m.camera.setFrameSize(200, 200)
+      m.camera.checkMovement()
+      m.camera.movedLastFrame() ' drain the initial true-on-construction state
+
+      m.camera.rollDegrees = 45
+      m.camera.checkMovement()
+
+      m.assertTrue(m.camera.movedLastFrame())
+    end function
+
+    @it("invalidates the cached world-to-camera matrix on a roll-only change")
+    function _()
+      m.camera.setFrameSize(200, 200)
+      m.camera.checkMovement()
+      m.camera.computeWorldToCameraMatrix() ' force it to exist
+
+      m.camera.rollDegrees = 45
+      m.camera.checkMovement()
+
+      m.assertInvalid(m.camera.worldToCamera)
     end function
 
   end class

@@ -6,10 +6,17 @@ class MainRoom extends BGE.Room
 
   turnSpeed = 2.0 ' radians/sec
   driveSpeed = 80 ' units/sec
+  rollSpeed = 60 ' degrees/sec
+  pitchSpeed = 0.3 ' radians/sec - downwardTilt is a rotation angle, not a y-component
   cameraHeight = 50
-  downwardTilt = 0.12 ' small negative y-component on the (unit) look direction, for a slight downward tilt
+  defaultDownwardTilt = 0.12 ' radians - rotates the look direction downward around the pitch axis
 
   heading = 0.0 ' radians, 0 = facing -z (the default camera forward)
+  downwardTilt = 0.12
+  rollDirection = 0 ' -1 = rolling left, 1 = rolling right, 0 = not rolling
+  pitchDirection = 0 ' -1 = pitching up, 1 = pitching down, 0 = not pitching
+  backHeldMs = 0
+  debugToggledForThisHold = false
   lastInput as BGE.GameInput
 
   sub new(game as BGE.Game)
@@ -23,6 +30,10 @@ class MainRoom extends BGE.Room
     camera = m.game.canvas.renderer.camera as BGE.Camera3d
     camera.position = BGE.Math.VectorOps.create(0, m.cameraHeight, 0)
     m.updateCameraOrientation()
+
+    marker = new RollMarker(m.game)
+    marker.position = BGE.Math.VectorOps.create(150, 0, -400)
+    m.game.addEntity(marker)
   end sub
 
   ' Swaps the ground plane's texture. Replaces the drawable entirely
@@ -49,14 +60,48 @@ class MainRoom extends BGE.Room
 
   override sub onInput(input as BGE.GameInput)
     m.lastInput = input
+    if input.isButton("replay") and not input.release
+      m.rollDirection = -1
+    else if input.isButton("options") and not input.release
+      m.rollDirection = 1
+    else if input.isButton("replay") and input.release
+      m.rollDirection = 0
+    else if input.isButton("options") and input.release
+      m.rollDirection = 0
+    else if input.isButton("rewind") and not input.release
+      m.pitchDirection = -1
+    else if input.isButton("fastforward") and not input.release
+      m.pitchDirection = 1
+    else if input.isButton("rewind") and input.release
+      m.pitchDirection = 0
+    else if input.isButton("fastforward") and input.release
+      m.pitchDirection = 0
+    end if
+
     if input.press
-      if input.isButton("back")
-        m.game.end()
-      else if input.isButton("OK")
+      if input.isButton("OK")
         m.setGroundTexture(not m.showingCheckerboard)
-      else if input.isButton("options")
-        m.debugEnabled = not m.debugEnabled
-        m.game.debugDrawEntityDetails(m.debugEnabled)
+      else if input.isButton("play")
+        camera = m.game.canvas.renderer.camera as BGE.Camera3d
+        camera.rollDegrees = 0
+        m.downwardTilt = m.defaultDownwardTilt
+      end if
+    end if
+
+    ' Back needs tap-vs-hold disambiguation: quitting can't fire on press (the
+    ' normal, simplest way to handle a button), or holding Back to toggle debug
+    ' info would never get the chance to run - the app would already be quitting
+    ' before 2 seconds of held time could accumulate. So a press just resets the
+    ' hold tracking, and a release only quits if the hold never reached 2 seconds
+    ' (i.e. debug info wasn't already toggled by onUpdate's held-time check below).
+    if input.isButton("back")
+      if input.press
+        m.backHeldMs = 0
+        m.debugToggledForThisHold = false
+      else if input.release
+        if not m.debugToggledForThisHold
+          m.game.end()
+        end if
       end if
     end if
   end sub
@@ -69,7 +114,24 @@ class MainRoom extends BGE.Room
         camera = m.game.canvas.renderer.camera as BGE.Camera3d
         camera.position = BGE.Math.VectorOps.add(camera.position, BGE.Math.VectorOps.scale(m.headingForward(), input.y * dt * m.driveSpeed))
       end if
+      if input.isButton("back") and input.held
+        m.backHeldMs = input.heldTimeMs
+        if m.backHeldMs >= 2000 and not m.debugToggledForThisHold
+          m.debugEnabled = not m.debugEnabled
+          m.game.debugDrawEntityDetails(m.debugEnabled)
+          m.debugToggledForThisHold = true
+        end if
+      end if
     end if
+
+    if m.rollDirection <> 0
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.rollDegrees = camera.rollDegrees + m.rollDirection * m.rollSpeed * dt
+    end if
+    if m.pitchDirection <> 0
+      m.downwardTilt += m.pitchDirection * m.pitchSpeed * dt
+    end if
+
     m.updateCameraOrientation()
   end sub
 
@@ -77,23 +139,35 @@ class MainRoom extends BGE.Room
     return BGE.Math.VectorOps.create(sin(m.heading), 0, -cos(m.heading))
   end function
 
-  ' Sets the camera's own look direction directly from the current heading
-  ' (plus a fixed downward tilt), rather than pointing it at some other
-  ' fixed world point - so steering turns the camera's view the way turning
-  ' your head does, rotating about the world y-axis, rather than orbiting
-  ' the camera around a point.
+  ' Sets the camera's own look direction from the current heading (yaw) and
+  ' pitch, rotating pitch around the camera's OWN current right axis - which
+  ' itself accounts for roll - rather than adjusting a world-space Y
+  ' component directly. The latter doesn't know about roll at all, so
+  ' pitching while banked used to tilt around the wrong axis entirely
+  ' (confirmed on real hardware: pitch should be relative to the camera's
+  ' current, possibly-rolled orientation, not always straight world-down).
   private sub updateCameraOrientation()
     camera = m.game.canvas.renderer.camera as BGE.Camera3d
     forward = m.headingForward()
-    tiltedForward = BGE.Math.VectorOps.create(forward.x, -m.downwardTilt, forward.z)
-    BGE.Math.VectorOps.normalize(tiltedForward)
+
+    worldUp = BGE.Math.VectorOps.create(0, 1, 0)
+    levelRight = BGE.Math.VectorOps.crossProduct(forward, worldUp)
+    BGE.Math.VectorOps.normalize(levelRight)
+    ' Rotate the level right vector around the SAME heading-only forward by
+    ' rollDegrees, mirroring exactly how Camera3d.getRightVector() itself
+    ' rotates its own level right vector around orientation by rollDegrees -
+    ' same convention, so pitch and the camera's real roll agree on which way
+    ' is "right."
+    pitchAxis = BGE.Math.RotateVectorAroundPoint3d(levelRight, BGE.Math.VectorOps.create(), forward, BGE.Math.DegreesToRadians(camera.rollDegrees))
+
+    tiltedForward = BGE.Math.RotateVectorAroundPoint3d(forward, BGE.Math.VectorOps.create(), pitchAxis, -m.downwardTilt)
     camera.orientation = tiltedForward
   end sub
 
   override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
     font = m.game.getFont("default")
     frameCenter = uiRenderObj.getCanvasCenter()
-    text = "Turn: Left/Right   Move: Up/Down" + Chr(10) + "OK: toggle track / checkerboard" + Chr(10) + "*: toggle debug info"
+    text = "Turn: Left/Right   Move: Up/Down" + Chr(10) + "Roll: Instant Replay/Options   Pitch: Rewind/FF" + Chr(10) + "OK: toggle track / checkerboard   Play: reset pitch/roll" + Chr(10) + "Hold Back 2s: toggle debug info"
     uiRenderObj.DrawText(text, frameCenter.x, 140, BGE.Colors.White, font, "center")
   end sub
 
