@@ -22,6 +22,7 @@ namespace BGE
     private perspectivePoints as PerspectiveCalculationResult
     private prePerspectiveBmp as roBitmap
     private tempBitmap as ifDraw2d = invalid
+    private rotatedTempBitmap as ifDraw2d = invalid
     private hasAccurateTempBitmap = false
 
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
@@ -89,15 +90,19 @@ namespace BGE
       if camera.name = "Camera3d"
         isRolled = (camera as Camera3d).rollDegrees <> 0
       end if
-      if not isRolled and not m.objMovedInRelationToCamera(rendererObj.camera) and m.tempBitmap <> invalid and m.hasAccurateTempBitmap
-        ' if the object hasn't moved in relation to the camera, we can skip all the perspective calculations and just draw the cached bitmap.
-        ' This shortcut is skipped entirely while rolled: m.tempBitmap holds the
-        ' pre-rotation composite, not the final rotated/cropped image (that only
-        ' ever gets drawn straight to the renderer's own canvas, never cached),
-        ' so redrawing it directly here would blit the wrong, unrotated bitmap -
-        ' confirmed on real hardware as "screen looks messed up as soon as you
-        ' stop rolling."
-        return rendererObj.drawObject(0, 0, m.tempBitmap)
+      if not m.objMovedInRelationToCamera(rendererObj.camera) and m.hasAccurateTempBitmap
+        ' If nothing has moved (including no roll change - Camera3d.checkMovement's
+        ' own roll dirty-check forces movedLastFrame true only on the frame roll
+        ' actually changes), redraw whichever cached bitmap is correct for the
+        ' current mode instead of recomputing: the already-rotated/cropped one
+        ' while rolled, or the plain composite otherwise. A camera parked at a
+        ' fixed bank angle hits this path exactly as cheaply as a level one - only
+        ' an actual roll/position/orientation change forces a recompute.
+        if isRolled and m.rotatedTempBitmap <> invalid
+          return rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
+        else if not isRolled and m.tempBitmap <> invalid
+          return rendererObj.drawObject(0, 0, m.tempBitmap)
+        end if
       end if
       m.hasAccurateTempBitmap = false
 
@@ -393,10 +398,25 @@ namespace BGE
       ' region centered on that same point gives exactly the rolled camera's view
       ' (see the design doc: perspective division commutes with an in-plane rotation
       ' about the optical axis for a pure roll).
+      ' Cache the rotated/cropped result into its own frame-sized bitmap (rather
+      ' than drawing straight to the renderer's live canvas only) so
+      ' performDraw's cache check has something correct to redraw on a frame
+      ' where nothing moved - see performDraw.
       center = BGE.Math.VectorOps.create(compositeSize / 2, compositeSize / 2)
       rollRad = BGE.Math.DegreesToRadians(camera.rollDegrees)
       cropOffset = BGE.Math.VectorOps.create((compositeSize - camera.frameSize.x) / 2, (compositeSize - camera.frameSize.y) / 2)
-      worked = worked and rendererObj.drawRotatedImageWithCenter(m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
+
+      if invalid = m.rotatedTempBitmap or m.rotatedTempBitmap.GetWidth() <> camera.frameSize.x or m.rotatedTempBitmap.GetHeight() <> camera.frameSize.y
+        m.rotatedTempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})
+      end if
+      if invalid = m.rotatedTempBitmap
+        print "failed to create rotated temp bitmap"
+        return false
+      end if
+      m.rotatedTempBitmap.Clear(&h00000000)
+
+      worked = worked and rendererObj.drawRotatedImageWithCenterTo(m.rotatedTempBitmap, m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
+      worked = worked and rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
       return worked
     end function
 
