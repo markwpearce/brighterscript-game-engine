@@ -10,9 +10,7 @@ namespace BGE
     srcWidth as float
     srcHeight as float
     srcTopLeft as BGE.PositionXY
-    destHeight as float
     scaleX as float
-    scaleY as float
   end interface
 
   const SCENE_OBJECT_PLANE_NEAR_DISTANCE = 0
@@ -87,8 +85,19 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean} True if the draw call was successful
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
-      if not m.objMovedInRelationToCamera(rendererObj.camera) and m.tempBitmap <> invalid and m.hasAccurateTempBitmap
-        ' if the object hasn't moved in relation to the camera, we can skip all the perspective calculations and just draw the cached bitmap
+      camera = rendererObj.camera
+      isRolled = false
+      if camera.name = "Camera3d"
+        isRolled = (camera as Camera3d).rollDegrees <> 0
+      end if
+      if not isRolled and not m.objMovedInRelationToCamera(rendererObj.camera) and m.tempBitmap <> invalid and m.hasAccurateTempBitmap
+        ' if the object hasn't moved in relation to the camera, we can skip all the perspective calculations and just draw the cached bitmap.
+        ' This shortcut is skipped entirely while rolled: m.tempBitmap holds the
+        ' pre-rotation composite, not the final rotated/cropped image (that only
+        ' ever gets drawn straight to the renderer's own canvas, never cached),
+        ' so redrawing it directly here would blit the wrong, unrotated bitmap -
+        ' confirmed on real hardware as "screen looks messed up as soon as you
+        ' stop rolling."
         return rendererObj.drawObject(0, 0, m.tempBitmap)
       end if
       m.hasAccurateTempBitmap = false
@@ -105,7 +114,7 @@ namespace BGE
       if not gotPreBmp
         return false
       end if
-      m.hasAccurateTempBitmap = m.drawPerspectiveBmpSlicesToByCamera(rendererObj, m.prePerspectiveBmp, m.perspectivePoints.actual, m.perspectivePoints.horizon, SCENE_OBJECT_PLANE_NEAR_DISTANCE, SCENE_OBJECT_PLANE_FAR_DISTANCE, SCENE_OBJECT_PLANE_SLICE_COUNT)
+      m.hasAccurateTempBitmap = m.drawPerspectiveBmpSlicesToByCamera(rendererObj, m.prePerspectiveBmp, m.perspectivePoints.actual, SCENE_OBJECT_PLANE_NEAR_DISTANCE, SCENE_OBJECT_PLANE_FAR_DISTANCE, SCENE_OBJECT_PLANE_SLICE_COUNT)
 
       return m.hasAccurateTempBitmap
     end function
@@ -284,75 +293,66 @@ namespace BGE
 
 
 
-    private function drawPerspectiveBmpSlicesToByCamera(rendererObj as BGE.Renderer, srcBmp as ifDraw2D, cp as BGE.Math.CornerPoints, horizon as BGE.Math.Vector[], nearDistance as float, farDistance as float, maxSliceCount as integer) as boolean
+    private function drawPerspectiveBmpSlicesToByCamera(rendererObj as BGE.Renderer, srcBmp as ifDraw2D, cp as BGE.Math.CornerPoints, nearDistance as float, farDistance as float, maxSliceCount as integer) as boolean
       camera = rendererObj.camera as Camera3d
       fovDeg = camera.fieldOfViewDegrees
-      'origin = camera.position
       slices as PerspectiveSlice[] = []
       halfFov = BGE.Math.DegreesToRadians(fovDeg / 2)
       isRolled = camera.rollDegrees <> 0
       compositeSize = m.getRollCanvasSize(camera.frameSize)
       destWidth = camera.frameSize.x
-      ' The real frame's own bottom edge, expressed in the bigger composite's
-      ' coordinate space - the composite's own center is the same optical-axis
-      ' center the real frame is centered on (see the final rotation step below,
-      ' which rotates about compositeSize/2), so the real frame's bottom edge
-      ' sits frameSize.y/2 below that shared center. This has to be what destTop
-      ' starts at (not compositeSize itself) or vertScale below rescales the
-      ' entire ground-recession curve differently than the roll=0 case, making
-      ' the ground's density visibly change as roll changes - confirmed on
-      ' real hardware.
-      realFrameBottomInComposite = compositeSize / 2 + camera.frameSize.y / 2
-      destTop = camera.frameSize.y
+      canvasHeight = camera.frameSize.y
       if isRolled
         destWidth = compositeSize
-        destTop = realFrameBottomInComposite
+        canvasHeight = compositeSize
       end if
 
       srcTop = srcBmp.GetHeight()
       srcSliceWidth = srcTop / maxSliceCount
       midWidthBmp = srcBmp.GetWidth() / 2
-
-      'theta = BGE.Math.Atan2(nearDistance, origin.z)
-      cummulativeHeight = 0'nearDistance
       tanHalfFov = tan(halfFov)
-      i = 0
 
-      firstHeight = 50
+      ' Project a world point believed to be on the plane to this composite's
+      ' absolute vertical canvas coordinate, using the exact same perspective
+      ' formula Camera3d.worldPointToCanvasPoint uses for every other 3D object
+      ' - see projectPlanePointToCanvasY(). This replaces an arbitrary easing
+      ' curve that used to size each slice (confirmed on real hardware to
+      ' visibly disagree with where a per-point-projected object at the same
+      ' world position lands, and to change density between roll=0 and rolled
+      ' since it was rescaled to whatever span it was told to fill). Using the
+      ' camera's real projection instead makes the ground exactly match every
+      ' other 3D object's positioning, with no special-casing needed between
+      ' the roll=0 and rolled (enlarged-canvas) cases - both just project
+      ' through the same level camera, since cp was already built that way
+      ' (see getPerspectivePointsByCamera).
+      levelLookTarget = BGE.Math.VectorOps.add(camera.position, camera.orientation)
+      levelWorldToCamera = BGE.Math.Matrix44.inverse(BGE.Math.lookAt(camera.position, levelLookTarget, camera.getLevelUpVector()))
+      focalLength = camera.getFocalLength()
 
       slicePt = cp.bottomLeft
       leftLineSegment = BGE.Math.VectorOps.subtract(cp.topLeft, cp.bottomLeft)
-      actualSliceVector = BGE.Math.VectorOps.scale(leftLineSegment, srcSliceWidth / BGE.Math.VectorOps.length(leftLineSegment))
+      sliceStep = BGE.Math.VectorOps.scale(leftLineSegment, 1 / maxSliceCount)
+
+      boundaryCanvasY = [m.projectPlanePointToCanvasY(slicePt, levelWorldToCamera, focalLength, canvasHeight)]
+
       for i = 0 to maxSliceCount - 1
         distanceToSlice = nearDistance + srcSliceWidth * i
         distanceToNextSlice = distanceToSlice + srcSliceWidth
-        'theta = BGE.Math.Atan2(distanceToNextSlice, origin.z)
         halfSliceWidth = distanceToNextSlice * tanHalfFov
-        nextSlicePoint = BGE.Math.VectorOps.add(slicePt, actualSliceVector)
+        slicePt = BGE.Math.VectorOps.add(slicePt, sliceStep)
+        boundaryCanvasY.push(m.projectPlanePointToCanvasY(slicePt, levelWorldToCamera, focalLength, canvasHeight))
 
-        'theta = BGE.Math.GetAngleBetweenVectors(origin, slicePt, nextSlicePoint)
-        slicePt = nextSlicePoint
-        'destHeight = distanceToSlice * tan(theta) - tan(lastTheta) * 4'3
-        destHeight = Cint(BGE.Tweens.ExponentialEaseOut(firstHeight, 1, i, maxSliceCount)) '(distanceToNextSlice * tan(BGE.math.HALF_PI - theta) - cummulativeHeight)
-
-        'destHeight = 50 * tan(theta)
-        cummulativeHeight += destHeight
-        if destHeight < 1
-          destHeight = 1
-        end if
         sliceWidth = BGE.Math.Max(1, (halfSliceWidth * 2))
         slices.push({
           srcWidth: halfSliceWidth * 2,
           srcHeight: srcSliceWidth,
           srcTopLeft: {x: midWidthBmp - halfSliceWidth, y: srcTop - srcSliceWidth * (i + 1)},
-          destHeight: destHeight,
-          scaleX: destWidth / sliceWidth,
-          scaleY: (destHeight) / srcSliceWidth
+          scaleX: destWidth / sliceWidth
         })
       end for
 
-      if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> destWidth or m.tempBitmap.GetHeight() <> destTop
-        m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: destTop, AlphaEnable: true})
+      if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> destWidth or m.tempBitmap.GetHeight() <> canvasHeight
+        m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: canvasHeight, AlphaEnable: true})
       end if
       if invalid = m.tempBitmap
         print "failed to create temp bitmap for perspective slices"
@@ -362,56 +362,29 @@ namespace BGE
 
       worked = true
 
-      horizonY = horizon[0].y ' TODO: need to account for camera roll
-
-      vertScale = (destTop - horizonY) / cummulativeHeight
-
-      ' destTop's per-slice advance is rounded to whole pixels (cint), but
-      ' each slice's own drawn height comes from a separate, unrounded scale
-      ' factor - the two can disagree by a fraction of a pixel, leaving a
-      ' thin gap (visible as a black seam) between adjacent slices. Draw
-      ' each slice a couple of pixels taller than its exact allotted band so
-      ' neighboring slices overlap slightly instead of gapping.
-      seamPaddingScale = 4 / srcSliceWidth
-
-      'print "Vertical scale: "; vertScale
+      ' Each slice's rounded pixel position can disagree from its neighbor's by
+      ' a fraction of a pixel, leaving a thin gap (visible as a black seam)
+      ' between them. Draw each slice a couple of pixels taller than its exact
+      ' allotted band so neighboring slices overlap slightly instead of gapping.
+      seamPadding = 4
 
       for i = 0 to slices.count() - 1
-        'print "drawing slice "; i;" - destHeight: "; slices[i].destHeight; " - scaleY: "; slices[i].scaleY
+        nearY = boundaryCanvasY[i]
+        farY = boundaryCanvasY[i + 1]
+        if invalid = nearY or invalid = farY
+          continue for
+        end if
 
         slice = slices[i]
-        destTop -= cint(slice.destHeight * vertScale)
+        sliceTop = cint(BGE.Math.Min(nearY, farY))
+        sliceHeight = Abs(nearY - farY) + seamPadding
+        if sliceHeight < 1
+          sliceHeight = 1
+        end if
         sliceRegion = CreateObject("roRegion", srcBmp, slice.srcTopLeft.x, slice.srcTopLeft.y, slice.srcWidth, slice.srcHeight)
-
-        sliceVertScale = slice.scaleY * vertScale + seamPaddingScale
-        worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, destTop, slice.scaleX, sliceVertScale, sliceRegion) and worked
-
+        sliceVertScale = sliceHeight / slice.srcHeight
+        worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, sliceTop, slice.scaleX, sliceVertScale, sliceRegion) and worked
       end for
-
-      if isRolled
-        ' The real 50 slices above only cover a frameSize.y-tall band, correctly
-        ' centered in the bigger composite so the ground density matches roll=0
-        ' exactly (see the destTop fix above). That leaves the rest of this
-        ' taller composite blank; extend it with a stretched copy of the
-        ' farthest/nearest slice's own source content so a rotated crop's
-        ' corners see continued ground rather than an empty gap - not true
-        ' perspective out there, but that's already outside the real camera's
-        ' own field of view, so this is a reasonable extension, not a visible
-        ' correctness regression within the actual frame.
-        farthestSlice = slices[slices.count() - 1]
-        farRegion = CreateObject("roRegion", srcBmp, farthestSlice.srcTopLeft.x, farthestSlice.srcTopLeft.y, farthestSlice.srcWidth, farthestSlice.srcHeight)
-        aboveHeight = destTop
-        if aboveHeight > 0
-          worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, 0, farthestSlice.scaleX, aboveHeight / farthestSlice.srcHeight, farRegion) and worked
-        end if
-
-        nearestSlice = slices[0]
-        nearRegion = CreateObject("roRegion", srcBmp, nearestSlice.srcTopLeft.x, nearestSlice.srcTopLeft.y, nearestSlice.srcWidth, nearestSlice.srcHeight)
-        belowHeight = compositeSize - realFrameBottomInComposite
-        if belowHeight > 0
-          worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, realFrameBottomInComposite, nearestSlice.scaleX, belowHeight / nearestSlice.srcHeight, nearRegion) and worked
-        end if
-      end if
 
       if not isRolled
         worked = worked and rendererObj.drawObject(0, 0, m.tempBitmap)
@@ -419,7 +392,7 @@ namespace BGE
       end if
 
       ' m.tempBitmap is the enlarged, level (unrolled) composite here - rotating it
-      ' by -rollDegrees about its own center and reading off the real frame-sized
+      ' by rollDegrees about its own center and reading off the real frame-sized
       ' region centered on that same point gives exactly the rolled camera's view
       ' (see the design doc: perspective division commutes with an in-plane rotation
       ' about the optical axis for a pure roll).
@@ -428,6 +401,27 @@ namespace BGE
       cropOffset = BGE.Math.VectorOps.create((compositeSize - camera.frameSize.x) / 2, (compositeSize - camera.frameSize.y) / 2)
       worked = worked and rendererObj.drawRotatedImageWithCenter(m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
       return worked
+    end function
+
+    ' Projects a world point believed to lie on the plane to this composite's
+    ' absolute vertical canvas coordinate (y-down, origin at the composite's
+    ' top) - the same formula Camera3d.worldPointToCanvasPoint uses, applied
+    ' against an explicit level (rollDegrees = 0) world-to-camera matrix and
+    ' canvas height rather than the camera's own (possibly rolled, possibly
+    ' frame-sized-only) versions - see drawPerspectiveBmpSlicesToByCamera.
+    '
+    ' @param {BGE.Math.Vector} worldPoint
+    ' @param {float[][]} levelWorldToCamera
+    ' @param {float} focalLength
+    ' @param {float} canvasHeight
+    ' @return {dynamic} float canvas Y, or invalid if the point is behind the camera
+    private function projectPlanePointToCanvasY(worldPoint as BGE.Math.Vector, levelWorldToCamera as float[][], focalLength as float, canvasHeight as float) as dynamic
+      pCamera = BGE.Math.Matrix44.multVecMatrix(worldPoint, levelWorldToCamera)
+      if pCamera.z >= 0
+        return invalid
+      end if
+      screenY = focalLength * pCamera.y / -pCamera.z
+      return canvasHeight * 0.5 - screenY
     end function
 
   end class
