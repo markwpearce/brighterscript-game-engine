@@ -25,16 +25,18 @@ namespace BGE
 
     protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       someWorked = false
-      usedTexture = false
       for each face in m.modelCanvasFaces
         someWorked = m.drawFaceToCanvas(rendererObj, face, drawMode) or someWorked
         if face.Texture <> invalid
-          usedTexture = true
+          ' Flush per-face, not once after the whole loop - a model with many textured
+          ' faces would otherwise stage 3 scratch regions per face (drawBitmapTriangle)
+          ' without ever returning them mid-loop, exhausting ScratchBitmapPool's hard
+          ' cap (20-30 regions) partway through a single frame for any model with more
+          ' than ~6-10 textured faces. This is a cheap no-op when nothing is staged, so
+          ' flushing after every textured face (rather than once per model) is safe.
+          rendererObj.bmpPool.returnStagedRegions()
         end if
       end for
-      if usedTexture
-        rendererObj.bmpPool.returnStagedRegions()
-      end if
       return someWorked
     end function
 
@@ -50,9 +52,11 @@ namespace BGE
     ' the texture's UV points onto this face's canvas points, tinted by the same
     ' brightness-shaded color a flat face gets - a caller batching many faces in one
     ' draw pass (drawToCanvas/drawToTempBitmap) must call
-    ' rendererObj.bmpPool.returnStagedRegions() itself once after the whole batch, per
+    ' rendererObj.bmpPool.returnStagedRegions() itself after each textured face, per
     ' drawBitmapTriangleTo's staged-scratch-bitmap contract - this method does not do
-    ' that itself, since it draws exactly one face at a time.
+    ' that itself, since it draws exactly one face at a time. Flushing per-face (not
+    ' once after a whole batch) matters because ScratchBitmapPool's cap is small
+    ' (20-30 regions) relative to how many textured faces a model can have.
     '
     ' @param {Renderer} rendererObj
     ' @param {Model3dFace} face
@@ -77,7 +81,6 @@ namespace BGE
         return {worked: false, didFastDraw: false}
       end if
       someWorked = false
-      usedTexture = false
       offsetX = -canvasPointsTopLeftBound.x
       offsetY = -canvasPointsTopLeftBound.y
 
@@ -91,7 +94,10 @@ namespace BGE
               offsetPoints.push(BGE.Math.VectorOps.create(vert.x + offsetX, vert.y + offsetY, 0))
             end for
             thisWorked = rendererObj.drawBitmapTriangleTo(tempBitmap, face.Texture.srcRegionWithId, face.Texture.points, offsetPoints, shadedColor)
-            usedTexture = true
+            ' Flush per-face, not once after the whole loop - see the matching comment
+            ' in drawToCanvas above for why (ScratchBitmapPool's cap is small relative
+            ' to how many textured faces a model can have).
+            rendererObj.bmpPool.returnStagedRegions()
           else
             thisWorked = rendererObj.drawTriangleTo(tempBitmap, face.vertices, offsetX, offsetY, shadedColor, allowFastDraw)
           end if
@@ -100,9 +106,6 @@ namespace BGE
         end if
         someWorked = thisWorked or someWorked
       end for
-      if usedTexture
-        rendererObj.bmpPool.returnStagedRegions()
-      end if
       return {worked: someWorked, didFastDraw: allowFastDraw}
     end function
 
