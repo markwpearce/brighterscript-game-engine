@@ -293,10 +293,20 @@ namespace BGE
       isRolled = camera.rollDegrees <> 0
       compositeSize = m.getRollCanvasSize(camera.frameSize)
       destWidth = camera.frameSize.x
+      ' The real frame's own bottom edge, expressed in the bigger composite's
+      ' coordinate space - the composite's own center is the same optical-axis
+      ' center the real frame is centered on (see the final rotation step below,
+      ' which rotates about compositeSize/2), so the real frame's bottom edge
+      ' sits frameSize.y/2 below that shared center. This has to be what destTop
+      ' starts at (not compositeSize itself) or vertScale below rescales the
+      ' entire ground-recession curve differently than the roll=0 case, making
+      ' the ground's density visibly change as roll changes - confirmed on
+      ' real hardware.
+      realFrameBottomInComposite = compositeSize / 2 + camera.frameSize.y / 2
       destTop = camera.frameSize.y
       if isRolled
         destWidth = compositeSize
-        destTop = compositeSize
+        destTop = realFrameBottomInComposite
       end if
 
       srcTop = srcBmp.GetHeight()
@@ -378,6 +388,31 @@ namespace BGE
 
       end for
 
+      if isRolled
+        ' The real 50 slices above only cover a frameSize.y-tall band, correctly
+        ' centered in the bigger composite so the ground density matches roll=0
+        ' exactly (see the destTop fix above). That leaves the rest of this
+        ' taller composite blank; extend it with a stretched copy of the
+        ' farthest/nearest slice's own source content so a rotated crop's
+        ' corners see continued ground rather than an empty gap - not true
+        ' perspective out there, but that's already outside the real camera's
+        ' own field of view, so this is a reasonable extension, not a visible
+        ' correctness regression within the actual frame.
+        farthestSlice = slices[slices.count() - 1]
+        farRegion = CreateObject("roRegion", srcBmp, farthestSlice.srcTopLeft.x, farthestSlice.srcTopLeft.y, farthestSlice.srcWidth, farthestSlice.srcHeight)
+        aboveHeight = destTop
+        if aboveHeight > 0
+          worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, 0, farthestSlice.scaleX, aboveHeight / farthestSlice.srcHeight, farRegion) and worked
+        end if
+
+        nearestSlice = slices[0]
+        nearRegion = CreateObject("roRegion", srcBmp, nearestSlice.srcTopLeft.x, nearestSlice.srcTopLeft.y, nearestSlice.srcWidth, nearestSlice.srcHeight)
+        belowHeight = compositeSize - realFrameBottomInComposite
+        if belowHeight > 0
+          worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, realFrameBottomInComposite, nearestSlice.scaleX, belowHeight / nearestSlice.srcHeight, nearRegion) and worked
+        end if
+      end if
+
       if not isRolled
         worked = worked and rendererObj.drawObject(0, 0, m.tempBitmap)
         return worked
@@ -389,7 +424,7 @@ namespace BGE
       ' (see the design doc: perspective division commutes with an in-plane rotation
       ' about the optical axis for a pure roll).
       center = BGE.Math.VectorOps.create(compositeSize / 2, compositeSize / 2)
-      rollRad = BGE.Math.DegreesToRadians(-camera.rollDegrees)
+      rollRad = BGE.Math.DegreesToRadians(camera.rollDegrees)
       cropOffset = BGE.Math.VectorOps.create((compositeSize - camera.frameSize.x) / 2, (compositeSize - camera.frameSize.y) / 2)
       worked = worked and rendererObj.drawRotatedImageWithCenter(m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
       return worked
