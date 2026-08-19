@@ -1,13 +1,18 @@
 namespace BGE
 
   class Model3dTexture
-    srcImage as ifRegion
+    srcRegionWithId as BGE.RendererHelpers.RegionWithId
     points as BGE.Math.Vector[]
-    sub new(srcImage as ifRegion, points as BGE.Math.Vector[])
+    sub new(srcRegionWithId as BGE.RendererHelpers.RegionWithId, points as BGE.Math.Vector[])
+      m.srcRegionWithId = srcRegionWithId
       m.points = points
-      m.srcImage = srcImage
     end sub
   end class
+
+  ' The options accepted by Game.load3dModel() for an .obj model's texture.
+  interface Model3dLoadOptions
+    optional texturePath as string
+  end interface
 
   interface Model3dFace
     vertices as BGE.Math.Vector[]
@@ -61,9 +66,54 @@ namespace BGE
     end function
   end namespace
 
+  namespace Model3dOps
+
+    ' Picks the texture path an .obj model should actually use: an explicit override
+    ' always wins over whatever `mtllib`/`map_Kd` resolution found while parsing.
+    '
+    ' @param {BGE.Model3dLoadOptions} options
+    ' @param {BGE.Model3d} model
+    ' @return {string}
+    function resolveEffectiveTexturePath(options as BGE.Model3dLoadOptions, model as BGE.Model3d) as dynamic
+      if options <> invalid and options.texturePath <> invalid and options.texturePath <> ""
+        return options.texturePath
+      end if
+      return model.texturePath
+    end function
+
+    ' Finalizes every face's texture data now that the texture bitmap is loaded and its
+    ' dimensions are known: wraps `bitmap` in one shared region+id (every face on this
+    ' model points at the same RegionWithId - one texture per model, per issue #89's v1
+    ' scope), and converts each textured face's normalized (0..1) UV points to pixel
+    ' space, flipping v since .obj UVs are bottom-up and bitmaps are top-down. Faces
+    ' with no Texture (a corner was missing a vt index while parsing) are left alone.
+    '
+    ' @param {BGE.Model3d} model
+    ' @param {roBitmap} bitmap
+    ' @param {string} cacheId - a stable, unique-per-texture id (the resolved texture path works well) used as the triangle-cache key for every draw of this texture
+    sub applyTexture(model as BGE.Model3d, bitmap as roBitmap, cacheId as string)
+      width = bitmap.GetWidth()
+      height = bitmap.GetHeight()
+      region = CreateObject("roRegion", bitmap, 0, 0, width, height)
+      regionWithId = BGE.RendererHelpers.createRegionWithId(region, cacheId)
+
+      for each face in model.faces
+        if face.Texture <> invalid
+          pixelPoints = [] as BGE.Math.Vector[]
+          for each uv in face.Texture.points
+            pixelPoints.push(BGE.Math.VectorOps.create(uv.x * width, (1 - uv.y) * height, 0))
+          end for
+          face.Texture = new BGE.Model3dTexture(regionWithId, pixelPoints)
+        end if
+      end for
+    end sub
+
+  end namespace
+
   class Model3d
     faces as Model3dFace[]
     name as string = "Model3d"
+    texturePath as string = invalid
 
     sub new(faces as Model3dFace[])
       m.faces = faces
