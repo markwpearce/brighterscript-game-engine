@@ -731,8 +731,7 @@ Add to `src/source/engine/renderer/sceneObjects/SceneObjectModel.spec.bs`, insid
       m.renderer.setupCameraForFrame()
       sceneObj.update(m.renderer.camera)
       m.renderer.resetDrawCallCounter()
-      result = sceneObj.draw(m.renderer)
-      m.assertTrue(result)
+      sceneObj.draw(m.renderer) ' draw() is a sub (void) - no return value to assert
       m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
     end function
 
@@ -766,8 +765,7 @@ Add to `src/source/engine/renderer/sceneObjects/SceneObjectModel.spec.bs`, insid
       m.renderer.setupCameraForFrame()
       sceneObj.update(m.renderer.camera)
       m.renderer.resetDrawCallCounter()
-      result = sceneObj.draw(m.renderer)
-      m.assertTrue(result)
+      sceneObj.draw(m.renderer) ' draw() is a sub (void) - no return value to assert
       m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
     end function
 ```
