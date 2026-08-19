@@ -6,15 +6,6 @@ namespace BGE
   ' Renderer.addSceneObject/removeSceneObject every frame during continuous emission,
   ' permanently defeating the depth-sort skip-optimization for the whole renderer.
   '
-  ' Frustum culling is evaluated against the emitter's own anchor position only (via
-  ' the base SceneObject's default getPositionsForFrustumCheck()), not against any
-  ' bounding volume for the particles it spawns. A stationary, off-screen emitter that
-  ' continuously emits particles drifting into an on-screen area will have those
-  ' particles culled and never drawn, since the cull-latch never re-triggers for a
-  ' non-moving emitter. Keep a continuously-emitting emitter's own position on/near-screen,
-  ' or move/nudge the owning entity periodically to force a re-check. See
-  ' specs/2026-08-18-particle-system-design.md for the broader one-SceneObject-per-emitter
-  ' tradeoff this extends.
   class SceneObjectParticle extends SceneObject
     drawable as DrawableParticles
 
@@ -29,6 +20,33 @@ namespace BGE
     ' draw as one batched unit - skip broad-phase candidacy entirely.
     override function participatesInOverlapDetection() as boolean
       return false
+    end function
+
+    ' The base class only re-checks the frustum when the emitter's own transform/camera
+    ' moved (see SceneObject.objMovedInRelationToCamera) - wrong here, since a stationary
+    ' emitter's particles still move every frame on their own. Forcing a re-check whenever
+    ' particles are alive fixes issue #114 (a stationary off-screen emitter's particles
+    ' drifting into view would otherwise stay culled forever). No cost once the emitter is
+    ' idle (zero live particles) - same cheap cached-answer path as any other SceneObject.
+    protected override function objMovedInRelationToCamera(cameraObj as Camera) as boolean
+      return super.objMovedInRelationToCamera(cameraObj) or m.drawable.particles.count() > 0
+    end function
+
+    ' The base default checks only the emitter's own anchor (m.worldPosition), which is
+    ' wrong for an emitter whose particles have spread away from it. Checking the bounding
+    ' box of every live particle's position (plus the anchor) instead of every individual
+    ' particle keeps this a cheap 2-point frustum check regardless of live particle count -
+    ' consistent with how every other multi-point SceneObject (e.g. SceneObjectBillboard)
+    ' already checks corner/bounding points rather than a precise shape test. See #114.
+    protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      if m.drawable.particles.count() = 0
+        return [m.worldPosition]
+      end if
+      positions = [m.worldPosition]
+      for each particle in m.drawable.particles
+        positions.push(particle.position)
+      end for
+      return BGE.Math.getBounds(positions)
     end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
