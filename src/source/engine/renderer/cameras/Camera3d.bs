@@ -369,42 +369,80 @@ namespace BGE
       return {x: screenX, y: py}
     end function
 
-    function getHorizonLine(plane as BGE.Math.Plane) as BGE.Math.Vector[]
+    ' The camera's intrinsic focal length in pixels, derived from its real field of
+    ' view and frame width. This is independent of any particular canvas size - see
+    ' getFovDegreesForCanvasSize(), which uses it to answer "what FOV would a
+    ' differently-sized canvas need to cover the same angular extent this camera
+    ' actually sees."
+    '
+    ' @return {float}
+    function getFocalLength() as float
+      return (m.frameSize.x * 0.5) / tan(BGE.Math.DegreesToRadians(m.fieldOfViewDegrees) * 0.5)
+    end function
 
+    ' The (horizontal = vertical, meant for a square canvas) field of view a
+    ' canvasSize x canvasSize canvas would need to cover the same angular extent as
+    ' this camera's real field of view does for its own frame width, at the same
+    ' focal length. Used by SceneObjectPlane to render its ground geometry into an
+    ' enlarged canvas before rotating it for roll - see SceneObjectPlane.
+    '
+    ' @param {float} canvasSize
+    ' @return {float} degrees
+    function getFovDegreesForCanvasSize(canvasSize as float) as float
+      return BGE.Math.RadiansToDegrees(2 * BGE.Math.Atan2(canvasSize / 2, m.getFocalLength()))
+    end function
+
+    ' Returns two screen-space points that define the visible horizon line of a plane.
+    ' If the horizon does not intersect the camera frame, invalid is returned.
+    '
+    ' @param {BGE.Math.Plane} plane
+    ' @return {BGE.Math.Vector[]} Two points in screen space that define the horizon line of the plane, or invalid if the plane is not visible.
+    function getHorizonLine(plane as BGE.Math.Plane) as BGE.Math.Vector[]
       if invalid = m.worldToCamera
         m.computeWorldToCameraMatrix()
       end if
+      return m.horizonLineForMatrix(plane, m.worldToCamera, m.frameSize.x, m.getFocalLength())
+    end function
 
+    ' The horizon line as seen by an unrolled (rollDegrees = 0) camera at this
+    ' camera's real position/orientation, against a canvasSize x canvasSize square
+    ' canvas rather than the real frame. SceneObjectPlane computes all of its ground
+    ' geometry this way and applies the actual roll as a final image rotation instead
+    ' of deriving a tilted horizon directly - see SceneObjectPlane.
+    '
+    ' @param {BGE.Math.Plane} plane
+    ' @param {float} canvasSize
+    ' @return {BGE.Math.Vector[]}
+    function getLevelHorizonLine(plane as BGE.Math.Plane, canvasSize as float) as BGE.Math.Vector[]
+      lookTarget = BGE.Math.VectorOps.add(m.position, m.orientation)
+      levelWorldToCamera = BGE.Math.Matrix44.inverse(BGE.Math.lookAt(m.position, lookTarget, m.getLevelUpVector()))
+      return m.horizonLineForMatrix(plane, levelWorldToCamera, canvasSize, m.getFocalLength())
+    end function
 
-      ' 1. Transform Normal to View Space (ignore translation)
-      nv = BGE.Math.Matrix44.multDirMatrix(plane.normal, m.worldToCamera)
-
-      ' 2. Calculate Focal Length from Horizontal FOV
-      ' f = (width / 2) / tan(fov / 2)
-
-      fovRad = BGE.Math.DegreesToRadians(m.fieldOfViewDegrees)
-      width = m.frameSize.x
-      focalLength = (width * 0.5) / tan(fovRad * 0.5)
-
-      ' 3. Check if horizon is even visible
-      ' if nv.y is near 0, the camera is tilted so the horizon is vertical or perfectly aligned.
-      if abs(nv.y) < 0.001
-        ' Handle edge case: Vertical horizon or camera looking straight up / down
+    ' Shared core of getHorizonLine()/getLevelHorizonLine() - see those for context.
+    '
+    ' @param {BGE.Math.Plane} plane
+    ' @param {float[][]} worldToCameraMatrix
+    ' @param {float} canvasWidth
+    ' @param {float} focalLength
+    ' @return {BGE.Math.Vector[]}
+    private function horizonLineForMatrix(plane as BGE.Math.Plane, worldToCameraMatrix as float[][], canvasWidth as float, focalLength as float) as BGE.Math.Vector[]
+      if invalid = plane or invalid = plane.normal or invalid = plane.point
         return invalid
       end if
 
-      ' 4. Find points at the left and right edges of the screen
-      ' Screen space coordinates usually range from -width/2 to +width/2
-      leftPt = m.findHorizonPoint(-width * 0.5, focalLength, nv)
-      rightPt = m.findHorizonPoint(width * 0.5, focalLength, nv)
+      ' Transform the plane's normal into view space (ignore translation).
+      nv = BGE.Math.Matrix44.multDirMatrix(plane.normal, worldToCameraMatrix)
 
+      ' If nv.y is near 0, the camera is tilted so the horizon is vertical, or
+      ' looking straight up/down - no meaningful horizontal horizon to draw.
+      if abs(nv.y) < 0.001
+        return invalid
+      end if
 
+      leftPt = m.findHorizonPoint(-canvasWidth * 0.5, focalLength, nv)
+      rightPt = m.findHorizonPoint(canvasWidth * 0.5, focalLength, nv)
       return [leftPt, rightPt]
-      ' 5. Convert to 0 -> Width, 0 -> Height space (standard UI space)
-      'screenPt1 = {x: leftPt.x + width * 0.5, y: height * 0.5 - leftPt.y}
-      'screenPt2 = {x: rightPt.x + width * 0.5, y: height * 0.5 - rightPt.y}
-
-      'return [screenPt1, screenPt2]
     end function
 
     ' Converts from float (-1 to 1) screen space with (0,0) as the center of the screen to pixel coordinates
