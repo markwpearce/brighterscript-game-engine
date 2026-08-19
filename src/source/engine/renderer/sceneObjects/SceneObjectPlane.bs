@@ -27,6 +27,17 @@ namespace BGE
     private tempBitmap as ifDraw2d = invalid
     private hasAccurateTempBitmap = false
 
+    ' Sized to at least the camera frame's diagonal, so a composite rendered into a
+    ' canvasSize x canvasSize square can be rotated by any angle without exposing an
+    ' empty corner once it's cropped back down to the real frame - see performDraw().
+    ' The +2 is slack for the sqrt/int rounding, not a precision requirement.
+    '
+    ' @param {BGE.Math.Vector} frameSize
+    ' @return {float}
+    function getRollCanvasSize(frameSize as BGE.Math.Vector) as float
+      return Int(Sqr(frameSize.x * frameSize.x + frameSize.y * frameSize.y)) + 2
+    end function
+
     sub new(name as string, drawableObj as DrawablePlane)
       super(name, drawableObj, BGE.SceneObjectType.Plane)
       ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
@@ -111,8 +122,32 @@ namespace BGE
 
       'camera.onCameraMovement()
 
-      rays = camera.frustumRays
+      isRolled = camera.rollDegrees <> 0
+      canvasWidth = camera.frameSize.x
+      canvasHeight = camera.frameSize.y
 
+      if not isRolled
+        rays = camera.frustumRays
+        horizFov = camera.fieldOfViewDegrees
+        horizonOrig = camera.getHorizonLine(plane)
+      else
+        ' Roll can't be represented by this trapezoid-slice rasterizer directly (see
+        ' the design doc) - instead, compute every bit of geometry against an
+        ' unrolled ("level") view enlarged to cover the frame's diagonal, and apply
+        ' the actual roll as a final image rotation in performDraw()/
+        ' drawPerspectiveBmpSlicesToByCamera(). A pure roll's projection is exactly
+        ' the level projection rotated about the image center, so this is exact, not
+        ' an approximation - modulo the finite canvas needing to be big enough to
+        ' cover every angle, which getRollCanvasSize() guarantees.
+        canvasWidth = m.getRollCanvasSize(camera.frameSize)
+        canvasHeight = canvasWidth
+        horizFov = camera.getFovDegreesForCanvasSize(canvasWidth)
+
+        rays = new CameraFrustumRays()
+        rays.setRays(camera.position, camera.orientation, horizFov, horizFov, camera.getLevelUpVector(), camera.getLevelRightVector())
+
+        horizonOrig = camera.getLevelHorizonLine(plane, canvasWidth)
+      end if
 
       output = new BGE.Math.CornerPoints()
 
@@ -121,15 +156,13 @@ namespace BGE
       output.bottomRight = BGE.Math.intersectRayWithPlane(plane, rays.bottomRight)
       output.bottomLeft = BGE.Math.intersectRayWithPlane(plane, rays.bottomLeft)
 
-      horizonOrig = camera.getHorizonLine(plane)
       horizon = []
       for each pt in horizonOrig
-        converted = camera.cameraPointToScreenPoint(pt)
-        'print "horizon point: "; pt; converted
-        horizon.Push(converted)
+        ' cameraPointToScreenPoint() reads the real camera's frameSize, which is only
+        ' correct for the non-rolled path above - do the same {x + width/2, height/2
+        ' - y} conversion directly here so it works for both canvasWidth values.
+        horizon.Push({x: pt.x + canvasWidth * 0.5, y: canvasHeight * 0.5 - pt.y})
       end for
-
-      horizFov = camera.fieldOfViewDegrees
 
 
       cameraPointOnPlane = BGE.Math.closestPointOnPlane(plane, camera.position)
