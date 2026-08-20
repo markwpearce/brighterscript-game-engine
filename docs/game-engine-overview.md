@@ -33,7 +33,7 @@ the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `3d
 | `Collider` | A `CircleCollider` or `RectangleCollider` attached to a `GameEntity`, wrapping a `roCompositor`/`roSprite` region. Collision checks run through the compositor, not manual math. |
 | `Renderer` | Wraps an `ifDraw2D` surface (a `Canvas`'s bitmap). Owns the scene's `SceneObject`s and a `Camera`. There's one for the game canvas and a separate one for the UI canvas. |
 | `Canvas` | Pairs a bitmap with a `Renderer` and scale/offset. `Game` composites the game canvas and UI canvas to the physical `roScreen` independently each frame, so UI can stay crisp regardless of game-canvas scaling. |
-| `UiContainer` / `UiWidget` | A small retained-mode widget tree (`Label`, `Style`, `Alignment`) drawn to its own canvas layer above the game world. `Game.gameUi` and `Game.debugUi` are the two top-level containers. |
+| `UiContainer` / `UiWidget` | A small retained-mode widget tree (`Label`, `Slider`, `Style`, `Alignment`) drawn to its own canvas layer above the game world. `Game.gameUi` and `Game.debugUi` are the two top-level containers. |
 
 **Always draw through a `Drawable`, not by calling `Renderer.Draw*()` yourself.**
 `examples/asteroids` is worth reading end to end as a reference for doing this consistently -
