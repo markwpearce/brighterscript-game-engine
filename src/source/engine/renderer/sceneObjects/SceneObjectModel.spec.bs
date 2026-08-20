@@ -32,6 +32,95 @@ namespace tests
       m.assertNotInvalid(sceneObj.drawable)
     end function
 
+    @describe("textured faces")
+
+    function makeTexturedFace() as BGE.Model3dFace
+      face = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, 0), BGE.Math.VectorOps.create(10, -10, 0), BGE.Math.VectorOps.create(0, 10, 0)])
+      textureBitmap = CreateObject("roBitmap", {width: 8, height: 8, alphaEnable: true})
+      region = CreateObject("roRegion", textureBitmap, 0, 0, 8, 8)
+      regionWithId = BGE.RendererHelpers.createRegionWithId(region, "test-texture")
+      face.Texture = new BGE.Model3dTexture(regionWithId, [
+        BGE.Math.VectorOps.create(0, 0, 0),
+        BGE.Math.VectorOps.create(8, 0, 0),
+        BGE.Math.VectorOps.create(4, 8, 0)
+      ])
+      return face
+    end function
+
+    @it("draws a textured face via the solo draw path without crashing, using drawBitmapTriangle")
+    function _()
+      face = m.makeTexturedFace()
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(m.entity, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("draws a textured face via the cluster drawPrimitive path without crashing, and can repeat across frames without leaking staged regions")
+    function _()
+      face = m.makeTexturedFace()
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(m.entity, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+      for i = 1 to 5
+        m.renderer.resetDrawCallCounter()
+        result = sceneObj.drawPrimitive(m.renderer, 0)
+        m.assertTrue(result)
+        m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+      end for
+    end function
+
+    @it("still draws an untextured face via the flat-color path (no regression)")
+    function _()
+      face1 = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, 0), BGE.Math.VectorOps.create(10, -10, 0), BGE.Math.VectorOps.create(0, 10, 0)])
+      model = new BGE.Model3d([face1])
+      drawableModel = new BGE.DrawableModel(m.entity, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("does not crash drawing a face whose Texture is still an unfinalized placeholder (invalid region)")
+    function _()
+      face = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, 0), BGE.Math.VectorOps.create(10, -10, 0), BGE.Math.VectorOps.create(0, 10, 0)])
+      ' Exactly what OBJParser.appendOBJFace produces before applyTexture() finalizes
+      ' it - an invalid region, the same placeholder shape a face is left with when
+      ' texture resolution/loading fails and Model3dOps.clearTextures isn't called.
+      face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), [
+        BGE.Math.VectorOps.create(0, 0, 0),
+        BGE.Math.VectorOps.create(8, 0, 0),
+        BGE.Math.VectorOps.create(4, 8, 0)
+      ])
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(m.entity, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      ' Completing without throwing is the assertion - this is the exact crash
+      ' scenario (issue #89 final review finding) being fixed.
+      m.assertTrue(true)
+    end function
+
     @describe("getPrimitiveCount / getPrimitiveDepth / drawPrimitive (cluster draw contract)")
 
     @it("getPrimitiveCount reflects the actual number of faces, not the base class's default of 1")
@@ -97,7 +186,7 @@ namespace tests
       m.assertTrue(sceneObj.getPrimitiveDepth(0) < 0)
     end function
 
-    @it("getPrimitiveDepth ranks a closer face as greater (less negative) than a farther face - ascending sort must draw farthest-first")
+    @it("getPrimitiveDepth ranks a closer face as greater (less negative) than a farther face - descending sort must draw farthest-first (issue #112)")
     function _()
       ' A default (unpositioned) 2d camera measures distanceFromCameraFront as
       ' `camera.position.z - point.z` (see Camera2d.distanceFromCameraFront), so a more
@@ -114,13 +203,40 @@ namespace tests
       sceneObj.update(m.renderer.camera)
       sceneObj.draw(m.renderer)
       m.assertEqual(2, sceneObj.getPrimitiveCount())
-      ' modelCanvasFaces is sorted ascending by priority (closest first), so index 0 is
-      ' faceNear and index 1 is faceFar regardless of the model's own face order above.
-      nearDepth = sceneObj.getPrimitiveDepth(0)
-      farDepth = sceneObj.getPrimitiveDepth(1)
+      ' modelCanvasFaces is sorted descending by priority (farthest first, fixed per issue
+      ' #112), so index 0 is faceFar and index 1 is faceNear regardless of the model's own
+      ' face order above.
+      farDepth = sceneObj.getPrimitiveDepth(0)
+      nearDepth = sceneObj.getPrimitiveDepth(1)
       m.assertTrue(nearDepth < 0)
       m.assertTrue(farDepth < 0)
       m.assertTrue(nearDepth > farDepth)
+    end function
+
+    @describe("intra-model solo draw order (issue #112)")
+
+    @it("stores the farthest face first and the nearest face last, so the solo draw loop paints farthest-first (painter's algorithm)")
+    function _()
+      ' Two faces at very different depths from the camera - faceFar should be
+      ' drawn first (as background), faceNear drawn last (on top, correctly
+      ' occluding faceFar if they overlapped on screen).
+      faceNear = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, -5), BGE.Math.VectorOps.create(10, -10, -5), BGE.Math.VectorOps.create(0, 10, -5)])
+      faceFar = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, -500), BGE.Math.VectorOps.create(10, -10, -500), BGE.Math.VectorOps.create(0, 10, -500)])
+      model = new BGE.Model3d([faceNear, faceFar])
+      drawableModel = new BGE.DrawableModel(m.entity, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToScene(m.renderer)
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.renderer.camera)
+      sceneObj.draw(m.renderer)
+      m.assertEqual(2, sceneObj.getPrimitiveCount())
+      ' getPrimitiveDepth(index) reads -m.modelCanvasFaces[index].priority (more
+      ' negative = farther). Index 0 must be the farthest face (drawn first, as
+      ' background) and the last index must be the nearest face (drawn last, on
+      ' top) - this directly verifies modelCanvasFaces' stored order without
+      ' needing pixel-level rendering readback.
+      m.assertTrue(sceneObj.getPrimitiveDepth(0) < sceneObj.getPrimitiveDepth(1))
     end function
 
   end class

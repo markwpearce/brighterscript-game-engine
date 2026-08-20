@@ -320,14 +320,12 @@ a shared `drawFaceToCanvas()` helper - deliberately bypassing its own whole-mode
 cache, which aggregates every face in the model's own internal order and can't represent this
 face being interleaved with a different object's primitives.
 
-**Known limitation** (tracked as [#112](https://github.com/markwpearce/brighterscript-game-engine/issues/112)):
-`getPrimitiveDepth()`'s farthest-first convention currently disagrees with `SceneObjectModel`'s own
-pre-existing intra-face draw order (its internal `SortBy("priority")` plus straight iteration,
-unrelated to and untouched by this feature, draws nearest-first instead). A model with genuinely
-self-overlapping faces can therefore paint them in reversed relative order depending on whether
-it's drawn solo or as part of a cluster that frame - rare in practice (most models are convex or
-backface-culled), and not fixed here since it would mean changing already-shipped model-rendering
-behavior with no dedicated testing budget for that specific change.
+**Fixed** (was tracked as [#112](https://github.com/markwpearce/brighterscript-game-engine/issues/112)):
+`updateCanvasPosition()`'s internal face sort is now `SortBy("priority", "r")` (descending, farthest
+priority value first), matching `getPrimitiveDepth()`'s own farthest-first convention. The solo draw
+loop (straight iteration over `modelCanvasFaces`, unchanged) and the cluster path now agree: a
+model's self-overlapping faces paint farthest-first, nearest-last-on-top, whether it's drawn solo
+or as part of a multi-member overlap cluster that frame.
 
 `SceneObjectLine` and `SceneObjectPlane` both override `participatesInOverlapDetection()` to
 return `false`. Neither is a correctness workaround - a line's bounding points are always exactly
@@ -341,6 +339,39 @@ cluster-candidate count for zero possible benefit.
 
 See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `examples/depthsort`'s
 `ClusterVisualizerRoom` for a runnable demo of interleaved draw order taking visible effect.
+
+## Textured 3D models (`Model3d` / `OBJParser`)
+
+An `.obj` model can carry a diffuse texture, sampled via UV coordinates and affine-mapped onto each
+triangular face (not perspective-correct - see the "Bitmap Triangle Warp" demo in `rendererTest` for
+the underlying primitive, `Renderer.drawBitmapTriangle(To)`). Two ways to get a texture onto a model:
+
+- **Standard convention**: the `.obj` references a `mtllib <file>.mtl`, and that file has a
+  `map_Kd <image>` line - both resolved relative to the `.obj`'s own directory. `examples/3d`'s
+  `D20Room` uses this path with no explicit override at all.
+- **Explicit override**: pass `{texturePath: "pkg:/..."}` as the third argument to
+  `Game.load3dModel(modelName, modelPath, options)` - this always wins over anything the `.obj`/
+  `.mtl` files reference. Needed for a model that carries UV data but no `mtllib` at all (a common
+  case for exported assets that ship their texture separately) - `examples/3d`'s `CarRoom` is this
+  case.
+
+```brighterscript
+' mtllib/map_Kd resolution, no override needed:
+game.load3dModel("d20", "pkg:/models/d20.obj")
+
+' explicit override - always wins, needed when the .obj has no mtllib:
+game.load3dModel("car", "pkg:/models/car.obj", {texturePath: "pkg:/sprites/car_texture.png"})
+```
+
+A face missing UV data on any of its corners renders flat-shaded instead - texturing degrades
+per-face, not per-model. The same is true if the texture itself can't be resolved or loaded (a
+missing file, a `mtllib` with no `map_Kd`): a warning is logged and the whole model renders
+flat-shaded rather than the load failing. v1 supports exactly one texture per model - `usemtl`/
+multi-material meshes aren't parsed into separate textures.
+
+![A textured car model rendered by examples/3d's CarRoom, showing windshield glass and tire tread detail - loaded via an explicit texturePath override](images/textured-obj-car.jpg)
+
+![A textured D20 model rendered by examples/3d's D20Room, showing distinct colored/numbered faces - loaded via mtllib/map_Kd auto-resolution, no override](images/textured-obj-d20.jpg)
 
 ## Deep dive: `SceneObjectPlane` (`DrawablePlane`)
 
