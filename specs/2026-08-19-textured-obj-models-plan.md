@@ -534,8 +534,8 @@ namespace BGE.Parsers
   '
   ' @param {string} baseDir - the .obj file's own directory
   ' @param {string} mtllibName - the mtllib line's filename, as written in the .obj
-  ' @return {string}
-  function resolveOBJTexturePath(baseDir as string, mtllibName as string) as string
+  ' @return {dynamic}
+  function resolveOBJTexturePath(baseDir as string, mtllibName as string) as dynamic
     mtlPath = joinObjPath(baseDir, mtllibName)
     mtlContent = ReadAsciiFile(mtlPath)
     if rodash.isNotInvalid(mtlContent)
