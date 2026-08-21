@@ -547,40 +547,55 @@ Add to `src/source/engine/renderer/sceneObjects/SceneObjectPlane.spec.bs`. This 
 ```brightscript
 @describe("color fillMode")
 
-@it("draws successfully with no region at all")
+@it("draws successfully near the plane's own anchor position")
 function _()
   colorDrawable = new BGE.DrawablePlane(m.room, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: BGE.ColorsRGB.Green})
   colorPlane = new BGE.SceneObjectPlane("colorPlane", colorDrawable)
 
-  colorPlane.update(m.game.canvas.renderer.camera)
+  ' The default camera (position z=1000, same height as the plane) is a degenerate
+  ' setup for actually exercising rendering - see the far-distance tests above,
+  ' where this was root-caused. Use the same height-1, level-gaze camera already
+  ' proven safe there instead.
+  camera = m.game.canvas.renderer.camera as BGE.Camera3d
+  camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+  camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+  camera.checkMovement()
+
+  colorPlane.update(camera)
   m.game.canvas.renderer.resetDrawCallCounter()
   colorPlane.draw(m.game.canvas.renderer)
 
   m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
-  m.assertFalse(colorPlane.isCulled())
 end function
 
-@it("is not culled by shrinking the region-based bounds check, since there is no region")
+@it("still draws far from the plane's own anchor position, unlike a staticImage decal")
 function _()
   colorDrawable = new BGE.DrawablePlane(m.room, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color})
   colorPlane = new BGE.SceneObjectPlane("colorPlane", colorDrawable)
 
-  ' Move the camera far from the plane's own anchor position - a staticImage plane
-  ' would run out of texture here; a color plane never does.
-  m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(5000, 50, 5000)
-  (m.game.canvas.renderer.camera as BGE.Camera3d).setTarget(BGE.Math.VectorOps.create(5000, 0, 4900))
+  ' Same proven-safe height-1, level-gaze geometry as above, just translated far
+  ' from the plane's own anchor position (0,0,0) - a staticImage plane would run
+  ' out of texture here (see the far-distance tests above); a color plane never
+  ' does, since findCanvasPosition() skips the bounds check entirely for this
+  ' fillMode.
+  camera = m.game.canvas.renderer.camera as BGE.Camera3d
+  camera.position = BGE.Math.VectorOps.create(5000, 1, 5000)
+  camera.setTarget(BGE.Math.VectorOps.create(5000, 1, 4900))
+  camera.checkMovement()
 
-  colorPlane.update(m.game.canvas.renderer.camera)
+  colorPlane.update(camera)
+  m.game.canvas.renderer.resetDrawCallCounter()
   colorPlane.draw(m.game.canvas.renderer)
 
-  m.assertFalse(colorPlane.isCulled())
+  m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
 end function
 ```
 
-`m.room` isn't currently stored on `SceneObjectPlaneTests` - add it. Update the existing `beforeEach` in `SceneObjectPlane.spec.bs`:
+`m.room` isn't currently stored on `SceneObjectPlaneTests` - add it. **Note:** the current file (after an earlier task's fix) already has a `drawable as BGE.DrawablePlane` field and uses `m.drawable` instead of a local `drawablePlane` var - leave that as-is. Update the existing `beforeEach` in `SceneObjectPlane.spec.bs`, changing only the local `room` variable to `m.room` (declare the new field, assign it, and use it everywhere `room` was used):
 
 ```brightscript
     game as BGE.Game
+    drawable as BGE.DrawablePlane
     room as BGE.Room
     plane as BGE.SceneObjectPlane
 
@@ -595,8 +610,8 @@ end function
 
       bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
       region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
-      drawablePlane = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}})
-      m.plane = new BGE.SceneObjectPlane("plane", drawablePlane)
+      m.drawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}})
+      m.plane = new BGE.SceneObjectPlane("plane", m.drawable)
     end function
 ```
 
@@ -808,40 +823,52 @@ Add to `src/source/engine/renderer/sceneObjects/SceneObjectPlane.spec.bs`:
 ```brightscript
 @describe("tiledImage fillMode")
 
-@it("draws successfully from a small tile, far from the plane's own anchor position")
+@it("draws successfully from a small tile, near the plane's own anchor position")
 function _()
   bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
   region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
   tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
   tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
 
-  m.game.canvas.renderer.camera.maxDrawDistance = 200
-  m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(150, 50, 150)
-  (m.game.canvas.renderer.camera as BGE.Camera3d).setTarget(BGE.Math.VectorOps.create(150, 0, 140))
+  ' The default camera (position z=1000, same height as the plane) is a degenerate
+  ' setup for actually exercising rendering - see the far-distance tests above,
+  ' where this was root-caused. Use the same height-1, level-gaze camera already
+  ' proven safe there instead.
+  camera = m.game.canvas.renderer.camera as BGE.Camera3d
+  camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+  camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+  camera.maxDrawDistance = 200
+  camera.checkMovement()
 
-  tiledPlane.update(m.game.canvas.renderer.camera)
+  tiledPlane.update(camera)
   m.game.canvas.renderer.resetDrawCallCounter()
   tiledPlane.draw(m.game.canvas.renderer)
 
   m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
-  m.assertFalse(tiledPlane.isCulled())
 end function
 
-@it("is not culled by the finite-decal bounds check far from the plane's own anchor position")
+@it("still draws far from the plane's own anchor position, unlike a staticImage decal")
 function _()
   bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
   region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
   tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
   tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
 
-  m.game.canvas.renderer.camera.maxDrawDistance = 200
-  m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(150, 50, 150)
-  (m.game.canvas.renderer.camera as BGE.Camera3d).setTarget(BGE.Math.VectorOps.create(150, 0, 140))
+  ' Same proven-safe height-1, level-gaze geometry as above, just translated far
+  ' from the plane's own anchor position (0,0,0) - a staticImage plane would run
+  ' out of texture here (see the far-distance tests above); a tiled plane never
+  ' does, since the tile repeats to cover the whole maxDrawDistance footprint.
+  camera = m.game.canvas.renderer.camera as BGE.Camera3d
+  camera.position = BGE.Math.VectorOps.create(5000, 1, 5000)
+  camera.setTarget(BGE.Math.VectorOps.create(5000, 1, 4900))
+  camera.maxDrawDistance = 200
+  camera.checkMovement()
 
-  tiledPlane.update(m.game.canvas.renderer.camera)
+  tiledPlane.update(camera)
+  m.game.canvas.renderer.resetDrawCallCounter()
   tiledPlane.draw(m.game.canvas.renderer)
 
-  m.assertFalse(tiledPlane.isCulled())
+  m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
 end function
 ```
 
