@@ -34,6 +34,13 @@ namespace BGE
     private tileWidth as float
     private tileHeight as float
     private tilesPerAxis as integer
+    ' Ratio of the supertexture's actual (physical) bitmap pixel dimensions to its
+    ' logical ones (tilesPerAxis * tileWidth/Height) - 1.0 until the logical size
+    ' would exceed getMaxSuperTextureDimension()'s device-tiered pixel budget, at
+    ' which point tiles are painted in downscaled and every consumer of the
+    ' supertexture's pixel space (wrapAnchorIntoSuperTexture, populatePerspectiveBmp's
+    ' final scale-up) has to compensate. See buildSuperTextureIfNeeded().
+    private superTextureScale as float = 1.0
 
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
     ' canvasSize x canvasSize square can be rotated by any angle without exposing an
@@ -116,7 +123,7 @@ namespace BGE
       if m.drawable.fillMode = PlaneFillMode.tiledImage
         m.buildSuperTextureIfNeeded(rendererObj)
         wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
-        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp)
+        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale)
       else
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
       end if
@@ -324,6 +331,25 @@ namespace BGE
       return CreateObject("roBitmap", {width: finalWidth, height: finalHeight, AlphaEnable: true})
     end function
 
+    ' Caps the supertexture's physical bitmap size independent of how much world-space
+    ' coverage (tilesPerAxis) it logically represents - mirroring ScratchBitmap.bs's
+    ' own setUpBasedOnDevice() device-tiered sizing pattern. A supertexture built to
+    ' cover a large camera.maxDrawDistance with a small tile can require thousands of
+    ' logical pixels per axis, which reliably fails to allocate on real hardware -
+    ' this bounds the actual CreateObject("roBitmap", ...) cost to a fixed budget
+    ' regardless of that logical size, at the cost of texture sharpness at long
+    ' viewing distances (an accepted, LOD-like trade-off - see buildSuperTextureIfNeeded()).
+    '
+    ' @return {float}
+    private function getMaxSuperTextureDimension() as float
+      device = CreateObject("roDeviceInfo")
+      resolution = device.GetUIResolution()
+      if "FHD" = resolution.name
+        return 1600
+      end if
+      return 1024
+    end function
+
     ' Builds (or rebuilds, if maxDrawDistance changed since the last build) a bitmap
     ' that repeats the plane's tile enough times per axis to seamlessly cover the
     ' world-space footprint bounded by camera.maxDrawDistance, so a single wrapped
@@ -386,23 +412,38 @@ namespace BGE
         m.tilesPerAxis = m.tilesPerAxis + 1
       end if
 
+      ' bmpWidth/bmpHeight above are the supertexture's LOGICAL size - how much
+      ' world-space coverage tilesPerAxis represents, and what the wrap math's period
+      ' is measured against. The supertexture's PHYSICAL (actual bitmap pixel) size is
+      ' capped separately below to a fixed, device-tiered budget (see
+      ' getMaxSuperTextureDimension()) - never upscaled beyond 1:1, only downscaled
+      ' when the logical size would exceed that budget. Every consumer that reads or
+      ' writes actual pixel coordinates (the tile blit loop, wrapAnchorIntoSuperTexture,
+      ' populatePerspectiveBmp's final scale-up) has to go through m.superTextureScale
+      ' to translate between the two spaces.
       bmpWidth = m.tilesPerAxis * m.tileWidth
       bmpHeight = m.tilesPerAxis * m.tileHeight
-      m.superTextureBmp = CreateObject("roBitmap", {width: bmpWidth, height: bmpHeight, AlphaEnable: true})
+      maxDimension = m.getMaxSuperTextureDimension()
+      m.superTextureScale = BGE.Math.Min(1.0, maxDimension / BGE.Math.Max(bmpWidth, bmpHeight))
+
+      physicalWidth = bmpWidth * m.superTextureScale
+      physicalHeight = bmpHeight * m.superTextureScale
+      m.superTextureBmp = CreateObject("roBitmap", {width: physicalWidth, height: physicalHeight, AlphaEnable: true})
       m.superTextureBmp.SetAlphaEnable(true)
       m.superTextureBmp.Clear(&h00000000)
 
       for row = 0 to m.tilesPerAxis - 1
         for col = 0 to m.tilesPerAxis - 1
-          rendererObj.drawObjectTo(m.superTextureBmp, col * m.tileWidth, row * m.tileHeight, m.drawable.region)
+          rendererObj.drawScaledObjectTo(m.superTextureBmp, col * m.tileWidth * m.superTextureScale, row * m.tileHeight * m.superTextureScale, m.superTextureScale, m.superTextureScale, m.drawable.region)
         end for
       end for
 
-      m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, bmpWidth, bmpHeight)
-      ' Unlike m.superTextureBmp above, this stays at the unpadded size - see the
-      ' comment on unpaddedScratchWidth/Height above for why the destination canvas
-      ' must NOT grow with the source's rotation padding.
-      m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth, height: unpaddedScratchHeight, AlphaEnable: true})
+      m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, physicalWidth, physicalHeight)
+      ' Unlike m.superTextureBmp above, this stays at the unpadded size (paired with
+      ' m.superTextureScale the same way) - see the comment on
+      ' unpaddedScratchWidth/Height above for why the destination canvas must NOT grow
+      ' with the source's rotation padding.
+      m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth * m.superTextureScale, height: unpaddedScratchHeight * m.superTextureScale, AlphaEnable: true})
       m.tiledScratchBmp.SetAlphaEnable(true)
       m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
     end sub
@@ -415,16 +456,25 @@ namespace BGE
     ' (computed from differences/perpendicular distances between corners in
     ' populatePerspectiveBmp), so wrapping just this one pivot point is correct.
     '
+    ' The wrap period itself stays in LOGICAL (world/tile) units - tiles still repeat
+    ' every tileWidth/tileHeight world units regardless of the supertexture's physical
+    ' pixel budget, since that's a property of the world, not the bitmap. Only the
+    ' final result is converted to the supertexture's actual PHYSICAL pixel space (via
+    ' m.superTextureScale) before being handed to the rotate step, which reads real
+    ' bitmap pixels.
+    '
     ' @param {BGE.Math.Vector} point
     ' @return {BGE.Math.Vector}
     private function wrapAnchorIntoSuperTexture(point as BGE.Math.Vector) as BGE.Math.Vector
       centerTileIndex = Int(m.tilesPerAxis / 2)
       wrappedX = BGE.Math.wrapValue(point.x, m.tileWidth)
       wrappedY = BGE.Math.wrapValue(point.y, m.tileHeight)
-      return BGE.Math.VectorOps.create(centerTileIndex * m.tileWidth + wrappedX, centerTileIndex * m.tileHeight + wrappedY, 0)
+      logicalX = centerTileIndex * m.tileWidth + wrappedX
+      logicalY = centerTileIndex * m.tileHeight + wrappedY
+      return BGE.Math.VectorOps.create(logicalX * m.superTextureScale, logicalY * m.superTextureScale, 0)
     end function
 
-    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D, anchorPoint as BGE.Math.Vector, ownScratchBmp = invalid as roBitmap) as boolean
+    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D, anchorPoint as BGE.Math.Vector, ownScratchBmp = invalid as roBitmap, extraScale = 1.0 as float) as boolean
       if invalid = cp
         return false
       end if
@@ -437,8 +487,12 @@ namespace BGE
         return false
       end if
 
-      horizScale = destRegion.GetWidth() / distanceFromTopToBottom
-      vertScale = destRegion.GetHeight() / footInfo.distanceToPoint
+      ' extraScale compensates for a source whose pixel space no longer maps 1:1 to
+      ' world/texture-pixel units - see buildSuperTextureIfNeeded()'s
+      ' superTextureScale. The static/non-tiled path always passes the default 1.0
+      ' here and is otherwise byte-for-byte unaffected.
+      horizScale = (destRegion.GetWidth() / distanceFromTopToBottom) * extraScale
+      vertScale = (destRegion.GetHeight() / footInfo.distanceToPoint) * extraScale
 
       usingOwnScratch = invalid <> ownScratchBmp
       scratchRegionForPool = invalid
