@@ -268,7 +268,8 @@ Add to `src/source/engine/renderer/sceneObjects/SceneObjectPlane.spec.bs`:
 @it("still finds a canvas position when maxDrawDistance is generous")
 function _()
   m.game.canvas.renderer.camera.maxDrawDistance = 2000
-  m.plane.update(m.game.canvas.renderer)
+  m.plane.update(m.game.canvas.renderer.camera)
+  m.plane.draw(m.game.canvas.renderer)
 
   m.assertFalse(m.plane.isCulled())
 end function
@@ -279,7 +280,8 @@ function _()
   camera.position = BGE.Math.VectorOps.create(0, 5000, 0)
   camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
   camera.maxDrawDistance = 10
-  m.plane.update(m.game.canvas.renderer)
+  m.plane.update(m.game.canvas.renderer.camera)
+  m.plane.draw(m.game.canvas.renderer)
 
   m.assertTrue(m.plane.isCulled())
 end function
@@ -550,10 +552,11 @@ function _()
   colorDrawable = new BGE.DrawablePlane(m.room, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: BGE.ColorsRGB.Green})
   colorPlane = new BGE.SceneObjectPlane("colorPlane", colorDrawable)
 
-  colorPlane.update(m.game.canvas.renderer)
-  didDraw = colorPlane.draw(m.game.canvas.renderer)
+  colorPlane.update(m.game.canvas.renderer.camera)
+  m.game.canvas.renderer.resetDrawCallCounter()
+  colorPlane.draw(m.game.canvas.renderer)
 
-  m.assertTrue(didDraw)
+  m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
   m.assertFalse(colorPlane.isCulled())
 end function
 
@@ -567,7 +570,8 @@ function _()
   m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(5000, 50, 5000)
   (m.game.canvas.renderer.camera as BGE.Camera3d).setTarget(BGE.Math.VectorOps.create(5000, 0, 4900))
 
-  colorPlane.update(m.game.canvas.renderer)
+  colorPlane.update(m.game.canvas.renderer.camera)
+  colorPlane.draw(m.game.canvas.renderer)
 
   m.assertFalse(colorPlane.isCulled())
 end function
@@ -815,10 +819,11 @@ function _()
   m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(150, 50, 150)
   (m.game.canvas.renderer.camera as BGE.Camera3d).setTarget(BGE.Math.VectorOps.create(150, 0, 140))
 
-  tiledPlane.update(m.game.canvas.renderer)
-  didDraw = tiledPlane.draw(m.game.canvas.renderer)
+  tiledPlane.update(m.game.canvas.renderer.camera)
+  m.game.canvas.renderer.resetDrawCallCounter()
+  tiledPlane.draw(m.game.canvas.renderer)
 
-  m.assertTrue(didDraw)
+  m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
   m.assertFalse(tiledPlane.isCulled())
 end function
 
@@ -833,7 +838,8 @@ function _()
   m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(150, 50, 150)
   (m.game.canvas.renderer.camera as BGE.Camera3d).setTarget(BGE.Math.VectorOps.create(150, 0, 140))
 
-  tiledPlane.update(m.game.canvas.renderer)
+  tiledPlane.update(m.game.canvas.renderer.camera)
+  tiledPlane.draw(m.game.canvas.renderer)
 
   m.assertFalse(tiledPlane.isCulled())
 end function
