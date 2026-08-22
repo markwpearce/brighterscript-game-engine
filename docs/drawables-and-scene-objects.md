@@ -392,7 +392,7 @@ Each frame, `SceneObjectPlane` (in `findCanvasPosition`, via `getPerspectivePoin
    `Camera3d.frustumRays` (which uses a cheaper linear approximation - accurate enough for frustum
    culling, but not for this plane's own edges; see "Roll" below for the rolled case, which builds
    its own rays too). Corners whose rays don't hit the plane at all (pointing above the horizon)
-   are approximated instead by rotating a point on the plane at `camera.maxDrawDistance`
+   are approximated instead by rotating a point on the plane at `SCENE_OBJECT_PLANE_FAR_DISTANCE`
    around the plane's normal by half the field of view.
 2. Converts those four world points into **texture pixel coordinates** via
    `BGE.Math.worldPointToTexturePixel` (see "Texture anchoring" below).
@@ -411,9 +411,8 @@ Each frame, `SceneObjectPlane` (in `findCanvasPosition`, via `getPerspectivePoin
 
 ### Texture anchoring
 
-The plane is mathematically infinite (`y=0`, extending forever in `x`/`z`), but by default
-(`fillMode: staticImage`) its texture is a single finite bitmap region with no tiling - see
-"Fill modes" below for `tiledImage`, which does tile.
+The plane is mathematically infinite (`y=0`, extending forever in `x`/`z`), but its texture is a
+single finite bitmap region - there's no tiling (yet; it's a planned follow-up, not implemented).
 `BGE.Math.worldPointToTexturePixel(worldPoint, textureCenterWorldPoint, textureWidth, textureHeight)`
 anchors the texture's *center* pixel on wherever the plane actually sits in world space
 (`textureCenterWorldPoint`, the plane entity's own world position) rather than on world `(0,0)` -
@@ -426,52 +425,6 @@ uses `BGE.Math.boundsOverlapRect` to skip drawing entirely once the camera's vie
 overlap the texture at all (a cheap early-out), and for partial overlaps, the plane correctly shows
 real texture on the side that's in-bounds and the renderer's background (transparent/black) on the
 side that isn't - it does **not** wrap or repeat the texture to fill the screen.
-
-### Fill modes (`DrawablePlane.fillMode`)
-
-`DrawablePlane.fillMode` (a `BGE.PlaneFillMode`) picks how the plane's surface is filled, and planes
-in different modes compose with each other through ordinary `addDrawable()` calls - stack a flat
-color base, a tiled texture over it, and a one-off decal on top of both:
-
-```brighterscript
-groundPlaneDef = {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}
-
-' A flat green base layer - region is `invalid` since color fillMode ignores it
-baseLayer = new BGE.DrawablePlane(m, invalid, groundPlaneDef, {fillMode: BGE.PlaneFillMode.color, color: BGE.ColorsRGB.Green})
-m.addDrawable("GroundBase", baseLayer)
-
-' A repeating grass tile on top of it
-grassTile = CreateObject("roRegion", m.game.getBitmap("grass"), 0, 0, 64, 64)
-grassLayer = new BGE.DrawablePlane(m, grassTile, groundPlaneDef, {fillMode: BGE.PlaneFillMode.tiledImage})
-m.addDrawable("Grass", grassLayer)
-
-' A one-off decal (e.g. a road) on top of both
-roadRegion = CreateObject("roRegion", m.game.getBitmap("road"), 0, 0, 256, 256)
-roadDecal = new BGE.DrawablePlane(m, roadRegion, groundPlaneDef, {fillMode: BGE.PlaneFillMode.staticImage})
-m.addDrawable("Road", roadDecal)
-```
-
-- `color` fills the plane with `Drawable.color`/`alpha` and ignores `region` entirely - no texture,
-  so it never "runs out" the way the other two modes can. This makes it the natural base/backdrop
-  layer to add first.
-- `tiledImage` treats `region` as a single repeating tile, seamlessly covering the ground out to
-  `Camera3d.maxDrawDistance` in every direction - this is the tiling the "Texture anchoring" section
-  above calls out as unavailable by default.
-- `staticImage` (the default, and the only mode that existed before `fillMode` was added) is the
-  finite decal described above: a one-off texture anchored at the plane's own world position -
-  correct for something like a map/track texture, wrong for anything meant to repeat.
-
-Layering order for planes at the same depth follows `addDrawable()` insertion order (the same
-depth-sort tie-break every `SceneObject` uses) - add the base layer first, as in the example above,
-so later calls draw on top of it.
-
-`tiledImage` builds and caches a "supertexture" bitmap the first time it draws (lazily, per
-`DrawablePlane` instance, and rebuilt only if `Camera3d.maxDrawDistance` changes afterward) by
-tiling `region` across a grid roughly `2 * maxDrawDistance / tileSize` tiles per axis, where
-`tileSize` is the tile's own smaller dimension. That means the tile count built up front - and so
-the build cost and cached bitmap size - scales with `(maxDrawDistance / tileSize)²`. Pick a tile
-size (and consider `maxDrawDistance`) with that in mind: a small tile paired with a large
-`maxDrawDistance` builds a much bigger cached bitmap than a coarser tile would.
 
 ### Roll
 
