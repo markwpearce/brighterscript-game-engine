@@ -14,12 +14,16 @@ namespace BGE
 
   const SCENE_OBJECT_PLANE_NEAR_DISTANCE = 0
   const SCENE_OBJECT_PLANE_SLICE_COUNT = 50
+  ' Above this, the supertexture build's tilesPerAxis^2 blit count is worth a runtime
+  ' warning (63x63 = ~4k blits) - see buildSuperTextureIfNeeded().
+  const SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD = 63
 
   class SceneObjectPlane extends SceneObject
 
     drawable as DrawablePlane
     private perspectivePoints as PerspectiveCalculationResult
     private prePerspectiveBmp as roBitmap
+    private prePerspectiveBmpBuiltForMaxDrawDistance as float = -1
     private tempBitmap as ifDraw2d = invalid
     private rotatedTempBitmap as ifDraw2d = invalid
     private hasAccurateTempBitmap = false
@@ -32,6 +36,15 @@ namespace BGE
     private tileWidth as float
     private tileHeight as float
     private tilesPerAxis as integer
+    ' The tile region's dimensions when the supertexture was last built - rebuilds if the
+    ' drawable's region is reassigned to a differently-sized one, not just on a
+    ' maxDrawDistance change. Dimensions, not the region reference itself: comparing two
+    ' roRegion values with `=` crashes at runtime with a Type Mismatch (confirmed - the
+    ' same class of crash CLAUDE.md documents for custom-class instances turns out to
+    ' apply to this native component too), and an `as dynamic` cast doesn't avoid it
+    ' either. A same-sized region swap isn't caught by this - see issue #140.
+    private superTextureBuiltForTileWidth as float = -1
+    private superTextureBuiltForTileHeight as float = -1
     ' Physical/logical pixel ratio: 1.0 until logical size exceeds getMaxSuperTextureDimension()'s
     ' budget, then tiles downscale and every pixel-space consumer must apply this factor.
     private superTextureScale as float = 1.0
@@ -110,8 +123,10 @@ namespace BGE
       end if
       m.hasAccurateTempBitmap = false
 
-      if invalid = m.prePerspectiveBmp
+      maxDrawDistance = (camera as Camera3d).maxDrawDistance
+      if invalid = m.prePerspectiveBmp or m.prePerspectiveBmpBuiltForMaxDrawDistance <> maxDrawDistance
         m.prePerspectiveBmp = m.getPrePerspectiveBmp(rendererObj)
+        m.prePerspectiveBmpBuiltForMaxDrawDistance = maxDrawDistance
       end if
 
       gotPreBmp = false
@@ -330,8 +345,10 @@ namespace BGE
     ' @return {float}
     private function getMaxSuperTextureDimension() as float
       device = CreateObject("roDeviceInfo")
-      resolution = device.GetUIResolution()
-      if "FHD" = resolution.name
+      if device.HasFeature("simulation_engine")
+        return 1024
+      end if
+      if "FHD" = device.GetUIResolution().name
         return 1600
       end if
       return 1024
@@ -347,12 +364,14 @@ namespace BGE
     ' @param {BGE.Renderer} rendererObj
     private sub buildSuperTextureIfNeeded(rendererObj as BGE.Renderer)
       camera = rendererObj.camera as Camera3d
-      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
+      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance and m.superTextureBuiltForTileWidth = m.drawable.region.GetWidth() and m.superTextureBuiltForTileHeight = m.drawable.region.GetHeight()
         return
       end if
 
-      m.tileWidth = m.drawable.region.GetWidth()
-      m.tileHeight = m.drawable.region.GetHeight()
+      ' Floored at 1 - a degenerate 0-sized tile region would otherwise divide by zero
+      ' below (and downstream, a 0-sized bmpWidth/bmpHeight feeding CreateObject("roBitmap", ...)).
+      m.tileWidth = BGE.Math.Max(1, m.drawable.region.GetWidth())
+      m.tileHeight = BGE.Math.Max(1, m.drawable.region.GetHeight())
       smallestTileDimension = BGE.Math.Min(m.tileWidth, m.tileHeight)
 
       ' m.tiledScratchBmp (the rotate destination) must stay at this unpadded,
@@ -383,6 +402,16 @@ namespace BGE
         m.tilesPerAxis = m.tilesPerAxis + 1
       end if
 
+      ' Not silently truncated - m.tilesPerAxis feeds directly into the corner-bleed
+      ' coverage math above, so reducing it here would reintroduce that bug. This is
+      ' just visibility: the blit loop below costs tilesPerAxis^2 calls, so a small
+      ' tile paired with a large maxDrawDistance can genuinely hitch on real hardware
+      ' (see issue #136 for a real fix - a bounded doubling-blit strategy that needs
+      ' on-device verification before shipping).
+      if m.tilesPerAxis > SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD
+        print "[BGE.SceneObjectPlane] warning: tiledImage supertexture needs "; m.tilesPerAxis; "x"; m.tilesPerAxis; " tile blits ("; m.tilesPerAxis * m.tilesPerAxis; " total) - consider a larger tile or a smaller camera.maxDrawDistance"
+      end if
+
       ' bmpWidth/bmpHeight are the supertexture's LOGICAL size (world coverage / wrap
       ' period); the PHYSICAL bitmap is capped to a device-tiered budget below and only
       ' ever downscaled from this, never upscaled - every pixel-space consumer must
@@ -410,6 +439,8 @@ namespace BGE
       m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth * m.superTextureScale, height: unpaddedScratchHeight * m.superTextureScale, AlphaEnable: true})
       m.tiledScratchBmp.SetAlphaEnable(true)
       m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
+      m.superTextureBuiltForTileWidth = m.tileWidth
+      m.superTextureBuiltForTileHeight = m.tileHeight
     end sub
 
     ' Wraps an unbounded world-derived texture-pixel anchor into this supertexture's
