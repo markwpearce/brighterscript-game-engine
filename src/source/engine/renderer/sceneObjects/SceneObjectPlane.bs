@@ -24,17 +24,6 @@ namespace BGE
     private rotatedTempBitmap as ifDraw2d = invalid
     private hasAccurateTempBitmap = false
 
-    private superTextureBmp as roBitmap
-    private superTextureRegion as roRegion
-    ' A second, identically-sized bitmap used only as the rotate step's scratch
-    ' destination - kept distinct from superTextureBmp so that step's canvas is
-    ' never the same bitmap superTextureRegion (its source) reads from.
-    private tiledScratchBmp as roBitmap
-    private superTextureBuiltForMaxDrawDistance as float = -1
-    private tileWidth as float
-    private tileHeight as float
-    private tilesPerAxis as integer
-
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
     ' canvasSize x canvasSize square can be rotated by any angle without exposing an
     ' empty corner once it's cropped back down to the real frame - see performDraw().
@@ -112,14 +101,7 @@ namespace BGE
         m.prePerspectiveBmp = m.getPrePerspectiveBmp(rendererObj)
       end if
 
-      gotPreBmp = false
-      if m.drawable.fillMode = PlaneFillMode.tiledImage
-        m.buildSuperTextureIfNeeded(rendererObj)
-        wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
-        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp)
-      else
-        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
-      end if
+      gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp)
       if not gotPreBmp
         return false
       end if
@@ -324,69 +306,7 @@ namespace BGE
       return CreateObject("roBitmap", {width: finalWidth, height: finalHeight, AlphaEnable: true})
     end function
 
-    ' Builds (or rebuilds, if maxDrawDistance changed since the last build) a bitmap
-    ' that repeats the plane's tile enough times per axis to seamlessly cover the
-    ' world-space footprint bounded by camera.maxDrawDistance, so a single wrapped
-    ' anchor point (see wrapAnchorIntoSuperTexture()) is always far enough from every
-    ' edge of this bitmap to cover the actual required rotated footprint. Lazy and
-    ' cached - built once per maxDrawDistance value, not per frame. See the design
-    ' note on ScratchBitmapPool's device-scratch-size cap for why this is its own
-    ' persistent bitmap rather than a pooled scratch region.
-    '
-    ' @param {BGE.Renderer} rendererObj
-    private sub buildSuperTextureIfNeeded(rendererObj as BGE.Renderer)
-      camera = rendererObj.camera as Camera3d
-      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
-        return
-      end if
-
-      m.tileWidth = m.drawable.region.GetWidth()
-      m.tileHeight = m.drawable.region.GetHeight()
-      smallestTileDimension = BGE.Math.Min(m.tileWidth, m.tileHeight)
-
-      m.tilesPerAxis = Fix(2 * camera.maxDrawDistance / smallestTileDimension) + 1
-      if (m.tilesPerAxis mod 2) = 0
-        ' Keep it odd, so a tile sits exactly centered in the supertexture - the
-        ' center tile is where wrapAnchorIntoSuperTexture() re-centers every anchor.
-        m.tilesPerAxis = m.tilesPerAxis + 1
-      end if
-
-      bmpWidth = m.tilesPerAxis * m.tileWidth
-      bmpHeight = m.tilesPerAxis * m.tileHeight
-      m.superTextureBmp = CreateObject("roBitmap", {width: bmpWidth, height: bmpHeight, AlphaEnable: true})
-      m.superTextureBmp.SetAlphaEnable(true)
-      m.superTextureBmp.Clear(&h00000000)
-
-      for row = 0 to m.tilesPerAxis - 1
-        for col = 0 to m.tilesPerAxis - 1
-          rendererObj.drawObjectTo(m.superTextureBmp, col * m.tileWidth, row * m.tileHeight, m.drawable.region)
-        end for
-      end for
-
-      m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, bmpWidth, bmpHeight)
-      m.tiledScratchBmp = CreateObject("roBitmap", {width: bmpWidth, height: bmpHeight, AlphaEnable: true})
-      m.tiledScratchBmp.SetAlphaEnable(true)
-      m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
-    end sub
-
-    ' Wraps a texture-pixel anchor point (unbounded, since it's derived from an
-    ' unbounded world-space camera position) into this instance's supertexture bounds -
-    ' re-centered so it always lands on the equivalent phase within the supertexture's
-    ' own center tile. Only the anchor needs wrapping, not every corner point: the
-    ' warp's rotation angle and scale factors are already translation-invariant
-    ' (computed from differences/perpendicular distances between corners in
-    ' populatePerspectiveBmp), so wrapping just this one pivot point is correct.
-    '
-    ' @param {BGE.Math.Vector} point
-    ' @return {BGE.Math.Vector}
-    private function wrapAnchorIntoSuperTexture(point as BGE.Math.Vector) as BGE.Math.Vector
-      centerTileIndex = Int(m.tilesPerAxis / 2)
-      wrappedX = BGE.Math.wrapValue(point.x, m.tileWidth)
-      wrappedY = BGE.Math.wrapValue(point.y, m.tileHeight)
-      return BGE.Math.VectorOps.create(centerTileIndex * m.tileWidth + wrappedX, centerTileIndex * m.tileHeight + wrappedY, 0)
-    end function
-
-    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D, anchorPoint as BGE.Math.Vector, ownScratchBmp = invalid as roBitmap) as boolean
+    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D) as boolean
       if invalid = cp
         return false
       end if
@@ -401,37 +321,28 @@ namespace BGE
 
       horizScale = destRegion.GetWidth() / distanceFromTopToBottom
       vertScale = destRegion.GetHeight() / footInfo.distanceToPoint
+      scratchRegion = rendererObj.bmpPool.getRegion(srcRegion.GetWidth(), srcRegion.GetHeight())
 
-      usingOwnScratch = invalid <> ownScratchBmp
-      scratchRegionForPool = invalid
-      scratchDrawTo = invalid as ifDraw2D
-      if usingOwnScratch
-        scratchDrawTo = ownScratchBmp
-      else
-        scratchRegionForPool = rendererObj.bmpPool.getRegion(srcRegion.GetWidth(), srcRegion.GetHeight())
-        if scratchRegionForPool = invalid
-          print "failed to get scratch region from pool"
-          return false
-        end if
-        scratchDrawTo = scratchRegionForPool.region
+      if scratchRegion = invalid
+        print "failed to get scratch region from pool"
+        return false
       end if
 
-      ' Scratch regions/bitmaps are reused frame to frame and are NOT cleared
-      ' automatically - if the rotated draw below lands mostly or entirely outside
-      ' this canvas (e.g. the camera's view has moved beyond the texture's valid
-      ' bounds), leftover pixel data from a previous, unrelated frame's use of this
-      ' same bitmap would otherwise show through.
-      scratchDrawTo.Clear(&h00000000)
+      ' Scratch regions are pooled/reused and are NOT cleared when handed
+      ' out - if the rotated draw below lands mostly or entirely outside
+      ' this region (e.g. the camera's view has moved beyond the texture's
+      ' valid bounds), leftover pixel data from a previous, unrelated frame's
+      ' use of this same pooled bitmap would otherwise show through.
+      scratchRegion.region.Clear(&h00000000)
       destRegion.Clear(&h00000000)
 
-      worked = rendererObj.drawRotatedImageWithCenterTo(scratchDrawTo, srcRegion, anchorPoint, rotation, BGE.Math.VectorOps.negative(anchorPoint))
-      worked = worked and rendererObj.drawScaledObjectTo(destRegion, 0, 0, horizScale, vertScale, scratchDrawTo)
+      worked = rendererObj.drawRotatedImageWithCenterTo(scratchRegion.region, srcRegion, cp.topLeft, rotation, BGE.Math.VectorOps.negative(cp.topLeft))
+      worked = worked and rendererObj.drawScaledObjectTo(destRegion, 0, 0, horizScale, vertScale, scratchRegion.region)
       if not worked
+        '  rendererObj.forceDraw(destRegion)
         print "failed to draw perspective bmp"
       end if
-      if not usingOwnScratch
-        rendererObj.bmpPool.returnRegion(scratchRegionForPool)
-      end if
+      rendererObj.bmpPool.returnRegion(scratchRegion)
 
       return worked
     end function
