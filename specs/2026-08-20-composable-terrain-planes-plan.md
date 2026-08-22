@@ -8,7 +8,7 @@
 
 **Tech Stack:** BrighterScript, Rooibos (rooibos-roku) for unit tests, `rokubot` for on-device/simulator verification.
 
-**Spec:** [specs/2026-08-20-composable-terrain-planes-design.md](../../../specs/2026-08-20-composable-terrain-planes-design.md)
+**Spec:** [specs/2026-08-20-composable-terrain-planes-design.md](2026-08-20-composable-terrain-planes-design.md)
 
 ## Global Constraints
 
