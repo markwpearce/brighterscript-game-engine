@@ -473,6 +473,11 @@ the build cost and cached bitmap size - scales with `(maxDrawDistance / tileSize
 size (and consider `maxDrawDistance`) with that in mind: a small tile paired with a large
 `maxDrawDistance` builds a much bigger cached bitmap than a coarser tile would.
 
+Note that `maxDrawDistance` itself may be silently capped below whatever you set it to: `Camera3d`
+clamps it per-device (900 on the BrightScript Simulator and, pending real hardware testing, on
+SD/HD devices too; effectively unlimited on FHD) every frame, so a plane's actual far distance and
+supertexture size follow the capped value, not the requested one.
+
 ### Roll
 
 `Camera3d.rollDegrees` (rotation about the camera's own forward axis) can't be represented by this
