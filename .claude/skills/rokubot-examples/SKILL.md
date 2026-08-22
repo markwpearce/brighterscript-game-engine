@@ -170,6 +170,13 @@ Two crashes seen so far, for reference:
   (`spacebackground.jpg`) and fails to decode (`loadBitmap()` logs "Bitmap not created"), which
   then null-derefs in `MainRoom.onCreate`. Looked simulator-specific (JPEG decode support), not
   an engine or rokubot bug — untested on real hardware.
+- `terrain` on brs-desktop: a ground plane's internal ~1000x2000px scratch bitmap (used by
+  `SceneObjectPlane`'s rotate-then-scale texture-warp pipeline, sized off `Camera3d.maxDrawDistance`)
+  renders blank in the simulator but correct on real hardware — confirmed size-dependent (a
+  512x1024px bitmap through the identical code path renders fine in both). Filed upstream:
+  [lvcabral/brs-engine#1198](https://github.com/lvcabral/brs-engine/issues/1198). Not an engine
+  bug — if a ground-plane example looks blank/textureless specifically on the simulator, suspect
+  this before the plane's own code; verify on real hardware before treating it as a regression.
 - Sideloading the loose `build/` dir (vs the packaged zip) has crashed `pong` on
   `Paddle.brs` reading a bitmap's width before it's loaded — another reason to always sideload
   the packaged zip.
