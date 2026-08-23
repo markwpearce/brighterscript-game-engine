@@ -57,10 +57,21 @@ headless CI, `rokubot` for on-device/simulator verification.
   `degreesPerFullWidth as float = 360`, `verticalDegreesCovered as float = 90`;
   `BGE.SceneObjectSkybox(name as string, drawableObj as BGE.DrawableSkybox)` extending
   `BGE.SceneObject`, overriding `participatesInOverlapDetection() as boolean` (returns
-  `false`) and `isPotentiallyOnScreen(cameraObj as Camera) as boolean` (returns `false`
-  unless `cameraObj.name = "Camera3d"`). `performDraw`/`findCanvasPosition` are stubbed
-  in this task (real logic lands in Tasks 2-3) - `findCanvasPosition` returns `true`,
-  `performDraw` returns `false` for now.
+  `false`), `isPotentiallyOnScreen(cameraObj as Camera) as boolean` (returns `false`
+  unless `cameraObj.name = "Camera3d"`, both protected - matching every other
+  `SceneObject` subclass's convention, so no test calls either directly), and
+  `updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean` (returns `true`
+  without touching `drawable.getWorldPosition()` - a skybox has no meaningful world
+  position). Also produces the public `renderNow(rendererObj as BGE.Renderer) as
+  boolean` - applies the same Camera2d/Camera3d gate and then calls `performDraw`
+  directly, bypassing the base `update()`/`draw()` pipeline's `movedLastFrame(true)`
+  call (which dereferences the drawable's owner - fine for a real Room/GameEntity
+  owner via the normal `Renderer.drawScene()` path, but not an option for a caller
+  with none). `renderNow` is how Task 5's rendererTest demo (deliberately built
+  without `Game`/`Room`) and this class's own unit tests exercise drawing.
+  `performDraw`/`findCanvasPosition` are stubbed in this task (real logic lands in
+  Tasks 2-3) - `findCanvasPosition` returns `true`, `performDraw` returns `false` for
+  now.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -138,7 +149,10 @@ namespace tests
 
       m.sourceBitmap = CreateObject("roBitmap", {width: 64, height: 32, alphaEnable: true})
       region = CreateObject("roRegion", m.sourceBitmap, 0, 0, 64, 32)
-      m.drawable = new BGE.DrawableSkybox(m.game.currentRoom, region)
+      ' No room is defined in this suite - SceneObjectSkybox never touches its
+      ' drawable's owner, so invalid is safe here (same pattern the rendererTest
+      ' SkyboxTest demo uses for the same reason - see Task 5).
+      m.drawable = new BGE.DrawableSkybox(invalid, region)
       m.skybox = new BGE.SceneObjectSkybox("skybox", m.drawable)
     end function
 
@@ -149,17 +163,19 @@ namespace tests
       m.assertFalse(m.skybox.participatesInOverlapDetection())
     end function
 
-    @describe("isPotentiallyOnScreen")
+    @describe("renderNow")
 
-    @it("is true under a Camera3d")
-    function _()
-      m.assertTrue(m.skybox.isPotentiallyOnScreen(m.game.canvas.renderer.camera))
-    end function
-
+    ' isPotentiallyOnScreen/performDraw are protected (matching SceneObject's own
+    ' convention - see SceneObjectPlane, which never calls either directly from its
+    ' spec either), so the Camera2d/Camera3d gate is exercised through the public
+    ' renderNow() wrapper instead. At this stage performDraw is still the Task-1 stub
+    ' (always returns false), so this only proves the Camera2d short-circuit rejects
+    ' before ever reaching performDraw - real Camera3d drawing is covered once Task 2
+    ' gives performDraw a real implementation.
     @it("is false under a Camera2d - Camera2d skybox support is a separate follow-up issue")
     function _()
       m.game.setCamera(new BGE.Camera2d())
-      m.assertFalse(m.skybox.isPotentiallyOnScreen(m.game.canvas.renderer.camera))
+      m.assertFalse(m.skybox.renderNow(m.game.canvas.renderer))
     end function
 
   end class
@@ -211,12 +227,35 @@ namespace BGE
       return cameraObj.name = "Camera3d"
     end function
 
+    ' A skybox has no meaningful world position (it's always drawn as if centered on
+    ' the camera) - skip the base class's default, which computes one from
+    ' m.drawable.getWorldPosition() for no benefit here.
+    override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
+      return true
+    end function
+
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       return true
     end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       return false
+    end function
+
+    ' Draws this skybox against rendererObj's current camera right now, bypassing the
+    ' base SceneObject update()/draw() pipeline entirely. That pipeline's update()
+    ' unconditionally calls m.drawable.movedLastFrame(true), which dereferences the
+    ' drawable's owner - fine for a DrawableSkybox added to a real Room/GameEntity
+    ' (the normal path, via Renderer.drawScene()), but not an option for a caller with
+    ' no owning entity at all. renderNow() is that owner-independent entry point: used
+    ' by the rendererTest SkyboxTest demo (Task 5), which deliberately has no
+    ' Game/Room, and by this class's own unit tests for the same reason. It applies
+    ' the same Camera2d/Camera3d gate isPotentiallyOnScreen() would.
+    function renderNow(rendererObj as BGE.Renderer) as boolean
+      if rendererObj.camera.name <> "Camera3d"
+        return false
+      end if
+      return m.performDraw(rendererObj, BGE.SceneObjectDrawMode.directToCamera)
     end function
 
   end class
@@ -336,11 +375,27 @@ Append to `SceneObjectSkyboxTests` (before the closing `end class`):
     @it("shifts the band up as pitch increases (looking up samples toward the texture's top)")
     function _()
       camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      levelBand = m.skybox.computeVisibleBand(camera, 200, 100)
+
       camera.orientation = BGE.Math.VectorOps.create(0, 1, 0) ' straight up, pitch +90 degrees
-      band = m.skybox.computeVisibleBand(camera, 200, 100)
-      ' verticalDegreesCovered defaults to 90 over a 32px-tall texture - looking
-      ' straight up centers the band on the texture's very top row.
-      m.assertEqual(-16.0, band.topY)
+      upBand = m.skybox.computeVisibleBand(camera, 200, 100)
+
+      ' Not asserting an exact figure here - the vertical FOV in play comes from
+      ' Camera3d.getFovDegreesForCanvasSize()'s aspect-based formula, not a round
+      ' number. The regression this guards is direction: looking up must move the
+      ' sampled band toward the texture's top (smaller topY), not leave it flat or
+      ' move it the wrong way.
+      m.assertTrue(upBand.topY < levelBand.topY)
+    end function
+
+    @describe("renderNow")
+
+    @it("draws under Camera3d now that performDraw is implemented")
+    function _()
+      m.game.canvas.renderer.resetDrawCallCounter()
+      m.assertTrue(m.skybox.renderNow(m.game.canvas.renderer))
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
     end function
 ```
 
@@ -388,8 +443,18 @@ Replace the Task-1 stub `findCanvasPosition`/`performDraw` and add the new metho
       visibleWidthPx = horizFov * pxPerDegX
       visibleHeightPx = vertFov * pxPerDegY
 
-      wrappedYawDeg = ((yawDeg mod 360) + 360) mod 360
-      centerX = (wrappedYawDeg / 360) * textureWidth
+      ' Float-safe wrap into [0, 360) - BrightScript's MOD operator has no documented
+      ' float contract in this codebase (every existing use is integer-only), so wrap
+      ' by hand rather than relying on it.
+      wrappedYawDeg = yawDeg - 360 * Int(yawDeg / 360)
+      if wrappedYawDeg < 0
+        wrappedYawDeg = wrappedYawDeg + 360
+      end if
+      ' Texture's horizontal middle column is yaw 0 - not its left edge (pixel 0).
+      centerX = (wrappedYawDeg / 360) * textureWidth + textureWidth / 2
+      if centerX >= textureWidth
+        centerX = centerX - textureWidth
+      end if
       leftX = centerX - visibleWidthPx / 2
 
       topY = (textureHeight / 2) - (pitchDeg * pxPerDegY) - (visibleHeightPx / 2)
@@ -535,12 +600,12 @@ Append to `SceneObjectSkyboxTests`:
 
     @describe("a rolled camera still draws")
 
-    @it("returns true from performDraw with a non-zero rollDegrees")
+    @it("renderNow succeeds with a non-zero rollDegrees")
     function _()
       camera = m.game.canvas.renderer.camera as BGE.Camera3d
       camera.rollDegrees = 30
       camera.checkMovement()
-      m.assertTrue(m.skybox.performDraw(m.game.canvas.renderer, BGE.SceneObjectDrawMode.directToCamera))
+      m.assertTrue(m.skybox.renderNow(m.game.canvas.renderer))
     end function
 ```
 
@@ -778,8 +843,10 @@ namespace BGE
       skyBmp = CreateObject("roBitmap", "pkg:/sprites/skybox_night.jpg")
       skyRegion = CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())
 
-      ' No owning entity is needed outside a Game/Room - passing invalid matches how
-      ' every other rendererTest demo constructs a bare Drawable.
+      ' No owning GameEntity/Room exists in this demo (rendererTest is deliberately
+      ' built without Game/Room - see CLAUDE.md). DrawableSkybox/SceneObjectSkybox
+      ' tolerate an invalid owner by design (SceneObjectSkybox.updateWorldPosition()
+      ' never dereferences it - see Task 1).
       m.drawable = new BGE.DrawableSkybox(invalid, skyRegion)
     end sub
 
@@ -793,11 +860,14 @@ namespace BGE
 
     override sub draw(renderer as BGE.Renderer)
       m.camera.checkMovement()
-      sceneObjects = m.drawable.getSceneObjects()
-      for each sceneObj in sceneObjects
-        sceneObj.update(m.camera)
-        sceneObj.draw(renderer)
-      end for
+      ' renderNow(), not update()/draw() - the base SceneObject update() pipeline
+      ' unconditionally touches the drawable's owner, and this demo has none (see
+      ' SceneObjectSkybox.renderNow()'s doc comment, Task 1). getSceneObjects()[0] is
+      ' safe - DrawableSkybox.addToScene() always registers exactly one
+      ' SceneObjectSkybox. Cast to the subtype since renderNow() isn't on the base
+      ' SceneObject type getSceneObjects() returns.
+      sceneObj = m.drawable.getSceneObjects()[0] as BGE.SceneObjectSkybox
+      sceneObj.renderNow(renderer)
     end sub
 
     ' OK toggles a constant roll, to specifically measure the render-then-rotate
@@ -1474,7 +1544,8 @@ class WorldRoom extends BGE.Room
         height: treeHeight
         drawMode: BGE.SceneObjectDrawMode.directToCamera
       })
-      tree.setAnchor(getTreeAnchor(placement.spriteIndex).x, getTreeAnchor(placement.spriteIndex).y)
+      anchor = getTreeAnchor(placement.spriteIndex)
+      tree.setAnchor(anchor.x, anchor.y)
       tree.offset = BGE.Math.VectorOps.create(placement.x, 0, placement.z)
       tree.rotation.z = BGE.Math.DegreesToRadians(placement.rotationDegrees)
       m.addDrawable("Tree" + i.ToStr(), tree)
