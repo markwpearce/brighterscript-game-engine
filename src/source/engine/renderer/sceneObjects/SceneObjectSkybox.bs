@@ -55,7 +55,8 @@ namespace BGE
     function computeVisibleBand(camera as Camera3d, destWidth as float, destHeight as float) as object
       textureWidth = m.drawable.region.GetWidth()
       textureHeight = m.drawable.region.GetHeight()
-      pxPerDegX = textureWidth / m.drawable.degreesPerFullWidth
+      degreesPerFullWidth = m.drawable.degreesPerFullWidth
+      pxPerDegX = textureWidth / degreesPerFullWidth
       pxPerDegY = textureHeight / m.drawable.verticalDegreesCovered
 
       yawDeg = BGE.Math.RadiansToDegrees(BGE.Math.atan2(camera.orientation.x, -camera.orientation.z))
@@ -75,8 +76,12 @@ namespace BGE
         wrappedYawDeg = wrappedYawDeg + 360
       end if
       ' Texture's horizontal middle column is yaw 0 - not its left edge (pixel 0).
-      centerX = (wrappedYawDeg / 360) * textureWidth + textureWidth / 2
-      if centerX >= textureWidth
+      ' The pan rate is degreesPerFullWidth, not a hardcoded 360 - this must match
+      ' pxPerDegX's own use of the same field, or the sampling window (sized for
+      ' degreesPerFullWidth) and the panning speed (previously always 360) disagree.
+      isFullWrap = degreesPerFullWidth >= 360
+      centerX = (wrappedYawDeg / degreesPerFullWidth) * textureWidth + textureWidth / 2
+      if isFullWrap and centerX >= textureWidth
         centerX = centerX - textureWidth
       end if
       leftX = centerX - visibleWidthPx / 2
@@ -97,12 +102,31 @@ namespace BGE
         cropHeight = textureHeight - topY
       end if
 
+      ' Horizontal is only finite (and clamped the exact same way as vertical) for a
+      ' sub-360 panorama - a true 360 wrap has no edge to run out of, and is instead
+      ' handled by drawUnrolledBand's two-slice wrap-around blit.
+      cropWidth = visibleWidthPx
+      destXOffset = 0.0
+      if not isFullWrap
+        if leftX < 0
+          destXOffset = -leftX
+          cropWidth = cropWidth + leftX
+          leftX = 0.0
+        end if
+        if leftX + cropWidth > textureWidth
+          cropWidth = textureWidth - leftX
+        end if
+      end if
+
       return {
         leftX: leftX,
         topY: topY,
+        cropWidth: cropWidth,
         cropHeight: cropHeight,
+        destXOffset: destXOffset,
         destYOffset: destYOffset,
         visibleWidthPx: visibleWidthPx,
+        isFullWrap: isFullWrap,
         scaleX: destWidth / visibleWidthPx,
         scaleY: destHeight / visibleHeightPx,
         textureWidth: textureWidth,
@@ -118,43 +142,57 @@ namespace BGE
     ' @return {boolean} true if anything was drawn (false only when the vertical crop
     '   collapsed to nothing, i.e. pitch looked entirely past verticalDegreesCovered)
     private function drawUnrolledBand(rendererObj as BGE.Renderer, destSurface as ifDraw2D, destWidth as float, destHeight as float, band as object) as boolean
-      if band.cropHeight <= 0
+      if band.cropHeight <= 0 or band.cropWidth <= 0
         return false
       end if
 
       ' The two wrap-seam slices' rounded destination pixel positions can disagree with
       ' their float widths by a fraction of a pixel, leaving a thin black seam on real
-      ' hardware - shift the second slice's destination x a couple pixels earlier so it
-      ' slightly overlaps the first, same fix as SceneObjectPlane's own seamPadding.
+      ' hardware. Both slices' "first" (destination x=0) region always ends exactly at
+      ' the texture's edge (x=textureWidth) - CreateObject("roRegion",...) returns
+      ' Invalid if asked to sample past a bitmap's bounds (confirmed directly against
+      ' brs-cli), so its *source* width can't literally be widened past that edge the
+      ' way SceneObjectPlane widens an in-bounds slice. Instead, stretch its rendered
+      ' *destination* width by a couple extra pixels (same source pixels, drawn very
+      ' slightly wider) so it overlaps into the second slice's territory; the second
+      ' slice then draws afterward, unshifted, on top - overwriting that tiny sliver
+      ' with its own correct pixels. Net effect: the two slices together span the full
+      ' destination width with an overlap in the middle, never a gap at the edge.
       seamPadding = 2
 
       srcBitmap = m.drawable.region.GetBitmap()
       destSurface.Clear(&h00000000)
 
       leftX = band.leftX
+      destXOffset = band.destXOffset * band.scaleX
       destYOffset = band.destYOffset * band.scaleY
 
-      if leftX < 0
+      ' Only a true 360-degree wrap (isFullWrap) uses the two-slice wrap-around blit -
+      ' a sub-360 panorama is clamped horizontally in computeVisibleBand instead, so
+      ' leftX/visibleWidthPx never actually run past the texture's edges here.
+      if band.isFullWrap and leftX < 0
         wrapWidth = -leftX
         firstWidth = wrapWidth
         secondWidth = band.visibleWidthPx - wrapWidth
         firstRegion = CreateObject("roRegion", srcBitmap, band.textureWidth - wrapWidth, band.topY, firstWidth, band.cropHeight)
         secondRegion = CreateObject("roRegion", srcBitmap, 0, band.topY, secondWidth, band.cropHeight)
-        worked = rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, band.scaleX, band.scaleY, firstRegion)
-        worked = rendererObj.drawScaledObjectTo(destSurface, BGE.Math.Max(0, firstWidth * band.scaleX - seamPadding), destYOffset, band.scaleX, band.scaleY, secondRegion) and worked
+        stretchedScaleX = band.scaleX * (firstWidth + seamPadding) / firstWidth
+        worked = rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, stretchedScaleX, band.scaleY, firstRegion)
+        worked = rendererObj.drawScaledObjectTo(destSurface, firstWidth * band.scaleX, destYOffset, band.scaleX, band.scaleY, secondRegion) and worked
         return worked
-      else if leftX + band.visibleWidthPx > band.textureWidth
+      else if band.isFullWrap and leftX + band.visibleWidthPx > band.textureWidth
         firstWidth = band.textureWidth - leftX
         secondWidth = band.visibleWidthPx - firstWidth
         firstRegion = CreateObject("roRegion", srcBitmap, leftX, band.topY, firstWidth, band.cropHeight)
         secondRegion = CreateObject("roRegion", srcBitmap, 0, band.topY, secondWidth, band.cropHeight)
-        worked = rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, band.scaleX, band.scaleY, firstRegion)
-        worked = rendererObj.drawScaledObjectTo(destSurface, BGE.Math.Max(0, firstWidth * band.scaleX - seamPadding), destYOffset, band.scaleX, band.scaleY, secondRegion) and worked
+        stretchedScaleX = band.scaleX * (firstWidth + seamPadding) / firstWidth
+        worked = rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, stretchedScaleX, band.scaleY, firstRegion)
+        worked = rendererObj.drawScaledObjectTo(destSurface, firstWidth * band.scaleX, destYOffset, band.scaleX, band.scaleY, secondRegion) and worked
         return worked
       end if
 
-      region = CreateObject("roRegion", srcBitmap, leftX, band.topY, band.visibleWidthPx, band.cropHeight)
-      return rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, band.scaleX, band.scaleY, region)
+      region = CreateObject("roRegion", srcBitmap, leftX, band.topY, band.cropWidth, band.cropHeight)
+      return rendererObj.drawScaledObjectTo(destSurface, destXOffset, destYOffset, band.scaleX, band.scaleY, region)
     end function
 
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -172,6 +210,9 @@ namespace BGE
       return Int(Sqr(frameSize.x * frameSize.x + frameSize.y * frameSize.y)) + 2
     end function
 
+    ' No per-frame dirty-check caching yet (unlike SceneObjectPlane's movement/camera
+    ' cache) - this recomputes and re-blits the band every frame even when yaw/pitch/
+    ' roll haven't changed. Correct, just not optimized; tracked as a follow-up issue.
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       camera = rendererObj.camera as Camera3d
       isRolled = camera.rollDegrees <> 0

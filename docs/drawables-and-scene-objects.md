@@ -550,6 +550,10 @@ geometry instead of a planar ground.
 
 **Note:** `Camera2d` does not support skyboxes; this feature is 3D-only (issue #65).
 
+**Note:** unlike `SceneObjectPlane`, `SceneObjectSkybox` has no per-frame dirty-check caching yet—it
+recomputes and re-blits its visible band every frame even when yaw/pitch/roll haven't changed. Correct,
+just not optimized; tracked as a follow-up issue.
+
 ## Parallax layers (`DrawableParallaxLayer`)
 
 `DrawableParallaxLayer` scrolls a bitmap at a configurable per-axis fraction of the

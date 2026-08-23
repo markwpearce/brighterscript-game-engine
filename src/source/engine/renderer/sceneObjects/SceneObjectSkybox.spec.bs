@@ -108,13 +108,20 @@ namespace tests
     @describe("drawUnrolledBand wrap-seam padding")
 
     ' Regression for the on-device thin black seam between the two wrap slices: verify
-    ' the actual destination x each drawScaledObjectTo call is issued at, via
+    ' the actual destination x/scale each drawScaledObjectTo call is issued with, via
     ' rooibos's stub() (works here because Renderer is a plain BrighterScript class,
     ' not a native Roku component - see CLAUDE.md's `=`-operator gotcha section for the
     ' same distinction). Stubbing bypasses the real method's `x as integer` param
-    ' coercion, so the captured value is the exact float the call site computed,
-    ' including the seamPadding subtraction.
-    @it("shifts the second slice's destination x left by seamPadding when the band wraps past the texture's left edge")
+    ' coercion, so the captured value is the exact float the call site computed.
+    '
+    ' The fix stretches the FIRST slice's rendered width by seamPadding px (same source
+    ' region, drawn at a slightly larger scaleX - CreateObject("roRegion",...) returns
+    ' Invalid if asked to sample past the texture's own bounds, confirmed directly, so
+    ' the source region itself can't literally widen past the texture edge) rather than
+    ' shifting the second slice's destination x - the second slice draws unshifted, on
+    ' top, so the two slices together span the full destination width with an overlap
+    ' in the middle, never a gap at the edge.
+    @it("stretches the first slice's rendered width and leaves the second slice's destination x unshifted when the band wraps past the texture's left edge")
     function _()
       camera = m.game.canvas.renderer.camera as BGE.Camera3d
       camera.orientation = BGE.Math.VectorOps.create(0, 0, 1) ' yaw 180 - wraps at the texture's left edge
@@ -122,19 +129,27 @@ namespace tests
       m.assertTrue(band.leftX < 0)
 
       firstWidth = -band.leftX
-      expectedSecondDestX = firstWidth * band.scaleX - 2
+      expectedSecondDestX = firstWidth * band.scaleX
+      expectedFirstScaleX = band.scaleX * (firstWidth + 2.0) / firstWidth
 
       fake = m.stub(m.game.canvas.renderer as roAssociativeArray, "drawScaledObjectTo", true)
       m.assertTrue(m.skybox.renderNow(m.game.canvas.renderer))
       m.assertEqual(2, fake.invocations)
 
       firstCallDestX = fake.allInvokedArgs[0][1]
+      firstCallScaleX = fake.allInvokedArgs[0][3]
+      firstCallSrcRegion = fake.allInvokedArgs[0][5]
       secondCallDestX = fake.allInvokedArgs[1][1]
       m.assertEqual(0, firstCallDestX)
+      m.assertEqual(firstWidth, firstCallSrcRegion.GetWidth() * 1.0)
+      m.assertTrue(Abs(firstCallScaleX - expectedFirstScaleX) < 0.0001)
       m.assertEqual(expectedSecondDestX, secondCallDestX)
+      ' The stretched first slice's rendered footprint must reach at least as far as
+      ' where the second slice starts - i.e. overlap, not a gap.
+      m.assertTrue(firstCallScaleX * firstCallSrcRegion.GetWidth() >= secondCallDestX)
     end function
 
-    @it("shifts the second slice's destination x left by seamPadding when the band wraps past the texture's right edge")
+    @it("stretches the first slice's rendered width and leaves the second slice's destination x unshifted when the band wraps past the texture's right edge")
     function _()
       camera = m.game.canvas.renderer.camera as BGE.Camera3d
       ' yaw ~157.5 degrees - close enough to the wrap boundary to overflow the texture's
@@ -145,44 +160,88 @@ namespace tests
       m.assertTrue(band.leftX + band.visibleWidthPx > band.textureWidth)
 
       firstWidth = band.textureWidth - band.leftX
-      expectedSecondDestX = firstWidth * band.scaleX - 2
+      expectedSecondDestX = firstWidth * band.scaleX
+      expectedFirstScaleX = band.scaleX * (firstWidth + 2.0) / firstWidth
 
       fake = m.stub(m.game.canvas.renderer as roAssociativeArray, "drawScaledObjectTo", true)
       m.assertTrue(m.skybox.renderNow(m.game.canvas.renderer))
       m.assertEqual(2, fake.invocations)
 
       firstCallDestX = fake.allInvokedArgs[0][1]
+      firstCallScaleX = fake.allInvokedArgs[0][3]
+      firstCallSrcRegion = fake.allInvokedArgs[0][5]
       secondCallDestX = fake.allInvokedArgs[1][1]
       m.assertEqual(0, firstCallDestX)
+      m.assertEqual(firstWidth, firstCallSrcRegion.GetWidth() * 1.0)
+      m.assertTrue(Abs(firstCallScaleX - expectedFirstScaleX) < 0.0001)
       m.assertEqual(expectedSecondDestX, secondCallDestX)
+      m.assertTrue(firstCallScaleX * firstCallSrcRegion.GetWidth() >= secondCallDestX)
     end function
 
-    ' Guards the reviewer-flagged edge case: a narrow visible band on a small destination
-    ' canvas can make firstWidth * scaleX itself smaller than seamPadding, which would
-    ' otherwise push the second slice's destination x negative (drawing left of the
-    ' destination surface's origin) - mirrors SceneObjectPlane's own clamp on its
-    ' analogous computed value.
-    @it("clamps the second slice's destination x to 0 rather than going negative on a narrow band/small canvas")
+    ' A narrow visible band on a small destination canvas still exercises the same
+    ' stretch-scale path (no clamp is needed here since the fix no longer widens the
+    ' source region at all - it only ever stretches the destination scale of the
+    ' existing, already-in-bounds region).
+    @it("still overlaps correctly on a narrow band/small canvas")
     function _()
       m.game.canvas.renderer.camera.setFrameSize(10, 100)
       camera = m.game.canvas.renderer.camera as BGE.Camera3d
-      ' yaw ~219.375 degrees puts the wrap only 1px past the texture's left edge -
-      ' at a 10px-wide destination canvas, firstWidth * scaleX (0.625) is well under
-      ' the 2px seamPadding.
+      ' yaw ~219.375 degrees puts the wrap only 1px past the texture's left edge.
       yawRad = BGE.Math.DegreesToRadians(219.375)
       camera.orientation = BGE.Math.VectorOps.create(Sin(yawRad), 0, -Cos(yawRad))
       band = m.skybox.computeVisibleBand(camera, 10, 100)
       m.assertTrue(band.leftX < 0)
 
       firstWidth = -band.leftX
-      m.assertTrue(firstWidth * band.scaleX < 2)
+      expectedSecondDestX = firstWidth * band.scaleX
 
       fake = m.stub(m.game.canvas.renderer as roAssociativeArray, "drawScaledObjectTo", true)
       m.assertTrue(m.skybox.renderNow(m.game.canvas.renderer))
       m.assertEqual(2, fake.invocations)
 
+      firstCallScaleX = fake.allInvokedArgs[0][3]
+      firstCallSrcRegion = fake.allInvokedArgs[0][5]
       secondCallDestX = fake.allInvokedArgs[1][1]
-      m.assertEqual(0.0, secondCallDestX)
+      m.assertEqual(expectedSecondDestX, secondCallDestX)
+      m.assertTrue(firstCallScaleX * firstCallSrcRegion.GetWidth() >= secondCallDestX)
+    end function
+
+    @describe("computeVisibleBand with a sub-360 degreesPerFullWidth")
+
+    ' Regression for Finding 3: with a 180-degree panorama, the pan rate (yaw -> texture
+    ' x) must match the sampling window's own size (both driven by degreesPerFullWidth),
+    ' and the band must clamp horizontally like it already does vertically rather than
+    ' wrap - a sub-360 panorama has real edges.
+    @it("sizes the sampling window consistently with the pan rate, both driven by degreesPerFullWidth")
+    function _()
+      m.drawable.degreesPerFullWidth = 180.0
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.orientation = BGE.Math.VectorOps.create(0, 0, -1) ' yaw 0
+      band = m.skybox.computeVisibleBand(camera, 200, 100)
+      ' 64px-wide texture / 180 degrees-per-width, camera fov defaults to 90 degrees -
+      ' visible band is 32px wide (double the 360-degree case), centered on the
+      ' texture's 32px midpoint.
+      m.assertEqual(32.0, band.visibleWidthPx)
+      m.assertEqual(16.0, band.leftX)
+      m.assertFalse(band.isFullWrap)
+    end function
+
+    @it("clamps horizontally instead of wrapping once yaw pans the band past a sub-360 texture's edge")
+    function _()
+      m.drawable.degreesPerFullWidth = 180.0
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      ' A yaw that would have wrapped under the old hardcoded-360 assumption (band
+      ' extends left of x=0) must now clamp, not wrap, since 180 < 360.
+      camera.orientation = BGE.Math.VectorOps.create(1, 0, 0) ' yaw +90 degrees
+      band = m.skybox.computeVisibleBand(camera, 200, 100)
+      m.assertFalse(band.isFullWrap)
+      m.assertTrue(band.leftX >= 0)
+      m.assertTrue(band.leftX + band.cropWidth <= band.textureWidth)
+
+      fake = m.stub(m.game.canvas.renderer as roAssociativeArray, "drawScaledObjectTo", true)
+      m.assertTrue(m.skybox.renderNow(m.game.canvas.renderer))
+      ' A clamped (non-wrapping) band draws in a single call, not the two-slice wrap path.
+      m.assertEqual(1, fake.invocations)
     end function
 
     @describe("a rolled camera still draws")
