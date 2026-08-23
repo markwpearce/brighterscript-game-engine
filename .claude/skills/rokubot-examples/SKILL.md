@@ -170,6 +170,15 @@ Two crashes seen so far, for reference:
   (`spacebackground.jpg`) and fails to decode (`loadBitmap()` logs "Bitmap not created"), which
   then null-derefs in `MainRoom.onCreate`. Looked simulator-specific (JPEG decode support), not
   an engine or rokubot bug — untested on real hardware.
+- `terrain` on brs-desktop: a ground plane's internal scratch bitmap (used by `SceneObjectPlane`'s
+  rotate-then-scale texture-warp pipeline, sized off `Camera3d.maxDrawDistance`) used to render
+  blank in the simulator past a certain size — confirmed size-dependent, filed upstream as
+  [lvcabral/brs-engine#1198](https://github.com/lvcabral/brs-engine/issues/1198). This is no longer
+  reachable through normal use: `Camera3d.getMaxDrawDistanceDeviceCap()` now auto-clamps
+  `maxDrawDistance` to 900 on the simulator (every frame, via `checkMovement()`), which stays safely
+  under the confirmed-working threshold. The linked issue remains useful background on *why* the
+  cap exists, but treat a blank ground plane on the simulator as an actual regression to
+  investigate, not this known gotcha resurfacing.
 - Sideloading the loose `build/` dir (vs the packaged zip) has crashed `pong` on
   `Paddle.brs` reading a bitmap's width before it's loaded — another reason to always sideload
   the packaged zip.

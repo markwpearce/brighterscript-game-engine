@@ -13,17 +13,41 @@ namespace BGE
   end interface
 
   const SCENE_OBJECT_PLANE_NEAR_DISTANCE = 0
-  const SCENE_OBJECT_PLANE_FAR_DISTANCE = 512
   const SCENE_OBJECT_PLANE_SLICE_COUNT = 50
+  ' Above this, the supertexture build's tilesPerAxis^2 blit count is worth a runtime
+  ' warning (63x63 = ~4k blits) - see buildSuperTextureIfNeeded().
+  const SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD = 63
 
   class SceneObjectPlane extends SceneObject
 
     drawable as DrawablePlane
     private perspectivePoints as PerspectiveCalculationResult
     private prePerspectiveBmp as roBitmap
+    private prePerspectiveBmpBuiltForMaxDrawDistance as float = -1
     private tempBitmap as ifDraw2d = invalid
     private rotatedTempBitmap as ifDraw2d = invalid
     private hasAccurateTempBitmap = false
+
+    private superTextureBmp as roBitmap
+    private superTextureRegion as roRegion
+    ' Rotate step's scratch destination - must differ from superTextureBmp since that's the rotate source.
+    private tiledScratchBmp as roBitmap
+    private superTextureBuiltForMaxDrawDistance as float = -1
+    private tileWidth as float
+    private tileHeight as float
+    private tilesPerAxis as integer
+    ' The tile region's dimensions when the supertexture was last built - rebuilds if the
+    ' drawable's region is reassigned to a differently-sized one, not just on a
+    ' maxDrawDistance change. Dimensions, not the region reference itself: comparing two
+    ' roRegion values with `=` crashes at runtime with a Type Mismatch (confirmed - the
+    ' same class of crash CLAUDE.md documents for custom-class instances turns out to
+    ' apply to this native component too), and an `as dynamic` cast doesn't avoid it
+    ' either. A same-sized region swap isn't caught by this - see issue #140.
+    private superTextureBuiltForTileWidth as float = -1
+    private superTextureBuiltForTileHeight as float = -1
+    ' Physical/logical pixel ratio: 1.0 until logical size exceeds getMaxSuperTextureDimension()'s
+    ' budget, then tiles downscale and every pixel-space consumer must apply this factor.
+    private superTextureScale as float = 1.0
 
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
     ' canvasSize x canvasSize square can be rotated by any angle without exposing an
@@ -62,22 +86,6 @@ namespace BGE
       return true
     end function
 
-    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
-      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, SCENE_OBJECT_PLANE_FAR_DISTANCE)
-      if invalid = m.perspectivePoints
-        return false
-      end if
-      ' The texture is a finite decal, not an infinitely tiling one - skip
-      ' the (relatively expensive) perspective warp entirely once the view
-      ' has moved so far that there's no possible overlap with the texture
-      ' at all. Partial overlaps are handled correctly by performDraw
-      ' clearing its scratch/dest bitmaps before drawing into them, so a
-      ' partially-out-of-bounds view correctly shows real texture where
-      ' valid and background where not, rather than needing an all-or-
-      ' nothing gate here.
-      return BGE.Math.boundsOverlapRect(m.perspectivePoints.mapped.toArray(), m.drawable.region.GetWidth(), m.drawable.region.GetHeight())
-    end function
-
     ' Perform any drawing logic for the object
     ' Override this function in subclasses to provide specific behavior
     '
@@ -85,11 +93,20 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean} True if the draw call was successful
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if invalid = m.perspectivePoints
+        return false
+      end if
+
+      if m.drawable.fillMode = PlaneFillMode.color
+        return m.performColorDraw(rendererObj)
+      end if
+
       camera = rendererObj.camera
       isRolled = false
       if camera.name = "Camera3d"
         isRolled = (camera as Camera3d).rollDegrees <> 0
       end if
+      isTiled = m.drawable.fillMode = PlaneFillMode.tiledImage
       if not m.objMovedInRelationToCamera(camera) and m.hasAccurateTempBitmap
         ' If nothing has moved (including no roll change - Camera3d.checkMovement's
         ' own roll dirty-check forces movedLastFrame true only on the frame roll
@@ -106,15 +123,20 @@ namespace BGE
       end if
       m.hasAccurateTempBitmap = false
 
-      if invalid = m.perspectivePoints
-        return false
-      end if
-
-      if invalid = m.prePerspectiveBmp
+      maxDrawDistance = (camera as Camera3d).maxDrawDistance
+      if invalid = m.prePerspectiveBmp or m.prePerspectiveBmpBuiltForMaxDrawDistance <> maxDrawDistance
         m.prePerspectiveBmp = m.getPrePerspectiveBmp(rendererObj)
+        m.prePerspectiveBmpBuiltForMaxDrawDistance = maxDrawDistance
       end if
 
-      gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp)
+      gotPreBmp = false
+      if isTiled
+        m.buildSuperTextureIfNeeded(rendererObj)
+        wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
+        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale)
+      else
+        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
+      end if
       if not gotPreBmp
         return false
       end if
@@ -122,6 +144,55 @@ namespace BGE
 
       return m.hasAccurateTempBitmap
     end function
+
+    ' Flat color fill - no texture warp, no slice rasterization, no bitmap caching.
+    ' No texture bounds, so it draws correctly no matter how far the camera has moved.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {boolean} True if the draw call was successful
+    private function performColorDraw(rendererObj as BGE.Renderer) as boolean
+      camera = rendererObj.camera
+      corners = [m.perspectivePoints.actual.topLeft, m.perspectivePoints.actual.topRight, m.perspectivePoints.actual.bottomRight, m.perspectivePoints.actual.bottomLeft]
+      canvasPoints = []
+      for each corner in corners
+        canvasPoint = camera.worldPointToCanvasPoint(corner)
+        if invalid <> canvasPoint
+          canvasPoints.push(canvasPoint)
+        end if
+      end for
+
+      if canvasPoints.count() < 3
+        ' Not enough corners in front of the camera to fill anything this frame;
+        ' not a deterministic failure since a corner can come back in front next frame.
+        return false
+      end if
+
+      ' 3 of 4 corners valid (one behind the camera) fills a triangle instead of the
+      ' full quad - the correct approximation of a plane straddling the near plane.
+      return rendererObj.drawPolygon(canvasPoints, 0, 0, m.drawable.getFillColorRGBA())
+    end function
+
+    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      camera = rendererObj.camera as Camera3d
+      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, camera.maxDrawDistance)
+      if invalid = m.perspectivePoints
+        return false
+      end if
+      if m.drawable.fillMode <> PlaneFillMode.staticImage
+        ' Color and tiled fills never "run out" like a finite decal does.
+        return true
+      end if
+      ' The texture is a finite decal, not an infinitely tiling one - skip
+      ' the (relatively expensive) perspective warp entirely once the view
+      ' has moved so far that there's no possible overlap with the texture
+      ' at all. Partial overlaps are handled correctly by performDraw
+      ' clearing its scratch/dest bitmaps before drawing into them, so a
+      ' partially-out-of-bounds view correctly shows real texture where
+      ' valid and background where not, rather than needing an all-or-
+      ' nothing gate here.
+      return BGE.Math.boundsOverlapRect(m.perspectivePoints.mapped.toArray(), m.drawable.region.GetWidth(), m.drawable.region.GetHeight())
+    end function
+
 
 
 
@@ -225,6 +296,12 @@ namespace BGE
         )
       end if
 
+      ' A color fill has no texture at all - only the world-space quad (`output`)
+      ' matters, so skip the texture-pixel mapping entirely.
+      if m.drawable.fillMode = PlaneFillMode.color
+        return {actual: output, mapped: invalid}
+      end if
+
       ' Anchor the texture's center on the plane's own world position (mapOffset)
       ' rather than on world-space (0,0) - otherwise world points get used
       ' directly as source-bitmap pixel coordinates, pinning the visible
@@ -253,14 +330,137 @@ namespace BGE
     ' feature), the other needs to change with it.
     private function getPrePerspectiveBmp(rendererObj as BGE.Renderer) as roBitmap
       nearDistance = SCENE_OBJECT_PLANE_NEAR_DISTANCE
-      farDistance = SCENE_OBJECT_PLANE_FAR_DISTANCE
       camera = rendererObj.camera as Camera3d
+      farDistance = camera.maxDrawDistance
       finalHeight = farDistance - nearDistance
       finalWidth = (finalHeight) * tan(BGE.Math.DegreesToRadians(camera.fieldOfViewDegrees) / 2) * 2
       return CreateObject("roBitmap", {width: finalWidth, height: finalHeight, AlphaEnable: true})
     end function
 
-    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D) as boolean
+    ' Caps the supertexture's physical bitmap size regardless of how much world-space
+    ' coverage it logically represents - a large maxDrawDistance with a small tile can
+    ' otherwise require an allocation that fails on real hardware. Trades sharpness at
+    ' long distances for a fixed allocation budget (device-tiered, like ScratchBitmap.bs).
+    '
+    ' @return {float}
+    private function getMaxSuperTextureDimension() as float
+      device = CreateObject("roDeviceInfo")
+      if device.HasFeature("simulation_engine")
+        return 1024
+      end if
+      if "FHD" = device.GetUIResolution().name
+        return 1600
+      end if
+      return 1024
+    end function
+
+    ' Builds (or rebuilds, if maxDrawDistance changed) a bitmap that repeats the
+    ' plane's tile enough times per axis to seamlessly cover the world-space footprint,
+    ' so a wrapped anchor (see wrapAnchorIntoSuperTexture()) always has enough margin
+    ' for the required rotated footprint. Lazy and cached per maxDrawDistance value;
+    ' its own persistent bitmap rather than a pooled scratch region since it's reused
+    ' across many frames, not just within one.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    private sub buildSuperTextureIfNeeded(rendererObj as BGE.Renderer)
+      camera = rendererObj.camera as Camera3d
+      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance and m.superTextureBuiltForTileWidth = m.drawable.region.GetWidth() and m.superTextureBuiltForTileHeight = m.drawable.region.GetHeight()
+        return
+      end if
+
+      ' Floored at 1 - a degenerate 0-sized tile region would otherwise divide by zero
+      ' below (and downstream, a 0-sized bmpWidth/bmpHeight feeding CreateObject("roBitmap", ...)).
+      m.tileWidth = BGE.Math.Max(1, m.drawable.region.GetWidth())
+      m.tileHeight = BGE.Math.Max(1, m.drawable.region.GetHeight())
+      smallestTileDimension = BGE.Math.Min(m.tileWidth, m.tileHeight)
+
+      ' m.tiledScratchBmp (the rotate destination) must stay at this unpadded,
+      ' maxDrawDistance-bounded size - drawScaledObjectTo reads it whole into the
+      ' final composite with no sub-crop, so it can't grow with the rotation padding
+      ' computed below. Computed from real tile-quantized dimensions, not an estimate.
+      unpaddedTilesPerAxis = Fix(2 * camera.maxDrawDistance / smallestTileDimension) + 1
+      if (unpaddedTilesPerAxis mod 2) = 0
+        unpaddedTilesPerAxis = unpaddedTilesPerAxis + 1
+      end if
+      unpaddedScratchWidth = unpaddedTilesPerAxis * m.tileWidth
+      unpaddedScratchHeight = unpaddedTilesPerAxis * m.tileHeight
+
+      ' The rotate call places the wrapped anchor at the destination canvas's ORIGIN,
+      ' not its center, so the region needing coverage after rotation is a full D x D
+      ' quadrant extending from the anchor - a FULL diagonal away, not the half-diagonal
+      ' getRollCanvasSize() uses for its center-anchored case. Since
+      ' wrapAnchorIntoSuperTexture() re-centers the anchor in this supertexture, its
+      ' half-side must be at least that full diagonal to cover every rotation angle,
+      ' or corners bleed through with visible rotation/pitch-dependent artifacts.
+      requiredDiagonal = Sqr(unpaddedScratchWidth * unpaddedScratchWidth + unpaddedScratchHeight * unpaddedScratchHeight)
+      rotationPaddedWorldDiameter = 2 * requiredDiagonal
+
+      m.tilesPerAxis = Fix(rotationPaddedWorldDiameter / smallestTileDimension) + 1
+      if (m.tilesPerAxis mod 2) = 0
+        ' Keep it odd, so a tile sits exactly centered in the supertexture - the
+        ' center tile is where wrapAnchorIntoSuperTexture() re-centers every anchor.
+        m.tilesPerAxis = m.tilesPerAxis + 1
+      end if
+
+      ' Not silently truncated - m.tilesPerAxis feeds directly into the corner-bleed
+      ' coverage math above, so reducing it here would reintroduce that bug. This is
+      ' just visibility: the blit loop below costs tilesPerAxis^2 calls, so a small
+      ' tile paired with a large maxDrawDistance can genuinely hitch on real hardware
+      ' (see issue #136 for a real fix - a bounded doubling-blit strategy that needs
+      ' on-device verification before shipping).
+      if m.tilesPerAxis > SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD
+        print "[BGE.SceneObjectPlane] warning: tiledImage supertexture needs "; m.tilesPerAxis; "x"; m.tilesPerAxis; " tile blits ("; m.tilesPerAxis * m.tilesPerAxis; " total) - consider a larger tile or a smaller camera.maxDrawDistance"
+      end if
+
+      ' bmpWidth/bmpHeight are the supertexture's LOGICAL size (world coverage / wrap
+      ' period); the PHYSICAL bitmap is capped to a device-tiered budget below and only
+      ' ever downscaled from this, never upscaled - every pixel-space consumer must
+      ' apply m.superTextureScale to convert between the two.
+      bmpWidth = m.tilesPerAxis * m.tileWidth
+      bmpHeight = m.tilesPerAxis * m.tileHeight
+      maxDimension = m.getMaxSuperTextureDimension()
+      m.superTextureScale = BGE.Math.Min(1.0, maxDimension / BGE.Math.Max(bmpWidth, bmpHeight))
+
+      physicalWidth = bmpWidth * m.superTextureScale
+      physicalHeight = bmpHeight * m.superTextureScale
+      m.superTextureBmp = CreateObject("roBitmap", {width: physicalWidth, height: physicalHeight, AlphaEnable: true})
+      m.superTextureBmp.SetAlphaEnable(true)
+      m.superTextureBmp.Clear(&h00000000)
+
+      for row = 0 to m.tilesPerAxis - 1
+        for col = 0 to m.tilesPerAxis - 1
+          rendererObj.drawScaledObjectTo(m.superTextureBmp, col * m.tileWidth * m.superTextureScale, row * m.tileHeight * m.superTextureScale, m.superTextureScale, m.superTextureScale, m.drawable.region)
+        end for
+      end for
+
+      m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, physicalWidth, physicalHeight)
+      ' Unpadded size (see unpaddedScratchWidth/Height above) - the destination canvas
+      ' must not grow with the source's rotation padding.
+      m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth * m.superTextureScale, height: unpaddedScratchHeight * m.superTextureScale, AlphaEnable: true})
+      m.tiledScratchBmp.SetAlphaEnable(true)
+      m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
+      m.superTextureBuiltForTileWidth = m.tileWidth
+      m.superTextureBuiltForTileHeight = m.tileHeight
+    end sub
+
+    ' Wraps an unbounded world-derived texture-pixel anchor into this supertexture's
+    ' center tile. Only the anchor needs wrapping (not every corner) since the warp's
+    ' rotation/scale are translation-invariant. Wrap period is in logical (world/tile)
+    ' units; the result is converted to physical pixel space (m.superTextureScale)
+    ' only at the end, for the rotate step which reads real bitmap pixels.
+    '
+    ' @param {BGE.Math.Vector} point
+    ' @return {BGE.Math.Vector}
+    private function wrapAnchorIntoSuperTexture(point as BGE.Math.Vector) as BGE.Math.Vector
+      centerTileIndex = Int(m.tilesPerAxis / 2)
+      wrappedX = BGE.Math.wrapValue(point.x, m.tileWidth)
+      wrappedY = BGE.Math.wrapValue(point.y, m.tileHeight)
+      logicalX = centerTileIndex * m.tileWidth + wrappedX
+      logicalY = centerTileIndex * m.tileHeight + wrappedY
+      return BGE.Math.VectorOps.create(logicalX * m.superTextureScale, logicalY * m.superTextureScale, 0)
+    end function
+
+    private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D, anchorPoint as BGE.Math.Vector, ownScratchBmp = invalid as roBitmap, extraScale = 1.0 as float) as boolean
       if invalid = cp
         return false
       end if
@@ -273,30 +473,38 @@ namespace BGE
         return false
       end if
 
-      horizScale = destRegion.GetWidth() / distanceFromTopToBottom
-      vertScale = destRegion.GetHeight() / footInfo.distanceToPoint
-      scratchRegion = rendererObj.bmpPool.getRegion(srcRegion.GetWidth(), srcRegion.GetHeight())
+      ' extraScale compensates when the source's pixel space no longer maps 1:1 to
+      ' world/texture-pixel units (see superTextureScale); the static path passes 1.0.
+      horizScale = (destRegion.GetWidth() / distanceFromTopToBottom) * extraScale
+      vertScale = (destRegion.GetHeight() / footInfo.distanceToPoint) * extraScale
 
-      if scratchRegion = invalid
-        print "failed to get scratch region from pool"
-        return false
+      usingOwnScratch = invalid <> ownScratchBmp
+      scratchRegionForPool = invalid
+      scratchDrawTo = invalid as ifDraw2D
+      if usingOwnScratch
+        scratchDrawTo = ownScratchBmp
+      else
+        scratchRegionForPool = rendererObj.bmpPool.getRegion(srcRegion.GetWidth(), srcRegion.GetHeight())
+        if scratchRegionForPool = invalid
+          print "failed to get scratch region from pool"
+          return false
+        end if
+        scratchDrawTo = scratchRegionForPool.region
       end if
 
-      ' Scratch regions are pooled/reused and are NOT cleared when handed
-      ' out - if the rotated draw below lands mostly or entirely outside
-      ' this region (e.g. the camera's view has moved beyond the texture's
-      ' valid bounds), leftover pixel data from a previous, unrelated frame's
-      ' use of this same pooled bitmap would otherwise show through.
-      scratchRegion.region.Clear(&h00000000)
+      ' Scratch regions/bitmaps are reused and not auto-cleared - without this, a
+      ' rotated draw landing mostly outside this canvas would show stale pixel data.
+      scratchDrawTo.Clear(&h00000000)
       destRegion.Clear(&h00000000)
 
-      worked = rendererObj.drawRotatedImageWithCenterTo(scratchRegion.region, srcRegion, cp.topLeft, rotation, BGE.Math.VectorOps.negative(cp.topLeft))
-      worked = worked and rendererObj.drawScaledObjectTo(destRegion, 0, 0, horizScale, vertScale, scratchRegion.region)
+      worked = rendererObj.drawRotatedImageWithCenterTo(scratchDrawTo, srcRegion, anchorPoint, rotation, BGE.Math.VectorOps.negative(anchorPoint))
+      worked = worked and rendererObj.drawScaledObjectTo(destRegion, 0, 0, horizScale, vertScale, scratchDrawTo)
       if not worked
-        '  rendererObj.forceDraw(destRegion)
         print "failed to draw perspective bmp"
       end if
-      rendererObj.bmpPool.returnRegion(scratchRegion)
+      if not usingOwnScratch
+        rendererObj.bmpPool.returnRegion(scratchRegionForPool)
+      end if
 
       return worked
     end function
@@ -395,11 +603,13 @@ namespace BGE
         end if
         sliceRegion = CreateObject("roRegion", srcBmp, slice.srcTopLeft.x, slice.srcTopLeft.y, slice.srcWidth, slice.srcHeight)
         sliceVertScale = sliceHeight / slice.srcHeight
-        worked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, sliceTop, slice.scaleX, sliceVertScale, sliceRegion) and worked
+        thisSliceWorked = rendererObj.drawScaledObjectTo(m.tempBitmap, 0, sliceTop, slice.scaleX, sliceVertScale, sliceRegion)
+        worked = thisSliceWorked and worked
       end for
 
       if not isRolled
-        worked = worked and rendererObj.drawObject(0, 0, m.tempBitmap)
+        finalBlitWorked = rendererObj.drawObject(0, 0, m.tempBitmap)
+        worked = worked and finalBlitWorked
         return worked
       end if
 
