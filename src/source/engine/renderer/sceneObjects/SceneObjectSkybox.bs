@@ -3,6 +3,7 @@ namespace BGE
   class SceneObjectSkybox extends SceneObject
 
     drawable as DrawableSkybox
+    private tempBitmap as roBitmap
 
     sub new(name as string, drawableObj as DrawableSkybox)
       super(name, drawableObj, BGE.SceneObjectType.Skybox)
@@ -31,12 +32,141 @@ namespace BGE
       return true
     end function
 
+    ' BrighterScript/BrightScript has no native arcsine - asin(x) = atan2(x, sqrt(1-x^2))
+    ' for x in [-1, 1] is the standard identity, reusing the engine's existing atan2.
+    ' Exposed (not private) so its correctness can be tested directly, matching
+    ' SceneObjectPlane.getRollCanvasSize()'s precedent for pure-math helpers.
+    function arcsinDegrees(sinValue as float) as float
+      clamped = BGE.Math.Clamp(sinValue, -1, 1)
+      return BGE.Math.RadiansToDegrees(BGE.Math.atan2(clamped, Sqr(1 - clamped * clamped)))
+    end function
+
+    ' Camera3d.orientation itself is unaffected by roll (rolling spins the camera
+    ' around its own forward axis, which doesn't change that axis's direction) - so yaw
+    ' and pitch can be read directly off orientation with no roll-aware "level" variant
+    ' needed, unlike SceneObjectPlane's horizon math. Roll is applied separately, as a
+    ' final image rotation (see the roll path in performDraw, Task 3).
+    '
+    ' @param {Camera3d} camera
+    ' @param {float} destWidth the destination surface's width in pixels
+    ' @param {float} destHeight the destination surface's height in pixels
+    ' @return {object} {leftX, topY, cropHeight, scaleX, scaleY, textureWidth, textureHeight}
+    function computeVisibleBand(camera as Camera3d, destWidth as float, destHeight as float) as object
+      textureWidth = m.drawable.region.GetWidth()
+      textureHeight = m.drawable.region.GetHeight()
+      pxPerDegX = textureWidth / m.drawable.degreesPerFullWidth
+      pxPerDegY = textureHeight / m.drawable.verticalDegreesCovered
+
+      yawDeg = BGE.Math.RadiansToDegrees(BGE.Math.atan2(camera.orientation.x, -camera.orientation.z))
+      pitchDeg = m.arcsinDegrees(camera.orientation.y)
+
+      horizFov = camera.fieldOfViewDegrees
+      vertFov = camera.getFovDegreesForCanvasSize(destHeight)
+
+      visibleWidthPx = horizFov * pxPerDegX
+      visibleHeightPx = vertFov * pxPerDegY
+
+      ' Float-safe wrap into [0, 360) - BrightScript's MOD operator has no documented
+      ' float contract in this codebase (every existing use is integer-only), so wrap
+      ' by hand rather than relying on it.
+      wrappedYawDeg = yawDeg - 360 * Int(yawDeg / 360)
+      if wrappedYawDeg < 0
+        wrappedYawDeg = wrappedYawDeg + 360
+      end if
+      ' Texture's horizontal middle column is yaw 0 - not its left edge (pixel 0).
+      centerX = (wrappedYawDeg / 360) * textureWidth + textureWidth / 2
+      if centerX >= textureWidth
+        centerX = centerX - textureWidth
+      end if
+      leftX = centerX - visibleWidthPx / 2
+
+      topY = (textureHeight / 2) - (pitchDeg * pxPerDegY) - (visibleHeightPx / 2)
+
+      ' Vertical is finite (looking past verticalDegreesCovered's edge shows nothing,
+      ' same as a finite ground decal) - clamp the crop into the texture's bounds and
+      ' shrink the destination band to match rather than sampling out of range.
+      cropHeight = visibleHeightPx
+      destYOffset = 0.0
+      if topY < 0
+        destYOffset = -topY
+        cropHeight = cropHeight + topY
+        topY = 0.0
+      end if
+      if topY + cropHeight > textureHeight
+        cropHeight = textureHeight - topY
+      end if
+
+      return {
+        leftX: leftX,
+        topY: topY,
+        cropHeight: cropHeight,
+        destYOffset: destYOffset,
+        visibleWidthPx: visibleWidthPx,
+        scaleX: destWidth / visibleWidthPx,
+        scaleY: destHeight / visibleHeightPx,
+        textureWidth: textureWidth,
+        textureHeight: textureHeight
+      }
+    end function
+
+    ' Blits the unrolled (no-roll) visible band into destSurface, sized destWidth x
+    ' destHeight. Handles the horizontal wrap seam (two source slices) when the visible
+    ' band crosses the texture's left or right edge - vertical is never wrapped (see
+    ' computeVisibleBand).
+    '
+    ' @return {boolean} true if anything was drawn (false only when the vertical crop
+    '   collapsed to nothing, i.e. pitch looked entirely past verticalDegreesCovered)
+    private function drawUnrolledBand(rendererObj as BGE.Renderer, destSurface as ifDraw2D, destWidth as float, destHeight as float, band as object) as boolean
+      if band.cropHeight <= 0
+        return false
+      end if
+
+      srcBitmap = m.drawable.region.GetBitmap()
+      destSurface.Clear(&h00000000)
+
+      leftX = band.leftX
+      destYOffset = band.destYOffset * band.scaleY
+
+      if leftX < 0
+        wrapWidth = -leftX
+        firstWidth = wrapWidth
+        secondWidth = band.visibleWidthPx - wrapWidth
+        firstRegion = CreateObject("roRegion", srcBitmap, band.textureWidth - wrapWidth, band.topY, firstWidth, band.cropHeight)
+        secondRegion = CreateObject("roRegion", srcBitmap, 0, band.topY, secondWidth, band.cropHeight)
+        worked = rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, band.scaleX, band.scaleY, firstRegion)
+        worked = rendererObj.drawScaledObjectTo(destSurface, firstWidth * band.scaleX, destYOffset, band.scaleX, band.scaleY, secondRegion) and worked
+        return worked
+      else if leftX + band.visibleWidthPx > band.textureWidth
+        firstWidth = band.textureWidth - leftX
+        secondWidth = band.visibleWidthPx - firstWidth
+        firstRegion = CreateObject("roRegion", srcBitmap, leftX, band.topY, firstWidth, band.cropHeight)
+        secondRegion = CreateObject("roRegion", srcBitmap, 0, band.topY, secondWidth, band.cropHeight)
+        worked = rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, band.scaleX, band.scaleY, firstRegion)
+        worked = rendererObj.drawScaledObjectTo(destSurface, firstWidth * band.scaleX, destYOffset, band.scaleX, band.scaleY, secondRegion) and worked
+        return worked
+      end if
+
+      region = CreateObject("roRegion", srcBitmap, leftX, band.topY, band.visibleWidthPx, band.cropHeight)
+      return rendererObj.drawScaledObjectTo(destSurface, 0, destYOffset, band.scaleX, band.scaleY, region)
+    end function
+
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       return true
     end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
-      return false
+      camera = rendererObj.camera as Camera3d
+
+      if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> camera.frameSize.x or m.tempBitmap.GetHeight() <> camera.frameSize.y
+        m.tempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})
+      end if
+
+      band = m.computeVisibleBand(camera, camera.frameSize.x, camera.frameSize.y)
+      if not m.drawUnrolledBand(rendererObj, m.tempBitmap, camera.frameSize.x, camera.frameSize.y, band)
+        return false
+      end if
+
+      return rendererObj.drawObject(0, 0, m.tempBitmap)
     end function
 
     ' Draws this skybox against rendererObj's current camera right now, bypassing the
