@@ -4,6 +4,8 @@ namespace tests
   class SceneObjectPlaneTests extends rooibos.BaseTestSuite
 
     game as BGE.Game
+    drawable as BGE.DrawablePlane
+    room as BGE.Room
     plane as BGE.SceneObjectPlane
 
     protected override function beforeEach()
@@ -11,14 +13,14 @@ namespace tests
       m.game.setCamera(new BGE.Camera3d())
       m.game.canvas.renderer.camera.setFrameSize(200, 100)
 
-      room = new BGE.Room(m.game, {name: "TestRoom"})
-      m.game.defineRoom(room)
+      m.room = new BGE.Room(m.game, {name: "TestRoom"})
+      m.game.defineRoom(m.room)
       m.game.changeRoom("TestRoom")
 
       bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
       region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
-      drawablePlane = new BGE.DrawablePlane(room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}})
-      m.plane = new BGE.SceneObjectPlane("plane", drawablePlane)
+      m.drawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}})
+      m.plane = new BGE.SceneObjectPlane("plane", m.drawable)
     end function
 
     @describe("getRollCanvasSize")
@@ -29,6 +31,279 @@ namespace tests
       diagonal = Sqr(200.0 * 200.0 + 100.0 * 100.0)
 
       m.assertTrue(size >= diagonal)
+    end function
+
+    @describe("a plane keeps drawing once the camera passes its anchor point")
+
+    ' Regression test: drawScene() used to gate draw() on negDistanceFromCamera, measured
+    ' from the plane's fixed anchor point - once the camera passed that anchor, it read as
+    ' "behind the camera" even though the ground was still in view, permanently blanking
+    ' the plane. Needs two stacked planes since a single plane's own isPotentiallyOnScreen()
+    ' short-circuit would otherwise mask the missed draw() call.
+    @it("still draws every stacked plane after the camera has moved past their shared anchor point")
+    function _()
+      colorDrawable = new BGE.DrawablePlane(m.room, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: BGE.ColorsRGB.Green})
+      m.room.addDrawable("GroundBase", colorDrawable)
+
+      bmp = CreateObject("roBitmap", {width: 120, height: 120, AlphaEnable: true})
+      region = CreateObject("roRegion", bmp, 0, 0, 120, 120)
+      tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      m.room.addDrawable("GroundOverlay", tiledDrawable)
+
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 38, -100))
+      m.game.canvas.renderer.setupCameraForFrame()
+      m.game.canvas.renderer.drawScene()
+
+      ' Teleport far past the shared anchor point (0,0,0), same heading.
+      camera.position = BGE.Math.VectorOps.create(0, 50, -1600)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 38, -1700))
+      m.game.canvas.renderer.resetDrawCallCounter()
+      m.game.canvas.renderer.setupCameraForFrame()
+      m.game.canvas.renderer.drawScene()
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @describe("far distance follows camera.maxDrawDistance")
+
+    @it("still draws successfully when maxDrawDistance is larger")
+    function _()
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 10
+      camera.checkMovement()
+      m.plane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      m.plane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("still draws successfully when maxDrawDistance is small")
+    function _()
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 5
+      camera.checkMovement()
+      m.plane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      m.plane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @describe("color fillMode")
+
+    @it("draws successfully near the plane's own anchor position")
+    function _()
+      colorDrawable = new BGE.DrawablePlane(m.room, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: BGE.ColorsRGB.Green})
+      colorPlane = new BGE.SceneObjectPlane("colorPlane", colorDrawable)
+
+      ' Default camera is degenerate for rendering (same height as plane) - use a level-gaze camera instead.
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.checkMovement()
+
+      colorPlane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      colorPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("still draws far from the plane's own anchor position, unlike a staticImage decal")
+    function _()
+      colorDrawable = new BGE.DrawablePlane(m.room, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color})
+      colorPlane = new BGE.SceneObjectPlane("colorPlane", colorDrawable)
+
+      ' Same geometry as above, translated far from the anchor - a staticImage plane
+      ' would run out of texture here, but a color plane skips that bounds check entirely.
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(5000, 1, 5000)
+      camera.setTarget(BGE.Math.VectorOps.create(5000, 1, 4900))
+      camera.checkMovement()
+
+      colorPlane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      colorPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @describe("tiledImage fillMode")
+
+    @it("draws successfully from a small tile, near the plane's own anchor position")
+    function _()
+      bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
+      region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
+      tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+
+      ' Default camera is degenerate for rendering (same height as plane) - use a level-gaze camera instead.
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 200
+      camera.checkMovement()
+
+      tiledPlane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      tiledPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("still draws far from the plane's own anchor position, unlike a staticImage decal")
+    function _()
+      bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
+      region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
+      tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+
+      ' Same geometry as above, translated far from the anchor - a staticImage plane
+      ' would run out of texture here, but a tiled plane repeats to cover maxDrawDistance.
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(5000, 1, 5000)
+      camera.setTarget(BGE.Math.VectorOps.create(5000, 1, 4900))
+      camera.maxDrawDistance = 200
+      camera.checkMovement()
+
+      tiledPlane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      tiledPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("caps the supertexture's physical bitmap size for a large maxDrawDistance, still draws")
+    function _()
+      ' Bigger 128px tile (vs. this suite's usual 8px) - an 8px tile against
+      ' maxDrawDistance=1000 needs far too many tile-blit calls to build the
+      ' supertexture, making the test prohibitively slow under brs-cli.
+      bmp = CreateObject("roBitmap", {width: 128, height: 128, AlphaEnable: true})
+      region = CreateObject("roRegion", bmp, 0, 0, 128, 128)
+      tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+
+      ' maxDrawDistance=1000 (examples/terrain's default) overflowed a real device's
+      ' bitmap allocator before the physical-size cap existed. Camera3d clamps this to
+      ' 900 under brs-cli/the simulator, but the assertions hold at either value.
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 1000
+      camera.checkMovement()
+
+      tiledPlane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      tiledPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+      ' getMaxSuperTextureDimension() returns 1024 on this (non-FHD) device budget.
+      ' Cast to `object` to reach private fields - BrighterScript's access modifiers
+      ' aren't enforced on dynamic member access.
+      dynamicPlane = tiledPlane as object
+      m.assertTrue(dynamicPlane.superTextureBmp.GetWidth() <= 1024)
+      m.assertTrue(dynamicPlane.superTextureBmp.GetHeight() <= 1024)
+      m.assertTrue(dynamicPlane.superTextureScale < 1.0)
+    end function
+
+    @it("does not downscale the supertexture when logical coverage already fits the device budget")
+    function _()
+      bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
+      region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
+      tiledDrawable = new BGE.DrawablePlane(m.room, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 5
+      camera.checkMovement()
+
+      tiledPlane.update(camera)
+      m.game.canvas.renderer.resetDrawCallCounter()
+      tiledPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(m.game.canvas.renderer.getDrawCallsLastFrame() > 0)
+      dynamicPlane = tiledPlane as object
+      m.assertEqual(1.0, dynamicPlane.superTextureScale)
+    end function
+
+    @describe("cache invalidation")
+
+    @it("rebuilds prePerspectiveBmp after maxDrawDistance changes")
+    function _()
+      staticPlane = new BGE.SceneObjectPlane("staticPlane", m.drawable)
+
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 50
+      camera.checkMovement()
+      staticPlane.update(camera)
+      staticPlane.draw(m.game.canvas.renderer)
+
+      dynamicPlane = staticPlane as object
+      firstHeight = dynamicPlane.prePerspectiveBmp.GetHeight()
+
+      camera.maxDrawDistance = 200
+      camera.checkMovement()
+      staticPlane.update(camera)
+      staticPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(dynamicPlane.prePerspectiveBmp.GetHeight() > firstHeight)
+    end function
+
+    @it("rebuilds the tiledImage supertexture after the drawable's region is swapped for a differently-sized one")
+    function _()
+      smallBmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
+      smallRegion = CreateObject("roRegion", smallBmp, 0, 0, 8, 8)
+      tiledDrawable = new BGE.DrawablePlane(m.room, smallRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 20
+      camera.checkMovement()
+      tiledPlane.update(camera)
+      tiledPlane.draw(m.game.canvas.renderer)
+
+      dynamicPlane = tiledPlane as object
+      firstTileWidth = dynamicPlane.tileWidth
+
+      largeBmp = CreateObject("roBitmap", {width: 16, height: 16, AlphaEnable: true})
+      tiledDrawable.region = CreateObject("roRegion", largeBmp, 0, 0, 16, 16)
+      tiledPlane.update(camera)
+      tiledPlane.draw(m.game.canvas.renderer)
+
+      m.assertTrue(dynamicPlane.tileWidth > firstTileWidth)
+    end function
+
+    @it("does not divide by zero when the drawable's region is degenerate (zero-sized)")
+    function _()
+      degenerateBmp = CreateObject("roBitmap", {width: 1, height: 1, AlphaEnable: true})
+      degenerateRegion = CreateObject("roRegion", degenerateBmp, 0, 0, 0, 0)
+      tiledDrawable = new BGE.DrawablePlane(m.room, degenerateRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 1, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 1, -100))
+      camera.maxDrawDistance = 20
+      camera.checkMovement()
+
+      tiledPlane.update(camera)
+      ' Would throw/hang on a divide-by-zero before smallestTileDimension was floored at 1 -
+      ' reaching this assertion at all is the real check.
+      tiledPlane.draw(m.game.canvas.renderer)
+      m.assertTrue(true)
     end function
 
   end class
