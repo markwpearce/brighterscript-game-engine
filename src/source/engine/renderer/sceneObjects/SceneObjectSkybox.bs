@@ -4,6 +4,7 @@ namespace BGE
 
     drawable as DrawableSkybox
     private tempBitmap as roBitmap
+    private rotatedTempBitmap as roBitmap
 
     sub new(name as string, drawableObj as DrawableSkybox)
       super(name, drawableObj, BGE.SceneObjectType.Skybox)
@@ -154,19 +155,58 @@ namespace BGE
       return true
     end function
 
+    ' Sized to at least the camera frame's diagonal, so a composite rendered into a
+    ' canvasSize x canvasSize square can be rotated by any angle without exposing an
+    ' empty corner once it's cropped back down to the real frame - mirrors
+    ' SceneObjectPlane.getRollCanvasSize() exactly (same underlying geometry problem).
+    '
+    ' @param {BGE.Math.Vector} frameSize
+    ' @return {float}
+    function getRollCanvasSize(frameSize as BGE.Math.Vector) as float
+      return Int(Sqr(frameSize.x * frameSize.x + frameSize.y * frameSize.y)) + 2
+    end function
+
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       camera = rendererObj.camera as Camera3d
+      isRolled = camera.rollDegrees <> 0
 
-      if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> camera.frameSize.x or m.tempBitmap.GetHeight() <> camera.frameSize.y
-        m.tempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})
+      destWidth = camera.frameSize.x
+      destHeight = camera.frameSize.y
+      if isRolled
+        compositeSize = m.getRollCanvasSize(camera.frameSize)
+        destWidth = compositeSize
+        destHeight = compositeSize
       end if
 
-      band = m.computeVisibleBand(camera, camera.frameSize.x, camera.frameSize.y)
-      if not m.drawUnrolledBand(rendererObj, m.tempBitmap, camera.frameSize.x, camera.frameSize.y, band)
+      if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> destWidth or m.tempBitmap.GetHeight() <> destHeight
+        m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: destHeight, AlphaEnable: true})
+      end if
+
+      band = m.computeVisibleBand(camera, destWidth, destHeight)
+      if not m.drawUnrolledBand(rendererObj, m.tempBitmap, destWidth, destHeight, band)
         return false
       end if
 
-      return rendererObj.drawObject(0, 0, m.tempBitmap)
+      if not isRolled
+        return rendererObj.drawObject(0, 0, m.tempBitmap)
+      end if
+
+      ' m.tempBitmap is the enlarged, level (unrolled) composite here - rotating it by
+      ' rollDegrees about its own center and reading off the real frame-sized region
+      ' centered on that same point gives exactly the rolled camera's view. Same trick
+      ' as SceneObjectPlane (specs/2026-08-19-camera-roll-and-plane-horizon-design.md).
+      center = BGE.Math.VectorOps.create(destWidth / 2, destHeight / 2)
+      rollRad = BGE.Math.DegreesToRadians(camera.rollDegrees)
+      cropOffset = BGE.Math.VectorOps.create((destWidth - camera.frameSize.x) / 2, (destHeight - camera.frameSize.y) / 2)
+
+      if invalid = m.rotatedTempBitmap or m.rotatedTempBitmap.GetWidth() <> camera.frameSize.x or m.rotatedTempBitmap.GetHeight() <> camera.frameSize.y
+        m.rotatedTempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})
+      end if
+      m.rotatedTempBitmap.Clear(&h00000000)
+
+      worked = rendererObj.drawRotatedImageWithCenterTo(m.rotatedTempBitmap, m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
+      worked = worked and rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
+      return worked
     end function
 
     ' Draws this skybox against rendererObj's current camera right now, bypassing the
