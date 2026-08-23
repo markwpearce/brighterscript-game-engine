@@ -1,0 +1,132 @@
+' Demonstrates Game's URL transfer / onUrlEvent lifecycle against a real public API
+' (Open Trivia Database, https://opentdb.com) - the loading/success/error states an
+' async HTTP request goes through, and how to route its response back through
+' GameEntity.onUrlEvent().
+'
+' OK: fetch a random trivia question   Down: fire a request to a bad host (error demo)
+' Back: quit
+class MainRoom extends BGE.Room
+
+  ' "idle", "loading", "success" or "error"
+  state = "idle"
+
+  ' GetIdentity() of the in-flight request, so onUrlEvent can ignore events that
+  ' aren't for the request this room itself started (the url message port is shared
+  ' across every entity in the game - see Game.newAsyncUrlTransfer()).
+  pendingIdentity = invalid
+
+  category = ""
+  question = ""
+  correctAnswer = ""
+  errorMessage = ""
+
+  infoLabel as BGE.UI.Label
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainRoom"
+    m.infoLabel = new BGE.UI.Label(m.game)
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.infoLabel.customPosition = true
+    m.infoLabel.customX = m.game.canvas.getWidth() * 0.1
+    m.infoLabel.customY = m.game.canvas.getHeight() * 0.1
+    m.game.gameUi.addChild(m.infoLabel)
+    m.updateDisplay()
+  end sub
+
+  override sub onChangeRoom(newRoom as BGE.Room)
+    m.game.gameUi.removeChild(m.infoLabel)
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press
+      return
+    end if
+
+    if input.isButton("ok")
+      m.fetchTrivia("https://opentdb.com/api.php?amount=1&encode=base64")
+    else if input.isButton("down")
+      ' A host that can never resolve, to exercise the failure path through the
+      ' same onUrlEvent handler as the success path above.
+      m.fetchTrivia("https://this-domain-does-not-exist.invalid/")
+    else if input.isButton("back")
+      m.game.End()
+    end if
+  end sub
+
+  private sub fetchTrivia(url as string)
+    if m.state = "loading"
+      return
+    end if
+
+    m.state = "loading"
+    m.pendingIdentity = invalid
+    m.updateDisplay()
+
+    transfer = m.game.newAsyncUrlTransfer()
+    transfer.SetUrl(url)
+    if transfer.AsyncGetToString()
+      m.pendingIdentity = transfer.GetIdentity()
+    else
+      m.state = "error"
+      m.errorMessage = "Failed to start the request"
+      m.updateDisplay()
+    end if
+  end sub
+
+  ' Called by Game once a response (or failure) arrives for any in-flight roUrlTransfer -
+  ' this room only acts on the one it itself started.
+  override sub onUrlEvent(msg as roUrlEvent)
+    if invalid = m.pendingIdentity or msg.GetSourceIdentity() <> m.pendingIdentity
+      return
+    end if
+    m.pendingIdentity = invalid
+
+    responseCode = msg.GetResponseCode()
+    if responseCode >= 200 and responseCode < 300
+      m.handleSuccess(msg.GetString())
+    else
+      m.state = "error"
+      m.errorMessage = `HTTP ${responseCode}: ${msg.GetFailureReason()}`
+    end if
+    m.updateDisplay()
+  end sub
+
+  private sub handleSuccess(body as string)
+    json = ParseJson(body)
+    if invalid = json or invalid = json.results or json.results.count() = 0
+      m.state = "error"
+      m.errorMessage = "Unexpected response body"
+      return
+    end if
+
+    result = json.results[0]
+    m.category = decodeBase64(result.category)
+    m.question = decodeBase64(result.question)
+    m.correctAnswer = decodeBase64(result.correct_answer)
+    m.state = "success"
+  end sub
+
+  private sub updateDisplay()
+    lines = [
+      "HTTP Example"
+      "OK: fetch a trivia question   Down: trigger a failed request (bad host)   Back: quit"
+      ""
+    ]
+    if m.state = "idle"
+      lines.push("Press OK to fetch a trivia question.")
+    else if m.state = "loading"
+      lines.push("Loading...")
+    else if m.state = "success"
+      lines.push(`Category: ${m.category}`)
+      lines.push(`Question: ${m.question}`)
+      lines.push(`Answer: ${m.correctAnswer}`)
+    else if m.state = "error"
+      lines.push(`Error: ${m.errorMessage}`)
+    end if
+    m.infoLabel.setText(lines.join(Chr(10)))
+  end sub
+
+end class
