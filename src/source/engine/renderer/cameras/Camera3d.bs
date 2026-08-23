@@ -97,10 +97,26 @@ namespace BGE
     ' top of the "level" vectors - see getLevelUpVector()/getLevelRightVector().
     rollDegrees as float = 0
 
+    ' How far (world units) in front of the camera a point can be and still be
+    ' considered visible - applied everywhere isInView() is checked, including
+    ' SceneObjectPlane's far-render-distance and tiled-texture cache sizing (issue #124).
+    ' Silently capped per-device (see getMaxDrawDistanceDeviceCap()), re-applied every
+    ' frame via checkMovement() - reading this back may show the capped value, not what
+    ' was set.
+    maxDrawDistance as float = 1000
+
     ' Last field of view seen by projectionChangedThisFrame(). fieldOfViewDegrees is a
     ' plain public field that consumers write directly, so it has to be dirty-checked -
     ' a setter would be silently bypassed.
     private lastProjectionFieldOfView as float = -1
+
+    ' Last maxDrawDistance seen by projectionChangedThisFrame() - dirty-checked like
+    ' fieldOfViewDegrees above, for the same reason.
+    private lastMaxDrawDistance as float = 1000
+
+    ' Cached device-specific cap for maxDrawDistance (see getMaxDrawDistanceDeviceCap()).
+    ' -1 means "not yet computed."
+    private maxDrawDistanceDeviceCap as float = -1
 
     ' Last rollDegrees seen by checkMovement(). rollDegrees is a plain public field a
     ' consumer writes directly, and MotionChecker's position/orientation check has no
@@ -190,7 +206,8 @@ namespace BGE
           return false
         end if
       end for
-      return true
+      forwardDistance = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, m.position), m.orientation)
+      return forwardDistance <= m.maxDrawDistance
     end function
 
 
@@ -534,6 +551,30 @@ namespace BGE
       return BGE.Math.RotateVectorAroundPoint3d(level, BGE.Math.VectorOps.create(), m.orientation, BGE.Math.DegreesToRadians(m.rollDegrees))
     end function
 
+    ' Caps maxDrawDistance per device: SceneObjectPlane's scratch bitmaps scale with it,
+    ' and the BrightScript Simulator silently fails to render past ~908 (binary-search
+    ' confirmed - see lvcabral/brs-engine#1198), hence the 900 cap. SD/HD real devices
+    ' borrow the same 900 as an unverified placeholder (similar low-memory profile).
+    ' FHD's 5000 is a generous but still-finite placeholder too - only the 1000 default
+    ' has actually been confirmed working on real FHD hardware (issue #142).
+    '
+    ' @return {float}
+    private function getMaxDrawDistanceDeviceCap() as float
+      if m.maxDrawDistanceDeviceCap < 0
+        device = CreateObject("roDeviceInfo")
+        if device.HasFeature("simulation_engine")
+          m.maxDrawDistanceDeviceCap = 900
+        else if "FHD" = device.GetUIResolution().name
+          m.maxDrawDistanceDeviceCap = 5000
+        else
+          ' Same as the simulator branch, intentionally - unverified placeholder for
+          ' SD/HD until real hardware data exists (issue #137), not dead code.
+          m.maxDrawDistanceDeviceCap = 900
+        end if
+      end if
+      return m.maxDrawDistanceDeviceCap
+    end function
+
     protected override function projectionChangedThisFrame() as boolean
       ' called unconditionally rather than inside an `or`, so it always records the new
       ' frame size even when the FOV changed too
@@ -541,6 +582,18 @@ namespace BGE
 
       if m.lastProjectionFieldOfView <> m.fieldOfViewDegrees
         m.lastProjectionFieldOfView = m.fieldOfViewDegrees
+        changed = true
+      end if
+
+      ' Clamp before the dirty-check, unconditionally, so both the initial default and
+      ' any later explicit change get capped.
+      deviceCap = m.getMaxDrawDistanceDeviceCap()
+      if m.maxDrawDistance > deviceCap
+        m.maxDrawDistance = deviceCap
+      end if
+
+      if m.lastMaxDrawDistance <> m.maxDrawDistance
+        m.lastMaxDrawDistance = m.maxDrawDistance
         changed = true
       end if
 
