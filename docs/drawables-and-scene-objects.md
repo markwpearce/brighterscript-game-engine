@@ -514,6 +514,42 @@ for the full design.
   own view. Set `camera.orientation` directly from your desired look direction instead (see
   `examples/terrain/src/source/Rooms/MainRoom.bs`'s `updateCameraOrientation`).
 
+## Skybox (`DrawableSkybox` / `SceneObjectSkybox`)
+
+`DrawableSkybox` renders a 360-degree panoramic texture that surrounds the camera, giving the impression
+of a distant sky or environment infinitely far away. Unlike other drawables that move with the world, a
+skybox is always centered on the camera and rotates with it. Attach one to an entity the same way as any
+other drawable:
+
+```brighterscript
+' Create a skybox with a 360-degree panoramic image
+region = CreateObject("roRegion", bmp, 0, 0, bmp.getWidth(), bmp.getHeight())
+owner.addDrawable("sky", new BGE.DrawableSkybox(owner, region, {
+  degreesPerFullWidth: 360.0,
+  verticalDegreesCovered: 90.0
+}))
+```
+
+The constructor takes an optional `args` object with two configurable fields:
+
+- **`degreesPerFullWidth`** (default `360.0`): how many degrees of view angle the texture's full width
+  represents. Set to `360` for a complete 360-degree panorama, or a smaller value if the texture covers
+  a narrower field of view (e.g., `120` for a 120-degree wide-angle texture).
+- **`verticalDegreesCovered`** (default `90.0`): how many degrees of vertical view angle the texture's
+  full height represents. This controls how much of the sky above and below the horizon the texture fills.
+
+`SceneObjectSkybox` renders in its own dedicated pass in `Renderer.drawScene()`, before all other objects
+(including planes). This ensures the skybox always draws behind everything else. A skybox never
+participates in depth-sort or overlap-cluster detection—it's always drawn as a background layer.
+
+Like `SceneObjectPlane`, `SceneObjectSkybox` handles `Camera3d.rollDegrees` (rotation about the camera's
+forward axis) by rendering against an unrolled camera view and then rotating the composite. See
+`specs/2026-08-19-camera-roll-and-plane-horizon-design.md` section D for the full mathematical
+details of this render-then-rotate trick—the mechanism is the same, applied to the skybox's spherical
+geometry instead of a planar ground.
+
+**Note:** `Camera2d` does not support skyboxes; this feature is 3D-only (issue #65).
+
 ## Parallax layers (`DrawableParallaxLayer`)
 
 `DrawableParallaxLayer` scrolls a bitmap at a configurable per-axis fraction of the
