@@ -60,11 +60,29 @@ namespace BGE
 
     private doPooling = true
 
+    ' Only for tests: setUpBasedOnDevice() normally force-disables pooling under the
+    ' simulator/brs-cli (it doesn't need pooling), which makes the self-flush behavior
+    ' below unobservable in headless Rooibos runs. Setting this bypasses that override
+    ' so tests can exercise the real pooling path. Never set outside a test.
+    private forcePoolingRegardlessOfDevice = false
+
     private stagedRegions as ScratchRegion[] = []
 
-    sub new(doPooling = true as boolean, initialCount = 10 as integer)
+    ' Once stagedRegions reaches this many entries, stageRegionsForReturn() flushes
+    ' them itself instead of waiting for a caller to call returnStagedRegions(). Set
+    ' relative to maxPoolCount (rather than a fixed magic number) so a caller batching
+    ' many draws (e.g. one drawBitmapTriangleTo per textured model face, which stages 3
+    ' regions per call) can never exhaust the pool before a flush happens - see #129.
+    private selfFlushThreshold = 10
+
+    sub new(doPooling = true as boolean, initialCount = 10 as integer, forcePoolingRegardlessOfDevice = false as boolean)
       m.doPooling = doPooling
+      m.forcePoolingRegardlessOfDevice = forcePoolingRegardlessOfDevice
       m.setUpBasedOnDevice()
+      m.selfFlushThreshold = m.maxPoolCount \ 2
+      if m.selfFlushThreshold < 1
+        m.selfFlushThreshold = 1
+      end if
       for i = 0 to initialCount - 1
         m.addNewBitmapToPool()
       end for
@@ -73,7 +91,7 @@ namespace BGE
     private sub setUpBasedOnDevice()
 
       tier = BGE.getDeviceRenderTier()
-      if tier = BGE.DeviceRenderTier.simulator
+      if tier = BGE.DeviceRenderTier.simulator and not m.forcePoolingRegardlessOfDevice
         ' The simulator does not need pooling
         m.doPooling = false
         return
@@ -189,6 +207,13 @@ namespace BGE
     end sub
 
 
+    ' Stages regions for later return to the pool via returnStagedRegions(). A caller
+    ' may still call returnStagedRegions() itself whenever it's convenient (e.g. once at
+    ' the end of a frame) - that's still correct, just a no-op if nothing is staged. But
+    ' it's no longer required for correctness: once stagedRegions crosses
+    ' selfFlushThreshold, this flushes them itself, so a caller that stages many regions
+    ' across many draws (e.g. a textured model's per-face triangle draws) can't exhaust
+    ' the pool by batching too long between manual flushes - see #129.
     sub stageRegionsForReturn(usedRegions as ScratchRegion[])
       if not m.doPooling
         return
@@ -198,6 +223,10 @@ namespace BGE
         region = usedRegions[i]
         m.stagedRegions.Push(region)
       end for
+
+      if m.stagedRegions.count() >= m.selfFlushThreshold
+        m.returnStagedRegions()
+      end if
     end sub
 
     sub returnStagedRegions()
@@ -216,6 +245,23 @@ namespace BGE
 
     function getMaxSize() as SizeWH
       return {width: m.scratchWidth, height: m.scratchHeight}
+    end function
+
+    ' Number of regions currently staged awaiting return to the pool (i.e. not yet
+    ' flushed by returnStagedRegions()). Exposed mainly for tests of the self-flush
+    ' behavior in stageRegionsForReturn() - see #129.
+    function getStagedCount() as integer
+      return m.stagedRegions.count()
+    end function
+
+    ' The hard cap on how many ScratchBitmap instances this pool will ever create.
+    function getMaxPoolCount() as integer
+      return m.maxPoolCount
+    end function
+
+    ' The staged-region count at which stageRegionsForReturn() self-flushes.
+    function getSelfFlushThreshold() as integer
+      return m.selfFlushThreshold
     end function
 
     function toStr() as string
