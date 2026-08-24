@@ -16,6 +16,15 @@ namespace tests
     bitmap as roBitmap
     renderer as BGE.Renderer
 
+    ' A real Camera3d, for the "transformed fast draw path" tests below: Camera2d's
+    ' orthographic-style projection can't produce the perspective skew that should make
+    ' the fast path bail, and the fast-path decision is made from the actual projected
+    ' canvasPoints, not from the drawMode alone.
+    game3d as BGE.Game
+    entity3d as BGE.GameEntity
+    bitmap3d as roBitmap
+    renderer3d as BGE.Renderer
+
     protected override function beforeEach()
       m.game = new BGE.Game(320, 240)
       m.entity = new BGE.GameEntity(m.game, {name: "TestEntity"})
@@ -28,6 +37,14 @@ namespace tests
       ' up front - building it involves its own internal draw calls, which would otherwise
       ' pollute the draw-call-count assertions below on whichever test draws a circle first.
       m.renderer.getCircleResource()
+
+      m.game3d = new BGE.Game(320, 240)
+      m.entity3d = new BGE.GameEntity(m.game3d, {name: "TestEntity3d"})
+      m.bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      m.renderer3d = new BGE.Renderer(m.bitmap3d, m.game3d, new BGE.Camera3d())
+      ' The default Camera3d starts at (0, 0, 1000) looking down -z (see
+      ' SceneObjectImage.spec.bs).
+      m.entity3d.position = BGE.Math.VectorOps.create(0, 0, 0)
     end function
 
     @describe("drawable field")
@@ -107,6 +124,96 @@ namespace tests
       canvasPoints = (sceneObj as BGE.SceneObjectCircle).getCanvasPoints()
       width = canvasPoints.topRight.x - canvasPoints.topLeft.x
       m.assertEqual(40.0, width)
+    end function
+
+    @describe("transformed fast draw path (issue #105)")
+
+    ' Registers the circle on the 3D renderer and runs one frame of update+draw for it.
+    private function drawOnce3d(circle as BGE.DrawableCircle) as BGE.SceneObjectCircle
+      sceneObj = circle.addToScene(m.renderer3d) as BGE.SceneObjectCircle
+      m.entity3d.updateTransformationMatrix()
+      m.renderer3d.resetDrawCallCounter()
+      m.renderer3d.setupCameraForFrame()
+      sceneObj.update(m.renderer3d.camera)
+      sceneObj.draw(m.renderer3d)
+      return sceneObj
+    end function
+
+    @it("takes the fast path for an un-rotated disc facing the camera")
+    function _()
+      circle = new BGE.DrawableCircle(m.entity3d, 60, {drawMode: BGE.SceneObjectDrawMode.solid})
+      sceneObj = m.drawOnce3d(circle)
+      m.assertTrue(sceneObj.usedTransformedFastDraw())
+    end function
+
+    @it("takes the fast path for a disc rotated only about the axis facing the camera")
+    function _()
+      ' Drawn closer to the camera than the default (0, 0, 0) test above, so the
+      ' projected quad is large enough in canvas pixels that integer-pixel rounding
+      ' (canvasPoints are whole pixels) doesn't itself exceed isApproximatelyRotatedRectangle's
+      ' tolerance - at a tiny on-screen size a single pixel of rounding is already a few
+      ' percent of the quad's own size.
+      m.entity3d.position = BGE.Math.VectorOps.create(0, 0, 700)
+      circle = new BGE.DrawableCircle(m.entity3d, 60, {
+        drawMode: BGE.SceneObjectDrawMode.solid,
+        rotation: BGE.Math.VectorOps.create(0, 0, BGE.Math.PI / 6)
+      })
+      sceneObj = m.drawOnce3d(circle)
+      m.assertTrue(sceneObj.usedTransformedFastDraw())
+    end function
+
+    @it("falls back to the exact drawPinnedCorners path for a disc tilted away from the camera")
+    function _()
+      ' Tilted steeply about x (not z), and drawn close to the camera so the resulting
+      ' perspective foreshortening is large relative to the disc's own size - the near
+      ' and far edges of the quad project to very different widths, which no rigid
+      ' rotation+scale of a rectangle can represent.
+      m.entity3d.position = BGE.Math.VectorOps.create(0, 0, 700)
+      circle = new BGE.DrawableCircle(m.entity3d, 60, {
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        rotation: BGE.Math.VectorOps.create(1.0, 0, 0)
+      })
+      sceneObj = m.drawOnce3d(circle)
+      m.assertFalse(sceneObj.usedTransformedFastDraw())
+    end function
+
+    @it("still draws something when falling back to the exact path")
+    function _()
+      m.entity3d.position = BGE.Math.VectorOps.create(0, 0, 700)
+      circle = new BGE.DrawableCircle(m.entity3d, 60, {
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        rotation: BGE.Math.VectorOps.create(1.0, 0, 0)
+      })
+      m.renderer3d.resetDrawCallCounter()
+      sceneObj = m.drawOnce3d(circle)
+      m.assertFalse(sceneObj.usedTransformedFastDraw())
+      m.assertTrue(m.renderer3d.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("lands the fast-path draw at a visually-correct canvas position/size")
+    function _()
+      ' Same scalar-proxy approach as the "spans exactly the circle's diameter" test
+      ' above, but checked against what the *exact* drawPinnedCorners path would have
+      ' projected the same quad to (rather than a hand-computed expected pixel size,
+      ' which would have to reproduce Camera3d's own perspective math) - the fast path
+      ' must land at the same canvasPoints drawPinnedCorners would have used, since both
+      ' draw from the identical projected quad. The scalar proxy is topLeft (this
+      ' drawable's anchor corner - see DrawableCircle's own doc comment) landing on the
+      ' canvas center, and a square (width = height) bounding box, matching an
+      ' undistorted, camera-facing circle.
+      circle = new BGE.DrawableCircle(m.entity3d, 60, {drawMode: BGE.SceneObjectDrawMode.solid})
+      sceneObj = m.drawOnce3d(circle)
+      m.assertTrue(sceneObj.usedTransformedFastDraw())
+
+      canvasPoints = sceneObj.getCanvasPoints()
+      width = canvasPoints.topRight.x - canvasPoints.topLeft.x
+      height = canvasPoints.bottomLeft.y - canvasPoints.topLeft.y
+      m.assertTrue(width > 5.0)
+      m.assertTrue(abs(width - height) < 1.0)
+      ' The entity sits at world (0, 0, 0), directly ahead of the camera - its anchor
+      ' corner (topLeft) projects to the canvas center, 160x120 on a 320x240 canvas.
+      m.assertTrue(abs(canvasPoints.topLeft.x - 160.0) < 1.0)
+      m.assertTrue(abs(canvasPoints.topLeft.y - 120.0) < 1.0)
     end function
 
   end class
