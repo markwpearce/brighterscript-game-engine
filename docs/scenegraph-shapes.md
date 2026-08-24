@@ -94,7 +94,13 @@ shape is observed by a single `onShapeFieldChanged` handler, which:
 This makes repeated/discrete field values (toggling between a couple of colors, resizing to a
 value you've already used) free after the first render. A continuously-varying value - most
 notably an `Animation`-driven tween - produces a new hash every single frame and never benefits
-from the cache; see "Animating a shape" below for what that costs in practice.
+from the cache; see "Animating a shape" below for what that costs in practice. Note a `Animation`
+that *repeats* over the same range (as `examples/scenegraph`'s demo does) only pays that cost
+during its first cycle - once every value in the range has been rendered once, later cycles are
+almost entirely cache hits, so real sustained throughput ends up far below the ~5-7 redraws/second
+ceiling below. The cache has no eviction - fine for a bounded/repeating range of values, but a
+consumer driving genuinely unbounded values (e.g. a continuously random color) will grow `tmp:/`
+without bound.
 
 All four shape components share one `ShapeRenderTask` component (`components/Shapes/
 ShapeRenderTask.xml`/`.bs`) rather than four near-duplicate `Task` subclasses - it takes a
