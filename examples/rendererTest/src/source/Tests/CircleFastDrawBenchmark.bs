@@ -1,0 +1,131 @@
+' Times the exact drawPinnedCorners texture warp (what SceneObjectCircle's oriented/solid
+' draw modes used exclusively before issue #105) against the cheap rotate+scale fast path
+' (BGE.SceneObjectBillboard.drawRegionAsRotatedQuad, one native DrawTransformedObject call)
+' SceneObjectCircle now takes whenever its projected quad is a plain rotated rectangle - see
+' BGE.Math.CornerPoints.isApproximatelyRotatedRectangle.
+'
+' Scaled up from examples/3d's CirclesRoom (a ring of 6 rotating circle panels) to a larger
+' panel count so the timing difference is measurable in one run, following
+' QuadFillBenchmark's own pattern (a differently-rotated quad every iteration, so
+' Renderer's TriangleCache can't flatter the exact path by serving a cached rasterization).
+class CircleFastDrawBenchmark extends RendererTest
+
+  ' Kept deliberately small: the exact drawPinnedCorners path measured ~110ms/panel on
+  ' real hardware (see the PR description) - a larger count multiplied that into tens of
+  ' seconds of unresponsive setup() and tripped the Roku OS's "app not responding"
+  ' watchdog, which silently kills and relaunches the channel mid-benchmark. This count is
+  ' still enough iterations to get a stable per-panel average for both paths.
+  private panelCount = 15
+  private repeats = 1
+  private panelDiameter = 120
+
+  private quads as BGE.Math.CornerPoints[] = []
+  private resultLines as string[] = []
+
+  sub new()
+    super("Circle Fast Draw Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.buildQuads(renderer)
+    m.runBenchmark(renderer)
+  end sub
+
+  ' One quad per panel, each at a different rotation - a plain rotated rectangle, matching
+  ' what a circle panel rotated only about the axis facing the camera actually projects to
+  ' (see the accuracy condition on CornerPoints.isApproximatelyRotatedRectangle).
+  private sub buildQuads(renderer as BGE.Renderer)
+    m.quads = []
+    center = renderer.getCanvasCenter()
+    half = m.panelDiameter / 2
+    for i = 0 to m.panelCount - 1
+      theta = (2 * BGE.Math.PI) * (i / m.panelCount)
+      quad = new BGE.Math.CornerPoints()
+      quad.topLeft = m.rotateAbout(center, -half, -half, theta)
+      quad.topRight = m.rotateAbout(center, half, -half, theta)
+      quad.bottomLeft = m.rotateAbout(center, -half, half, theta)
+      quad.bottomRight = m.rotateAbout(center, half, half, theta)
+      m.quads.push(quad)
+    end for
+  end sub
+
+  private function rotateAbout(center as BGE.Math.Vector, dX as float, dY as float, theta as float) as BGE.Math.Vector
+    return BGE.Math.VectorOps.create(
+    center.x + dX * cos(theta) - dY * sin(theta),
+    center.y + dX * sin(theta) + dY * cos(theta))
+  end function
+
+  ' Mirrors SceneObjectCircle's drawToTempBitmap path: draw the shared circle region into
+  ' each quad via the exact, per-pixel drawPinnedCorners warp.
+  private sub drawExact(renderer as BGE.Renderer, region as BGE.RendererHelpers.RegionWithId, color as integer)
+    for each quad in m.quads
+      renderer.drawPinnedCorners(quad, region, {}, color)
+    end for
+  end sub
+
+  ' Mirrors SceneObjectCircle's new fast path: derive rotation + non-uniform scale from the
+  ' same quad (BGE.Math.CornerPoints.getAvgRotation/getAvgWidth/getAvgHeight) and blit with a
+  ' single DrawTransformedObject call instead of warping per-pixel.
+  private sub drawFast(renderer as BGE.Renderer, region as BGE.RendererHelpers.RegionWithId, color as integer)
+    regionObj = region.region
+    for each quad in m.quads
+      scaleX = quad.getAvgWidth() / regionObj.getWidth()
+      scaleY = quad.getAvgHeight() / regionObj.getHeight()
+      theta = quad.getAvgRotation()
+      renderer.drawTransformedObject(quad.topLeft.x, quad.topLeft.y, scaleX, scaleY, theta, regionObj, color)
+    end for
+  end sub
+
+  private sub runBenchmark(renderer as BGE.Renderer)
+    color = BGE.Colors.Cyan
+    region = renderer.getCircleRegionWithId()
+    timer = CreateObject("roTimespan")
+    totalIterations = m.panelCount * m.repeats
+
+    timer.Mark()
+    for r = 0 to m.repeats - 1
+      m.drawExact(renderer, region, color)
+    end for
+    exactMs = timer.TotalMilliseconds()
+
+    timer.Mark()
+    for r = 0 to m.repeats - 1
+      m.drawFast(renderer, region, color)
+    end for
+    fastMs = timer.TotalMilliseconds()
+
+    m.resultLines = [
+      `iterations per method: ${totalIterations} (${m.panelCount} circle panels, ${m.panelDiameter}px, unique rotation each)`,
+      "",
+      `EXACT drawPinnedCorners:      ${exactMs} ms  (${m.perOp(exactMs, totalIterations)} ms/panel)`,
+      `FAST  drawTransformedObject:  ${fastMs} ms  (${m.perOp(fastMs, totalIterations)} ms/panel)`,
+      `      difference:             ${exactMs - fastMs} ms  (${m.percentOf(exactMs - fastMs, exactMs)}% of exact path)`
+    ]
+
+    print "=== Circle Fast Draw Benchmark ==="
+    for each line in m.resultLines
+      print line
+    end for
+    print "=== end ==="
+  end sub
+
+  private function perOp(totalMs as integer, iterations as integer) as string
+    return Str(totalMs / iterations).trim()
+  end function
+
+  private function percentOf(part as integer, whole as integer) as string
+    if whole = 0
+      return "n/a"
+    end if
+    return Str(cint(100.0 * part / whole)).trim()
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    y = 80
+    for each line in m.resultLines
+      renderer.drawText(line, 60, y, BGE.Colors.White)
+      y += 28
+    end for
+  end sub
+
+end class

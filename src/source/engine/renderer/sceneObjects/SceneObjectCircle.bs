@@ -12,11 +12,25 @@ namespace BGE
 
     drawable as DrawableCircle
 
+    ' Whether the most recent oriented/solid draw took the cheap rotate+scale fast path
+    ' (BGE.SceneObjectBillboard.drawRegionAsRotatedQuad) instead of the exact drawPinnedCorners
+    ' warp - see canUseTransformedFastDraw() below. Exposed read-only for tests/telemetry.
+    private usedTransformedFastDrawLastFrame = false
+
     sub new(name as string, drawableObj as DrawableCircle)
       super(name, drawableObj, SceneObjectType.Circle)
       ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
       m.drawable = drawableObj
     end sub
+
+
+    ' Whether the most recent draw used the cheap rotate+scale fast path rather than the
+    ' exact drawPinnedCorners warp (issue #105). For tests/telemetry only.
+    '
+    ' @return {boolean}
+    function usedTransformedFastDraw() as boolean
+      return m.usedTransformedFastDrawLastFrame
+    end function
 
     ' A circle always has a real width/height, unlike SceneObjectPolygon/SceneObjectModel
     ' (see the comment on SceneObjectBillboard.computeBillboardWorldCorners()) - so this
@@ -44,26 +58,72 @@ namespace BGE
     ' not to need it - see SceneObjectRectangle.usesTempBitmap, which overrides this
     ' same hook for its own reason (skipping the cache for an unfilled rectangle). A
     ' circle's solid fill is the same expensive pinned-corners texture warp the
-    ' oriented modes use, so it needs the same reuse-across-frames caching too, or
+    ' oriented modes use, so it would need the same reuse-across-frames caching too, or
     ' drawToCanvas's inherited solid branch (see below) would re-run that warp from
-    ' scratch on every single frame with no caching at all.
+    ' scratch on every single frame with no caching at all - UNLESS canvasPoints happens
+    ' to be a plain rotated rectangle (canUseTransformedFastDraw() below), in which case
+    ' drawToCanvas's own fast path is cheap enough every frame that no temp bitmap is
+    ' needed at all, the same way directScaled needs none.
     protected override function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
-      return super.usesTempBitmap(drawMode) or isSolidDrawMode(drawMode)
+      if m.isEligibleForFastDrawCheck(drawMode)
+        m.usedTransformedFastDrawLastFrame = m.canUseTransformedFastDraw()
+        return not m.usedTransformedFastDrawLastFrame
+      end if
+      return super.usesTempBitmap(drawMode)
+    end function
+
+    ' oriented/orientedDrawBackFace/solid/solidDrawBackFace only - NOT `isOrientedDrawMode`,
+    ' which is really "not a direct mode" and so also matches `directScaled` (used by every
+    ' DrawableSphere). `directScaled` already has its own cheap, exact drawRegionAsRotatedQuad
+    ' path in the base class (SceneObjectBillboard's own directScaled branch) that doesn't
+    ' need - and must not go through - this approximation check at all. wireFrame draws only
+    ' its outline (see drawToCanvas below) and never touches the region fill, so it must also
+    ' keep using the base class's default (no temp bitmap) regardless of this check.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    private function isEligibleForFastDrawCheck(drawMode as SceneObjectDrawMode) as boolean
+      return drawMode = SceneObjectDrawMode.oriented or drawMode = SceneObjectDrawMode.orientedDrawBackFace or isSolidDrawMode(drawMode)
+    end function
+
+
+    ' Whether m.canvasPoints (this frame's projected quad) is close enough to a pure
+    ' rotation + non-uniform scale of a rectangle that BGE.SceneObjectBillboard's
+    ' drawRegionAsRotatedQuad() - one native DrawTransformedObject call - is a safe stand-in
+    ' for the exact drawPinnedCorners triangle warp. True for a disc rotated only about the
+    ' axis facing the camera (including not rotated at all); false once perspective
+    ' foreshortening skews the quad into a general trapezoid (a disc tilted away from the
+    ' camera on another axis) - see issue #105.
+    '
+    ' @return {boolean}
+    protected function canUseTransformedFastDraw() as boolean
+      return m.canvasPoints.isApproximatelyRotatedRectangle()
     end function
 
 
     ' The base class's own wireFrame branch draws the plain 4-corner quad directly (a
     ' square) - correct for DrawableRectangle, whose fill genuinely is its own quad, but
     ' wrong for a circle. Routed through drawOutlineToCanvas()/getOutlineCanvasPoints()
-    ' below instead (same pattern SceneObjectRectangle uses). solid mode needs no
-    ' override here at all now that usesTempBitmap() opts it in above - drawToCanvas is
-    ' only ever called for draw modes that don't use a temp bitmap, so the base class's
-    ' solid branch is simply never reached for a circle; the inherited drawToTempBitmap
-    ' already draws the right thing (getRegionWithIdToDraw's circular region, via
-    ' drawPinnedCornersTo) and caches it exactly like oriented mode does.
+    ' below instead (same pattern SceneObjectRectangle uses).
+    '
+    ' oriented/solid modes only reach here at all when usesTempBitmap() above has already
+    ' decided the fast path is safe (see it for why) - drawn via the same
+    ' drawRegionAsRotatedQuad() helper directScaled uses, instead of the base class's own
+    ' solid branch (a flat drawPolygon, wrong for a circle) or the inherited
+    ' drawToTempBitmap/drawPinnedCorners path (correct but far more expensive - the whole
+    ' point of this fast path). Otherwise drawToTempBitmap already draws the right thing
+    ' (getRegionWithIdToDraw's circular region, via drawPinnedCornersTo) and caches it.
     protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       if isWireFrameDrawMode(drawMode)
         return m.drawOutlineToCanvas(rendererObj, drawMode)
+      end if
+      if m.isEligibleForFastDrawCheck(drawMode)
+        regionToDraw = m.getRegionWithIdToDraw(rendererObj)
+        if invalid = regionToDraw or invalid = regionToDraw.region
+          return false
+        end if
+        color = m.getDrawColorRGBA(rendererObj)
+        return m.drawRegionAsRotatedQuad(rendererObj, regionToDraw.region, m.canvasPoints, color)
       end if
       return super.drawToCanvas(rendererObj, drawMode)
     end function
