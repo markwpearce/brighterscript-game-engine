@@ -6,11 +6,16 @@ order: 4
 
 # SceneGraph Shape Components
 
-BGE ships four `Poster`-extending SceneGraph components under `components/Shapes/` -
-`RoundedRectangle`, `Circle`, `Triangle`, `Polygon` - that render shapes SceneGraph has no
-native node for, using `BGE.Renderer` internally. Drop one in your scene and get a rendered
-shape with no offscreen-bitmap plumbing of your own: no `BGE.Game`, no `Room`, no `roScreen`.
-See `examples/scenegraph` for a runnable demo of all four.
+BGE ships four SceneGraph components under `components/Shapes/` - `RoundedRectangle`,
+`Circle`, `Triangle`, `Polygon` - that render shapes SceneGraph has no native node for, using
+`BGE.Renderer` internally. Drop one in your scene and get a rendered shape with no
+offscreen-bitmap plumbing of your own: no `BGE.Game`, no `Room`, no `roScreen`. See
+`examples/scenegraph` for a runnable demo of all four.
+
+Internally each component is a `Group` wrapping a child `Poster` and a shared render `Task`,
+but none of that is visible to a consumer - same tags, same fields, same positioning via
+`translation` as a simpler `Poster`-extends design would have. That's the point: it hides an
+off-render-thread redraw behind an interface indistinguishable from a native node's.
 
 ## Usage
 
@@ -65,22 +70,36 @@ from `width`/`height` instead. `Polygon.vertices` is required; nothing is drawn 
 
 ## How it works
 
-Each component owns exactly one private `BGE.Renderer` over its own `roBitmap`. Every field
-that affects the rendered shape is observed by a single `onShapeFieldChanged` handler, which:
+Each shape component is a `Group` wrapping one child `Poster` (`id="image"`) and one persistent
+child `BGE_ShapeRenderTask`-style `Task` node created once in `init()` and reused across
+redraws. The child `Poster`'s `width`/`height` are never set - only its `uri` is ever swapped,
+and only once a render has actually finished - so there's no frame where a stale image gets
+stretched into a newly-set box (see "A fixed bug" below). Every field that affects the rendered
+shape is observed by a single `onShapeFieldChanged` handler, which:
 
 1. Hashes the shape type plus the current field values (`roEVPDigest` SHA1) into a
-   `tmp:/bge_shape_<hash>.png` filename.
-2. If that file already exists, skips rendering entirely and just points `uri` at it - a cache
-   hit, since identical field values always hash to the same filename.
-3. Otherwise draws via the private `Renderer`, calls `Finish()` (there's no `roScreen` anywhere
-   in a pure-SceneGraph process to force a draw through, but plain `Finish()` alone is enough
-   to realize the queued draws here - confirmed on real hardware, see below), encodes to PNG
-   (`GetPng()`), writes it to `tmp:/`, and sets `uri`.
+   `tmp:/bge_shape_<hash>.png` filename and checks whether that file already exists
+   (`BGE.ShapeComponentHelpers.checkShapeCache()`) - synchronously, on the render thread, with
+   no bitmap/`Task` work either way.
+2. On a cache hit, skips rendering entirely and just points the internal `Poster.uri` (and the
+   component's own `uri` field) at the existing file.
+3. On a miss, pushes the draw parameters onto the component's persistent render `Task` and sets
+   `control="RUN"`. The `Task` (off the render thread) draws via its own private
+   `BGE.Renderer`/`roBitmap`, calls `Finish()` (there's no `roScreen` anywhere in a
+   pure-SceneGraph process to force a draw through, but plain `Finish()` alone is enough to
+   realize the queued draws here - confirmed on real hardware, see below), encodes to PNG
+   (`GetPng()`), and writes it to `tmp:/`. The component observes the `Task`'s `resultUri` field
+   and, once it fires, sets the internal `Poster.uri` and the component's own `uri`.
 
 This makes repeated/discrete field values (toggling between a couple of colors, resizing to a
 value you've already used) free after the first render. A continuously-varying value - most
 notably an `Animation`-driven tween - produces a new hash every single frame and never benefits
 from the cache; see "Animating a shape" below for what that costs in practice.
+
+All four shape components share one `ShapeRenderTask` component (`components/Shapes/
+ShapeRenderTask.xml`/`.bs`) rather than four near-duplicate `Task` subclasses - it takes a
+`shapeType` field plus the union of draw parameters every shape might need, and dispatches
+internally to the matching `BGE.Renderer.draw*To`/`draw*OutlineTo` call(s).
 
 ## Animating a shape (not recommended)
 
@@ -103,12 +122,12 @@ too slow for smooth continuous animation - **all four are redraw-on-change compo
 animate-safe ones**, regardless of shape type. A discrete/repeated value (toggling between a
 couple of colors) is still free after the first render, per the caching above.
 
-Driving `width`/`height` continuously via an `Animation` also hit an unresolved rendering bug in
-testing - forcing `loadSync="true"` (see below) fixed one cause of the shape going blank, but the
-shape still intermittently disappeared under a fast repeated-field-change load in
-`examples/scenegraph`'s demo. Root cause wasn't isolated given the numbers above already rule out
-animation as a supported use case; treat continuous per-frame animation as unsupported rather than
-just slow.
+Because the redraw now runs on the shared `Task` (see below), a continuous `Animation` no longer
+blocks the render thread while it catches up - the rest of the UI stays responsive - but the
+shape itself still only visibly updates at that same ~5-7 redraws/second, since each individual
+render still costs ~150-200ms. Expect a shape driven by a fast `Animation` to visibly lag a step
+or two behind the interpolator's actual current value, not to redraw at the interpolator's own
+frame rate.
 
 ## Hardware findings (issue #61)
 
@@ -130,15 +149,38 @@ just slow.
 - **A field's `onChange` XML attribute and a same-name `m.top.observeField()` call both fire** -
   registering both (an early draft of these components did, redundantly) doubles every redraw,
   including the initial paint. Fixed by relying on `onChange` alone.
+- **`control="RUN"` on an already-idle `Task` node can be set again to re-run it** - no
+  `control="STOP"` needed first. Confirmed on real hardware: each shape component keeps one
+  `ShapeRenderTask` instance for its whole lifetime and just reassigns its fields plus
+  `control="RUN"` on every cache-miss redraw.
 
-## Task experiment (issue #61)
+## A fixed bug: width/height auto-scale race
 
-Moving a shape's draw+encode+write work onto a `Task` node was prototyped (`CircleTask`/
-`TaskCircle` in `examples/scenegraph`, not part of the shipped components) to see whether it
-frees up the render thread during a redraw. Measured with a 50ms heartbeat `Timer` on the render
-thread (a gap much larger than 50ms means the render thread was blocked):
+An earlier version of these components extended `Poster` directly and reused `Poster`'s own
+native `width`/`height` fields as the redraw trigger. `Poster` auto-scales its currently-loaded
+`uri` image to fit those fields on every composited frame - so the instant an `Animation` (or
+any other caller) changed `width`/`height`, `Poster` immediately stretched the *previous* (stale)
+bitmap into the newly-set box, and only once the redraw finished ~150-200ms later did `uri` catch
+up to a correctly-proportioned image. This was visible as `RoundedRectangle`'s corners briefly
+distorting into ellipses (and similar distortion for the other shapes) during any width/height
+change - moving that redraw onto a `Task` (see below) made the window *longer*, not shorter, so
+this had to be fixed regardless of sync-vs-`Task`.
 
-- A direct/synchronous shape redraw (the shipped design) blocks the render thread for its whole
+The fix: every shape component is a `Group`, not a `Poster`, wrapping one child `Poster`
+(`id="image"`) whose `width`/`height` are never explicitly set - it always displays its loaded
+image at native pixel size, so there's no frame where size and image can disagree. Only the
+child `Poster`'s `uri` is ever swapped, and only once a render has actually finished.
+
+## Task-based rendering (issue #61)
+
+Moving a shape's draw+encode+write work onto a `Task` node was prototyped first (`CircleTask`/
+`TaskCircle`, since removed) to check whether it frees up the render thread during a redraw
+before committing to the architecture change - it does, and this is now the shipped design (see
+"How it works" above: one persistent `ShapeRenderTask` per component instance, reused via
+`control="RUN"`). Measured with a 50ms heartbeat `Timer` on the render thread (a gap much larger
+than 50ms means the render thread was blocked):
+
+- The original direct/synchronous shape redraw blocked the render thread for its whole
   ~150-200ms - confirmed by heartbeat gaps of up to 316ms while 4 shapes redrew in sequence at
   startup.
 - A `Task`-based redraw's **first ever run costs ~780ms** (Task thread spin-up overhead) but a
@@ -148,11 +190,10 @@ thread (a gap much larger than 50ms means the render thread was blocked):
 
 So a `Task` genuinely improves perceived responsiveness (the rest of the UI keeps ticking during
 a redraw) without making that shape's own content appear any faster once warmed up - the
-trade-off is a large one-time latency hit on a `Task`'s first use, which a real consumer would
-want to pay upfront (e.g. a throwaway warm-up run at app start) rather than on first real use.
-This wasn't adopted for the shipped components (it's a real architecture change - one Task node
-per shape instance, or a shared pool - beyond this issue's scope) but is a solid direction for a
-follow-up if redraw-blocking the render thread becomes a real problem for a consumer.
+trade-off is a one-time ~780ms latency hit the first time each component instance actually
+redraws (its `ShapeRenderTask`'s first `control="RUN"`), which a latency-sensitive consumer may
+want to pay upfront (e.g. constructing the shape off-screen ahead of when it needs to appear)
+rather than on the shape's first real use.
 
 ## ROPM component names
 

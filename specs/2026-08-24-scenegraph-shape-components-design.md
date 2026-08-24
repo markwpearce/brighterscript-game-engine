@@ -82,21 +82,35 @@ swaps `uri` — visibly distorting a rounded rectangle's corners into ellipses d
 width/height change. Async (Task-based) rendering makes this window *longer*, not shorter, so it
 must be fixed regardless of sync-vs-Task.
 
-**Resulting design**: every shape component extends `Group`, not `Poster`, with one child
-`Poster` node whose `width`/`height` are never explicitly set (so it always displays its loaded
-image at native pixel size — no auto-scale, no race) — only its `uri` is ever swapped, and only
-once a render actually finishes. Rendering itself runs in **one shared, generic `Task`
-component** (not four near-duplicate Task subclasses) that takes a `shapeType` field plus the
-same generic draw-parameter fields the components already have (`width`, `height`, `color`,
-`outlineColor`, `outlineWidth`, `cornerRadius`, `outlineSegments`, `vertices`) and dispatches
-internally to the matching `Renderer.draw*To`/`draw*OutlineTo` call(s) — the same
-`shapeType`-driven pattern `ShapeComponentHelpers` already used for cache-key hashing.
-Each component keeps one persistent instance of this Task, reused across redraws, so the
-~780ms cold-start cost is paid once per component instance, not per redraw — the same "pay
-once, cache after" pattern `Renderer.getRightTriangleResource()` already uses for its own
-one-time cost. The cache-hit check (`MatchFiles` against the content-hash filename) stays
-synchronous in the component's own script, run *before* ever touching the Task, so a cache hit
-costs nothing beyond the hash + file check.
+**Resulting design (shipped)**: every shape component extends `Group`, not `Poster`, with one
+child `Poster` node (`id="image"`) whose `width`/`height` are never explicitly set (so it always
+displays its loaded image at native pixel size — no auto-scale, no race) — only its `uri` is
+ever swapped, and only once a render actually finishes. A plain custom `uri` field is
+re-declared on the `Group` wrapper itself (safe, since `Group` has no native `uri` semantics) so
+external consumers observing `<shape>.uri` for "redraw completed" keep working unchanged.
+Rendering itself runs in **one shared, generic `Task` component**
+(`components/Shapes/ShapeRenderTask.xml`/`.bs`, not four near-duplicate Task subclasses) that
+takes a `shapeType` field, a `uri` field (the target cache file, computed by the calling
+component), and the union of draw-parameter fields the four shapes need (`width`, `height`,
+`color`, `outlineColor`, `outlineWidth`, `cornerRadius`, `outlineSegments`, `vertices`), and
+dispatches internally to the matching `Renderer.draw*To`/`draw*OutlineTo` call(s) — the same
+`shapeType`-driven pattern `ShapeComponentHelpers` already used for cache-key hashing. Each
+component creates one persistent instance of this Task in `init()` and reuses it across redraws
+by reassigning fields and setting `control="RUN"` again (confirmed on real hardware: no
+`control="STOP"` needed first) — so the ~780ms cold-start cost is paid once per component
+instance, not per redraw, the same "pay once, cache after" pattern
+`Renderer.getRightTriangleResource()` already uses for its own one-time cost.
+
+The cache-hit check (`BGE.ShapeComponentHelpers.checkShapeCache()`, `MatchFiles` against the
+content-hash filename) stays synchronous in the component's own script, run *before* ever
+touching the Task, so a cache hit costs nothing beyond the hash + file check and never spins up
+the Task at all. On a miss, `BGE.ShapeComponentHelpers.createShapeRenderState()` (called from
+inside the Task, off the render thread) creates the `roBitmap`/`BGE.Renderer` pair to draw into,
+and `finishShapeRender()` (unchanged) does the `Finish()`/`GetPng()`/`WriteFile()`. This is the
+split `beginShapeRender()` was refactored into: the old function's cache-check half became
+`checkShapeCache()` (now callable from the render thread with no bitmap involved), and its
+render-setup half became `createShapeRenderState()` (now callable from the Task thread, always
+past a confirmed cache miss).
 
 ## Example
 
