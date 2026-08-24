@@ -1,0 +1,166 @@
+' A plain, non-GameEntity helper: the owning Room constructs one and forwards its own
+' onInput/onUpdate calls to it. Extracted from the terrain example's original MainRoom
+' so both MainRoom and WorldRoom share the same controls and the same fixes - yaw/pitch
+' relative to the camera's current (roll-adjusted) orientation instead of always
+' world-vertical, and a ground clamp so flying forward can't cross the ground plane.
+class FreeFlyCameraController
+
+  room as BGE.Room
+  otherRoomName as string
+  groundPlane as BGE.Math.Plane
+
+  turnSpeed = 2.0 ' radians/sec
+  driveSpeed = 80 ' units/sec
+  rollSpeed = 60 ' degrees/sec
+  pitchSpeed = 0.3 ' radians/sec
+  ' Bounds the pitch *input* accumulator to reduce (not eliminate) how close repeated
+  ' pitch input can drive the camera toward Camera3d.getLevelUpVector()'s degenerate
+  ' near-vertical case; under sustained roll+pitch combinations the actual world-space
+  ' angle isn't strictly bounded by this alone.
+  maxDownwardTilt = 1.2 ' radians (~69 degrees)
+  minHeightAboveGround = 1.0 ' world units
+
+  ' Tracked only to enforce maxDownwardTilt - yaw is free rotation with no clamp, so it
+  ' needs no equivalent accumulator.
+  pitchAccum = 0.0
+
+  ' The room's starting pitch (radians), set via setInitialPitch() - Play resets back to
+  ' this rather than to a perfectly level view.
+  defaultPitch = 0.0
+  rollDirection = 0 ' -1 = rolling left, 1 = rolling right, 0 = not rolling
+  pitchDirection = 0 ' -1 = pitching up, 1 = pitching down, 0 = not pitching
+  backHeldMs = 0
+  debugToggledForThisHold = false
+  debugEnabled = false
+  lastInput as BGE.GameInput
+
+  sub new(room as BGE.Room, otherRoomName as string, groundPlane as BGE.Math.Plane)
+    m.room = room
+    m.otherRoomName = otherRoomName
+    m.groundPlane = groundPlane
+  end sub
+
+  function getHintText() as string
+    return "Turn: Left/Right   Move: Up/Down" + Chr(10) + "Roll: Instant Replay/Options   Pitch: Rewind/FF" + Chr(10) + "Play: reset orientation   Back: switch room" + Chr(10) + "Hold Back 2s: toggle debug info"
+  end function
+
+  sub onInput(input as BGE.GameInput)
+    m.lastInput = input
+    if input.isButton("replay") and not input.release
+      m.rollDirection = -1
+    else if input.isButton("options") and not input.release
+      m.rollDirection = 1
+    else if input.isButton("replay") and input.release
+      m.rollDirection = 0
+    else if input.isButton("options") and input.release
+      m.rollDirection = 0
+    else if input.isButton("rewind") and not input.release
+      m.pitchDirection = -1
+    else if input.isButton("fastforward") and not input.release
+      m.pitchDirection = 1
+    else if input.isButton("rewind") and input.release
+      m.pitchDirection = 0
+    else if input.isButton("fastforward") and input.release
+      m.pitchDirection = 0
+    end if
+
+    if input.press and input.isButton("play")
+      m.getCamera().rollDegrees = 0
+      m.setInitialPitch(m.defaultPitch)
+    end if
+
+    ' Back needs tap-vs-hold disambiguation: switching rooms can't fire on press (a
+    ' hold-to-toggle-debug would never get 2 seconds to accumulate before the room
+    ' already changed), so a press just resets the hold tracking, and a release only
+    ' switches rooms if the hold never reached 2 seconds (i.e. debug info wasn't
+    ' already toggled by update()'s held-time check below).
+    if input.isButton("back")
+      if input.press
+        m.backHeldMs = 0
+        m.debugToggledForThisHold = false
+      else if input.release
+        if not m.debugToggledForThisHold
+          m.room.game.changeRoom(m.otherRoomName)
+        end if
+      end if
+    end if
+  end sub
+
+  sub update(dt as float)
+    input = m.lastInput
+    camera = m.getCamera()
+
+    if input <> invalid
+      if input.x <> 0
+        ' Negated: RotateVectorAroundPoint3d's Rodrigues-formula rotation around the up
+        ' axis turns the opposite direction from this codebase's established heading
+        ' convention (forward = (sin(heading), 0, -cos(heading)) - see the pre-refactor
+        ' MainRoom.headingForward()) for a positive angle, so a positive angle here must
+        ' be the negative of the input to turn the intended way.
+        camera.orientation = BGE.Math.RotateVectorAroundPoint3d(camera.orientation, BGE.Math.VectorOps.create(), camera.getUpVector(), -input.x * dt * m.turnSpeed)
+      end if
+      if input.y <> 0
+        candidate = BGE.Math.VectorOps.add(camera.position, BGE.Math.VectorOps.scale(camera.orientation, input.y * dt * m.driveSpeed))
+        camera.position = m.clampAboveGround(candidate)
+      end if
+      if input.isButton("back") and input.held
+        m.backHeldMs = input.heldTimeMs
+        if m.backHeldMs >= 2000 and not m.debugToggledForThisHold
+          m.debugEnabled = not m.debugEnabled
+          m.room.game.debugDrawEntityDetails(m.debugEnabled)
+          m.debugToggledForThisHold = true
+        end if
+      end if
+    end if
+
+    if m.rollDirection <> 0
+      camera.rollDegrees = camera.rollDegrees + m.rollDirection * m.rollSpeed * dt
+    end if
+
+    if m.pitchDirection <> 0
+      delta = m.pitchDirection * m.pitchSpeed * dt
+      clampedAccum = BGE.Math.Clamp(m.pitchAccum + delta, -m.maxDownwardTilt, m.maxDownwardTilt)
+      actualDelta = clampedAccum - m.pitchAccum
+      m.pitchAccum = clampedAccum
+      if actualDelta <> 0
+        ' Negated for the same reason as the yaw rotation above - matches the original
+        ' pre-refactor code's explicit `-m.downwardTilt` around this same axis.
+        camera.orientation = BGE.Math.RotateVectorAroundPoint3d(camera.orientation, BGE.Math.VectorOps.create(), camera.getRightVector(), -actualDelta)
+      end if
+    end if
+  end sub
+
+  ' Sets the room's starting pitch (radians, same sign convention as pitchAccum) and
+  ' resets the camera to face straight down -z before applying it - both an initial
+  ' setup call (a room's onCreate, right after constructing this controller) and Play's
+  ' reset use this, so pitchAccum and the actually-applied rotation never drift apart the
+  ' way they used to when a room rotated camera.orientation directly without seeding
+  ' pitchAccum to match (the pitch clamp then only bounded input on top of an untracked
+  ' offset, and Play reset to level instead of back to the room's real default view).
+  sub setInitialPitch(radians as float)
+    m.defaultPitch = radians
+    m.pitchAccum = radians
+    camera = m.getCamera()
+    camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+    camera.orientation = BGE.Math.RotateVectorAroundPoint3d(camera.orientation, BGE.Math.VectorOps.create(), camera.getRightVector(), -radians)
+  end sub
+
+  ' Pushes a candidate camera position back above the ground plane by at least
+  ' minHeightAboveGround, along the plane's own normal - keeps the camera from flying
+  ' through the ground regardless of the plane's orientation. Exposed (not private) for
+  ' direct testing.
+  function clampAboveGround(candidate as BGE.Math.Vector) as BGE.Math.Vector
+    toCandidate = BGE.Math.VectorOps.subtract(candidate, m.groundPlane.point)
+    distance = BGE.Math.VectorOps.dotProduct(toCandidate, m.groundPlane.normal)
+    if distance >= m.minHeightAboveGround
+      return candidate
+    end if
+    shortfall = m.minHeightAboveGround - distance
+    return BGE.Math.VectorOps.add(candidate, BGE.Math.VectorOps.scale(m.groundPlane.normal, shortfall))
+  end function
+
+  private function getCamera() as BGE.Camera3d
+    return m.room.game.canvas.renderer.camera as BGE.Camera3d
+  end function
+
+end class
