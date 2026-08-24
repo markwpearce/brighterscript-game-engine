@@ -28,16 +28,21 @@ See `examples/scenegraph` for a runnable demo of all four.
   outlineColor="0x1B1B1BFF" outlineWidth="4" outlineSegments="48" />
 ```
 
-`Triangle` and `Polygon` take a `vertices` field - an array of `{x, y}` points local to the
-shape's own bitmap - which can't be expressed as a plain XML attribute, so set it from code:
+`Triangle` and `Polygon` take a `vertices` field (`vector2darray`) - points local to the shape's
+own bitmap - settable directly from XML:
+
+```xml
+<Polygon
+  translation="[860, 180]"
+  width="200" height="200"
+  color="0xE85D75FF"
+  vertices="[[100,0],[200,60],[160,200],[40,200],[0,60]]" />
+```
+
+or imperatively as an array of `{x, y}` associative arrays (both forms are accepted):
 
 ```brightscript
-m.polygon.vertices = [
-  {x: 100, y: 0},
-  {x: 200, y: 100},
-  {x: 100, y: 200},
-  {x: 0, y: 100}
-]
+m.polygon.vertices = [{x: 100, y: 0}, {x: 200, y: 100}, {x: 100, y: 200}, {x: 0, y: 100}]
 ```
 
 `Triangle.vertices` is optional - when empty (the default), it draws a right triangle sized
@@ -56,7 +61,7 @@ from `width`/`height` instead. `Polygon.vertices` is required; nothing is drawn 
 
 - `RoundedRectangle.cornerRadius` (`float`) - clamped to at most half of `width`/`height`.
 - `Circle.outlineSegments` (`integer`) - number of line segments approximating the outline circle.
-- `Triangle.vertices` / `Polygon.vertices` (`array`, optional/required respectively) - see above.
+- `Triangle.vertices` / `Polygon.vertices` (`vector2darray`, optional/required respectively) - see above.
 
 ## How it works
 
