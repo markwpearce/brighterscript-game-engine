@@ -65,14 +65,38 @@ Every redraw-triggering field's `onChange` points at one observer function that:
 This makes repeated/discrete field values free, but a continuously-varying tween (many distinct
 values) redraws every value — no caching benefit there.
 
-## Animation experiment
+## Animation experiment — findings and resulting redesign
 
-Try driving a field via a SceneGraph `Animation` node (genuine per-frame redraws, no cache hits)
-and measure real FPS/jank per shape on hardware. `RoundedRectangle`/`Circle` are cheap
-(`DrawRect`/blit); `Polygon` with many vertices could be expensive (triangle rasterization is
-~500/sec per the repo's own benchmark numbers). Each shape documents itself as
-animate-safe or static-only based on what's actually measured — this is expected to differ
-per shape, not a pass/fail for the whole feature.
+Measured on real hardware: all four shapes cost ~150-200ms per redraw (PNG encode/decode
+dominates, not draw complexity) — none are animate-safe at a real per-frame rate. A synchronous
+redraw (`Poster`-extending component doing the render inline) fully blocks the render thread for
+that whole span (confirmed via a heartbeat timer showing gaps up to 316ms). A `Task`-based redraw
+costs about the same wall-clock warm (~200ms; ~780ms cold, one-time thread spin-up) but with
+**zero render-thread blocking** — this is the escalation the original issue anticipated
+("Poster first, Task as an escalation... if measurement shows it janks").
+
+Separately, a real bug: `extends="Poster"` reusing Poster's own native `width`/`height` fields
+for the redraw trigger means Poster's built-in auto-scale-to-fit stretches the *previous*
+(stale) bitmap to the newly-set size on every composited frame until the redraw finishes and
+swaps `uri` — visibly distorting a rounded rectangle's corners into ellipses during any
+width/height change. Async (Task-based) rendering makes this window *longer*, not shorter, so it
+must be fixed regardless of sync-vs-Task.
+
+**Resulting design**: every shape component extends `Group`, not `Poster`, with one child
+`Poster` node whose `width`/`height` are never explicitly set (so it always displays its loaded
+image at native pixel size — no auto-scale, no race) — only its `uri` is ever swapped, and only
+once a render actually finishes. Rendering itself runs in **one shared, generic `Task`
+component** (not four near-duplicate Task subclasses) that takes a `shapeType` field plus the
+same generic draw-parameter fields the components already have (`width`, `height`, `color`,
+`outlineColor`, `outlineWidth`, `cornerRadius`, `outlineSegments`, `vertices`) and dispatches
+internally to the matching `Renderer.draw*To`/`draw*OutlineTo` call(s) — the same
+`shapeType`-driven pattern `ShapeComponentHelpers` already used for cache-key hashing.
+Each component keeps one persistent instance of this Task, reused across redraws, so the
+~780ms cold-start cost is paid once per component instance, not per redraw — the same "pay
+once, cache after" pattern `Renderer.getRightTriangleResource()` already uses for its own
+one-time cost. The cache-hit check (`MatchFiles` against the content-hash filename) stays
+synchronous in the component's own script, run *before* ever touching the Task, so a cache hit
+costs nothing beyond the hash + file check.
 
 ## Example
 
