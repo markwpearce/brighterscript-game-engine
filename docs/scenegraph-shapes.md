@@ -122,12 +122,23 @@ too slow for smooth continuous animation - **all four are redraw-on-change compo
 animate-safe ones**, regardless of shape type. A discrete/repeated value (toggling between a
 couple of colors) is still free after the first render, per the caching above.
 
-Because the redraw now runs on the shared `Task` (see below), a continuous `Animation` no longer
-blocks the render thread while it catches up - the rest of the UI stays responsive - but the
-shape itself still only visibly updates at that same ~5-7 redraws/second, since each individual
-render still costs ~150-200ms. Expect a shape driven by a fast `Animation` to visibly lag a step
-or two behind the interpolator's actual current value, not to redraw at the interpolator's own
-frame rate.
+Because the draw+encode+write work now runs on the shared `Task` (see below), a continuous
+`Animation` blocks the render thread far less than the original synchronous design did - but
+**not to zero**, measured with all four shapes animating at once (`examples/scenegraph`'s demo,
+a 50ms heartbeat `Timer`): moving the redraw off-thread removes the ~150-200ms draw+encode+write
+blocking window entirely, but the internal `Poster`'s own image decode still runs synchronously
+on the render thread (`loadSync="true"`, required - see "A fixed bug" and "Hardware findings"
+below for why), and with four shapes redrawing concurrently that residual cost still produced
+heartbeat gaps up to ~287ms over a 20-second sustained run (100 gaps over 70ms in that window),
+not far below the original fully-synchronous design's worst case of ~316ms. **Treat "moves
+redraw off the render thread" as a real, measured improvement in the common case (one shape
+redrawing occasionally), not as a guarantee of zero blocking under sustained multi-shape
+animation** - the remaining cost is dominated by synchronous image decode and/or thread
+scheduling contention between four concurrent `Task`s and the render thread on real hardware,
+not anything the `Task` itself left undone. Regardless, the shape itself still only visibly
+updates at ~5-7 redraws/second, since each individual render still costs ~150-200ms - expect a
+shape driven by a fast `Animation` to visibly lag a step or two behind the interpolator's actual
+current value, not to redraw at the interpolator's own frame rate.
 
 ## Hardware findings (issue #61)
 
@@ -153,6 +164,19 @@ frame rate.
   `control="STOP"` needed first. Confirmed on real hardware: each shape component keeps one
   `ShapeRenderTask` instance for its whole lifetime and just reassigns its fields plus
   `control="RUN"` on every cache-miss redraw.
+- **The internal `Poster`'s `loadSync` must stay `"true"`, even with `Task`-based rendering** -
+  tried removing it (since the `Task` now naturally throttles how often `uri` actually changes,
+  to ~5-7/second, the same rate that made the original `TaskCircle` prototype's default-async
+  load safe). Confirmed on real hardware that this does **not** hold for the shipped multi-shape
+  design: with `loadSync` left at `Poster`'s async default, all four shapes went completely
+  blank under `examples/scenegraph`'s concurrent 4-shape `Animation` (redraw counts kept
+  climbing normally - the render/cache/`Task` pipeline was working - but nothing ever displayed).
+  Reverting to `loadSync="true"` fixed it. Root cause not fully isolated, but the width/height
+  race this component design already exists to avoid (see below) is the likely mechanism:
+  something about very-close-together async decodes on the same `Poster` node under load
+  apparently loses image data rather than just lagging. Async is not worth the risk here even
+  though it measurably reduces render-thread blocking (see "Task-based rendering" below) - a
+  blank shape is a worse failure than an occasionally-janky heartbeat.
 
 ## A fixed bug: width/height auto-scale race
 
@@ -175,22 +199,35 @@ child `Poster`'s `uri` is ever swapped, and only once a render has actually fini
 
 Moving a shape's draw+encode+write work onto a `Task` node was prototyped first (`CircleTask`/
 `TaskCircle`, since removed) to check whether it frees up the render thread during a redraw
-before committing to the architecture change - it does, and this is now the shipped design (see
-"How it works" above: one persistent `ShapeRenderTask` per component instance, reused via
-`control="RUN"`). Measured with a 50ms heartbeat `Timer` on the render thread (a gap much larger
-than 50ms means the render thread was blocked):
+before committing to the architecture change - it measurably does, and this is now the shipped
+design (see "How it works" above: one persistent `ShapeRenderTask` per component instance,
+reused via `control="RUN"`). Measured with a 50ms heartbeat `Timer` on the render thread (a gap
+much larger than 50ms means the render thread was blocked):
 
 - The original direct/synchronous shape redraw blocked the render thread for its whole
   ~150-200ms - confirmed by heartbeat gaps of up to 316ms while 4 shapes redrew in sequence at
   startup.
 - A `Task`-based redraw's **first ever run costs ~780ms** (Task thread spin-up overhead) but a
-  **subsequent ("warm") run costs ~200ms**, matching the direct approach's own cost - and neither
-  produced a large heartbeat gap, i.e. the render thread stayed responsive throughout, unlike the
-  direct approach.
+  **subsequent ("warm") run costs ~200ms**, matching the direct approach's own cost.
+- With a single shape redrawing occasionally (the original `TaskCircle` prototype's test), no
+  large heartbeat gap was produced at all - the render thread stayed fully responsive.
+- With all four shapes redrawing concurrently and continuously (`examples/scenegraph`'s
+  `Animation` demo, the harder and more realistic stress case), the render thread was **not**
+  fully insulated: over a sustained 20-second run, 100 heartbeat gaps exceeded 70ms (out of
+  ~400 expected heartbeats), with a worst case of ~287ms - close to (if usually somewhat better
+  than) the original synchronous design's own worst case of ~316ms measured the same way. This
+  residual cost is not the draw+encode+write work (confirmed moved off-thread), but is
+  consistent with the internal `Poster`'s synchronous image decode (`loadSync="true"`, required -
+  see "Hardware findings" above) plus general OS-level thread-scheduling contention between four
+  concurrent `Task`s and the render thread on real hardware.
 
-So a `Task` genuinely improves perceived responsiveness (the rest of the UI keeps ticking during
-a redraw) without making that shape's own content appear any faster once warmed up - the
-trade-off is a one-time ~780ms latency hit the first time each component instance actually
+So a `Task` is a real, measured improvement - it eliminates the single largest cost
+(draw+encode+write) from the render thread and keeps things fully smooth for the common case of
+one shape occasionally redrawing - but **does not eliminate render-thread blocking down to zero
+once several shapes redraw concurrently and continuously**. Don't repeat "moves rendering off
+the render thread" as a blanket "the UI never stutters" claim; it's a substantial mitigation, not
+a complete fix, for this shipped multi-shape design. Separately, there's still a one-time
+~780ms latency hit the first time each component instance actually
 redraws (its `ShapeRenderTask`'s first `control="RUN"`), which a latency-sensitive consumer may
 want to pay upfront (e.g. constructing the shape off-screen ahead of when it needs to appear)
 rather than on the shape's first real use.

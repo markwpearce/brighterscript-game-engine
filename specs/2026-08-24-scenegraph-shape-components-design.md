@@ -71,9 +71,21 @@ Measured on real hardware: all four shapes cost ~150-200ms per redraw (PNG encod
 dominates, not draw complexity) — none are animate-safe at a real per-frame rate. A synchronous
 redraw (`Poster`-extending component doing the render inline) fully blocks the render thread for
 that whole span (confirmed via a heartbeat timer showing gaps up to 316ms). A `Task`-based redraw
-costs about the same wall-clock warm (~200ms; ~780ms cold, one-time thread spin-up) but with
-**zero render-thread blocking** — this is the escalation the original issue anticipated
-("Poster first, Task as an escalation... if measurement shows it janks").
+costs about the same wall-clock warm (~200ms; ~780ms cold, one-time thread spin-up); with a
+single shape redrawing occasionally, this produced **zero measurable render-thread blocking** —
+this is the escalation the original issue anticipated ("Poster first, Task as an escalation... if
+measurement shows it janks").
+
+**Update after shipping the full multi-shape design** (see "Resulting design" below): the
+single-shape "zero blocking" result does not fully hold once all four shapes redraw concurrently
+and continuously (`examples/scenegraph`'s `Animation` demo). Over a sustained 20-second run, 100
+heartbeat gaps exceeded 70ms, worst case ~287ms — a real improvement over the fully-synchronous
+design's own worst case (~316ms, same test) but not the complete fix "zero blocking" implies.
+The residual cost isn't the draw+encode+write work (confirmed moved off-thread); it's consistent
+with the internal `Poster`'s synchronous image decode (`loadSync="true"`, required — see below)
+plus general OS-level thread-scheduling contention between four concurrent `Task`s and the
+render thread on real hardware. See docs/scenegraph-shapes.md's "Task-based rendering" section
+for the full numbers and caveat.
 
 Separately, a real bug: `extends="Poster"` reusing Poster's own native `width`/`height` fields
 for the redraw trigger means Poster's built-in auto-scale-to-fit stretches the *previous*
@@ -100,6 +112,17 @@ by reassigning fields and setting `control="RUN"` again (confirmed on real hardw
 `control="STOP"` needed first) — so the ~780ms cold-start cost is paid once per component
 instance, not per redraw, the same "pay once, cache after" pattern
 `Renderer.getRightTriangleResource()` already uses for its own one-time cost.
+
+The internal `Poster`'s `loadSync` field must stay `"true"` even with `Task`-based rendering —
+tried defaulting it to `Poster`'s normal async load instead (reasoning: the `Task` now throttles
+`uri` reassignment to ~5-7/second on its own, the same rate that already made the `TaskCircle`
+prototype's async load safe), but confirmed on real hardware this doesn't hold for the shipped
+four-shape design: with async load, all four shapes went completely blank under sustained
+concurrent animation (redraw counts kept climbing normally — the pipeline was working — nothing
+ever displayed). Reverted to `loadSync="true"`. Root cause not fully isolated; the async
+regression traded a worse failure (blank shape) for a smaller one (more render-thread blocking),
+so `loadSync="true"` stays the shipped default despite its real render-thread cost — see
+"Update after shipping" above.
 
 The cache-hit check (`BGE.ShapeComponentHelpers.checkShapeCache()`, `MatchFiles` against the
 content-hash filename) stays synchronous in the component's own script, run *before* ever
