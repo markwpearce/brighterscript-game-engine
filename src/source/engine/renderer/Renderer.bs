@@ -99,8 +99,7 @@ namespace BGE
     sub new(draw2d as ifDraw2d, mainGame = invalid as BGE.Game, cam = invalid as BGE.Camera, options = {useBitmapPooling: true} as RendererOptions)
       m.game = mainGame
       m.draw2d = draw2d
-      device = CreateObject("roDeviceInfo")
-      if device.HasFeature("simulation_engine")
+      if BGE.getDeviceRenderTier() = BGE.DeviceRenderTier.simulator
         ' The simulator does not need pooling
         m.isSimulator = true
       end if
@@ -386,14 +385,11 @@ namespace BGE
       end for
       primitiveEntries.SortBy("depth")
       for each entry in primitiveEntries
+        ' A drawPrimitive() call here may stage scratch bitmaps (e.g. a textured
+        ' Model3d face) via drawBitmapTriangleTo - ScratchBitmapPool self-flushes those
+        ' once enough build up (see #129), so a cluster with far more faces than the
+        ' pool's max size can't exhaust it here.
         entry.sceneObj.drawPrimitive(m, entry.index)
-        ' A drawPrimitive() call above may have staged scratch bitmaps (e.g. a textured
-        ' Model3d face) via drawBitmapTriangleTo - flush after EVERY primitive, not once
-        ' for the whole batch, since a model/cluster can have far more faces than the
-        ' scratch pool's max size (confirmed: a 228-face model exhausted the pool and
-        ' silently failed to draw most of its faces when this was flushed only once).
-        ' Cheap no-op when nothing was staged by this particular primitive's draw.
-        m.bmpPool.returnStagedRegions()
       end for
       for each sceneObj in m.pendingClusterDraws
         sceneObj.afterDraw()
@@ -877,8 +873,10 @@ namespace BGE
     end function
 
     ' NOTE: This method uses temporary bitmaps. In order not to re-use them for subsequent calls
-    ' they are staged for return to the bitmap pool. You need to manually call bmpPool.returnStagedRegions() to return them
-    ' after you're sure all the drawing to the surface is done
+    ' they are staged for return to the bitmap pool via bmpPool.stageRegionsForReturn(), which
+    ' self-flushes once enough regions build up (see #129) - a caller may still call
+    ' bmpPool.returnStagedRegions() itself once done drawing (e.g. at end of frame) to flush
+    ' any remainder early, but it's no longer required for correctness.
     '
     ' @param  draw2d Surface to draw to
     ' @param {BGE.RendererHelpers.RegionWithId} srcRegionWithId the region to draw from
