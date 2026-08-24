@@ -1,0 +1,149 @@
+namespace BGE
+
+  ' A reusable free-fly camera control scheme: yaw/pitch relative to the camera's
+  ' current (roll-adjusted) orientation, forward/back drive, roll, and a ground-plane
+  ' clamp so driving forward can't cross the ground. Not a GameEntity - a Room (or any
+  ' owner) constructs one and forwards its own onInput/onUpdate calls to it. Extracted
+  ' from examples/terrain's original FreeFlyCameraController (issue #148); that example
+  ' now layers its own room-switching/debug-toggle/hint-text glue on top of this.
+  class FreeFlyCameraController
+
+    camera as BGE.Camera3d
+    groundPlane as BGE.Math.Plane
+
+    turnSpeed = 2.0 ' radians/sec
+    driveSpeed = 80 ' units/sec
+    rollSpeed = 60 ' degrees/sec
+    pitchSpeed = 0.3 ' radians/sec
+    ' Bounds the pitch *input* accumulator to reduce (not eliminate) how close repeated
+    ' pitch input can drive the camera toward Camera3d.getLevelUpVector()'s degenerate
+    ' near-vertical case; under sustained roll+pitch combinations the actual world-space
+    ' angle isn't strictly bounded by this alone.
+    maxDownwardTilt = 1.2 ' radians (~69 degrees)
+    minHeightAboveGround = 1.0 ' world units
+
+    ' Tracked only to enforce maxDownwardTilt - yaw is free rotation with no clamp, so it
+    ' needs no equivalent accumulator.
+    private pitchAccum = 0.0
+
+    ' The controller's starting pitch (radians), set via setInitialPitch() - onPlayButton
+    ' resets back to this rather than to a perfectly level view.
+    private defaultPitch = 0.0
+    private rollDirection = 0 ' -1 = rolling left, 1 = rolling right, 0 = not rolling
+    private pitchDirection = 0 ' -1 = pitching up, 1 = pitching down, 0 = not pitching
+    ' Protected, not private: a subclass adding its own per-frame button handling (e.g.
+    ' examples/terrain's hold-to-toggle-debug) needs to see the same input this frame.
+    protected lastInput as BGE.GameInput
+
+    ' @param {BGE.Camera3d} camera the camera to drive
+    ' @param {BGE.Math.Plane} groundPlane the plane clampAboveGround() keeps the camera above
+    sub new(camera as BGE.Camera3d, groundPlane as BGE.Math.Plane)
+      m.camera = camera
+      m.groundPlane = groundPlane
+    end sub
+
+    ' Forward a Room/GameEntity's own onInput() call here. Tracks roll/pitch/drive
+    ' direction from the "replay"/"options" (roll), "rewind"/"fastforward" (pitch) and
+    ' directional (drive/turn) buttons, and resets roll/pitch to their initial values on
+    ' "play".
+    '
+    ' @param {BGE.GameInput} input
+    sub onInput(input as BGE.GameInput)
+      m.lastInput = input
+      if input.isButton("replay") and not input.release
+        m.rollDirection = -1
+      else if input.isButton("options") and not input.release
+        m.rollDirection = 1
+      else if input.isButton("replay") and input.release
+        m.rollDirection = 0
+      else if input.isButton("options") and input.release
+        m.rollDirection = 0
+      else if input.isButton("rewind") and not input.release
+        m.pitchDirection = -1
+      else if input.isButton("fastforward") and not input.release
+        m.pitchDirection = 1
+      else if input.isButton("rewind") and input.release
+        m.pitchDirection = 0
+      else if input.isButton("fastforward") and input.release
+        m.pitchDirection = 0
+      end if
+
+      if input.press and input.isButton("play")
+        m.camera.rollDegrees = 0
+        m.setInitialPitch(m.defaultPitch)
+      end if
+    end sub
+
+    ' Forward a Room/GameEntity's own onUpdate() call here. Applies yaw/drive from the
+    ' last onInput()'s directional input, plus any active roll/pitch, to the camera.
+    '
+    ' @param {float} dt seconds since the last frame
+    sub update(dt as float)
+      input = m.lastInput
+
+      if input <> invalid
+        if input.x <> 0
+          ' Negated: RotateVectorAroundPoint3d's Rodrigues-formula rotation around the up
+          ' axis turns the opposite direction from this codebase's established heading
+          ' convention (forward = (sin(heading), 0, -cos(heading))) for a positive angle,
+          ' so a positive angle here must be the negative of the input to turn the
+          ' intended way.
+          m.camera.orientation = BGE.Math.RotateVectorAroundPoint3d(m.camera.orientation, BGE.Math.VectorOps.create(), m.camera.getUpVector(), -input.x * dt * m.turnSpeed)
+        end if
+        if input.y <> 0
+          candidate = BGE.Math.VectorOps.add(m.camera.position, BGE.Math.VectorOps.scale(m.camera.orientation, input.y * dt * m.driveSpeed))
+          m.camera.position = m.clampAboveGround(candidate)
+        end if
+      end if
+
+      if m.rollDirection <> 0
+        m.camera.rollDegrees = m.camera.rollDegrees + m.rollDirection * m.rollSpeed * dt
+      end if
+
+      if m.pitchDirection <> 0
+        delta = m.pitchDirection * m.pitchSpeed * dt
+        clampedAccum = BGE.Math.Clamp(m.pitchAccum + delta, -m.maxDownwardTilt, m.maxDownwardTilt)
+        actualDelta = clampedAccum - m.pitchAccum
+        m.pitchAccum = clampedAccum
+        if actualDelta <> 0
+          ' Negated for the same reason as the yaw rotation above.
+          m.camera.orientation = BGE.Math.RotateVectorAroundPoint3d(m.camera.orientation, BGE.Math.VectorOps.create(), m.camera.getRightVector(), -actualDelta)
+        end if
+      end if
+    end sub
+
+    ' Sets the controller's starting pitch (radians, same sign convention as the internal
+    ' pitch accumulator) and resets the camera to face straight down -z before applying
+    ' it - both an initial setup call and the "play" button's reset use this, so the
+    ' internal accumulator and the actually-applied rotation never drift apart the way
+    ' they would if a caller rotated camera.orientation directly without seeding the
+    ' accumulator to match (the pitch clamp would then only bound input on top of an
+    ' untracked offset, and "play" would reset to level instead of back to this default).
+    '
+    ' @param {float} radians
+    sub setInitialPitch(radians as float)
+      m.defaultPitch = radians
+      m.pitchAccum = radians
+      m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      m.camera.orientation = BGE.Math.RotateVectorAroundPoint3d(m.camera.orientation, BGE.Math.VectorOps.create(), m.camera.getRightVector(), -radians)
+    end sub
+
+    ' Pushes a candidate camera position back above the ground plane by at least
+    ' minHeightAboveGround, along the plane's own normal - keeps the camera from flying
+    ' through the ground regardless of the plane's orientation.
+    '
+    ' @param {BGE.Math.Vector} candidate
+    ' @return {BGE.Math.Vector}
+    function clampAboveGround(candidate as BGE.Math.Vector) as BGE.Math.Vector
+      toCandidate = BGE.Math.VectorOps.subtract(candidate, m.groundPlane.point)
+      distance = BGE.Math.VectorOps.dotProduct(toCandidate, m.groundPlane.normal)
+      if distance >= m.minHeightAboveGround
+        return candidate
+      end if
+      shortfall = m.minHeightAboveGround - distance
+      return BGE.Math.VectorOps.add(candidate, BGE.Math.VectorOps.scale(m.groundPlane.normal, shortfall))
+    end function
+
+  end class
+
+end namespace
