@@ -50,7 +50,7 @@ from `width`/`height` instead. `Polygon.vertices` is required; nothing is drawn 
 | `color` | `color` | Fill color, packed RGBA (`0xRRGGBBAA`) - the same convention every `BGE.Renderer.draw*` call uses. |
 | `width` / `height` | `float` | The shape's own bitmap size. |
 | `outlineColor` | `color` | Packed RGBA. |
-| `outlineWidth` | `integer` | Outline is only drawn when this is `> 0` - there's no separate on/off flag. `Triangle`'s outline is always a single-pixel stroke regardless of this value (it just gates whether one is drawn), since `drawTriangleOutlineTo` has no thickness parameter. |
+| `outlineWidth` | `integer` | Outline is only drawn when this is `> 0` - there's no separate on/off flag. `RoundedRectangle`/`Polygon` stroke a real `outlineWidth`-thick ring; `Circle`/`Triangle` always draw a single-pixel stroke regardless of this value (it just gates whether one is drawn), since `drawCircleOutline`/`drawTriangleOutlineTo` have no thickness parameter. |
 
 ### Shape-specific fields
 
@@ -77,38 +77,35 @@ value you've already used) free after the first render. A continuously-varying v
 notably an `Animation`-driven tween - produces a new hash every single frame and never benefits
 from the cache; see "Animating a shape" below for what that costs in practice.
 
-## Animating a shape
+## Animating a shape (not recommended)
 
 You can drive any field with a SceneGraph `Animation`/`*FieldInterpolator` node the same way you
-would any other node field:
+would any other node field, but measured on real hardware (`examples/scenegraph`, a `roTimespan`
+timing each redraw end-to-end), **every shape costs roughly the same ~150-200ms per redraw**,
+regardless of shape complexity:
 
-```xml
-<Animation id="anim" repeat="true" duration="2.0">
-  <FloatFieldInterpolator key="[0, 0.5, 1]" keyValue="[80.0, 220.0, 80.0]" fieldToInterp="roundedRect.width" />
-</Animation>
-```
-
-Every redraw this drives is a real, uncached render (see above) - measured on real hardware
-(`examples/scenegraph`, redraws/sec counted per shape via a 1-second `Timer`, animating `width`/
-`height` continuously on all four shapes at once):
-
-| Shape | Animate-safe? | Notes |
+| Shape | Draw+encode+write | Full round trip (redraw -> visible) |
 | --- | --- | --- |
-| `RoundedRectangle` | Yes | Backed by `DrawRect` + a cached circle-resource blit for the corners - cheap per the repo's own draw-cost benchmarks. |
-| `Circle` | Yes | A single scaled blit of the shared circle resource, plus a handful of `DrawLine` calls for the outline. |
-| `Triangle` | Yes | Two `drawTransformedObjectTo` calls per triangle (see `drawTriangleTo`) - not free, but well within a per-frame budget for one shape. |
-| `Polygon` | Static-only for anything but a small vertex count | Fan-triangulated (`BGE.QuickHull` + one `drawTriangleTo` per resulting triangle) - cost scales with vertex count, and rasterizing a rotated/warped triangle is one of the most expensive `ifDraw2D` operations on real hardware (see `examples/rendererTest`'s benchmarks). A 4-vertex diamond animated smoothly in testing; a polygon with many more vertices should be redraw-on-change only, not continuously animated. |
+| `RoundedRectangle` | ~55-70ms | ~150-200ms |
+| `Circle` | ~55-75ms | ~150-165ms |
+| `Triangle` | ~50-60ms | ~150-165ms |
+| `Polygon` (4-vertex diamond) | ~55-75ms | ~150-180ms |
 
-Note that `Polygon`'s `vertices` are fixed local coordinates, independent of `width`/`height` -
-animating `width`/`height` alone (as the `examples/scenegraph` demo does, purely to measure
-redraw cost) reshapes the bitmap without rescaling the points, which visibly clips the polygon
-as it shrinks. A real scaling animation should recompute and re-assign `vertices` directly
-instead.
+The draw call itself is cheap and does scale with shape complexity as expected, but it's a small
+fraction of the total - PNG encoding (`GetPng()`), the `tmp:/` file write, and the `Poster`'s own
+image decode dominate for every shape alike. That caps every shape at roughly 5-7 redraws/second,
+too slow for smooth continuous animation - **all four are redraw-on-change components, not
+animate-safe ones**, regardless of shape type. A discrete/repeated value (toggling between a
+couple of colors) is still free after the first render, per the caching above.
+
+Driving `width`/`height` continuously via an `Animation` also hit an unresolved rendering bug in
+testing - forcing `loadSync="true"` (see below) fixed one cause of the shape going blank, but the
+shape still intermittently disappeared under a fast repeated-field-change load in
+`examples/scenegraph`'s demo. Root cause wasn't isolated given the numbers above already rule out
+animation as a supported use case; treat continuous per-frame animation as unsupported rather than
+just slow.
 
 ## Hardware findings (issue #61)
-
-Two things called out as open questions in this feature's design were verified on a real Roku,
-not just the simulator:
 
 - **`Finish()` alone is sufficient** to realize a `Triangle`/`Polygon` draw with zero `roScreen`
   anywhere in the process. `BGE.Renderer.forceDraw()` (used internally by the lazy
@@ -117,8 +114,40 @@ not just the simulator:
   `m.dummyScreen` is valid - which it never is for a `Renderer` constructed without a `Game`, as
   every shape component's private `Renderer` is. Plain `Finish()` on the bitmap was enough; no
   workaround (constructing a throwaway `roScreen` inside the component) was needed.
-- **Animation cost is genuinely per-shape**, not a single yes/no for the feature - see the table
-  above.
+- **`roFileSystem` is MAIN|TASK-only** - `CreateObject("roFileSystem")` fails on the SceneGraph
+  render thread every shape component script runs on, confirmed by a real crash on hardware
+  (`'Dot' Operator attempted with invalid BrightScript Component or interface reference`). The
+  global `MatchFiles()` function has no such restriction and is used for the cache-hit check
+  instead.
+- **`Poster.uri` does not accept a `roBitmap` directly** - assigning one instead of a file URI
+  silently renders nothing (confirmed on hardware). The PNG-file round trip isn't an optional
+  optimization opportunity; it's the only path found to get pixels into a `Poster` here.
+- **A field's `onChange` XML attribute and a same-name `m.top.observeField()` call both fire** -
+  registering both (an early draft of these components did, redundantly) doubles every redraw,
+  including the initial paint. Fixed by relying on `onChange` alone.
+
+## Task experiment (issue #61)
+
+Moving a shape's draw+encode+write work onto a `Task` node was prototyped (`CircleTask`/
+`TaskCircle` in `examples/scenegraph`, not part of the shipped components) to see whether it
+frees up the render thread during a redraw. Measured with a 50ms heartbeat `Timer` on the render
+thread (a gap much larger than 50ms means the render thread was blocked):
+
+- A direct/synchronous shape redraw (the shipped design) blocks the render thread for its whole
+  ~150-200ms - confirmed by heartbeat gaps of up to 316ms while 4 shapes redrew in sequence at
+  startup.
+- A `Task`-based redraw's **first ever run costs ~780ms** (Task thread spin-up overhead) but a
+  **subsequent ("warm") run costs ~200ms**, matching the direct approach's own cost - and neither
+  produced a large heartbeat gap, i.e. the render thread stayed responsive throughout, unlike the
+  direct approach.
+
+So a `Task` genuinely improves perceived responsiveness (the rest of the UI keeps ticking during
+a redraw) without making that shape's own content appear any faster once warmed up - the
+trade-off is a large one-time latency hit on a `Task`'s first use, which a real consumer would
+want to pay upfront (e.g. a throwaway warm-up run at app start) rather than on first real use.
+This wasn't adopted for the shipped components (it's a real architecture change - one Task node
+per shape instance, or a shared pool - beyond this issue's scope) but is a solid direction for a
+follow-up if redraw-blocking the render thread becomes a real problem for a consumer.
 
 ## ROPM component names
 

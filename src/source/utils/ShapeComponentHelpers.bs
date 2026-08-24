@@ -1,21 +1,10 @@
 ' Shared redraw/caching logic for the SceneGraph shape components under
-' `components/Shapes/` (RoundedRectangle, Circle, Triangle, Polygon). Each
-' component owns exactly one private BGE.Renderer over its own roBitmap and
-' renders into a `tmp:/`-cached PNG, the same Poster-extends/Finish()+GetPng()+
-' tmp:/-file pattern proven by the QR-code SceneGraph library referenced in
-' specs/2026-08-24-scenegraph-shape-components-design.md.
-'
-' A SceneGraph component's own compile scope only includes files reachable via
-' `import` (unlike the flat "source" scope a plain BrighterScript app gets for
-' free) - and BrighterScript type-checks a whole imported class/file, not just
-' the members actually called, so importing BGE.Renderer here pulls in its full
-' transitive dependency graph. Every shape component imports only this one file
-' to get the whole engine in scope, rather than repeating this list four times.
-' Paths are relative (not `pkg:/`-absolute) so they resolve correctly however
-' a consumer's own bsconfig `files` remapping relocates this whole `source/`
-' tree (e.g. `examples/*` copies it under `source/roku_modules/source/`, ropm
-' installs it under `source/roku_modules/<pkg>/`) - relative paths between
-' sibling engine files stay correct under any uniform prefix like that.
+' `components/Shapes/`. A SceneGraph component's compile scope only includes
+' files reachable via `import`, and BrighterScript type-checks a whole
+' imported file's dependency graph rather than just members actually called -
+' hence importing all of BGE here, once, instead of per component. Relative
+' (not `pkg:/`-absolute) paths so this still resolves under any consumer's
+' `files` remapping (ropm, this repo's own examples/* copy trick, etc).
 import "../engine/renderer/Renderer.bs"
 import "../engine/Canvas.bs"
 import "../engine/colliders/CircleCollider.bs"
@@ -102,11 +91,9 @@ import "../roku_modules/rodash/rodash.d.bs"
 
 namespace BGE.ShapeComponentHelpers
 
-  ' Hashes a shape type plus its current field values into a stable `tmp:/`
-  ' filename - identical field values always produce the same filename, so
-  ' repeated/discrete values are a cache hit and skip re-rendering entirely.
-  ' A continuously-varying value (e.g. an Animation-driven tween) produces a
-  ' new hash every frame and never benefits from the cache.
+  ' Hashes a shape type plus its field values into a stable `tmp:/` filename -
+  ' a cache hit for repeated/discrete values, but a continuously-varying value
+  ' (e.g. an Animation-driven tween) hashes differently every frame.
   '
   ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
   ' @param {string} cacheKey a string uniquely identifying this shape's current field values
@@ -118,6 +105,25 @@ namespace BGE.ShapeComponentHelpers
     digest.Setup("sha1")
     hash = digest.Process(bytes)
     return "tmp:/bge_shape_" + hash + ".png"
+  end function
+
+  ' Wall-clock timer for a full field-change-to-visible round trip - bracket a
+  ' component's whole redraw() with this and logRoundTrip().
+  '
+  ' @return {roTimespan}
+  function startRoundTripTimer() as object
+    return CreateObject("roTimespan")
+  end function
+
+  ' Prints and returns the elapsed time since startRoundTripTimer() - see there.
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {object} timer the result of startRoundTripTimer()
+  ' @return {integer} elapsed milliseconds
+  function logRoundTrip(shapeType as string, timer as object) as integer
+    ms = timer.TotalMilliseconds()
+    print "[BGE.ShapeComponentHelpers] " + shapeType + " full round trip (redraw -> visible) took " + ms.ToStr() + "ms"
+    return ms
   end function
 
   ' Begins a cached shape render: computes the cache URI and, on a cache miss,
@@ -132,13 +138,14 @@ namespace BGE.ShapeComponentHelpers
   ' @return {object} `{uri, hit, renderer, bitmap}` - `renderer`/`bitmap` are invalid when
   '   `hit` is true (cache hit) or when the bitmap couldn't be created
   function beginShapeRender(shapeType as string, cacheKey as string, width as integer, height as integer) as object
-    result = {uri: "", hit: false, renderer: invalid, bitmap: invalid}
+    result = {uri: "", hit: false, renderer: invalid, bitmap: invalid, shapeType: shapeType, timer: invalid}
     if width <= 0 or height <= 0
       return result
     end if
     result.uri = getCacheUri(shapeType, cacheKey)
-    fileSystem = CreateObject("roFileSystem")
-    if fileSystem.Exists(result.uri)
+    ' roFileSystem is MAIN|TASK-only and fails on the render thread (confirmed on hardware) - MatchFiles() has no such restriction.
+    fileName = Mid(result.uri, Len("tmp:/") + 1)
+    if MatchFiles("tmp:/", fileName).Count() > 0
       result.hit = true
       return result
     end if
@@ -149,13 +156,13 @@ namespace BGE.ShapeComponentHelpers
     end if
     result.bitmap = bitmap
     result.renderer = new BGE.Renderer(bitmap)
+    result.timer = CreateObject("roTimespan")
     return result
   end function
 
-  ' Finishes a cache-miss render started by `beginShapeRender()`: realizes the
-  ' queued draws (`Finish()` - there is no `roScreen` involved anywhere in a
-  ' pure-SceneGraph process, so this is the only realization step available or
-  ' needed here), encodes to PNG, and writes it to the cache URI.
+  ' Finishes a cache-miss render started by `beginShapeRender()`: `Finish()`
+  ' (sufficient alone - no `roScreen` needed, confirmed on hardware), encodes
+  ' to PNG, writes to the cache URI.
   '
   ' @param {object} renderState the result of `beginShapeRender()`
   ' @return {boolean} true if the file was written successfully
@@ -168,7 +175,11 @@ namespace BGE.ShapeComponentHelpers
     if invalid = png
       return false
     end if
-    return png.WriteFile(renderState.uri)
+    wrote = png.WriteFile(renderState.uri)
+    if invalid <> renderState.timer
+      print "[BGE.ShapeComponentHelpers] " + renderState.shapeType + " render took " + renderState.timer.TotalMilliseconds().ToStr() + "ms"
+    end if
+    return wrote
   end function
 
   ' Converts a SceneGraph `vertices` field value (a roArray of `{x, y}`-shaped
