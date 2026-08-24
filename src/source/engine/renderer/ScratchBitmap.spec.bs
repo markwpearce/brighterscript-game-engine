@@ -2,18 +2,19 @@ namespace tests
 
   ' ScratchBitmapPool hands out reusable off-screen bitmap regions so the
   ' renderer doesn't have to allocate a new roBitmap for every scratch draw.
-  ' Note: under the simulator/brs-cli, pooling is force-disabled by
-  ' ScratchBitmapPool itself (it checks roDeviceInfo's "simulation_engine"
-  ' feature) regardless of what's passed to the constructor - so these tests
-  ' exercise the pool's public contract rather than pool-reuse internals,
-  ' which can only be observed on a real, non-simulator device.
+  ' Note: under the simulator/brs-cli, ScratchBitmapPool normally force-disables
+  ' pooling itself (it checks roDeviceInfo's "simulation_engine" feature)
+  ' regardless of what's passed to the constructor, which would make pool-reuse
+  ' internals (including the self-flush behavior below) unobservable here - so
+  ' these tests pass forcePoolingRegardlessOfDevice (the 3rd constructor arg,
+  ' test-only) to exercise the real pooling path under brs-cli.
   @suite("BGE.ScratchBitmapPool")
   class ScratchBitmapPoolTests extends rooibos.BaseTestSuite
 
     pool as BGE.ScratchBitmapPool
 
     protected override function beforeEach()
-      m.pool = new BGE.ScratchBitmapPool(true, 2)
+      m.pool = new BGE.ScratchBitmapPool(true, 2, true)
     end function
 
     @describe("getRegion")
@@ -50,6 +51,45 @@ namespace tests
       scratchRegion = m.pool.getRegion(20, 20)
       m.pool.stageRegionsForReturn([scratchRegion])
       m.pool.returnStagedRegions()
+    end function
+
+    @describe("stageRegionsForReturn self-flush (#129)")
+
+    @it("self-flushes once staged regions reach the threshold, with no manual returnStagedRegions() call")
+    function _()
+      threshold = m.pool.getSelfFlushThreshold()
+      m.assertTrue(threshold > 0)
+
+      ' Stage regions one at a time (as a caller would across multiple draws),
+      ' asserting it never crosses the threshold - a self-flush should already have
+      ' fired by the time it would.
+      for i = 1 to threshold
+        scratchRegion = m.pool.getRegion(10, 10)
+        m.pool.stageRegionsForReturn([scratchRegion])
+        m.assertTrue(m.pool.getStagedCount() < threshold)
+      end for
+    end function
+
+    @it("never lets staged regions exceed maxPoolCount, even staging in bursts of 3 (drawBitmapTriangleTo's pattern)")
+    function _()
+      maxPoolCount = m.pool.getMaxPoolCount()
+      for batch = 1 to maxPoolCount \ 3 + 3
+        regions = [m.pool.getRegion(10, 10), m.pool.getRegion(10, 10), m.pool.getRegion(10, 10)]
+        m.pool.stageRegionsForReturn(regions)
+        m.assertTrue(m.pool.getStagedCount() <= maxPoolCount)
+      end for
+    end function
+
+    @it("a caller that still manually calls returnStagedRegions() after a self-flush is a safe no-op")
+    function _()
+      threshold = m.pool.getSelfFlushThreshold()
+      for i = 1 to threshold
+        scratchRegion = m.pool.getRegion(10, 10)
+        m.pool.stageRegionsForReturn([scratchRegion])
+      end for
+      m.assertEqual(0, m.pool.getStagedCount())
+      m.pool.returnStagedRegions()
+      m.assertEqual(0, m.pool.getStagedCount())
     end function
 
     @describe("clearPool")

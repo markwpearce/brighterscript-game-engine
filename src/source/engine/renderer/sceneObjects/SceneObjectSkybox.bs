@@ -6,6 +6,23 @@ namespace BGE
     private tempBitmap as roBitmap
     private rotatedTempBitmap as roBitmap
 
+    ' Snapshot of every input computeVisibleBand()/performDraw() depend on, taken after
+    ' the last successful draw - see inputsUnchangedSinceLastDraw(). Camera position is
+    ' deliberately not tracked here (unlike SceneObjectPlane's cache, which does depend
+    ' on it): a skybox always renders centered on the camera, so translating without
+    ' turning/rolling/zooming needs no recompute at all.
+    private hasCachedDraw as boolean = false
+    private lastOrientation as BGE.Math.Vector
+    private lastRollDegrees as float = 0
+    private lastFieldOfViewDegrees as float = -1
+    private lastDestWidth as float = -1
+    private lastDestHeight as float = -1
+    private lastTextureWidth as float = -1
+    private lastTextureHeight as float = -1
+    private lastDegreesPerFullWidth as float = -1
+    private lastVerticalDegreesCovered as float = -1
+    private lastGeometryVersion as integer = -1
+
     sub new(name as string, drawableObj as DrawableSkybox)
       super(name, drawableObj, BGE.SceneObjectType.Skybox)
       ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
@@ -218,9 +235,71 @@ namespace BGE
       return Int(Sqr(frameSize.x * frameSize.x + frameSize.y * frameSize.y)) + 2
     end function
 
-    ' No per-frame dirty-check caching yet (unlike SceneObjectPlane's movement/camera
-    ' cache) - this recomputes and re-blits the band every frame even when yaw/pitch/
-    ' roll haven't changed. Correct, just not optimized; tracked as a follow-up issue.
+    ' Whether every input computeVisibleBand()/performDraw() depend on is unchanged
+    ' since the last successful draw - if so, performDraw can reuse the previously
+    ' composited bitmap instead of recomputing/re-blitting the band and (if rolled)
+    ' re-rotating it. destWidth/destHeight are the actual (possibly roll-enlarged)
+    ' composite dimensions performDraw already computed, so comparing them covers both
+    ' a frame-size change and a roll-on/off transition in one check.
+    '
+    ' @param {Camera3d} camera
+    ' @param {float} destWidth
+    ' @param {float} destHeight
+    ' @return {boolean}
+    private function inputsUnchangedSinceLastDraw(camera as Camera3d, destWidth as float, destHeight as float) as boolean
+      if not m.hasCachedDraw
+        return false
+      end if
+      if invalid = m.lastOrientation or not BGE.Math.VectorOps.equals(m.lastOrientation, camera.orientation)
+        return false
+      end if
+      if m.lastRollDegrees <> camera.rollDegrees
+        return false
+      end if
+      if m.lastFieldOfViewDegrees <> camera.fieldOfViewDegrees
+        return false
+      end if
+      if m.lastDestWidth <> destWidth or m.lastDestHeight <> destHeight
+        return false
+      end if
+      if m.lastTextureWidth <> m.drawable.region.GetWidth() or m.lastTextureHeight <> m.drawable.region.GetHeight()
+        return false
+      end if
+      if m.lastDegreesPerFullWidth <> m.drawable.degreesPerFullWidth or m.lastVerticalDegreesCovered <> m.drawable.verticalDegreesCovered
+        return false
+      end if
+      ' Catches an explicit invalidateGeometry() call and (partially - see issue #140's
+      ' same-sized-region-swap gap for SceneObjectPlane's supertexture cache) a region
+      ' reassignment; a same-sized region swap with no explicit invalidateGeometry()
+      ' call is the one case this cache can miss, matching that documented precedent.
+      if m.lastGeometryVersion <> m.drawable.geometryVersion
+        return false
+      end if
+      return true
+    end function
+
+    ' Records the snapshot inputsUnchangedSinceLastDraw() compares against next frame.
+    ' Only called after a successful draw, so a failed/culled frame never poisons the
+    ' cache with values that didn't actually produce m.tempBitmap/m.rotatedTempBitmap's
+    ' current contents.
+    '
+    ' @param {Camera3d} camera
+    ' @param {float} destWidth
+    ' @param {float} destHeight
+    private sub rememberDrawInputs(camera as Camera3d, destWidth as float, destHeight as float)
+      m.lastOrientation = BGE.Math.VectorOps.copy(camera.orientation)
+      m.lastRollDegrees = camera.rollDegrees
+      m.lastFieldOfViewDegrees = camera.fieldOfViewDegrees
+      m.lastDestWidth = destWidth
+      m.lastDestHeight = destHeight
+      m.lastTextureWidth = m.drawable.region.GetWidth()
+      m.lastTextureHeight = m.drawable.region.GetHeight()
+      m.lastDegreesPerFullWidth = m.drawable.degreesPerFullWidth
+      m.lastVerticalDegreesCovered = m.drawable.verticalDegreesCovered
+      m.lastGeometryVersion = m.drawable.geometryVersion
+      m.hasCachedDraw = true
+    end sub
+
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       camera = rendererObj.camera as Camera3d
       isRolled = camera.rollDegrees <> 0
@@ -233,6 +312,15 @@ namespace BGE
         destHeight = compositeSize
       end if
 
+      if m.inputsUnchangedSinceLastDraw(camera, destWidth, destHeight)
+        if isRolled and invalid <> m.rotatedTempBitmap
+          return rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
+        else if not isRolled and invalid <> m.tempBitmap
+          return rendererObj.drawObject(0, 0, m.tempBitmap)
+        end if
+      end if
+      m.hasCachedDraw = false
+
       if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> destWidth or m.tempBitmap.GetHeight() <> destHeight
         m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: destHeight, AlphaEnable: true})
       end if
@@ -243,7 +331,11 @@ namespace BGE
       end if
 
       if not isRolled
-        return rendererObj.drawObject(0, 0, m.tempBitmap)
+        worked = rendererObj.drawObject(0, 0, m.tempBitmap)
+        if worked
+          m.rememberDrawInputs(camera, destWidth, destHeight)
+        end if
+        return worked
       end if
 
       ' m.tempBitmap is the enlarged, level (unrolled) composite here - rotating it by
@@ -261,6 +353,9 @@ namespace BGE
 
       worked = rendererObj.drawRotatedImageWithCenterTo(m.rotatedTempBitmap, m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
       worked = worked and rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
+      if worked
+        m.rememberDrawInputs(camera, destWidth, destHeight)
+      end if
       return worked
     end function
 
