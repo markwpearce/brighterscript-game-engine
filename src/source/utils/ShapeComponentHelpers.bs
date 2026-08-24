@@ -1,0 +1,191 @@
+' Shared redraw/caching logic for the SceneGraph shape components under
+' `components/Shapes/` (RoundedRectangle, Circle, Triangle, Polygon). Each
+' component owns exactly one private BGE.Renderer over its own roBitmap and
+' renders into a `tmp:/`-cached PNG, the same Poster-extends/Finish()+GetPng()+
+' tmp:/-file pattern proven by the QR-code SceneGraph library referenced in
+' specs/2026-08-24-scenegraph-shape-components-design.md.
+'
+' A SceneGraph component's own compile scope only includes files reachable via
+' `import` (unlike the flat "source" scope a plain BrighterScript app gets for
+' free) - and BrighterScript type-checks a whole imported class/file, not just
+' the members actually called, so importing BGE.Renderer here pulls in its full
+' transitive dependency graph. Every shape component imports only this one file
+' to get the whole engine in scope, rather than repeating this list four times.
+' Paths are relative (not `pkg:/`-absolute) so they resolve correctly however
+' a consumer's own bsconfig `files` remapping relocates this whole `source/`
+' tree (e.g. `examples/*` copies it under `source/roku_modules/source/`, ropm
+' installs it under `source/roku_modules/<pkg>/`) - relative paths between
+' sibling engine files stay correct under any uniform prefix like that.
+import "../engine/renderer/Renderer.bs"
+import "../engine/Canvas.bs"
+import "../engine/colliders/CircleCollider.bs"
+import "../engine/colliders/Collider.bs"
+import "../engine/colliders/RectangleCollider.bs"
+import "../engine/controllers/FreeFlyCameraController.bs"
+import "../engine/debug/DebugOptions.bs"
+import "../engine/debug/DebugWindow.bs"
+import "../engine/debug/FpsDisplay.bs"
+import "../engine/debug/GarbageCollectorDisplay.bs"
+import "../engine/debug/InputDisplay.bs"
+import "../engine/debug/LogDisplay.bs"
+import "../engine/debug/LogLevel.bs"
+import "../engine/debug/MemoryDisplay.bs"
+import "../engine/drawables/AnimatedImage.bs"
+import "../engine/drawables/Drawable.bs"
+import "../engine/drawables/DrawableCircle.bs"
+import "../engine/drawables/DrawableLine.bs"
+import "../engine/drawables/DrawableParallaxLayer.bs"
+import "../engine/drawables/DrawableParticles.bs"
+import "../engine/drawables/DrawablePlane.bs"
+import "../engine/drawables/DrawablePolygon.bs"
+import "../engine/drawables/DrawableRectangle.bs"
+import "../engine/drawables/DrawableSkybox.bs"
+import "../engine/drawables/DrawableSphere.bs"
+import "../engine/drawables/DrawableText.bs"
+import "../engine/drawables/Image.bs"
+import "../engine/drawables/Model3d.bs"
+import "../engine/drawables/Sprite.bs"
+import "../engine/Game.bs"
+import "../engine/GameEntity.bs"
+import "../engine/GameInput.bs"
+import "../engine/GameTimer.bs"
+import "../engine/interfaces.bs"
+import "../engine/renderer/cameras/Camera.bs"
+import "../engine/renderer/cameras/Camera2d.bs"
+import "../engine/renderer/cameras/Camera3d.bs"
+import "../engine/renderer/DepthSortHelpers.bs"
+import "../engine/renderer/RendererHelpers.bs"
+import "../engine/renderer/sceneObjects/SceneObject.bs"
+import "../engine/renderer/sceneObjects/SceneObjectBillboard.bs"
+import "../engine/renderer/sceneObjects/SceneObjectCircle.bs"
+import "../engine/renderer/sceneObjects/SceneObjectImage.bs"
+import "../engine/renderer/sceneObjects/SceneObjectLine.bs"
+import "../engine/renderer/sceneObjects/SceneObjectModel.bs"
+import "../engine/renderer/sceneObjects/SceneObjectParallaxLayer.bs"
+import "../engine/renderer/sceneObjects/SceneObjectParticle.bs"
+import "../engine/renderer/sceneObjects/SceneObjectPlane.bs"
+import "../engine/renderer/sceneObjects/SceneObjectPolygon.bs"
+import "../engine/renderer/sceneObjects/SceneObjectRectangle.bs"
+import "../engine/renderer/sceneObjects/SceneObjectSkybox.bs"
+import "../engine/renderer/sceneObjects/SceneObjectText.bs"
+import "../engine/renderer/ScratchBitmap.bs"
+import "../engine/renderer/TriangleCache.bs"
+import "../engine/Room.bs"
+import "../engine/TweenManager.bs"
+import "../engine/ui/Alignment.bs"
+import "../engine/ui/Label.bs"
+import "../engine/ui/Slider.bs"
+import "../engine/ui/Style.bs"
+import "../engine/ui/UiContainer.bs"
+import "../engine/ui/UiWidget.bs"
+import "../math/circle.bs"
+import "../math/CornerPoints.bs"
+import "../math/math.bs"
+import "../math/Matrix44.bs"
+import "../math/plane.bs"
+import "../math/rectangle.bs"
+import "../math/Transform.bs"
+import "../math/Triangle.bs"
+import "../math/vector.bs"
+import "colors.bs"
+import "deviceRenderTier.bs"
+import "MotionChecker.bs"
+import "parsers/OBJParser.bs"
+import "parsers/STLParser.bs"
+import "quickhull.bs"
+import "registry.bs"
+import "strings.bs"
+import "TagList.bs"
+import "tweens.bs"
+import "utils.bs"
+import "../roku_modules/rodash/rodash.d.bs"
+
+namespace BGE.ShapeComponentHelpers
+
+  ' Hashes a shape type plus its current field values into a stable `tmp:/`
+  ' filename - identical field values always produce the same filename, so
+  ' repeated/discrete values are a cache hit and skip re-rendering entirely.
+  ' A continuously-varying value (e.g. an Animation-driven tween) produces a
+  ' new hash every frame and never benefits from the cache.
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {string} cacheKey a string uniquely identifying this shape's current field values
+  ' @return {string} a `tmp:/bge_shape_<hash>.png` file URI
+  function getCacheUri(shapeType as string, cacheKey as string) as string
+    bytes = CreateObject("roByteArray")
+    bytes.FromAsciiString(shapeType + "|" + cacheKey)
+    digest = CreateObject("roEVPDigest")
+    digest.Setup("sha1")
+    hash = digest.Process(bytes)
+    return "tmp:/bge_shape_" + hash + ".png"
+  end function
+
+  ' Begins a cached shape render: computes the cache URI and, on a cache miss,
+  ' creates a fresh roBitmap/BGE.Renderer pair for the caller to draw into.
+  ' Call `finishShapeRender()` with the result after drawing (only needed when
+  ' `hit` is false).
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {string} cacheKey a string uniquely identifying this shape's current field values
+  ' @param {integer} width bitmap width in pixels
+  ' @param {integer} height bitmap height in pixels
+  ' @return {object} `{uri, hit, renderer, bitmap}` - `renderer`/`bitmap` are invalid when
+  '   `hit` is true (cache hit) or when the bitmap couldn't be created
+  function beginShapeRender(shapeType as string, cacheKey as string, width as integer, height as integer) as object
+    result = {uri: "", hit: false, renderer: invalid, bitmap: invalid}
+    if width <= 0 or height <= 0
+      return result
+    end if
+    result.uri = getCacheUri(shapeType, cacheKey)
+    fileSystem = CreateObject("roFileSystem")
+    if fileSystem.Exists(result.uri)
+      result.hit = true
+      return result
+    end if
+    bitmap = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+    if invalid = bitmap
+      result.uri = ""
+      return result
+    end if
+    result.bitmap = bitmap
+    result.renderer = new BGE.Renderer(bitmap)
+    return result
+  end function
+
+  ' Finishes a cache-miss render started by `beginShapeRender()`: realizes the
+  ' queued draws (`Finish()` - there is no `roScreen` involved anywhere in a
+  ' pure-SceneGraph process, so this is the only realization step available or
+  ' needed here), encodes to PNG, and writes it to the cache URI.
+  '
+  ' @param {object} renderState the result of `beginShapeRender()`
+  ' @return {boolean} true if the file was written successfully
+  function finishShapeRender(renderState as object) as boolean
+    if invalid = renderState.bitmap or "" = renderState.uri
+      return false
+    end if
+    renderState.bitmap.Finish()
+    png = renderState.bitmap.GetPng(0, 0, renderState.bitmap.GetWidth(), renderState.bitmap.GetHeight())
+    if invalid = png
+      return false
+    end if
+    return png.WriteFile(renderState.uri)
+  end function
+
+  ' Converts a SceneGraph `vertices` field value (a roArray of `{x, y}`-shaped
+  ' associative arrays) into `BGE.Math.Vector[]`, as every `Renderer.draw*`
+  ' polygon/triangle call expects.
+  '
+  ' @param {object} verticesField the raw field value (may be invalid or empty)
+  ' @return {BGE.Math.Vector[]} converted points, empty if the field was empty/invalid
+  function verticesFromField(verticesField as object) as BGE.Math.Vector[]
+    points = []
+    if invalid = verticesField
+      return points
+    end if
+    for each point in verticesField
+      points.push(BGE.Math.VectorOps.create(point.x, point.y))
+    end for
+    return points
+  end function
+
+end namespace
