@@ -90,7 +90,13 @@ namespace BGE
     resources as {
       rightTriangle as BGE.RendererHelpers.TriangleBitmap,
       circle as ifDraw2d,
-      circleRegionWithId as BGE.RendererHelpers.RegionWithId
+      circleRegionWithId as BGE.RendererHelpers.RegionWithId,
+      circleQuadrants as {
+        topLeft as roRegion,
+        topRight as roRegion,
+        bottomLeft as roRegion,
+        bottomRight as roRegion
+      }
     } = {}
 
 
@@ -581,6 +587,82 @@ namespace BGE
       end if
       scale = (radius * 2) / RendererResourceSize
       return m.drawScaledObjectTo(draw2d, x - radius, y - radius, scale, scale, circleBitmap, rgba)
+    end function
+
+
+    ' The renderer's four cached quadrant roRegions of getCircleResource(), one per
+    ' rounded corner - built lazily on first use and cached in resources.circleQuadrants
+    ' exactly like getCircleRegionWithId(), so drawRoundedRectangle doesn't re-run
+    ' CreateObject("roRegion", ...) on every single call.
+    '
+    ' @return {object} an associative array with topLeft/topRight/bottomLeft/bottomRight
+    '   roRegion keys, or invalid if the circle resource couldn't be created
+    function getCircleQuadrantRegions() as dynamic
+      if invalid = m.resources.circleQuadrants
+        circleBitmap = m.getCircleResource()
+        if invalid = circleBitmap
+          return invalid
+        end if
+        half = RendererResourceSize / 2
+        m.resources.circleQuadrants = {
+          topLeft: CreateObject("roRegion", circleBitmap, 0, 0, half, half),
+          topRight: CreateObject("roRegion", circleBitmap, half, 0, half, half),
+          bottomLeft: CreateObject("roRegion", circleBitmap, 0, half, half, half),
+          bottomRight: CreateObject("roRegion", circleBitmap, half, half, half, half)
+        }
+      end if
+      return m.resources.circleQuadrants
+    end function
+
+
+    ' Draws a filled rectangle with rounded corners, top-left anchored at (x, y). The four
+    ' corners are quadrant sections of the renderer's shared circle resource (see
+    ' getCircleResource()/getCircleQuadrantRegions()) scaled to `radius`, composited with
+    ' native DrawRect calls for the straight edges/fill - the same "reuse the pre-rasterized
+    ' circle instead of rasterizing fresh" approach drawCircle takes.
+    '
+    ' @param {float} x top-left x
+    ' @param {float} y top-left y
+    ' @param {float} width
+    ' @param {float} height
+    ' @param {float} radius corner radius - clamped to at most half of width/height, so an
+    '   oversized radius degrades to a "stadium"/circle shape rather than drawing garbage
+    ' @param {integer} rgba fill color (also tints the corner regions, matching drawCircle)
+    ' @return {boolean} true if anything was drawn
+    function drawRoundedRectangle(x as float, y as float, width as float, height as float, radius as float, rgba as integer) as boolean
+      return m.drawRoundedRectangleTo(m.draw2d, x, y, width, height, radius, rgba)
+    end function
+
+    function drawRoundedRectangleTo(draw2d as ifDraw2d, x as float, y as float, width as float, height as float, radius as float, rgba as integer) as boolean
+      if not m.shouldDrawTo(draw2d, x, y, width, height)
+        return false
+      end if
+
+      clampedRadius = BGE.Math.Max(0, BGE.Math.Min(radius, BGE.Math.Min(width, height) / 2))
+      if clampedRadius <= 0
+        return m.drawRectangleTo(draw2d, x, y, width, height, rgba)
+      end if
+
+      quadrants = m.getCircleQuadrantRegions()
+      if invalid = quadrants
+        return m.drawRectangleTo(draw2d, x, y, width, height, rgba)
+      end if
+
+      ' Straight-edge fill: a full-width middle band plus top/bottom bands spanning only
+      ' the gap between each pair of rounded corners - the corner squares themselves are
+      ' left untouched here, for the quadrant regions below to fill instead.
+      draw2d.DrawRect(x, y + clampedRadius, width, height - (clampedRadius * 2), rgba)
+      draw2d.DrawRect(x + clampedRadius, y, width - (clampedRadius * 2), clampedRadius, rgba)
+      draw2d.DrawRect(x + clampedRadius, y + height - clampedRadius, width - (clampedRadius * 2), clampedRadius, rgba)
+      m.drawCallsLastFrame += 3
+
+      scale = (clampedRadius * 2) / RendererResourceSize
+      worked = true
+      worked = m.drawScaledObjectTo(draw2d, x, y, scale, scale, quadrants.topLeft, rgba) and worked
+      worked = m.drawScaledObjectTo(draw2d, x + width - clampedRadius, y, scale, scale, quadrants.topRight, rgba) and worked
+      worked = m.drawScaledObjectTo(draw2d, x, y + height - clampedRadius, scale, scale, quadrants.bottomLeft, rgba) and worked
+      worked = m.drawScaledObjectTo(draw2d, x + width - clampedRadius, y + height - clampedRadius, scale, scale, quadrants.bottomRight, rgba) and worked
+      return worked
     end function
 
     ' Draws text to the screen
