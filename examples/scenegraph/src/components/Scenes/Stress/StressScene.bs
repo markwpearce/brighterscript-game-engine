@@ -1,0 +1,219 @@
+' See StressScene.xml. Builds a grid of BGE shape components on demand and measures
+' mass-construction behavior: total wall-clock to "all rendered", a heartbeat timer's
+' max render-thread-stall gap during the burst, and a spot-check that a few instances
+' set with several XML/imperative-style field writes each still coalesce into exactly
+' one real redraw (see docs/scenegraph-shapes.md's "Hardware findings").
+function init()
+  m.top.setFocus(true)
+
+  m.titleLabel = m.top.findNode("title")
+  m.statusLabel = m.top.findNode("statusLabel")
+  m.heartbeatLabel = m.top.findNode("heartbeatLabel")
+  m.spotCheckLabel = m.top.findNode("spotCheckLabel")
+  m.grid = m.top.findNode("grid")
+
+  m.specCycle = ["rects:25", "rects:10", "rects:20", "rects:30", "mixed:25", "mixed:30"]
+  m.specIndex = 0
+
+  ' Same heartbeat pattern as MainScene.bs - ticks on a short fixed interval, so a gap
+  ' much larger than that reveals the render thread was blocked during construction.
+  m.heartbeatCount = 0
+  m.heartbeatMaxGapMs = 0
+  m.heartbeatClock = CreateObject("roTimespan")
+  m.heartbeatTimer = CreateObject("roSGNode", "Timer")
+  m.heartbeatTimer.duration = 0.05
+  m.heartbeatTimer.repeat = true
+  m.heartbeatTimer.ObserveField("fire", "onHeartbeat")
+  m.top.appendChild(m.heartbeatTimer)
+  m.heartbeatTimer.control = "start"
+
+  ' A fresh nonce per app run so every shape's field values are novel this run (distinct
+  ' cachefs:/ filenames), giving a genuine cold cache-miss measurement instead of a mix of
+  ' accidental cache hits from a previous run's identical values.
+  m.nonce = CreateObject("roDateTime").AsSeconds() mod 977
+
+  ' Deliberately does NOT build here - main.bs always sets `spec` exactly once right after
+  ' scene creation, and onSpecChanged() below builds from that. If init() also built (e.g.
+  ' from a non-empty XML default), main.bs's own spec assignment would fire a second,
+  ' overlapping build while the first is still mid-render - each ShapeRenderTask keeps
+  ' running once started regardless of its owning node being torn down, so this isn't just
+  ' wasted work, it's extra concurrent Task load stacked on top of the intended count
+  ' (confirmed on hardware: a real "unusually high number of tasks" OS warning).
+  if m.top.spec <> ""
+    buildGrid(m.top.spec)
+  end if
+end function
+
+sub onSpecChanged()
+  if m.top.spec <> ""
+    buildGrid(m.top.spec)
+  end if
+end sub
+
+function onKeyEvent(key as string, press as boolean) as boolean
+  handled = false
+  if press and "OK" = key
+    m.specIndex = (m.specIndex + 1) mod m.specCycle.count()
+    m.top.spec = m.specCycle[m.specIndex]
+    handled = true
+  end if
+  return handled
+end function
+
+sub onHeartbeat()
+  gapMs = m.heartbeatClock.TotalMilliseconds()
+  m.heartbeatClock.Mark()
+  m.heartbeatCount++
+  if gapMs > m.heartbeatMaxGapMs
+    m.heartbeatMaxGapMs = gapMs
+  end if
+  if gapMs > 70
+    print "[StressScene] heartbeat gap " + gapMs.toStr() + "ms (expected ~50ms) - render thread was blocked"
+  end if
+  m.heartbeatLabel.text = "Heartbeat: " + m.heartbeatCount.toStr() + " (max gap: " + m.heartbeatMaxGapMs.toStr() + "ms)"
+end sub
+
+' Rebuilds the shape grid from a "<variant>:<count>" spec string, then times how long
+' it takes every shape to report its first real redraw (uri set = rendered, cache hit or
+' Task result).
+sub buildGrid(spec as string)
+  parts = spec.split(":")
+  variant = parts[0]
+  count = 25
+  if parts.count() > 1
+    count = val(parts[1])
+  end if
+
+  print "[StressScene] building spec=" + spec + " (variant=" + variant + ", count=" + count.toStr() + ")"
+
+  existing = m.grid.getChildren(-1, 0)
+  m.grid.removeChildren(existing)
+
+  m.totalCount = count
+  m.completedCount = 0
+  m.spotCheckCounts = [0, 0, 0]
+  m.allRenderedLogged = false
+  m.statusLabel.text = "Building " + count.toStr() + " (" + variant + ") shapes..."
+  m.spotCheckLabel.text = "Spot-check redraw counts: pending"
+  m.heartbeatMaxGapMs = 0
+  m.heartbeatClock.Mark()
+
+  m.constructionClock = CreateObject("roTimespan")
+
+  shapeTypes = ["RoundedRectangle", "Circle", "Triangle", "Polygon"]
+  palette = [&hFF6B35FF, &h3AAFA9FF, &hF6C90EFF, &hE85D75FF, &h2D9CDBFF, &h9B5DE5FF, &h6FCF97FF, &hEE6C4DFF, &h355C7DFF, &hF08A5DFF]
+
+  ' A fixed-column grid (rather than a shelf-packer) guarantees no overlap/off-canvas
+  ' placement at any count up to a couple dozen columns*rows worth - each shape is sized
+  ' as a varying fraction of its own cell, so sizes still differ meaningfully without
+  ' risking a row running off the bottom of the canvas.
+  gridStartX = 20
+  gridStartY = 140
+  gridWidth = 1240
+  gridHeight = 720 - gridStartY - 20
+  cols = 6
+  rows = Int((count - 1) / cols) + 1
+  cellW = gridWidth / cols
+  cellH = gridHeight / rows
+
+  for i = 0 to count - 1
+    if variant = "mixed"
+      shapeType = shapeTypes[i mod shapeTypes.count()]
+    else
+      shapeType = "RoundedRectangle"
+    end if
+
+    col = i mod cols
+    row = Int(i / cols)
+    x = gridStartX + col * cellW
+    y = gridStartY + row * cellH
+
+    ' Vary each shape's size as 40%-90% of its own cell (varies meaningfully across the
+    ' grid, e.g. ~80px to ~190px wide at a 6-column/1240px-wide grid) while always fitting
+    ' inside the cell, so no shape can overlap a neighbor regardless of count.
+    w = Int(cellW * (0.4 + 0.5 * ((i * 53 + m.nonce) mod 100) / 100))
+    h = Int(cellH * (0.4 + 0.5 * ((i * 41 + m.nonce * 3) mod 100) / 100))
+    color = palette[(i * 7 + m.nonce) mod palette.count()]
+    outlineColor = palette[(i * 3 + m.nonce + 1) mod palette.count()]
+
+    ' A dynamically-typed CreateObject("roSGNode", shapeType) call resolves to the generic
+    ' Node type at compile time (shapeType isn't a literal), which has none of these shape-
+    ' specific fields - bracket/AA field access sidesteps that, same as `shape.SetField(...)`.
+    shape = CreateObject("roSGNode", shapeType)
+    shape.id = "stressShape" + i.toStr()
+    shape["translation"] = [x, y]
+    shape["width"] = w
+    shape["height"] = h
+    shape["color"] = color
+    ' Every third shape also gets an outline - several extra redraw-triggering fields set
+    ' on the same instance, the same multi-attribute-coalescing case docs/scenegraph-shapes.md
+    ' documents, now exercised under real concurrent load from 20-30 other instances at once.
+    if i mod 3 = 0
+      shape["outlineColor"] = outlineColor
+      shape["outlineWidth"] = 3 + (i mod 5)
+    end if
+
+    if shapeType = "RoundedRectangle"
+      if w < h
+        minWH = w
+      else
+        minWH = h
+      end if
+      maxRadius = Int(minWH / 2)
+      if maxRadius < 1
+        maxRadius = 1
+      end if
+      shape["cornerRadius"] = 4 + (i * 5 mod maxRadius)
+    else if shapeType = "Circle"
+      segmentsChoices = [16, 24, 32, 48]
+      shape["outlineSegments"] = segmentsChoices[i mod segmentsChoices.count()]
+    else if shapeType = "Polygon"
+      shape["vertices"] = [[w / 2, 0], [w, h / 2], [w / 2, h], [0, h / 2]]
+    end if
+    ' Triangle: leave vertices at their default (right triangle sized from width/height).
+
+    shape.observeField("uri", "onAnyShapeRedrawn")
+    if i = 0
+      shape.observeField("uri", "onSpotCheck0Redrawn")
+    else if i = 1
+      shape.observeField("uri", "onSpotCheck1Redrawn")
+    else if i = 2
+      shape.observeField("uri", "onSpotCheck2Redrawn")
+    end if
+
+    m.grid.appendChild(shape)
+  end for
+end sub
+
+sub onAnyShapeRedrawn()
+  m.completedCount++
+  m.statusLabel.text = "Rendered " + m.completedCount.toStr() + "/" + m.totalCount.toStr() + " shapes"
+  if m.completedCount = m.totalCount and not m.allRenderedLogged
+    m.allRenderedLogged = true
+    elapsedMs = m.constructionClock.TotalMilliseconds()
+    m.statusLabel.text = "ALL RENDERED: " + elapsedMs.toStr() + "ms for " + m.totalCount.toStr() + " shapes"
+    print "[StressScene] all " + m.totalCount.toStr() + " shapes rendered in " + elapsedMs.toStr() + "ms (max heartbeat gap so far: " + m.heartbeatMaxGapMs.toStr() + "ms)"
+    updateSpotCheckLabel()
+  end if
+end sub
+
+sub onSpotCheck0Redrawn()
+  m.spotCheckCounts[0]++
+  updateSpotCheckLabel()
+end sub
+
+sub onSpotCheck1Redrawn()
+  m.spotCheckCounts[1]++
+  updateSpotCheckLabel()
+end sub
+
+sub onSpotCheck2Redrawn()
+  m.spotCheckCounts[2]++
+  updateSpotCheckLabel()
+end sub
+
+sub updateSpotCheckLabel()
+  c = m.spotCheckCounts
+  m.spotCheckLabel.text = "Spot-check redraw counts (expect 1 each): " + c[0].toStr() + ", " + c[1].toStr() + ", " + c[2].toStr()
+  print "[StressScene] spot-check redraw counts: " + c[0].toStr() + ", " + c[1].toStr() + ", " + c[2].toStr()
+end sub

@@ -183,6 +183,46 @@ full write-up.
 `roScreen` fallback anywhere in the process, unlike `examples/hybrid`). Demonstrates all four
 shapes, static and (where it survives measurement) animated.
 
+## Mass-construction stress test (issue #61 follow-up)
+
+The 4-shape `examples/scenegraph` demo never exercises more than 4 concurrent `ShapeRenderTask`
+instances - each shape component owns its own persistent Task, not a shared pool, so a scene
+with 20-30 shape instances means 20-30 near-simultaneous Task spin-ups. This was never measured.
+Added `examples/scenegraph`'s `StressScene` (reachable via `scene=stress`/`spec=<variant>:<count>`
+launch params, not the default view) to build a grid of `RoundedRectangle`-only or mixed-type
+shapes and measure this on real hardware.
+
+**Found and fixed**: every shape component's private `Renderer` used the default
+`useBitmapPooling: true`, eagerly preallocating a ~44MB `ScratchBitmapPool` (10 scratch bitmaps
+at the device's scratch-tier size) per `Renderer`, regardless of whether that render ever needs
+one. At 25+ concurrent shapes this exhausted available bitmap memory on real hardware -
+`Failed to create bitmap for ScratchBitmap with id: N` spam, individual render times up to 10x
+the documented baseline, and several shapes permanently stuck mid-render. Fixed in
+`BGE.ShapeComponentHelpers.createShapeRenderState()` by passing `{useBitmapPooling: false}` -
+correct since a shape component's `Renderer` is one-shot and disposable, never reused, so pooling
+has nothing to amortize. Verified fixed: 25 and 30 concurrent `RoundedRectangle` instances both
+completed with zero bitmap-creation failures post-fix (construction time 2213ms/2498ms, max
+heartbeat gap 848ms/627ms - both above the 4-shape demo's ~287ms worst case, but no failures).
+
+**Found, not fixed**: mixing all four shape types at count 30 still measured 4-6 shapes (of 30)
+silently never completing - no error anywhere, including after adding a diagnostic print to
+`ShapeRenderTask.doRender()`'s one known silent-failure path (a failed primary bitmap create).
+That print never fired, so the failure lies elsewhere in the `Triangle`/`Polygon` path under this
+specific concurrency level. Bisected: `mixed:10`/`mixed:20`/`mixed:25` and `rects:30` (no
+triangles/polygons) all completed cleanly and repeatably; only `mixed:30` reproduced the hang,
+and the exact count of stuck shapes varied between runs (24/30 and 26/30 observed), suggesting a
+resource-contention race rather than a deterministic logic bug. Not root-caused within this
+session - documented as a known limitation. See docs/scenegraph-shapes.md's "Mass construction"
+section for the user-facing writeup.
+
+Also fixed in the same investigation: setting `StressScene.spec` from `main.bs` after scene
+creation used to fire a second, overlapping build on top of the scene's own non-empty XML
+default - each `ShapeRenderTask` keeps running once started regardless of its owning node being
+torn down, so this stacked extra concurrent Task load on top of the intended count (confirmed via
+a real "unusually high number of tasks" OS warning at 51 tasks when only 30 were intended).
+Fixed by defaulting `spec` to empty in XML and only building when it's actually set - `main.bs`
+now always sets it exactly once, so exactly one build ever happens per launch.
+
 ## Definition of done
 
 - All four components ship under `src/components/Shapes/`, verified via

@@ -230,6 +230,49 @@ current value, not to redraw at the interpolator's own frame rate.
   though it measurably reduces render-thread blocking (see "Task-based rendering" below) - a
   blank shape is a worse failure than an occasionally-janky heartbeat.
 
+## Mass construction (20-30 concurrent shapes, issue #61 stress test)
+
+Each shape component instance owns its own persistent `ShapeRenderTask` - there is no shared
+pool across instances. The 4-shape demo above never stresses this; a dedicated stress test
+(`examples/scenegraph`'s `StressScene`, reachable via `rokubot launch dev --param scene=stress
+--param spec=rects:30` or `--param spec=mixed:30` - not the app's default view) builds a grid of
+20-30 shape instances at once to measure what happens with that many concurrent `Task`
+spin-ups on real hardware.
+
+**A real memory bug, found and fixed**: each shape component's private `BGE.Renderer` used the
+normal `useBitmapPooling: true` default, which eagerly preallocates a `ScratchBitmapPool` of 10
+scratch bitmaps at the device's scratch-tier size (1080x1080 on FHD, ~4.4MB each - ~44MB per
+pool) in the `Renderer`'s constructor, whether or not that particular render ever needs a scratch
+bitmap. With 25+ shapes redrawing concurrently (each on its own `Task`, each constructing its own
+`Renderer`), this measured real `CreateObject("roBitmap")` failures on real hardware - console
+spam of `Failed to create bitmap for ScratchBitmap with id: N` - ballooning individual render
+times from the documented ~55-70ms up to 500-700ms, and in the worst observed case permanently
+stalling several shapes (stuck at "22/25 rendered" indefinitely, no crash, no further progress).
+Fixed by passing `{useBitmapPooling: false}` to the internal `Renderer` in
+`BGE.ShapeComponentHelpers.createShapeRenderState()` - a shape component's `Renderer` does one
+disposable render and is discarded, so it has nothing to amortize a pool against; any scratch
+bitmap it does need (e.g. `Triangle`/`Polygon`'s lazy right-triangle resource) is now created on
+demand instead of preallocated. After the fix, 25 and 30 concurrent `RoundedRectangle` instances
+both completed cleanly with no bitmap-creation failures (25: 2213ms total, max heartbeat gap
+848ms; 30: 2498ms total, max heartbeat gap 627ms - both well above the 4-shape demo's ~287ms
+worst case, but no failures).
+
+**A second, unresolved failure mode**: mixing all four shape types (`RoundedRectangle`, `Circle`,
+`Triangle`, `Polygon`) at count 30 measured several shapes (4-6 of 30, varying between runs)
+silently never completing - the on-screen "Rendered N/30" counter stops advancing permanently
+(confirmed via a heartbeat timer still ticking for 60+ seconds afterward, so the render thread
+itself isn't blocked/crashed) with **no error printed anywhere**, even after adding a diagnostic
+print to `ShapeRenderTask.doRender()` for the one known silent-failure path (a failed primary
+`CreateObject("roBitmap")`, which returns from `doRender()` with no `resultUri` ever set - see
+the code comment there). That diagnostic never fired during the hang, so the failure is
+somewhere else in the `Triangle`/`Polygon` path specifically - the same test at `mixed:20` and
+`mixed:25`, and at `rects:30` (all `RoundedRectangle`, no triangles/polygons), completed cleanly
+every time. Root cause not isolated within the scope of this investigation; treat "20-30
+same-type shapes" as measured-safe (with the pooling fix above) and "30 mixed shapes including
+Triangle/Polygon" as a known, unresolved risk until someone digs further - see
+`specs/2026-08-24-scenegraph-shape-components-design.md`'s stress-test findings for the full
+bisection (10/20/25 mixed all clean; 30 mixed flaky).
+
 ## A fixed bug: width/height auto-scale race
 
 An earlier version of these components extended `Poster` directly and reused `Poster`'s own
