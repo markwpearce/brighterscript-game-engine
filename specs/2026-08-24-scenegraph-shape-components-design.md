@@ -138,6 +138,45 @@ split `beginShapeRender()` was refactored into: the old function's cache-check h
 render-setup half became `createShapeRenderState()` (now callable from the Task thread, always
 past a confirmed cache miss).
 
+## Multi-attribute redraw coalescing (issue #61 follow-up)
+
+A shape constructed with several redraw-triggering fields set as XML attributes on one tag
+(e.g. `<RoundedRectangle width="220" height="160" cornerRadius="24" color="0xFF6B35FF" />`)
+redrew once per attribute, not once per tag — a real cache-miss render each time, since the
+whole point of the fix is to still work correctly on the very first construction (no cache hit
+yet). A first attempt switched the redraw trigger from XML `onChange=` to `observeField()`
+registered once in `init()`, on the theory that SceneGraph batches a tag's XML-attribute
+application into one signal after construction finishes. **That theory is wrong** — proven on
+real hardware with diagnostic call-count logging: `observeField()` fires exactly once per field,
+exactly like `onChange=` did; there is no batching. The true construction order is `init()` runs
+first (queuing its own initial redraw with default field values), then each XML attribute is
+applied afterward, each one independently notifying its observer. That first attempt's apparent
+success was an accident of Task pre-emption: reusing one `ShapeRenderTask` instance across
+redraws means an in-flight run's fields get silently overwritten by a later `redraw()` call
+before it completes, so only the *last* of several redraws actually finished and got cached —
+`redraw()` itself was still being called once per attribute, it just wasn't visible in the
+render-completion counts, and this behavior isn't guaranteed to hold under different timing.
+
+The actual fix is a debounce, not a change of trigger mechanism: `onShapeFieldChanged` (and
+`init()`'s own initial trigger) never call `redraw()` directly — they restart a `duration="0"`
+`Timer` child node (`m.redrawTimer.control = "stop"` then `"start"`), and only the timer's own
+`fire` event calls the real `redraw()`. SceneGraph applies every attribute on an XML tag
+synchronously before the render thread next processes timer/event callbacks, so N attribute
+values set on one tag restart the timer N times but only the last restart survives to fire —
+coalescing into exactly one real redraw. Verified on real hardware with temporary diagnostic
+prints counting both "field changed, timer restarted" and "timer fired, real redraw ran" calls
+directly (not inferred from render-completion log lines, which is exactly what masked the first
+attempt's real behavior): every shape showed the targeted N:1 ratio, e.g. `RoundedRectangle`
+with 4 attributes set produced 4 restarts and exactly 1 real redraw; a zero-attribute
+`<Circle />` relying entirely on defaults produced 0 restarts and exactly 1 real redraw (from
+`init()`'s own trigger). A single post-construction imperative field change (the demo's
+Left-button color toggle) still redraws correctly, with the debounce adding roughly 1ms of
+latency on real hardware — negligible against the ~150-200ms render round trip. The sustained
+`Animation`-driven redraw path (repeated field changes at runtime, a different scenario from
+construction-time batching) was re-verified over a 20-second run and continues to work
+unchanged by the debounce. See `docs/scenegraph-shapes.md`'s "Hardware findings" section for the
+full write-up.
+
 ## Example
 
 `examples/scenegraph` — pure SceneGraph app (manifest `main_scene`, `roSGScreen` only, no

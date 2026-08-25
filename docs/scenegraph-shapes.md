@@ -75,7 +75,21 @@ child `BGE_ShapeRenderTask`-style `Task` node created once in `init()` and reuse
 redraws. The child `Poster`'s `width`/`height` are never set - only its `uri` is ever swapped,
 and only once a render has actually finished - so there's no frame where a stale image gets
 stretched into a newly-set box (see "A fixed bug" below). Every field that affects the rendered
-shape is observed by a single `onShapeFieldChanged` handler, which:
+shape is observed by an `onShapeFieldChanged` handler, but that handler never redraws directly -
+it restarts a `duration="0"` `Timer` (stop then start); only the timer's own `fire` event calls
+the real `redraw()`. This matters because SceneGraph fires a field's change notification once per
+field, exactly like an `onChange=` XML attribute would - there is no batching of an XML tag's
+several attributes into one notification (see "Hardware findings" below). So setting several
+redraw-triggering fields as attributes on one tag (e.g. `width`, `height`, `cornerRadius`, `color`
+all on one `<RoundedRectangle>` tag) still calls `onShapeFieldChanged` once per attribute, but
+each call just restarts the timer rather than redrawing - since SceneGraph applies every
+attribute on a tag synchronously before the render thread next processes timer/event callbacks,
+only the *last* restart survives to actually fire, so N attribute values coalesce into exactly
+one real `redraw()` (confirmed on real hardware by counting each call site directly - see
+"Hardware findings"). `init()` itself goes through the same path (calling the debounce-restart
+function, not `redraw()` directly), so a shape built with zero explicit attributes (e.g.
+`<Circle />`, relying entirely on defaults) still gets exactly one initial render, not zero.
+`redraw()`, once it actually runs, does the real work:
 
 1. Hashes the shape type plus the current field values (`roEVPDigest` SHA1) into a
    `cachefs:/bge_shape_<hash>.png` filename and checks whether that file already exists
@@ -170,6 +184,34 @@ current value, not to redraw at the interpolator's own frame rate.
 - **A field's `onChange` XML attribute and a same-name `m.top.observeField()` call both fire** -
   registering both (an early draft of these components did, redundantly) doubles every redraw,
   including the initial paint. Fixed by relying on `onChange` alone.
+- **SceneGraph does not batch a tag's several XML attributes into one field-change
+  notification** - confirmed on real hardware with call-count diagnostics: `observeField()`
+  fires exactly once per field, exactly like `onChange=` did, whether the value came from an
+  XML attribute or an imperative assignment. Setting `width`, `height`, `cornerRadius`, `color`
+  as four attributes on one `<RoundedRectangle>` tag produces four separate field-change
+  notifications, not one - an earlier attempt at this fix assumed construction-time XML
+  attributes get batched into a single post-construction signal; they don't. The actual order
+  observed: `init()` runs first (queuing its own initial redraw), then each XML attribute is
+  applied afterward, one at a time, each independently notifying its observer. The real fix is
+  a debounce: `onShapeFieldChanged` never redraws directly, it restarts a `duration="0"` `Timer`
+  (`m.redrawTimer.control = "stop"` then `"start"`); only the timer's `fire` event calls the
+  real `redraw()`. Because every attribute on one XML tag (and `init()`'s own initial trigger)
+  applies synchronously before the render thread next processes timer/event callbacks, only the
+  last timer restart survives to fire. Measured directly (not inferred from render/cache log
+  lines, which can look artificially low for an unrelated reason - see below) by counting both
+  "field changed, timer restarted" and "timer fired, real redraw ran" calls at construction:
+  every shape showed exactly the N-changed-fields : 1-real-redraw ratio the fix targets (e.g.
+  `RoundedRectangle` with 4 attributes set: 4 restarts, 1 real redraw; a zero-attribute
+  `<Circle />` relying entirely on defaults: 0 restarts, 1 real redraw from `init()` alone). A
+  single post-construction imperative field change (e.g. the demo's Left-button color toggle)
+  still redraws correctly, with the debounce itself adding on the order of 1ms of latency
+  (measured on real hardware) - negligible next to the ~150-200ms render round trip. The
+  previous (incorrect) fix attempt happened to *look* like it worked because reusing one
+  `ShapeRenderTask` instance means an in-flight run's fields get silently overwritten by a later
+  `redraw()` call before it finishes, so only the last of several redraws actually completed and
+  got cached - `redraw()` itself was still being called once per attribute, it just wasn't
+  visible in the render-completion counts. The debounce fix removes the extra `redraw()` calls
+  entirely rather than relying on that timing accident.
 - **`control="RUN"` on an already-idle `Task` node can be set again to re-run it** - no
   `control="STOP"` needed first. Confirmed on real hardware: each shape component keeps one
   `ShapeRenderTask` instance for its whole lifetime and just reassigns its fields plus
