@@ -1,6 +1,12 @@
 ' See ShapeRenderTask.xml for the field interface.
 import "../../source/utils/ShapeComponentHelpers.bs"
 
+typecast m as IShapeRenderTask
+
+interface IShapeRenderTask
+  top as BGE.ShapeComponentHelpers.INodeShapeRenderTask
+end interface
+
 sub init()
   m.top.functionName = "doRender"
 end sub
@@ -18,49 +24,63 @@ function doRender() as void
     ' diagnostic at all. This print doesn't recover the render, but at least makes the
     ' failure visible instead of an unexplained permanent hang.
     print "[BGE.ShapeRenderTask] " + shapeType + " bitmap creation failed (" + width.toStr() + "x" + height.toStr() + ") - shape will never render"
+    ' resultUri is alwaysNotify="true" (see ShapeRenderTask.xml), so setting it - even to
+    ' its already-empty value - still fires onRenderComplete and lets the caller detect the
+    ' failure instead of hanging forever on a Task that will never finish.
+    m.top.resultUri = ""
     return
   end if
 
-  drawShape(renderState, shapeType, width, height)
-  BGE.ShapeComponentHelpers.finishShapeRender(renderState)
+  drewOk = drawShape(renderState, shapeType, width, height)
+  wroteOk = BGE.ShapeComponentHelpers.finishShapeRender(renderState)
+  if not drewOk or not wroteOk
+    print "[BGE.ShapeRenderTask] " + shapeType + " draw/encode failed (drewOk=" + drewOk.toStr() + " wroteOk=" + wroteOk.toStr() + ") - likely a scratch-bitmap allocation failure under memory pressure, see BGE.ShapeComponentHelpers.createShapeRenderState()'s useBitmapPooling comment"
+    m.top.resultUri = ""
+    return
+  end if
 
   m.top.resultRoundTripMs = renderState.timer.TotalMilliseconds()
   m.top.resultUri = renderState.uri
 end function
 
 ' Dispatches to the BGE.Renderer draw*/draw*Outline call(s) matching `shapeType` - the
-' same calls each shape component made directly before this Task existed.
-sub drawShape(renderState as object, shapeType as string, width as integer, height as integer)
+' same calls each shape component made directly before this Task existed. Returns false if
+' any draw call itself failed (e.g. `Renderer`'s internal scratch-bitmap pool couldn't
+' allocate under memory pressure) so the caller can report a real failure instead of writing
+' out (and caching) a blank/partial image.
+function drawShape(renderState as BGE.ShapeComponentHelpers.ShapeRenderState, shapeType as string, width as integer, height as integer) as boolean
   renderer = renderState.renderer
   bitmap = renderState.bitmap
+  ok = true
 
   if shapeType = "RoundedRectangle"
-    renderer.drawRoundedRectangleTo(bitmap, 0, 0, width, height, m.top.cornerRadius, m.top.color)
+    ok = renderer.drawRoundedRectangleTo(bitmap, 0, 0, width, height, m.top.cornerRadius, m.top.color) and ok
     if m.top.outlineWidth > 0
-      renderer.drawRectangleOutlineTo(bitmap, 0, 0, width, height, m.top.outlineColor, m.top.outlineWidth)
+      ok = renderer.drawRectangleOutlineTo(bitmap, 0, 0, width, height, m.top.outlineColor, m.top.outlineWidth) and ok
     end if
   else if shapeType = "Circle"
     radius = BGE.Math.Min(width, height) / 2
-    renderer.drawCircleTo(bitmap, radius, radius, radius, m.top.color)
+    ok = renderer.drawCircleTo(bitmap, radius, radius, radius, m.top.color) and ok
     if m.top.outlineWidth > 0
-      renderer.drawCircleOutline(m.top.outlineSegments, radius, radius, radius - (m.top.outlineWidth / 2), m.top.outlineColor)
+      ok = renderer.drawCircleOutline(m.top.outlineSegments, radius, radius, radius - (m.top.outlineWidth / 2), m.top.outlineColor) and ok
     end if
   else if shapeType = "Triangle"
     points = BGE.ShapeComponentHelpers.verticesFromField(m.top.vertices)
     if points.count() <> 3
       points = BGE.ShapeComponentHelpers.defaultTriangleVertices(width, height)
     end if
-    renderer.drawTriangleTo(bitmap, points, 0, 0, m.top.color)
+    ok = renderer.drawTriangleTo(bitmap, points, 0, 0, m.top.color) and ok
     if m.top.outlineWidth > 0
-      renderer.drawTriangleOutlineTo(bitmap, points, m.top.outlineColor)
+      ok = renderer.drawTriangleOutlineTo(bitmap, points, m.top.outlineColor) and ok
     end if
   else if shapeType = "Polygon"
     points = BGE.ShapeComponentHelpers.verticesFromField(m.top.vertices)
     if points.count() >= 3
-      renderer.drawPolygonTo(bitmap, points, 0, 0, m.top.color)
+      ok = renderer.drawPolygonTo(bitmap, points, 0, 0, m.top.color) and ok
       if m.top.outlineWidth > 0
-        renderer.drawPolygonOutlineTo(bitmap, points, m.top.outlineColor, m.top.outlineWidth)
+        ok = renderer.drawPolygonOutlineTo(bitmap, points, m.top.outlineColor, m.top.outlineWidth) and ok
       end if
     end if
   end if
-end sub
+  return ok
+end function

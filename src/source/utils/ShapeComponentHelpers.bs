@@ -91,6 +91,24 @@ import "../roku_modules/rodash/rodash.d.bs"
 
 namespace BGE.ShapeComponentHelpers
 
+  ' Node-level interface for the shared `ShapeRenderTask` node (see ShapeRenderTask.xml) -
+  ' declared here (not in ShapeRenderTask.bs) so every shape component's own `renderTask`
+  ' field can be typed precisely too, without each one re-declaring it.
+  interface INodeShapeRenderTask extends roSGNodeTask
+    shapeType as string
+    uri as string
+    width as float
+    height as float
+    color as integer
+    outlineColor as integer
+    outlineWidth as integer
+    cornerRadius as float
+    outlineSegments as integer
+    vertices as object
+    resultUri as string
+    resultRoundTripMs as integer
+  end interface
+
   ' Hashes a shape type plus its field values into a stable `cachefs:/` filename -
   ' a cache hit for repeated/discrete values, but a continuously-varying value
   ' (e.g. an Animation-driven tween) hashes differently every frame. `cachefs:/`
@@ -116,16 +134,16 @@ namespace BGE.ShapeComponentHelpers
   ' component's whole redraw() with this and logRoundTrip().
   '
   ' @return {roTimespan}
-  function startRoundTripTimer() as object
+  function startRoundTripTimer() as roTimespan
     return CreateObject("roTimespan")
   end function
 
   ' Prints and returns the elapsed time since startRoundTripTimer() - see there.
   '
   ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
-  ' @param {object} timer the result of startRoundTripTimer()
+  ' @param {roTimespan} timer the result of startRoundTripTimer()
   ' @return {integer} elapsed milliseconds
-  function logRoundTrip(shapeType as string, timer as object) as integer
+  function logRoundTrip(shapeType as string, timer as roTimespan) as integer
     ms = timer.TotalMilliseconds()
     print "[BGE.ShapeComponentHelpers] " + shapeType + " full round trip (redraw -> visible) took " + ms.ToStr() + "ms"
     return ms
@@ -138,14 +156,20 @@ namespace BGE.ShapeComponentHelpers
   '
   ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
   ' @param {string} cacheKey a string uniquely identifying this shape's current field values
-  ' @return {object} `{uri, hit}`
-  function checkShapeCache(shapeType as string, cacheKey as string) as object
+  ' @return {ShapeCacheCheck} `{uri, hit}`
+  function checkShapeCache(shapeType as string, cacheKey as string) as ShapeCacheCheck
     uri = getCacheUri(shapeType, cacheKey)
     ' roFileSystem is MAIN|TASK-only and fails on the render thread (confirmed on hardware) - MatchFiles() has no such restriction.
     fileName = Mid(uri, Len("cachefs:/") + 1)
     hit = MatchFiles("cachefs:/", fileName).Count() > 0
     return {uri: uri, hit: hit}
   end function
+
+  ' Result of checkShapeCache() - see there.
+  interface ShapeCacheCheck
+    uri as string
+    hit as boolean
+  end interface
 
   ' Begins a cache-miss render: creates a fresh roBitmap/BGE.Renderer pair for the caller
   ' to draw into. Intended to run inside a `ShapeRenderTask` (off the render thread) after
@@ -156,9 +180,9 @@ namespace BGE.ShapeComponentHelpers
   ' @param {string} uri the cache file URI to render into (from `checkShapeCache()`)
   ' @param {integer} width bitmap width in pixels
   ' @param {integer} height bitmap height in pixels
-  ' @return {object} `{uri, renderer, bitmap, shapeType, timer}` - `renderer`/`bitmap` are
+  ' @return {ShapeRenderState} `{uri, renderer, bitmap, shapeType, timer}` - `renderer`/`bitmap` are
   '   invalid when `width`/`height` are non-positive or the bitmap couldn't be created
-  function createShapeRenderState(shapeType as string, uri as string, width as integer, height as integer) as object
+  function createShapeRenderState(shapeType as string, uri as string, width as integer, height as integer) as ShapeRenderState
     result = {uri: uri, renderer: invalid, bitmap: invalid, shapeType: shapeType, timer: invalid}
     if width <= 0 or height <= 0 or "" = uri
       return result
@@ -179,18 +203,45 @@ namespace BGE.ShapeComponentHelpers
     ' in specs/2026-08-24-scenegraph-shape-components-design.md. Any scratch bitmap this
     ' render actually needs (e.g. Triangle/Polygon's lazy right-triangle resource) is
     ' still created on demand, just not pooled/preallocated.
+    '
+    ' NOTE: useBitmapPooling: false skips the pool's eager preallocation, but
+    ' ScratchBitmapPool.getRegion() still allocates a fresh roBitmap per call when pooling
+    ' is off (BGE.getNewMemoryScratchRegion()) - drawTriangleTo()/drawPolygonTo()'s internal
+    ' scratch-bitmap use (e.g. drawPinnedCorners()/makeIntoTriangle()) can still fail under
+    ' the same memory pressure this flag was meant to avoid, and every one of those internal
+    ' call sites returns `invalid`/`false` on failure with no diagnostic of its own.
+    ' ShapeRenderTask's drawShape() now checks the draw calls' own boolean return values and
+    ' reports a failure through resultUri="" instead of hanging (see doRender()) - this closes
+    ' a real diagnosability gap, but retesting `mixed:30` on real hardware after adding it
+    ' still showed the same handful of shapes stuck forever with *zero* console output at all,
+    ' not even this new failure print - ruling this specific path out as the cause. The
+    ' render thread itself stayed responsive throughout (heartbeat kept advancing), so
+    ' whatever's failing for those shapes is upstream of doRender() ever running at all - most
+    ' likely something at the SceneGraph Task-scheduling layer under ~30 concurrent Tasks,
+    ' not this Renderer/bitmap-pooling path. See docs/scenegraph-shapes.md's "Mass
+    ' construction" section and this investigation's notes in
+    ' specs/2026-08-24-scenegraph-shape-components-design.md.
     result.renderer = new BGE.Renderer(bitmap, invalid, invalid, {useBitmapPooling: false})
     result.timer = CreateObject("roTimespan")
     return result
   end function
 
+  ' Result of createShapeRenderState() - see there. `renderer`/`bitmap` may be `invalid`.
+  interface ShapeRenderState
+    uri as string
+    renderer as BGE.Renderer
+    bitmap as roBitmap
+    shapeType as string
+    timer as roTimespan
+  end interface
+
   ' Finishes a cache-miss render started by `createShapeRenderState()`: `Finish()`
   ' (sufficient alone - no `roScreen` needed, confirmed on hardware), encodes
   ' to PNG, writes to the cache URI.
   '
-  ' @param {object} renderState the result of `createShapeRenderState()`
+  ' @param {ShapeRenderState} renderState the result of `createShapeRenderState()`
   ' @return {boolean} true if the file was written successfully
-  function finishShapeRender(renderState as object) as boolean
+  function finishShapeRender(renderState as ShapeRenderState) as boolean
     if invalid = renderState.bitmap or "" = renderState.uri
       return false
     end if
