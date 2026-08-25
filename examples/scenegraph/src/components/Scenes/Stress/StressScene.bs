@@ -15,6 +15,9 @@ function init()
   m.specCycle = ["rects:25", "rects:10", "rects:20", "rects:30", "mixed:25", "mixed:30"]
   m.specIndex = 0
 
+  ' Bumped once per buildGrid() call - see buildGrid()'s comment.
+  m.buildGeneration = 0
+
   ' Same heartbeat pattern as MainScene.bs - ticks on a short fixed interval, so a gap
   ' much larger than that reveals the render thread was blocked during construction.
   m.heartbeatCount = 0
@@ -78,11 +81,27 @@ end sub
 ' Task result).
 sub buildGrid(spec as string)
   parts = spec.split(":")
-  variant = parts[0]
+  ' Normalize case - main.bs lowercases its own "scene" launch param, so match that here too;
+  ' otherwise a differently-cased spec (e.g. "Mixed:30") silently falls through to the
+  ' "rects" variant below instead of erroring or behaving as the caller intended.
+  variant = LCase(parts[0])
   count = 25
   if parts.count() > 1
+    ' val() returns 0 for a non-numeric string (e.g. "abc"), and count=0 collapses this
+    ' function's grid-row math to a division by zero (rows = 0) further down - clamp to a
+    ' sane minimum instead of trusting the launch param.
     count = val(parts[1])
+    if count < 1
+      count = 1
+    end if
   end if
+
+  ' A fresh build-generation token: every observer callback below closes over the token that
+  ' was current when its shape was created, and bails if a newer build has since started -
+  ' guards against a still-in-flight ShapeRenderTask from a torn-down previous build (e.g.
+  ' cycling `spec` quickly) corrupting this build's counters after the fact.
+  m.buildGeneration = m.buildGeneration + 1
+  buildGeneration = m.buildGeneration
 
   print "[StressScene] building spec=" + spec + " (variant=" + variant + ", count=" + count.toStr() + ")"
 
@@ -140,7 +159,12 @@ sub buildGrid(spec as string)
     ' Node type at compile time (shapeType isn't a literal), which has none of these shape-
     ' specific fields - bracket/AA field access sidesteps that, same as `shape.SetField(...)`.
     shape = CreateObject("roSGNode", shapeType)
-    shape.id = "stressShape" + i.toStr()
+    ' Each shape component declares its own fixed `<interface>` (see e.g. Circle.xml) and
+    ' silently rejects (with an on-console warning, not a crash) any field not declared there -
+    ' confirmed on hardware setting an arbitrary custom field directly - so the build
+    ' generation this shape belongs to (see below) is smuggled through `id` instead, the one
+    ' field every node type accepts.
+    shape.id = "stressShape_" + i.toStr() + "_" + buildGeneration.toStr()
     shape["translation"] = [x, y]
     shape["width"] = w
     shape["height"] = h
@@ -173,19 +197,18 @@ sub buildGrid(spec as string)
     ' Triangle: leave vertices at their default (right triangle sized from width/height).
 
     shape.observeField("uri", "onAnyShapeRedrawn")
-    if i = 0
-      shape.observeField("uri", "onSpotCheck0Redrawn")
-    else if i = 1
-      shape.observeField("uri", "onSpotCheck1Redrawn")
-    else if i = 2
-      shape.observeField("uri", "onSpotCheck2Redrawn")
+    if i < 3
+      shape.observeField("uri", "onSpotCheckRedrawn")
     end if
 
     m.grid.appendChild(shape)
   end for
 end sub
 
-sub onAnyShapeRedrawn()
+sub onAnyShapeRedrawn(event as object)
+  if not isFromCurrentBuild(event)
+    return
+  end if
   m.completedCount++
   m.statusLabel.text = "Rendered " + m.completedCount.toStr() + "/" + m.totalCount.toStr() + " shapes"
   if m.completedCount = m.totalCount and not m.allRenderedLogged
@@ -197,20 +220,33 @@ sub onAnyShapeRedrawn()
   end if
 end sub
 
-sub onSpotCheck0Redrawn()
-  m.spotCheckCounts[0]++
+' Single parameterized handler for the first few shapes' spot-check (see buildGrid()'s
+' `id`-encoded index) - replaces three near-identical onSpotCheckNRedrawn subs.
+sub onSpotCheckRedrawn(event as object)
+  parsed = parseShapeId(event)
+  if not parsed.currentBuild
+    return
+  end if
+  m.spotCheckCounts[parsed.index]++
   updateSpotCheckLabel()
 end sub
 
-sub onSpotCheck1Redrawn()
-  m.spotCheckCounts[1]++
-  updateSpotCheckLabel()
-end sub
+' True if `event`'s node was created by the build currently in progress - false for a
+' still-in-flight observer from a previous, torn-down build (e.g. `spec` cycled quickly),
+' whose late callback would otherwise corrupt the new build's counters.
+function isFromCurrentBuild(event as object) as boolean
+  return parseShapeId(event).currentBuild
+end function
 
-sub onSpotCheck2Redrawn()
-  m.spotCheckCounts[2]++
-  updateSpotCheckLabel()
-end sub
+' Recovers `{index, generation, currentBuild}` from a shape's `id` (see buildGrid(), which
+' encodes both as "stressShape_<index>_<generation>" since a typed shape component rejects an
+' undeclared custom field outright).
+function parseShapeId(event as object) as object
+  parts = event.GetRoSGNode().id.split("_")
+  index = val(parts[1])
+  generation = val(parts[2])
+  return {index: index, generation: generation, currentBuild: generation = m.buildGeneration}
+end function
 
 sub updateSpotCheckLabel()
   c = m.spotCheckCounts
