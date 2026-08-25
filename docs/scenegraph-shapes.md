@@ -78,7 +78,7 @@ stretched into a newly-set box (see "A fixed bug" below). Every field that affec
 shape is observed by a single `onShapeFieldChanged` handler, which:
 
 1. Hashes the shape type plus the current field values (`roEVPDigest` SHA1) into a
-   `tmp:/bge_shape_<hash>.png` filename and checks whether that file already exists
+   `cachefs:/bge_shape_<hash>.png` filename and checks whether that file already exists
    (`BGE.ShapeComponentHelpers.checkShapeCache()`) - synchronously, on the render thread, with
    no bitmap/`Task` work either way.
 2. On a cache hit, skips rendering entirely and just points the internal `Poster.uri` (and the
@@ -88,19 +88,23 @@ shape is observed by a single `onShapeFieldChanged` handler, which:
    `BGE.Renderer`/`roBitmap`, calls `Finish()` (there's no `roScreen` anywhere in a
    pure-SceneGraph process to force a draw through, but plain `Finish()` alone is enough to
    realize the queued draws here - confirmed on real hardware, see below), encodes to PNG
-   (`GetPng()`), and writes it to `tmp:/`. The component observes the `Task`'s `resultUri` field
-   and, once it fires, sets the internal `Poster.uri` and the component's own `uri`.
+   (`GetPng()`), and writes it to `cachefs:/`. The component observes the `Task`'s `resultUri`
+   field and, once it fires, sets the internal `Poster.uri` and the component's own `uri`.
 
 This makes repeated/discrete field values (toggling between a couple of colors, resizing to a
-value you've already used) free after the first render. A continuously-varying value - most
-notably an `Animation`-driven tween - produces a new hash every single frame and never benefits
-from the cache; see "Animating a shape" below for what that costs in practice. Note a `Animation`
-that *repeats* over the same range (as `examples/scenegraph`'s demo does) only pays that cost
-during its first cycle - once every value in the range has been rendered once, later cycles are
-almost entirely cache hits, so real sustained throughput ends up far below the ~5-7 redraws/second
-ceiling below. The cache has no eviction - fine for a bounded/repeating range of values, but a
-consumer driving genuinely unbounded values (e.g. a continuously random color) will grow `tmp:/`
-without bound.
+value you've already used) free after the first render - and, since the filename is a pure
+function of the shape's inputs, permanently free across app relaunches too: `cachefs:/` (unlike
+`tmp:/`, which is cleared every session) persists until the OS evicts it under storage pressure.
+A continuously-varying value - most notably an `Animation`-driven tween - produces a new hash
+every single frame and never benefits from the cache; see "Animating a shape" below for what
+that costs in practice. Note an `Animation` that *repeats* over the same range (as
+`examples/scenegraph`'s demo does) only pays that cost during its first cycle - once every value
+in the range has been rendered once, later cycles are almost entirely cache hits, so real
+sustained throughput ends up far below the ~5-7 redraws/second ceiling below. The cache has no
+eviction of its own - fine for a bounded/repeating range of values (the OS itself may evict
+under storage pressure, which `checkShapeCache()`'s existence check already handles safely by
+just re-rendering), but a consumer driving genuinely unbounded values (e.g. a continuously
+random color) will grow `cachefs:/` without bound between OS evictions.
 
 All four shape components share one `ShapeRenderTask` component (`components/Shapes/
 ShapeRenderTask.xml`/`.bs`) rather than four near-duplicate `Task` subclasses - it takes a
@@ -122,7 +126,7 @@ regardless of shape complexity:
 | `Polygon` (4-vertex diamond) | ~55-75ms | ~150-180ms |
 
 The draw call itself is cheap and does scale with shape complexity as expected, but it's a small
-fraction of the total - PNG encoding (`GetPng()`), the `tmp:/` file write, and the `Poster`'s own
+fraction of the total - PNG encoding (`GetPng()`), the `cachefs:/` file write, and the `Poster`'s own
 image decode dominate for every shape alike. That caps every shape at roughly 5-7 redraws/second,
 too slow for smooth continuous animation - **all four are redraw-on-change components, not
 animate-safe ones**, regardless of shape type. A discrete/repeated value (toggling between a

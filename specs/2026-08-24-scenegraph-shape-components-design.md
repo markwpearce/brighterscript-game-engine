@@ -57,7 +57,10 @@ optional — defaults to a right triangle sized from `width`/`height` when absen
 Every redraw-triggering field's `onChange` points at one observer function that:
 
 1. Hashes the shape type + current field values (`roEVPDigest` SHA1, same as the QR component)
-   into `tmp:/bge_shape_<hash>.png`.
+   into `cachefs:/bge_shape_<hash>.png` — `cachefs:/`, not `tmp:/`, so identical inputs stay
+   cached permanently across app relaunches, not just within one session (the filename is a
+   pure function of the inputs, so this is always safe; the OS may still evict it under storage
+   pressure, handled by re-rendering on a miss like any other cache miss).
 2. If that file already exists, skip the render and just set `m.top.uri` — a cache hit.
 3. Otherwise render via the private `Renderer`, `Finish()`, `GetPng()`, `WriteFile`, then set
    `m.top.uri`.
