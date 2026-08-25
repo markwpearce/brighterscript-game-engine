@@ -223,6 +223,38 @@ a real "unusually high number of tasks" OS warning at 51 tasks when only 30 were
 Fixed by defaulting `spec` to empty in XML and only building when it's actually set - `main.bs`
 now always sets it exactly once, so exactly one build ever happens per launch.
 
+### Follow-up investigation (PR #164 review pass): ruled out the Renderer/bitmap-pooling path
+
+A later review pass on this PR raised a real concern: `useBitmapPooling: false` (the fix above)
+only skips the `ScratchBitmapPool`'s eager preallocation - `Renderer`'s internal scratch-bitmap
+calls (`drawTriangleTo()`/`drawPolygonTo()`'s `drawPinnedCorners()`/`makeIntoTriangle()`) still
+allocate a fresh `roBitmap` per call even with pooling off, and every one of those internal call
+sites already returned `invalid`/`false` on failure with zero diagnostics. This was a real,
+confirmed-by-reading-the-code gap - `ShapeRenderTask.drawShape()` was fixed to check each draw
+call's own boolean return value and report a failure through `resultUri=""` (the field's
+`alwaysNotify="true"` contract) instead of leaving the caller waiting forever.
+
+Retested `mixed:30` on real hardware after that fix: the same non-deterministic partial hang
+still reproduced (22/30 rendered, permanently stuck) - but with **zero console output of any
+kind** for the missing shapes, including the new failure diagnostic. The heartbeat timer kept
+advancing throughout (3530+ ticks observed with the count frozen at 22/30), confirming the render
+thread itself stays responsive. This rules out the Renderer/scratch-bitmap-allocation path as the
+cause: if a draw call or the primary bitmap create were failing, one of the two diagnostic prints
+now on that path would have fired. The missing shapes' `ShapeRenderTask.doRender()` appears to
+never run at all - the failure is upstream of this engine's own render code, most plausibly at
+the SceneGraph Task-scheduling layer itself under ~30 concurrent `Task`s. Root cause still not
+isolated; this narrows the search space for a future investigator but does not resolve the
+underlying issue.
+
+(Unrelated fix made alongside this retest: the stress scene's `buildGrid()` originally tried to
+tag each shape node with a custom `buildGeneration` field to guard against a stale observer from
+a torn-down previous build - this silently failed on real hardware with an on-console warning,
+`Tried to set nonexistent field "buildGeneration" of a "<ShapeType>" node`, because a shape
+component declares a fixed `<interface>` and rejects any undeclared field, unlike a generic
+`roSGNode`. Fixed by encoding the generation - and the spot-check index, replacing three
+near-identical single-purpose observer subs - into the one field every node accepts: `id`,
+as `"stressShape_<index>_<generation>"`, parsed back out in the observer callbacks.)
+
 ## Definition of done
 
 - All four components ship under `src/components/Shapes/`, verified via
