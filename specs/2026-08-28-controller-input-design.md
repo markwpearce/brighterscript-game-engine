@@ -61,8 +61,8 @@ Single new concept for consumers: `ControlMap`, exposed as `game.controls`. `Con
 ## D. Unified mapping API — `BGE.ControlMap` (`game.controls`)
 
 ```brighterscript
-game.controls.bindAction("jump", remoteButton: "ok", controllerButton: 0)
-game.controls.bindAxis("move", stick: 1)
+game.controls.bindAction("jump", "ok", 0)   ' name, remoteButton, controllerButton
+game.controls.bindAxis("move", 1)   ' name, stick
 
 if game.controls.isActionPressed("jump") then ...
 move = game.controls.getAxis("move")   ' BGE.Math.Vector {x, y}

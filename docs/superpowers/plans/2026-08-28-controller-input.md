@@ -1590,7 +1590,7 @@ sub Main()
   game.fitCanvasToScreen()
   game.enableControllerInput()
 
-  game.controls.bindAction("fire", remoteButton: "ok", controllerButton: 0)
+  game.controls.bindAction("fire", "ok", 0) ' name, remoteButton, controllerButton
   game.controls.bindAxis("move")
 
   firstRoom = new MainRoom(game)
@@ -1703,7 +1703,7 @@ your game code never has to know whether the remote or a connected
 controller produced the input.
 
 \`\`\`brighterscript
-game.controls.bindAction("jump", remoteButton: "ok", controllerButton: 0)
+game.controls.bindAction("jump", "ok", 0)   ' name, remoteButton, controllerButton
 game.controls.bindAxis("move")
 
 ' per frame, e.g. in onUpdate/onInput:
