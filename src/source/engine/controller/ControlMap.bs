@@ -7,7 +7,8 @@ namespace BGE.Controller
     private registry as BGE.Controller.ControllerRegistry
     private actionBindings = {} ' name -> {remoteButton, controllerButton, playerIndex}
     private axisBindings = {} ' name -> {stick, playerIndex}
-    private actionState = {} ' "<name>:<playerIndex>" -> {press, held, release}
+    private actionState = {} ' name -> {press, held, release}
+    private anyBindings = false
 
     sub new(registry as BGE.Controller.ControllerRegistry)
       m.registry = registry
@@ -23,6 +24,7 @@ namespace BGE.Controller
     ' @return {void}
     sub bindAction(name as string, remoteButton = invalid as dynamic, controllerButton = invalid as dynamic, playerIndex = 0 as integer)
       m.actionBindings[name] = {remoteButton: remoteButton, controllerButton: controllerButton, playerIndex: playerIndex}
+      m.anyBindings = true
     end sub
 
     ' Binds a logical axis name to a player's controller stick. getAxis()
@@ -35,11 +37,36 @@ namespace BGE.Controller
     ' @return {void}
     sub bindAxis(name as string, stick = 1 as integer, playerIndex = 0 as integer)
       m.axisBindings[name] = {stick: stick, playerIndex: playerIndex}
+      m.anyBindings = true
+    end sub
+
+    ' @return {boolean} - true once any action/axis binding has been added
+    function hasBindings() as boolean
+      return m.anyBindings
+    end function
+
+    ' Starts a new frame: clears the one-shot press/release flags so they only
+    ' read true on the frame their event arrived. `held` is a snapshot of
+    ' "currently down", not a transient, so it is left alone here and only
+    ' changes when a later onInput() says otherwise. Called once per frame by
+    ' Game - a game does not call this directly.
+    '
+    ' @return {void}
+    sub beginFrame()
+      for each name in m.actionState
+        state = m.actionState[name]
+        state.press = false
+        state.release = false
+      end for
     end sub
 
     ' Feeds one GameInput event (remote or controller-originated) through
     ' every action binding, updating whichever actions it matches. Called
     ' once per input event by Game - a game does not call this directly.
+    '
+    ' Several events for the same binding can arrive in one frame (Game feeds
+    ' a press and then a held event for the same button), so press/release
+    ' accumulate across the frame rather than overwriting each other.
     '
     ' @param {BGE.GameInput} input
     ' @return {void}
@@ -49,36 +76,45 @@ namespace BGE.Controller
         matchesRemote = binding.remoteButton <> invalid and input.playerIndex = -1 and input.isButton(binding.remoteButton)
         matchesController = binding.controllerButton <> invalid and input.playerIndex = binding.playerIndex and input.button = "controller" + binding.controllerButton.ToStr()
         if matchesRemote or matchesController
-          key = name + ":" + binding.playerIndex.ToStr()
-          m.actionState[key] = {press: input.press, held: input.held, release: input.release}
+          state = m.actionState[name]
+          if state = invalid
+            state = {press: false, held: false, release: false}
+            m.actionState[name] = state
+          end if
+          state.press = state.press or input.press
+          state.release = state.release or input.release
+          if input.release
+            state.held = false
+          else
+            state.held = state.held or input.held
+          end if
         end if
       end for
     end sub
 
+    ' A binding's playerIndex is fixed at bindAction() time, so reading an
+    ' action never needs it - the name alone identifies the binding.
+    '
     ' @param {string} name
-    ' @param {integer} [playerIndex=0]
     ' @return {boolean} - true the frame the bound button was pressed
-    function isActionPressed(name as string, playerIndex = 0 as integer) as boolean
-      return m.stateFor(name, playerIndex).press
+    function isActionPressed(name as string) as boolean
+      return m.stateFor(name).press
     end function
 
     ' @param {string} name
-    ' @param {integer} [playerIndex=0]
     ' @return {boolean} - true every frame the bound button remains held
-    function isActionHeld(name as string, playerIndex = 0 as integer) as boolean
-      return m.stateFor(name, playerIndex).held
+    function isActionHeld(name as string) as boolean
+      return m.stateFor(name).held
     end function
 
     ' @param {string} name
-    ' @param {integer} [playerIndex=0]
     ' @return {boolean} - true the frame the bound button was released
-    function isActionReleased(name as string, playerIndex = 0 as integer) as boolean
-      return m.stateFor(name, playerIndex).release
+    function isActionReleased(name as string) as boolean
+      return m.stateFor(name).release
     end function
 
-    private function stateFor(name as string, playerIndex as integer) as object
-      key = name + ":" + playerIndex.ToStr()
-      return m.actionState[key] ?? {press: false, held: false, release: false}
+    private function stateFor(name as string) as object
+      return m.actionState[name] ?? {press: false, held: false, release: false}
     end function
 
     ' @param {string} name - a name previously passed to bindAxis()
