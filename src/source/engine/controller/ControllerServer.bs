@@ -1,0 +1,258 @@
+namespace BGE.Controller
+
+  const CONTROLLER_HTTP_BUFFER_SIZE = 10240
+  const CONTROLLER_WS_READ_SIZE = 10240
+
+  enum ConnectionMode
+    http = "http"
+    websocket = "websocket"
+  end enum
+
+  class ControllerConnection
+    socket as roStreamSocket
+    mode as string = BGE.Controller.ConnectionMode.http
+    wsBuffer as roByteArray = CreateObject("roByteArray")
+  end class
+
+  enum ControllerServerEventType
+    onOpen = "onOpen"
+    onMessage = "onMessage"
+    onClose = "onClose"
+  end enum
+
+  interface ControllerServerEvent
+    type as string ' BGE.Controller.ControllerServerEventType
+    connectionId as string
+    message as string ' only set for onMessage
+  end interface
+
+  ' Minimal HTTP + WebSocket (RFC 6455) server for streaming controller
+  ' input from a browser page, without SceneGraph. Adapted and trimmed from
+  ' https://github.com/markwpearce/roku-gamepad - serves GET only (static
+  ' files under pkg:/source/controller-web), no upload/directory listing.
+  class ControllerServer
+    port as integer
+    private tcpListen as roStreamSocket = CreateObject("roStreamSocket")
+    private messagePort as roMessagePort
+    private connections = {} ' socket id string -> ControllerConnection
+    private events as BGE.Controller.ControllerServerEvent[] = []
+    private buffer as roByteArray = CreateObject("roByteArray")
+
+    sub new(port as integer)
+      m.port = port
+      m.buffer[CONTROLLER_HTTP_BUFFER_SIZE] = 0
+    end sub
+
+    sub listen(messagePort as roMessagePort)
+      m.messagePort = messagePort
+      addr = CreateObject("roSocketAddress")
+      addr.setPort(m.port)
+      m.tcpListen.setMessagePort(messagePort)
+      m.tcpListen.setAddress(addr)
+      m.tcpListen.notifyReadable(true)
+      m.tcpListen.listen(4)
+    end sub
+
+    ' Returns and clears the queue of connection lifecycle/message events
+    ' collected since the last call.
+    function drainEvents() as BGE.Controller.ControllerServerEvent[]
+      drained = m.events
+      m.events = []
+      return drained
+    end function
+
+    sub onSocketEvent(event as roSocketEvent)
+      changedId = event.getSocketID()
+      if changedId = m.tcpListen.getID() and m.tcpListen.isReadable()
+        m.acceptConnection()
+        return
+      end if
+      id = changedId.ToStr()
+      connection = m.connections[id]
+      if connection = invalid
+        return
+      end if
+      if connection.mode = BGE.Controller.ConnectionMode.websocket
+        m.onWebSocketReadable(id, connection)
+      else
+        m.onHttpReadable(id, connection)
+      end if
+    end sub
+
+    sub closeConnection(id as string)
+      connection = m.connections[id]
+      if connection = invalid
+        return
+      end if
+      wasWebSocket = connection.mode = BGE.Controller.ConnectionMode.websocket
+      connection.socket.close()
+      m.connections.Delete(id)
+      if wasWebSocket
+        m.events.Push({type: BGE.Controller.ControllerServerEventType.onClose, connectionId: id, message: ""})
+      end if
+    end sub
+
+    private sub acceptConnection()
+      newSocket = m.tcpListen.accept() as roStreamSocket
+      if newSocket = invalid
+        return
+      end if
+      newSocket.notifyReadable(true)
+      newSocket.setMessagePort(m.messagePort)
+      connection = new BGE.Controller.ControllerConnection()
+      connection.socket = newSocket
+      m.connections[newSocket.getID().ToStr()] = connection
+    end sub
+
+    private sub onHttpReadable(id as string, connection as BGE.Controller.ControllerConnection)
+      socket = connection.socket
+      if not socket.isReadable()
+        return
+      end if
+      numReceivedBytes = socket.receive(m.buffer, 0, CONTROLLER_HTTP_BUFFER_SIZE)
+      if numReceivedBytes <= 0
+        m.closeConnection(id)
+        return
+      end if
+      request = m.parseHttpRequest(m.buffer, numReceivedBytes)
+      if request.command <> "GET"
+        m.sendHttpResponse(socket, request.protocol, 405, "Method Not Allowed")
+        m.closeConnection(id)
+      else if m.isWebSocketUpgradeRequest(request)
+        m.upgradeToWebSocket(id, connection, request)
+      else
+        m.serveStaticFile(socket, request)
+        m.closeConnection(id)
+      end if
+    end sub
+
+    private function parseHttpRequest(buffer as roByteArray, bufferSize as integer) as object
+      if bufferSize > CONTROLLER_HTTP_BUFFER_SIZE
+        bufferSize = CONTROLLER_HTTP_BUFFER_SIZE
+      end if
+      buffer[bufferSize] = 0
+      lines = buffer.ToAsciiString().Tokenize(chr(13) + chr(10))
+      commandLine = lines[0].Tokenize(" ")
+      headers = {}
+      for lineIndex = 1 to lines.Count() - 1
+        line = lines[lineIndex]
+        if line = ""
+          exit for
+        end if
+        headerParts = line.Tokenize(":")
+        key = headerParts[0].Trim()
+        headerParts.Shift()
+        headers[key] = headerParts.ToArray().Join(":").Trim()
+      end for
+      return {command: commandLine[0], path: commandLine[1], protocol: commandLine[2], headers: headers}
+    end function
+
+    private function isWebSocketUpgradeRequest(request as object) as boolean
+      upgrade = LCase(request.headers["Upgrade"] ?? "")
+      connectionHeader = LCase(request.headers["Connection"] ?? "")
+      return upgrade = "websocket" and Instr(1, connectionHeader, "upgrade") > 0 and request.headers["Sec-WebSocket-Key"] <> invalid
+    end function
+
+    ' Completes the RFC 6455 handshake (section 4.2.2) and flips this
+    ' connection into websocket framing mode.
+    private sub upgradeToWebSocket(id as string, connection as BGE.Controller.ControllerConnection, request as object)
+      acceptKey = BGE.Controller.WebSocketFrameCodec.computeAcceptKey(request.headers["Sec-WebSocket-Key"])
+      response = "HTTP/1.1 101 Switching Protocols" + chr(13) + chr(10)
+      response += "Upgrade: websocket" + chr(13) + chr(10)
+      response += "Connection: Upgrade" + chr(13) + chr(10)
+      response += "Sec-WebSocket-Accept: " + acceptKey + chr(13) + chr(10) + chr(13) + chr(10)
+      m.sendAll(connection.socket, m.stringToBytes(response))
+      connection.mode = BGE.Controller.ConnectionMode.websocket
+      m.events.Push({type: BGE.Controller.ControllerServerEventType.onOpen, connectionId: id, message: ""})
+    end sub
+
+    private sub onWebSocketReadable(id as string, connection as BGE.Controller.ControllerConnection)
+      socket = connection.socket
+      if not socket.isReadable()
+        return
+      end if
+      chunk = CreateObject("roByteArray")
+      chunk[CONTROLLER_WS_READ_SIZE] = 0
+      numReceivedBytes = socket.receive(chunk, 0, CONTROLLER_WS_READ_SIZE)
+      if numReceivedBytes <= 0
+        m.closeConnection(id)
+        return
+      end if
+      connection.wsBuffer.Append(chunk.Slice(0, numReceivedBytes))
+      decodeResult = BGE.Controller.WebSocketFrameCodec.decodeFrames(connection.wsBuffer, connection.wsBuffer.Count())
+      shouldClose = false
+      for each frame in decodeResult.frames
+        if frame.opcode = BGE.Controller.WebSocketFrameCodec.OpCode.close
+          shouldClose = true
+        else if frame.opcode = BGE.Controller.WebSocketFrameCodec.OpCode.text
+          m.events.Push({type: BGE.Controller.ControllerServerEventType.onMessage, connectionId: id, message: frame.payload.ToAsciiString()})
+        end if
+        ' ping/pong/binary/fragmentation intentionally unsupported - the
+        ' browser client only ever sends small, unfragmented text frames
+      end for
+      if decodeResult.bytesConsumed > 0
+        remaining = connection.wsBuffer.Slice(decodeResult.bytesConsumed)
+        connection.wsBuffer = CreateObject("roByteArray")
+        connection.wsBuffer.Append(remaining)
+      end if
+      if shouldClose
+        m.closeConnection(id)
+      end if
+    end sub
+
+    private sub serveStaticFile(socket as roStreamSocket, request as object)
+      path = "pkg:/source/controller-web" + request.path
+      if request.path = "/"
+        path += "index.html"
+      end if
+      contents = CreateObject("roByteArray")
+      if not contents.ReadFile(path)
+        m.sendHttpResponse(socket, request.protocol, 404, "Not Found")
+        return
+      end if
+      header = request.protocol + " 200 OK" + chr(13) + chr(10) + "Content-Type: " + m.contentTypeFor(path) + chr(13) + chr(10) + "Content-Length: " + contents.Count().ToStr() + chr(13) + chr(10) + chr(13) + chr(10)
+      m.sendAll(socket, m.stringToBytes(header))
+      m.sendAll(socket, contents)
+    end sub
+
+    private function contentTypeFor(path as string) as string
+      if path.EndsWith(".html")
+        return "text/html"
+      else if path.EndsWith(".js")
+        return "text/javascript"
+      else if path.EndsWith(".css")
+        return "text/css"
+      end if
+      return "application/octet-stream"
+    end function
+
+    private sub sendHttpResponse(socket as roStreamSocket, protocol as string, code as integer, body as string)
+      statusTexts = {"404": "Not Found", "405": "Method Not Allowed"}
+      statusText = statusTexts[code.ToStr()] ?? "Error"
+      response = protocol + " " + code.ToStr() + " " + statusText + chr(13) + chr(10) + "Content-Type: text/plain" + chr(13) + chr(10) + chr(13) + chr(10) + body
+      m.sendAll(socket, m.stringToBytes(response))
+    end sub
+
+    private function stringToBytes(s as string) as roByteArray
+      bytes = CreateObject("roByteArray")
+      bytes.FromAsciiString(s)
+      return bytes
+    end function
+
+    ' roStreamSocket.send() is non-blocking and may write fewer bytes than
+    ' requested in one call - loop on its return value until fully flushed.
+    private sub sendAll(socket as roStreamSocket, bytes as roByteArray)
+      totalSent = 0
+      total = bytes.Count()
+      while totalSent < total
+        sent = socket.send(bytes, totalSent, total - totalSent)
+        if sent <= 0
+          exit while
+        end if
+        totalSent += sent
+      end while
+    end sub
+
+  end class
+
+end namespace
