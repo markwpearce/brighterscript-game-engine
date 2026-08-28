@@ -115,6 +115,11 @@ namespace BGE.Controller
         return
       end if
       request = m.parseHttpRequest(m.buffer, numReceivedBytes)
+      if request = invalid
+        ' malformed request line - nothing safe to respond with
+        m.closeConnection(id)
+        return
+      end if
       if request.command <> "GET"
         m.sendHttpResponse(socket, request.protocol, 405, "Method Not Allowed")
         m.closeConnection(id)
@@ -126,13 +131,27 @@ namespace BGE.Controller
       end if
     end sub
 
-    private function parseHttpRequest(buffer as roByteArray, bufferSize as integer) as object
+    ' Parses a raw request buffer into {command, path, protocol, headers},
+    ' or invalid if the request line is malformed (fewer than the three
+    ' required tokens) - the caller closes the connection in that case.
+    ' Engine-internal; not private only so the spec can exercise it.
+    '
+    ' @param {roByteArray} buffer
+    ' @param {integer} bufferSize
+    ' @return {object}
+    function parseHttpRequest(buffer as roByteArray, bufferSize as integer) as object
       if bufferSize > CONTROLLER_HTTP_BUFFER_SIZE
         bufferSize = CONTROLLER_HTTP_BUFFER_SIZE
       end if
       buffer[bufferSize] = 0
       lines = buffer.ToAsciiString().Tokenize(chr(13) + chr(10))
+      if lines.Count() = 0
+        return invalid
+      end if
       commandLine = lines[0].Tokenize(" ")
+      if commandLine.Count() < 3
+        return invalid
+      end if
       headers = {}
       for lineIndex = 1 to lines.Count() - 1
         line = lines[lineIndex]
@@ -147,7 +166,12 @@ namespace BGE.Controller
       return {command: commandLine[0], path: commandLine[1], protocol: commandLine[2], headers: headers}
     end function
 
-    private function isWebSocketUpgradeRequest(request as object) as boolean
+    ' True only for a request carrying all three RFC 6455 handshake headers.
+    ' Engine-internal; not private only so the spec can exercise it.
+    '
+    ' @param {object} request - a parseHttpRequest() result
+    ' @return {boolean}
+    function isWebSocketUpgradeRequest(request as object) as boolean
       upgrade = LCase(request.headers["Upgrade"] ?? "")
       connectionHeader = LCase(request.headers["Connection"] ?? "")
       return upgrade = "websocket" and Instr(1, connectionHeader, "upgrade") > 0 and request.headers["Sec-WebSocket-Key"] <> invalid
@@ -205,6 +229,11 @@ namespace BGE.Controller
     end sub
 
     private sub serveStaticFile(socket as roStreamSocket, request as object)
+      ' No path traversal out of the served directory.
+      if Instr(1, request.path, "..") > 0
+        m.sendHttpResponse(socket, request.protocol, 404, "Not Found")
+        return
+      end if
       path = "pkg:/source/controller-web" + request.path
       if request.path = "/"
         path += "index.html"
