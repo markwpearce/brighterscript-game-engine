@@ -1,0 +1,106 @@
+' See RoundedRectangle.xml for the field interface.
+import "../../source/utils/ShapeComponentHelpers.bs"
+
+typecast m as IRoundedRectangle
+
+interface INodeRoundedRectangle extends roSGNode
+  loadSync as boolean
+  uri as string
+  lastRoundTripMs as integer
+  color as integer
+  width as float
+  height as float
+  cornerRadius as float
+  outlineColor as integer
+  outlineWidth as integer
+end interface
+
+interface IRoundedRectangle
+  top as INodeRoundedRectangle
+  image as roSGNodePoster
+  renderTask as BGE.ShapeComponentHelpers.INodeShapeRenderTask
+  redrawTimer as roSGNodeTimer
+  roundTripTimer as roTimespan
+end interface
+
+' Redraw-triggering fields are debounced through a duration="0" Timer, not called directly -
+' observeField() alone fires once per field exactly like XML onChange= did (no batching of
+' XML-attribute application exists - confirmed on hardware). Every field change (including
+' init()'s own initial trigger) restarts redrawTimer instead of redrawing immediately; only the
+' timer's own "fire" event calls the real redraw(). Because SceneGraph applies every XML
+' attribute on a tag synchronously before the render thread next processes timer/event
+' callbacks, N attribute values set on one tag restart the timer N times but only the last
+' restart survives to fire - coalescing into exactly one real redraw (confirmed on hardware).
+sub init()
+  m.image = m.top.findNode("image")
+  m.renderTask = m.top.findNode("renderTask")
+  m.renderTask.shapeType = "RoundedRectangle"
+  m.renderTask.observeField("resultUri", "onRenderComplete")
+  m.redrawTimer = m.top.findNode("redrawTimer")
+  m.redrawTimer.observeField("fire", "onRedrawTimerFired")
+  for each fieldId in ["color", "width", "height", "cornerRadius", "outlineColor", "outlineWidth"]
+    m.top.observeField(fieldId, "onShapeFieldChanged")
+  end for
+  scheduleRedraw()
+end sub
+
+sub onLoadSyncChanged()
+  m.image.loadSync = m.top.loadSync
+end sub
+
+sub onShapeFieldChanged()
+  scheduleRedraw()
+end sub
+
+' Restarts redrawTimer rather than redrawing immediately - see init()'s comment for why this
+' coalesces multiple field changes into one real redraw.
+sub scheduleRedraw()
+  m.redrawTimer.control = "stop"
+  m.redrawTimer.control = "start"
+end sub
+
+sub onRedrawTimerFired()
+  redraw()
+end sub
+
+sub redraw()
+  m.roundTripTimer = BGE.ShapeComponentHelpers.startRoundTripTimer()
+  width = Int(m.top.width)
+  height = Int(m.top.height)
+  cacheKey = FormatJson({
+    w: width,
+    h: height,
+    color: m.top.color,
+    r: m.top.cornerRadius,
+    oc: m.top.outlineColor,
+    ow: m.top.outlineWidth
+  })
+
+  cache = BGE.ShapeComponentHelpers.checkShapeCache("RoundedRectangle", cacheKey)
+  if cache.hit
+    applyRenderedUri(cache.uri)
+    return
+  end if
+
+  m.renderTask.uri = cache.uri
+  m.renderTask.width = width
+  m.renderTask.height = height
+  m.renderTask.color = m.top.color
+  m.renderTask.cornerRadius = m.top.cornerRadius
+  m.renderTask.outlineColor = m.top.outlineColor
+  m.renderTask.outlineWidth = m.top.outlineWidth
+  m.renderTask.control = "RUN"
+end sub
+
+sub onRenderComplete()
+  applyRenderedUri(m.renderTask.resultUri)
+end sub
+
+sub applyRenderedUri(uri as string)
+  if "" = uri
+    return
+  end if
+  m.image.uri = uri
+  m.top.uri = uri
+  m.top.lastRoundTripMs = BGE.ShapeComponentHelpers.logRoundTrip("RoundedRectangle", m.roundTripTimer)
+end sub

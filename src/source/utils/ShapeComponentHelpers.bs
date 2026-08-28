@@ -1,0 +1,298 @@
+' Shared redraw/caching logic for the SceneGraph shape components under
+' `components/Shapes/`. A SceneGraph component's compile scope only includes
+' files reachable via `import`, and BrighterScript type-checks a whole
+' imported file's dependency graph rather than just members actually called -
+' hence importing all of BGE here, once, instead of per component. Relative
+' (not `pkg:/`-absolute) paths so this still resolves under any consumer's
+' `files` remapping (ropm, this repo's own examples/* copy trick, etc).
+import "../engine/renderer/Renderer.bs"
+import "../engine/Canvas.bs"
+import "../engine/colliders/CircleCollider.bs"
+import "../engine/colliders/Collider.bs"
+import "../engine/colliders/RectangleCollider.bs"
+import "../engine/controllers/FreeFlyCameraController.bs"
+import "../engine/debug/DebugOptions.bs"
+import "../engine/debug/DebugWindow.bs"
+import "../engine/debug/FpsDisplay.bs"
+import "../engine/debug/GarbageCollectorDisplay.bs"
+import "../engine/debug/InputDisplay.bs"
+import "../engine/debug/LogDisplay.bs"
+import "../engine/debug/LogLevel.bs"
+import "../engine/debug/MemoryDisplay.bs"
+import "../engine/drawables/AnimatedImage.bs"
+import "../engine/drawables/Drawable.bs"
+import "../engine/drawables/DrawableCircle.bs"
+import "../engine/drawables/DrawableLine.bs"
+import "../engine/drawables/DrawableParallaxLayer.bs"
+import "../engine/drawables/DrawableParticles.bs"
+import "../engine/drawables/DrawablePlane.bs"
+import "../engine/drawables/DrawablePolygon.bs"
+import "../engine/drawables/DrawableRectangle.bs"
+import "../engine/drawables/DrawableSkybox.bs"
+import "../engine/drawables/DrawableSphere.bs"
+import "../engine/drawables/DrawableText.bs"
+import "../engine/drawables/Image.bs"
+import "../engine/drawables/Model3d.bs"
+import "../engine/drawables/Sprite.bs"
+import "../engine/Game.bs"
+import "../engine/GameEntity.bs"
+import "../engine/GameInput.bs"
+import "../engine/GameTimer.bs"
+import "../engine/interfaces.bs"
+import "../engine/renderer/cameras/Camera.bs"
+import "../engine/renderer/cameras/Camera2d.bs"
+import "../engine/renderer/cameras/Camera3d.bs"
+import "../engine/renderer/DepthSortHelpers.bs"
+import "../engine/renderer/RendererHelpers.bs"
+import "../engine/renderer/sceneObjects/SceneObject.bs"
+import "../engine/renderer/sceneObjects/SceneObjectBillboard.bs"
+import "../engine/renderer/sceneObjects/SceneObjectCircle.bs"
+import "../engine/renderer/sceneObjects/SceneObjectImage.bs"
+import "../engine/renderer/sceneObjects/SceneObjectLine.bs"
+import "../engine/renderer/sceneObjects/SceneObjectModel.bs"
+import "../engine/renderer/sceneObjects/SceneObjectParallaxLayer.bs"
+import "../engine/renderer/sceneObjects/SceneObjectParticle.bs"
+import "../engine/renderer/sceneObjects/SceneObjectPlane.bs"
+import "../engine/renderer/sceneObjects/SceneObjectPolygon.bs"
+import "../engine/renderer/sceneObjects/SceneObjectRectangle.bs"
+import "../engine/renderer/sceneObjects/SceneObjectSkybox.bs"
+import "../engine/renderer/sceneObjects/SceneObjectText.bs"
+import "../engine/renderer/ScratchBitmap.bs"
+import "../engine/renderer/TriangleCache.bs"
+import "../engine/Room.bs"
+import "../engine/TweenManager.bs"
+import "../engine/ui/Alignment.bs"
+import "../engine/ui/Label.bs"
+import "../engine/ui/Slider.bs"
+import "../engine/ui/Style.bs"
+import "../engine/ui/UiContainer.bs"
+import "../engine/ui/UiWidget.bs"
+import "../math/circle.bs"
+import "../math/CornerPoints.bs"
+import "../math/math.bs"
+import "../math/Matrix44.bs"
+import "../math/plane.bs"
+import "../math/rectangle.bs"
+import "../math/Transform.bs"
+import "../math/Triangle.bs"
+import "../math/vector.bs"
+import "colors.bs"
+import "deviceRenderTier.bs"
+import "MotionChecker.bs"
+import "parsers/OBJParser.bs"
+import "parsers/STLParser.bs"
+import "quickhull.bs"
+import "registry.bs"
+import "strings.bs"
+import "TagList.bs"
+import "tweens.bs"
+import "utils.bs"
+import "../roku_modules/rodash/rodash.d.bs"
+
+namespace BGE.ShapeComponentHelpers
+
+  ' Node-level interface for the shared `ShapeRenderTask` node (see ShapeRenderTask.xml) -
+  ' declared here (not in ShapeRenderTask.bs) so every shape component's own `renderTask`
+  ' field can be typed precisely too, without each one re-declaring it.
+  interface INodeShapeRenderTask extends roSGNodeTask
+    shapeType as string
+    uri as string
+    width as float
+    height as float
+    color as integer
+    outlineColor as integer
+    outlineWidth as integer
+    cornerRadius as float
+    outlineSegments as integer
+    vertices as object
+    resultUri as string
+    resultRoundTripMs as integer
+  end interface
+
+  ' Hashes a shape type plus its field values into a stable `cachefs:/` filename -
+  ' a cache hit for repeated/discrete values, but a continuously-varying value
+  ' (e.g. an Animation-driven tween) hashes differently every frame. `cachefs:/`
+  ' (not `tmp:/`) is deliberate: the filename is a pure function of the shape's
+  ' inputs, so it's always safe to keep permanently across app relaunches - unlike
+  ' `tmp:/`, which is cleared every session, `cachefs:/` persists until the OS
+  ' evicts it under storage pressure (checked for existence on every use regardless,
+  ' since the OS can evict it at any time - see checkShapeCache()).
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {string} cacheKey a string uniquely identifying this shape's current field values
+  ' @return {string} a `cachefs:/bge_shape_<hash>.png` file URI
+  function getCacheUri(shapeType as string, cacheKey as string) as string
+    bytes = CreateObject("roByteArray")
+    bytes.FromAsciiString(shapeType + "|" + cacheKey)
+    digest = CreateObject("roEVPDigest")
+    digest.Setup("sha1")
+    hash = digest.Process(bytes)
+    return "cachefs:/bge_shape_" + hash + ".png"
+  end function
+
+  ' Wall-clock timer for a full field-change-to-visible round trip - bracket a
+  ' component's whole redraw() with this and logRoundTrip().
+  '
+  ' @return {roTimespan}
+  function startRoundTripTimer() as roTimespan
+    return CreateObject("roTimespan")
+  end function
+
+  ' Prints and returns the elapsed time since startRoundTripTimer() - see there.
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {roTimespan} timer the result of startRoundTripTimer()
+  ' @return {integer} elapsed milliseconds
+  function logRoundTrip(shapeType as string, timer as roTimespan) as integer
+    ms = timer.TotalMilliseconds()
+    print "[BGE.ShapeComponentHelpers] " + shapeType + " full round trip (redraw -> visible) took " + ms.ToStr() + "ms"
+    return ms
+  end function
+
+  ' Synchronous cache-hit check - computes the cache URI and reports whether it already
+  ' exists, with no bitmap/renderer creation either way. Safe to call from a component's
+  ' own script (the render thread) before ever touching a render `Task` - only spin up (or
+  ' re-run) a `ShapeRenderTask` on a miss.
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {string} cacheKey a string uniquely identifying this shape's current field values
+  ' @return {ShapeCacheCheck} `{uri, hit}`
+  function checkShapeCache(shapeType as string, cacheKey as string) as ShapeCacheCheck
+    uri = getCacheUri(shapeType, cacheKey)
+    ' roFileSystem is MAIN|TASK-only and fails on the render thread (confirmed on hardware) - MatchFiles() has no such restriction.
+    fileName = Mid(uri, Len("cachefs:/") + 1)
+    hit = MatchFiles("cachefs:/", fileName).Count() > 0
+    return {uri: uri, hit: hit}
+  end function
+
+  ' Result of checkShapeCache() - see there.
+  interface ShapeCacheCheck
+    uri as string
+    hit as boolean
+  end interface
+
+  ' Begins a cache-miss render: creates a fresh roBitmap/BGE.Renderer pair for the caller
+  ' to draw into. Intended to run inside a `ShapeRenderTask` (off the render thread) after
+  ' `checkShapeCache()` has already reported a miss - call `finishShapeRender()` with the
+  ' result after drawing.
+  '
+  ' @param {string} shapeType distinguishes shape components from each other (e.g. "Circle")
+  ' @param {string} uri the cache file URI to render into (from `checkShapeCache()`)
+  ' @param {integer} width bitmap width in pixels
+  ' @param {integer} height bitmap height in pixels
+  ' @return {ShapeRenderState} `{uri, renderer, bitmap, shapeType, timer}` - `renderer`/`bitmap` are
+  '   invalid when `width`/`height` are non-positive or the bitmap couldn't be created
+  function createShapeRenderState(shapeType as string, uri as string, width as integer, height as integer) as ShapeRenderState
+    result = {uri: uri, renderer: invalid, bitmap: invalid, shapeType: shapeType, timer: invalid}
+    if width <= 0 or height <= 0 or "" = uri
+      return result
+    end if
+    bitmap = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+    if invalid = bitmap
+      result.uri = ""
+      return result
+    end if
+    result.bitmap = bitmap
+    ' useBitmapPooling: false - each shape component's Renderer is a one-shot, disposable
+    ' render (draw, encode, write, discard), never reused across frames, so the normal
+    ' pooling default's eager preallocation (10 scratch bitmaps at the device's scratch
+    ' tier size, e.g. 1080x1080 on FHD - ~44MB) has nothing to amortize here. With one
+    ' Renderer per shape component instance (not shared), 20-30 concurrent shapes each
+    ' constructing their own pool at once measured real "Failed to create bitmap"
+    ' failures and multi-second stalls on real hardware - see the stress-test findings
+    ' in specs/2026-08-24-scenegraph-shape-components-design.md. Any scratch bitmap this
+    ' render actually needs (e.g. Triangle/Polygon's lazy right-triangle resource) is
+    ' still created on demand, just not pooled/preallocated.
+    '
+    ' NOTE: useBitmapPooling: false skips the pool's eager preallocation, but
+    ' ScratchBitmapPool.getRegion() still allocates a fresh roBitmap per call when pooling
+    ' is off (BGE.getNewMemoryScratchRegion()) - drawTriangleTo()/drawPolygonTo()'s internal
+    ' scratch-bitmap use (e.g. drawPinnedCorners()/makeIntoTriangle()) can still fail under
+    ' the same memory pressure this flag was meant to avoid, and every one of those internal
+    ' call sites returns `invalid`/`false` on failure with no diagnostic of its own.
+    ' ShapeRenderTask's drawShape() now checks the draw calls' own boolean return values and
+    ' reports a failure through resultUri="" instead of hanging (see doRender()) - this closes
+    ' a real diagnosability gap, but retesting `mixed:30` on real hardware after adding it
+    ' still showed the same handful of shapes stuck forever with *zero* console output at all,
+    ' not even this new failure print - ruling this specific path out as the cause. The
+    ' render thread itself stayed responsive throughout (heartbeat kept advancing), so
+    ' whatever's failing for those shapes is upstream of doRender() ever running at all - most
+    ' likely something at the SceneGraph Task-scheduling layer under ~30 concurrent Tasks,
+    ' not this Renderer/bitmap-pooling path. See docs/scenegraph-shapes.md's "Mass
+    ' construction" section and this investigation's notes in
+    ' specs/2026-08-24-scenegraph-shape-components-design.md.
+    result.renderer = new BGE.Renderer(bitmap, invalid, invalid, {useBitmapPooling: false})
+    result.timer = CreateObject("roTimespan")
+    return result
+  end function
+
+  ' Result of createShapeRenderState() - see there. `renderer`/`bitmap` may be `invalid`.
+  interface ShapeRenderState
+    uri as string
+    renderer as BGE.Renderer
+    bitmap as roBitmap
+    shapeType as string
+    timer as roTimespan
+  end interface
+
+  ' Finishes a cache-miss render started by `createShapeRenderState()`: `Finish()`
+  ' (sufficient alone - no `roScreen` needed, confirmed on hardware), encodes
+  ' to PNG, writes to the cache URI.
+  '
+  ' @param {ShapeRenderState} renderState the result of `createShapeRenderState()`
+  ' @return {boolean} true if the file was written successfully
+  function finishShapeRender(renderState as ShapeRenderState) as boolean
+    if invalid = renderState.bitmap or "" = renderState.uri
+      return false
+    end if
+    renderState.bitmap.Finish()
+    png = renderState.bitmap.GetPng(0, 0, renderState.bitmap.GetWidth(), renderState.bitmap.GetHeight())
+    if invalid = png
+      return false
+    end if
+    wrote = png.WriteFile(renderState.uri)
+    if invalid <> renderState.timer
+      print "[BGE.ShapeComponentHelpers] " + renderState.shapeType + " render took " + renderState.timer.TotalMilliseconds().ToStr() + "ms"
+    end if
+    return wrote
+  end function
+
+  ' Converts a SceneGraph `vertices` field value into `BGE.Math.Vector[]`, as
+  ' every `Renderer.draw*` polygon/triangle call expects. Accepts a
+  ' `vector2darray` field (each point a 2-element Float array, index [0]/[1] -
+  ' this is the XML-settable form, e.g. vertices="[[0,0],[100,0]]") as well as
+  ' a plain roArray of `{x, y}` associative arrays (for callers setting it
+  ' imperatively).
+  '
+  ' @param {object} verticesField the raw field value (may be invalid or empty)
+  ' @return {BGE.Math.Vector[]} converted points, empty if the field was empty/invalid
+  function verticesFromField(verticesField as object) as BGE.Math.Vector[]
+    points = []
+    if invalid = verticesField
+      return points
+    end if
+    for each point in verticesField
+      if type(point) = "roAssociativeArray"
+        points.push(BGE.Math.VectorOps.create(point.x, point.y))
+      else
+        points.push(BGE.Math.VectorOps.create(point[0], point[1]))
+      end if
+    end for
+    return points
+  end function
+
+  ' A right triangle with its right angle at the bottom-left, sized to fill the given
+  ' width/height - used by `Triangle`'s render dispatch whenever its `vertices` field is empty.
+  '
+  ' @param {float} width
+  ' @param {float} height
+  ' @return {BGE.Math.Vector[]} the three triangle points
+  function defaultTriangleVertices(width as float, height as float) as BGE.Math.Vector[]
+    return [
+      BGE.Math.VectorOps.create(0, height),
+      BGE.Math.VectorOps.create(0, 0),
+      BGE.Math.VectorOps.create(width, height)
+    ]
+  end function
+
+end namespace
