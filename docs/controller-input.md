@@ -42,6 +42,11 @@ velocity.x = move.x * speed
 velocity.y = move.y * speed
 ```
 
+`isActionPressed`/`isActionReleased` read true only on the frame the bound
+button was pressed/released, and `isActionHeld` every frame in between, so
+they are best read once per frame from `onUpdate` rather than from `onInput`
+(which fires once per input event).
+
 `bindAxis`'s axis falls back to the remote d-pad whenever the bound
 controller stick reads neutral, so binding once supports both input
 sources automatically.
@@ -50,8 +55,20 @@ sources automatically.
 
 Each connected browser is assigned its own `playerIndex` (0, 1, 2, ...)
 in the order it connects. Pass `playerIndex` to `bindAction`/`bindAxis`
-and to the `isAction*`/`getAxis` calls that read them for local
-multiplayer; a single-player game can ignore it entirely (it defaults to 0).
+to say which controller a binding listens to; a single-player game can
+ignore it entirely (it defaults to 0).
+
+```brighterscript
+game.controls.bindAction("p2fire", invalid, 0, 1)   ' player 1's button 0
+game.controls.bindAxis("p2move", 1, 1)              ' player 1's stick 1
+
+if game.controls.isActionPressed("p2fire") then ...
+```
+
+Reading an action or axis never takes a `playerIndex` - each name is bound
+to one player at bind time, so `isActionPressed("p2fire")`/`getAxis("p2move")`
+already know which controller they refer to. Give each player's actions
+their own names.
 
 ## Advanced: raw controller input
 
