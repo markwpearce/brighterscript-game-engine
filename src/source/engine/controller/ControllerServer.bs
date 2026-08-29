@@ -50,6 +50,23 @@ namespace BGE.Controller
     ' genuinely stopped (tab closed, network gone), just no longer trusted
     ' to distinguish idle-vs-dead on its own.
     staleReadPolls as integer = 0
+    ' Bytes still waiting to be flushed to the socket - see
+    ' ControllerServer.queueSend()/flushPendingSend(). `invalid` when
+    ' nothing is queued. roStreamSocket.send() is non-blocking and can
+    ' return 0 ("would block, try again") under ordinary backpressure -
+    ' looping on that in place would busy-spin the whole render loop
+    ' (Roku's socket has no blocking wait), so instead any unsent
+    ' remainder is parked here and retried once per poll() cycle until it
+    ' fully flushes (or a real send error occurs).
+    pendingSend as roByteArray = invalid
+    ' How far into pendingSend the previous partial send(s) already got.
+    pendingSendOffset as integer = 0
+    ' What to do once pendingSend fully flushes - "" (nothing further),
+    ' "close" (close the connection - e.g. after an HTTP response), or
+    ' "upgrade" (flip into websocket mode and emit onOpen - deferred until
+    ' the handshake response has actually reached the client, so a flush
+    ' failure never leaves a "ghost" upgraded connection).
+    pendingSendAction as string = ""
   end class
 
   ' Consecutive negative-receive polls before a connection is assumed dead
@@ -131,7 +148,23 @@ namespace BGE.Controller
       end if
       for each id in m.connections.Keys()
         connection = m.connections[id]
-        if connection <> invalid and connection.socket.isReadable()
+        if connection = invalid
+          continue for
+        end if
+        m.flushPendingSend(id, connection)
+        ' flushPendingSend() may have closed this connection (a real send
+        ' error, or a queued "close" action finally completing) - re-fetch
+        ' before touching it further.
+        connection = m.connections[id]
+        if connection = invalid
+          continue for
+        end if
+        ' Don't start parsing a new request while a response is still
+        ' being flushed to this same connection - a client that pipelined
+        ' a second request before the first response finished sending
+        ' would otherwise clobber the in-flight pendingSend with a second,
+        ' unrelated one.
+        if connection.pendingSend = invalid and connection.socket.isReadable()
           if connection.mode = BGE.Controller.ConnectionMode.websocket
             m.onWebSocketReadable(id, connection)
           else
@@ -150,6 +183,12 @@ namespace BGE.Controller
       m.tcpListen.close()
     end sub
 
+    ' Closes and forgets one tracked connection, pushing an onClose event
+    ' if it had completed the websocket handshake. Safe to call for an
+    ' already-closed/unknown id (no-op).
+    '
+    ' @param {string} id - the connection id, as passed to a
+    '   ControllerServerEvent's connectionId
     sub closeConnection(id as string)
       connection = m.connections[id]
       if connection = invalid
@@ -206,12 +245,12 @@ namespace BGE.Controller
       end if
       connection.staleReadPolls = 0
       connection.httpBuffer.Append(m.buffer.Slice(0, numReceivedBytes))
-      if connection.httpBuffer.Count() > CONTROLLER_HTTP_BUFFER_SIZE
-        ' headers never terminated within a reasonable size - nothing safe to do
-        m.closeConnection(id)
-        return
-      end if
-      if Instr(1, connection.httpBuffer.ToAsciiString(), chr(13) + chr(10) + chr(13) + chr(10)) = 0
+      if not m.httpHeaderTerminatorFound(connection.httpBuffer)
+        if m.httpBufferExceedsMax(connection.httpBuffer.Count())
+          ' headers never terminated within a reasonable size - nothing safe to do
+          m.closeConnection(id)
+          return
+        end if
         ' full request headers not received yet - a single recv() is not
         ' guaranteed to deliver a whole request, especially a real browser's
         ' larger WebSocket-upgrade request split across TCP segments. Wait
@@ -225,28 +264,60 @@ namespace BGE.Controller
         return
       end if
       if request.command <> "GET"
-        m.sendHttpResponse(socket, request.protocol, 405, "Method Not Allowed")
-        m.closeConnection(id)
+        ' sendHttpResponse()/serveStaticFile() now queue a "close" action of
+        ' their own, taking effect only once the response has actually
+        ' finished flushing (see queueSend()/flushPendingSend()) - don't
+        ' close synchronously here, that could cut the response off mid-send.
+        m.sendHttpResponse(id, connection, request.protocol, 405, "Method Not Allowed")
       else if m.isWebSocketUpgradeRequest(request)
         m.upgradeToWebSocket(id, connection, request)
       else
-        m.serveStaticFile(socket, request)
-        m.closeConnection(id)
+        m.serveStaticFile(id, connection, request)
       end if
     end sub
+
+    ' @param {roByteArray} buffer - a connection's accumulated httpBuffer
+    ' @return {boolean} - true once the double-CRLF header terminator has
+    '   arrived, meaning a full set of request headers is present and
+    '   parseHttpRequest() can be called regardless of total buffer size
+    '   so far. Engine-internal; not private only so the spec can exercise
+    '   it directly (needs no socket).
+    function httpHeaderTerminatorFound(buffer as roByteArray) as boolean
+      return Instr(1, buffer.ToAsciiString(), chr(13) + chr(10) + chr(13) + chr(10)) > 0
+    end function
+
+    ' @param {integer} bufferCount - a connection's accumulated httpBuffer size
+    ' @return {boolean} - true if this buffer has grown past
+    '   CONTROLLER_HTTP_BUFFER_SIZE and should be rejected. Only meaningful
+    '   (and only ever checked by onHttpReadable) when
+    '   httpHeaderTerminatorFound() is still false - see its doc comment
+    '   for why the terminator check must come first. Engine-internal; not
+    '   private only so the spec can exercise it directly.
+    function httpBufferExceedsMax(bufferCount as integer) as boolean
+      return bufferCount > CONTROLLER_HTTP_BUFFER_SIZE
+    end function
 
     ' Parses a raw request buffer into {command, path, protocol, headers},
     ' or invalid if the request line is malformed (fewer than the three
     ' required tokens) - the caller closes the connection in that case.
     ' Engine-internal; not private only so the spec can exercise it.
     '
+    ' Note: `bufferSize` is trusted as-is (no clamp to CONTROLLER_HTTP_BUFFER_SIZE) -
+    ' an earlier clamp here silently corrupted any request larger than that cap on
+    ' real hardware: buffer[bufferSize] = 0 wrote a null byte mid-buffer (at the
+    ' clamped position, not the real end), and roByteArray.ToAsciiString() truncates
+    ' at the first null on a real device (confirmed via on-device testing - brs-cli's
+    ' ToAsciiString() does NOT truncate this way, so this was invisible to the
+    ' headless test suite), silently cutting off everything after it, including the
+    ' actual header terminator. onHttpReadable() is the only caller and already
+    ' decides whether a buffer this large should even be parsed (see
+    ' httpHeaderTerminatorFound()/httpBufferExceedsMax()) - by the time this
+    ' function runs, the size is already accepted.
+    '
     ' @param {roByteArray} buffer
     ' @param {integer} bufferSize
     ' @return {object}
     function parseHttpRequest(buffer as roByteArray, bufferSize as integer) as object
-      if bufferSize > CONTROLLER_HTTP_BUFFER_SIZE
-        bufferSize = CONTROLLER_HTTP_BUFFER_SIZE
-      end if
       buffer[bufferSize] = 0
       lines = buffer.ToAsciiString().Tokenize(chr(13) + chr(10))
       if lines.Count() = 0
@@ -288,21 +359,19 @@ namespace BGE.Controller
       return upgrade = "websocket" and Instr(1, connectionHeader, "upgrade") > 0 and request.headers["sec-websocket-key"] <> invalid
     end function
 
-    ' Completes the RFC 6455 handshake (section 4.2.2) and flips this
-    ' connection into websocket framing mode.
+    ' Completes the RFC 6455 handshake (section 4.2.2) and queues this
+    ' connection to flip into websocket framing mode. The mode flip and
+    ' onOpen event are deferred until the handshake response has actually
+    ' finished sending (see queueSend()/flushPendingSend()) - committing to
+    ' websocket mode before that would create a "ghost" upgraded connection
+    ' if the flush later fails partway through.
     private sub upgradeToWebSocket(id as string, connection as BGE.Controller.ControllerConnection, request as object)
       acceptKey = BGE.Controller.WebSocketFrameCodec.computeAcceptKey(request.headers["sec-websocket-key"])
       response = "HTTP/1.1 101 Switching Protocols" + chr(13) + chr(10)
       response += "Upgrade: websocket" + chr(13) + chr(10)
       response += "Connection: Upgrade" + chr(13) + chr(10)
       response += "Sec-WebSocket-Accept: " + acceptKey + chr(13) + chr(10) + chr(13) + chr(10)
-      sent = m.sendAll(connection.socket, m.stringToBytes(response))
-      if not sent
-        m.closeConnection(id)
-        return
-      end if
-      connection.mode = BGE.Controller.ConnectionMode.websocket
-      m.events.Push({type: BGE.Controller.ControllerServerEventType.onOpen, connectionId: id, message: ""})
+      m.queueSend(id, connection, m.stringToBytes(response), "upgrade")
     end sub
 
     ' @return {boolean} - true if a websocket connection's accumulated buffer has grown past
@@ -359,19 +428,19 @@ namespace BGE.Controller
         ' browser client only ever sends small, unfragmented text frames
       end for
       if decodeResult.bytesConsumed > 0
-        remaining = connection.wsBuffer.Slice(decodeResult.bytesConsumed)
-        connection.wsBuffer = CreateObject("roByteArray")
-        connection.wsBuffer.Append(remaining)
+        ' Slice() already returns a new, independent roByteArray - no need
+        ' to copy it again into a fresh array.
+        connection.wsBuffer = connection.wsBuffer.Slice(decodeResult.bytesConsumed)
       end if
       if shouldClose
         m.closeConnection(id)
       end if
     end sub
 
-    private sub serveStaticFile(socket as roStreamSocket, request as object)
+    private sub serveStaticFile(id as string, connection as BGE.Controller.ControllerConnection, request as object)
       ' No path traversal out of the served directory.
       if Instr(1, request.path, "..") > 0
-        m.sendHttpResponse(socket, request.protocol, 404, "Not Found")
+        m.sendHttpResponse(id, connection, request.protocol, 404, "Not Found")
         return
       end if
       path = "pkg:/source/controller-web" + request.path
@@ -380,12 +449,16 @@ namespace BGE.Controller
       end if
       contents = CreateObject("roByteArray")
       if not contents.ReadFile(path)
-        m.sendHttpResponse(socket, request.protocol, 404, "Not Found")
+        m.sendHttpResponse(id, connection, request.protocol, 404, "Not Found")
         return
       end if
       header = request.protocol + " 200 OK" + chr(13) + chr(10) + "Content-Type: " + m.contentTypeFor(path) + chr(13) + chr(10) + "Content-Length: " + contents.Count().ToStr() + chr(13) + chr(10) + chr(13) + chr(10)
-      m.sendAll(socket, m.stringToBytes(header))
-      m.sendAll(socket, contents)
+      ' Combine header + body into one buffer so this is one queued send
+      ' (one pendingSend slot per connection - see its doc comment) rather
+      ' than two sends racing/overwriting each other across poll() cycles.
+      response = m.stringToBytes(header)
+      response.Append(contents)
+      m.queueSend(id, connection, response, "close")
     end sub
 
     private function contentTypeFor(path as string) as string
@@ -399,11 +472,11 @@ namespace BGE.Controller
       return "application/octet-stream"
     end function
 
-    private sub sendHttpResponse(socket as roStreamSocket, protocol as string, code as integer, body as string)
+    private sub sendHttpResponse(id as string, connection as BGE.Controller.ControllerConnection, protocol as string, code as integer, body as string)
       statusTexts = {"404": "Not Found", "405": "Method Not Allowed"}
       statusText = statusTexts[code.ToStr()] ?? "Error"
       response = protocol + " " + code.ToStr() + " " + statusText + chr(13) + chr(10) + "Content-Type: text/plain" + chr(13) + chr(10) + chr(13) + chr(10) + body
-      m.sendAll(socket, m.stringToBytes(response))
+      m.queueSend(id, connection, m.stringToBytes(response), "close")
     end sub
 
     private function stringToBytes(s as string) as roByteArray
@@ -412,22 +485,64 @@ namespace BGE.Controller
       return bytes
     end function
 
-    ' roStreamSocket.send() is non-blocking and may write fewer bytes than
-    ' requested in one call - loop on its return value until fully flushed.
-    ' Returns true if the whole buffer was sent, false if the socket failed
-    ' partway through (caller should treat the send as not having happened).
-    private function sendAll(socket as roStreamSocket, bytes as roByteArray) as boolean
-      totalSent = 0
-      total = bytes.Count()
-      while totalSent < total
-        sent = socket.send(bytes, totalSent, total - totalSent)
-        if sent <= 0
-          exit while
-        end if
-        totalSent += sent
-      end while
-      return totalSent = total
-    end function
+    ' Queues `bytes` to be sent on this connection, replacing the old
+    ' blocking-retry-loop sendAll(). Makes one immediate non-blocking
+    ' send() attempt (via flushPendingSend()); if that doesn't fully
+    ' flush, the remainder is parked on the connection and completed by
+    ' poll() calling flushPendingSend() once per frame until done - see
+    ' ControllerConnection.pendingSend's doc comment for why this can't
+    ' just retry-loop in place (roStreamSocket.send() is non-blocking with
+    ' no wait, so a tight `while sent = 0` loop here would busy-spin the
+    ' whole render loop under ordinary backpressure).
+    '
+    ' @param {string} id - the connection id
+    ' @param {BGE.Controller.ControllerConnection} connection
+    ' @param {roByteArray} bytes - the bytes to send
+    ' @param {string} action - what to do once fully flushed: "" (nothing
+    '   further), "close", or "upgrade" - see pendingSendAction
+    private sub queueSend(id as string, connection as BGE.Controller.ControllerConnection, bytes as roByteArray, action as string)
+      connection.pendingSend = bytes
+      connection.pendingSendOffset = 0
+      connection.pendingSendAction = action
+      m.flushPendingSend(id, connection)
+    end sub
+
+    ' Makes one non-blocking send() attempt for a connection's queued
+    ' bytes (if any), advancing pendingSendOffset on partial progress.
+    ' Runs the queued action and clears the pending state once fully
+    ' flushed. On a real (negative) send error - as opposed to 0, which
+    ' means only "would block, try again" under Roku's non-blocking
+    ' socket model, not a failure - gives up and closes the connection,
+    ' since there's nothing left to send the queued action's result to
+    ' anyway. A no-op if nothing is queued.
+    private sub flushPendingSend(id as string, connection as BGE.Controller.ControllerConnection)
+      if connection.pendingSend = invalid
+        return
+      end if
+      total = connection.pendingSend.Count()
+      sent = connection.socket.send(connection.pendingSend, connection.pendingSendOffset, total - connection.pendingSendOffset)
+      if sent < 0
+        connection.pendingSend = invalid
+        connection.pendingSendAction = ""
+        m.closeConnection(id)
+        return
+      end if
+      connection.pendingSendOffset += sent
+      if connection.pendingSendOffset < total
+        ' 0 (would block) or a partial send - leave it queued, poll()
+        ' retries next frame.
+        return
+      end if
+      action = connection.pendingSendAction
+      connection.pendingSend = invalid
+      connection.pendingSendAction = ""
+      if action = "close"
+        m.closeConnection(id)
+      else if action = "upgrade"
+        connection.mode = BGE.Controller.ConnectionMode.websocket
+        m.events.Push({type: BGE.Controller.ControllerServerEventType.onOpen, connectionId: id, message: ""})
+      end if
+    end sub
 
   end class
 
