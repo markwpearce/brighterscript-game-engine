@@ -719,7 +719,7 @@ git commit -m "feat: add ControllerRegistry for per-connection controller state 
 
 **Interfaces:**
 - Consumes: `BGE.GameInput` (Task 2: `.playerIndex`, `.button`, `.press/.held/.release`, `.isButton`), `BGE.Controller.ControllerRegistry` (Task 3: `.getStick`, `.getRemoteDpad`).
-- Produces: `BGE.Controller.ControlMap` with `new(registry as BGE.Controller.ControllerRegistry)`, `bindAction(name as string, remoteButton = invalid as string, controllerButton = invalid as dynamic, playerIndex = 0 as integer)`, `bindAxis(name as string, stick = 1 as integer, playerIndex = 0 as integer)`, `onInput(input as BGE.GameInput)`, `isActionPressed(name as string, playerIndex = 0 as integer) as boolean`, `isActionHeld(...) as boolean`, `isActionReleased(...) as boolean`, `getAxis(name as string) as BGE.Math.Vector`.
+- Produces: `BGE.Controller.ControlMap` with `new(registry as BGE.Controller.ControllerRegistry)`, `bindAction(name as string, remoteButton = invalid as dynamic, controllerButton = invalid as dynamic, playerIndex = 0 as integer)`, `bindAxis(name as string, stick = 1 as integer, playerIndex = 0 as integer)`, `onInput(input as BGE.GameInput)`, `isActionPressed(name as string) as boolean`, `isActionHeld(name as string) as boolean`, `isActionReleased(name as string) as boolean`, `getAxis(name as string) as BGE.Math.Vector`. (Final API: `playerIndex` is fixed at `bindAction()`/`bindAxis()` time and dropped from the read-side methods — a binding's player is baked in, so reading an action never needs to repeat it.)
 
 - [ ] **Step 1: Write failing tests**
 
@@ -754,16 +754,15 @@ namespace tests
       controls = new BGE.Controller.ControlMap(new BGE.Controller.ControllerRegistry())
       controls.bindAction("jump", invalid, 0, 0) ' controller button 0, player 0
       controls.onInput(new BGE.GameInput(0, 0, 0, "controller0"))
-      m.assertTrue(controls.isActionPressed("jump", 0))
+      m.assertTrue(controls.isActionPressed("jump"))
     end function
 
     @it("does not fire for a different player's same controller button")
     function _()
       controls = new BGE.Controller.ControlMap(new BGE.Controller.ControllerRegistry())
-      controls.bindAction("jump", invalid, 0, 0)
-      controls.onInput(new BGE.GameInput(0, 0, 1, "controller0")) ' player 1
-      m.assertFalse(controls.isActionPressed("jump", 0))
-      m.assertFalse(controls.isActionPressed("jump", 1)) ' player 1 has no "jump" binding
+      controls.bindAction("jump", invalid, 0, 0) ' bound to player 0
+      controls.onInput(new BGE.GameInput(0, 0, 1, "controller0")) ' event from player 1
+      m.assertFalse(controls.isActionPressed("jump"))
     end function
 
     @it("either the remote or the controller binding fires the same action")
@@ -818,6 +817,8 @@ Expected: FAIL — `BGE.Controller.ControlMap` not found.
 
 - [ ] **Step 3: Implement `ControlMap.bs`**
 
+**Note (updated post-fix-wave):** the block below is the original planning draft, kept as historical record of the plan-time design. The final, shipped `ControlMap` (`src/source/engine/controller/ControlMap.bs`) differs from it in two ways decided during the final fix wave (see `.superpowers/sdd/2026-08-28-controller-input/final-fix-report.md`): (1) `playerIndex` is dropped from `isActionPressed`/`isActionHeld`/`isActionReleased`/the private state lookup — a binding's player is fixed at `bindAction()`/`bindAxis()` time, so the read side never needs to repeat it, and `actionState` is keyed by `name` alone rather than `"<name>:<playerIndex>"`; (2) `onInput`'s per-event state update accumulates `press`/`release` across the frame (`state.press = state.press or input.press`, etc.) instead of overwriting them, and `beginFrame()` (called once per frame by `Game`) clears the one-shot `press`/`release` flags — this closes the frame-semantics bug where a same-frame press-then-held event pair for the same button clobbered `press:true` with `held:true` before any entity could read it.
+
 ```brighterscript
 namespace BGE.Controller
 
@@ -828,7 +829,7 @@ namespace BGE.Controller
     private registry as BGE.Controller.ControllerRegistry
     private actionBindings = {} ' name -> {remoteButton, controllerButton, playerIndex}
     private axisBindings = {} ' name -> {stick, playerIndex}
-    private actionState = {} ' "<name>:<playerIndex>" -> {press, held, release}
+    private actionState = {} ' name -> {press, held, release}
 
     sub new(registry as BGE.Controller.ControllerRegistry)
       m.registry = registry
@@ -842,7 +843,7 @@ namespace BGE.Controller
     ' @param {integer} [controllerButton=invalid] - a controller button index (Gamepad API buttons[] order)
     ' @param {integer} [playerIndex=0] - which controller's button this binds to
     ' @return {void}
-    sub bindAction(name as string, remoteButton = invalid as string, controllerButton = invalid as dynamic, playerIndex = 0 as integer)
+    sub bindAction(name as string, remoteButton = invalid as dynamic, controllerButton = invalid as dynamic, playerIndex = 0 as integer)
       m.actionBindings[name] = {remoteButton: remoteButton, controllerButton: controllerButton, playerIndex: playerIndex}
     end sub
 
@@ -858,9 +859,26 @@ namespace BGE.Controller
       m.axisBindings[name] = {stick: stick, playerIndex: playerIndex}
     end sub
 
+    ' Starts a new frame: clears the one-shot press/release flags so they only
+    ' read true on the frame their event arrived. Called once per frame by
+    ' Game - a game does not call this directly.
+    '
+    ' @return {void}
+    sub beginFrame()
+      for each name in m.actionState
+        state = m.actionState[name]
+        state.press = false
+        state.release = false
+      end for
+    end sub
+
     ' Feeds one GameInput event (remote or controller-originated) through
     ' every action binding, updating whichever actions it matches. Called
     ' once per input event by Game - a game does not call this directly.
+    '
+    ' Several events for the same binding can arrive in one frame (Game feeds
+    ' a press and then a held event for the same button), so press/release
+    ' accumulate across the frame rather than overwriting each other.
     '
     ' @param {BGE.GameInput} input
     ' @return {void}
@@ -870,36 +888,45 @@ namespace BGE.Controller
         matchesRemote = binding.remoteButton <> invalid and input.playerIndex = -1 and input.isButton(binding.remoteButton)
         matchesController = binding.controllerButton <> invalid and input.playerIndex = binding.playerIndex and input.button = "controller" + binding.controllerButton.ToStr()
         if matchesRemote or matchesController
-          key = name + ":" + binding.playerIndex.ToStr()
-          m.actionState[key] = {press: input.press, held: input.held, release: input.release}
+          state = m.actionState[name]
+          if state = invalid
+            state = {press: false, held: false, release: false}
+            m.actionState[name] = state
+          end if
+          state.press = state.press or input.press
+          state.release = state.release or input.release
+          if input.release
+            state.held = false
+          else
+            state.held = state.held or input.held
+          end if
         end if
       end for
     end sub
 
+    ' A binding's playerIndex is fixed at bindAction() time, so reading an
+    ' action never needs it - the name alone identifies the binding.
+    '
     ' @param {string} name
-    ' @param {integer} [playerIndex=0]
     ' @return {boolean} - true the frame the bound button was pressed
-    function isActionPressed(name as string, playerIndex = 0 as integer) as boolean
-      return m.stateFor(name, playerIndex).press
+    function isActionPressed(name as string) as boolean
+      return m.stateFor(name).press
     end function
 
     ' @param {string} name
-    ' @param {integer} [playerIndex=0]
     ' @return {boolean} - true every frame the bound button remains held
-    function isActionHeld(name as string, playerIndex = 0 as integer) as boolean
-      return m.stateFor(name, playerIndex).held
+    function isActionHeld(name as string) as boolean
+      return m.stateFor(name).held
     end function
 
     ' @param {string} name
-    ' @param {integer} [playerIndex=0]
     ' @return {boolean} - true the frame the bound button was released
-    function isActionReleased(name as string, playerIndex = 0 as integer) as boolean
-      return m.stateFor(name, playerIndex).release
+    function isActionReleased(name as string) as boolean
+      return m.stateFor(name).release
     end function
 
-    private function stateFor(name as string, playerIndex as integer) as object
-      key = name + ":" + playerIndex.ToStr()
-      return m.actionState[key] ?? {press: false, held: false, release: false}
+    private function stateFor(name as string) as object
+      return m.actionState[name] ?? {press: false, held: false, release: false}
     end function
 
     ' @param {string} name - a name previously passed to bindAxis()
