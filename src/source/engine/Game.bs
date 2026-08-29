@@ -473,7 +473,12 @@ namespace BGE
               if GetInterface(axes, "ifArray") <> invalid and GetInterface(buttons, "ifArray") <> invalid
                 changed = m.controllerRegistry.updateFromMessage(playerIndex, axes, buttons)
                 for each buttonIndex in changed
-                  code = buttons[buttonIndex] ? buttonIndex : (100 + buttonIndex)
+                  ' Read the sanitized/coerced state back from the registry rather than
+                  ' indexing the raw, untrusted `buttons` array directly - a non-boolean
+                  ' JSON element there would crash this ternary (it requires a strict
+                  ' Boolean condition), and updateFromMessage() has already coerced it.
+                  isPressed = m.controllerRegistry.isButtonHeld(playerIndex, buttonIndex)
+                  code = isPressed ? (BGE.CONTROLLER_BUTTON_CODE_PRESS_BASE + buttonIndex) : (BGE.CONTROLLER_BUTTON_CODE_RELEASE_BASE + buttonIndex)
                   controllerInputs.Push(new GameInput(code, 0, playerIndex, "controller" + buttonIndex.ToStr()))
                 end for
               end if
@@ -484,10 +489,14 @@ namespace BGE
 
       for each key in m.controllerConnectionPlayers
         playerIndex = m.controllerConnectionPlayers[key]
-        for buttonIndex = 0 to 15
+        ' Scan the actual number of buttons this player's controller last reported,
+        ' not a hardcoded count - a real gamepad's button count varies (the W3C
+        ' standard mapping alone goes up to 17).
+        buttonCount = m.controllerRegistry.getButtonCount(playerIndex)
+        for buttonIndex = 0 to buttonCount - 1
           if m.controllerRegistry.isButtonHeld(playerIndex, buttonIndex)
             heldTimeMs = m.controllerRegistry.getHeldTimeMs(playerIndex, buttonIndex)
-            controllerInputs.Push(new GameInput(1000 + buttonIndex, heldTimeMs, playerIndex, "controller" + buttonIndex.ToStr()))
+            controllerInputs.Push(new GameInput(BGE.CONTROLLER_BUTTON_CODE_HELD_BASE + buttonIndex, heldTimeMs, playerIndex, "controller" + buttonIndex.ToStr()))
           end if
         end for
       end for
@@ -544,6 +553,9 @@ namespace BGE
           if m.isValidEntity(entity) and invalid <> entity.onUrlEvent and "roUrlEvent" = type(urlMsg)
             entity.onUrlEvent(urlMsg)
           end if
+
+          ' -------------------Then process the onControls() function (only if the game has bound anything) ----------------------
+          m.processEntityOnControls(entity)
 
           ' -------------------Then process the onUpdate() function----------------------
           if m.isValidEntity(entity) and invalid <> entity.onUpdate
@@ -630,39 +642,70 @@ namespace BGE
 
 
 
-    ' Processes input events and calls the entity's onInput function
+    ' Dispatches one GameInput to an entity's onInput(), re-validating the
+    ' entity immediately afterward - the common "call onInput, then check the
+    ' callback didn't invalidate/delete the entity" step shared by
+    ' processEntityOnInput's and processEntityOnControllerInput's dispatch
+    ' loops, factored out so the two can't drift out of sync with each other.
     '
-    ' @param {GameEntity} entity - the entity to relay input to
-    ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @param {GameEntity} entity
+    ' @param {GameInput} input
     ' @return {boolean} true if this entity is still valid
+    private function dispatchOnInput(entity as GameEntity, input as GameInput) as boolean
+      if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
+        entity.onInput(input)
+      end if
+      return m.isValidEntity(entity)
+    end function
+
     ' Dispatches this frame's controller-originated GameInput events to one
     ' entity's onInput(), mirroring processEntityOnInput's remote-input path.
+    '
+    ' @param {GameEntity} entity - the entity to relay input to
+    ' @param {GameInput[]} controllerInputs - array of controller-originated GameInput events synthesized this frame
+    ' @return {boolean} true if this entity is still valid
     private function processEntityOnControllerInput(entity as GameEntity, controllerInputs as GameInput[]) as boolean
       if not m.isValidEntity(entity)
         return false
       end if
       for each input in controllerInputs
-        if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
-          entity.onInput(input)
-          if not m.isValidEntity(entity)
-            return false
-          end if
+        if not m.dispatchOnInput(entity, input)
+          return false
         end if
       end for
       return true
     end function
 
+    ' Dispatches onControls() to one entity, but only if the game has bound at
+    ' least one action/axis (ControlMap.hasBindings()) - see
+    ' GameEntity.onControls()'s doc comment for the zero-cost-when-unbound
+    ' guarantee this preserves. Not private, matching this file's own
+    ' precedent (BGE.Controller.ControllerServer.parseHttpRequest) of an
+    ' otherwise-internal method left public purely so a spec can exercise it
+    ' directly, since Game's real per-frame loop has no other test seam.
+    '
+    ' @param {GameEntity} entity
+    ' @return {boolean} true if this entity is still valid
+    function processEntityOnControls(entity as GameEntity) as boolean
+      if m.controls.hasBindings() and m.isValidEntity(entity) and invalid <> entity.onControls
+        entity.onControls(m.controls)
+      end if
+      return m.isValidEntity(entity)
+    end function
+
+    ' Processes input events and calls the entity's onInput function
+    '
+    ' @param {GameEntity} entity - the entity to relay input to
+    ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @return {boolean} true if this entity is still valid
     private function processEntityOnInput(entity as GameEntity, universalControlEvents as roUniversalControlEvent[]) as boolean
       if not m.isValidEntity(entity)
         return false
       end if
 
       for each msg in universalControlEvents
-        if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
-          entity.onInput(new GameInput(msg.GetInt(), 0))
-          if not m.isValidEntity(entity)
-            return false
-          end if
+        if not m.dispatchOnInput(entity, new GameInput(msg.GetInt(), 0))
+          return false
         end if
 
         if entity.onECPKeyboard <> invalid and msg.GetChar() <> 0 and msg.GetChar() = msg.GetInt()
@@ -675,12 +718,8 @@ namespace BGE
       if m.buttonHeld <> -1
         ' Button release codes are 100 plus the button press code
         ' This shows a button held code as 1000 plus the button press code
-        if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
-          entity.onInput(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
-
-          if not m.isValidEntity(entity)
-            return false
-          end if
+        if not m.dispatchOnInput(entity, new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
+          return false
         end if
       end if
       return true

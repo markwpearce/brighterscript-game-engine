@@ -34,18 +34,40 @@ controller produced the input.
 ```brighterscript
 game.controls.bindAction("jump", "ok", 0)   ' name, remoteButton, controllerButton
 game.controls.bindAxis("move")
-
-' per frame, e.g. in onUpdate/onInput:
-if game.controls.isActionPressed("jump") then ...
-move = game.controls.getAxis("move")   ' a BGE.Math.Vector
-velocity.x = move.x * speed
-velocity.y = move.y * speed
 ```
 
-`isActionPressed`/`isActionReleased` read true only on the frame the bound
-button was pressed/released, and `isActionHeld` every frame in between, so
-they are best read once per frame from `onUpdate` rather than from `onInput`
-(which fires once per input event).
+The recommended way to read bound state each frame is `onControls()`, a
+`GameEntity` lifecycle hook called once per frame with the game's
+`ControlMap` (the same object as `m.game.controls`):
+
+```brighterscript
+override sub onControls(controls as BGE.Controller.ControlMap)
+  if controls.isActionPressed("jump") then ...
+  move = controls.getAxis("move")   ' a BGE.Math.Vector
+  m.velocity.x = move.x * speed
+  m.velocity.y = move.y * speed
+end sub
+```
+
+`onControls()` is only called on a frame where the game has bound at least
+one action/axis (`ControlMap.hasBindings()`) - a game that never calls
+`bindAction`/`bindAxis` never gets this callback at all, keeping the
+zero-cost-when-unused guarantee. `isActionPressed`/`isActionReleased` read
+true only on the frame the bound button was pressed/released, and
+`isActionHeld` every frame in between.
+
+You can still read `m.game.controls` directly from `onUpdate()` (or
+anywhere else) instead, if you want different per-frame ordering or would
+rather keep controller reads alongside your other update logic - the two
+approaches read the exact same state, `onControls()` just saves the
+`m.game.controls` boilerplate and guarantees the read happens before
+`onUpdate()` runs:
+
+```brighterscript
+sub onUpdate(deltaTime as float)
+  if m.game.controls.isActionPressed("jump") then ...
+end sub
+```
 
 `bindAxis`'s axis falls back to the remote d-pad whenever the bound
 controller stick reads neutral, so binding once supports both input
