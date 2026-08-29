@@ -12,7 +12,26 @@ namespace BGE.Controller
     socket as roStreamSocket
     mode as string = BGE.Controller.ConnectionMode.http
     wsBuffer as roByteArray = CreateObject("roByteArray")
+    ' Accumulates raw bytes across possibly-multiple recv()/poll() calls
+    ' until a full HTTP request (terminated by a blank line) has arrived -
+    ' see onHttpReadable(). A single recv() is not guaranteed to return an
+    ' entire request in one call, especially a real browser's larger
+    ' WebSocket-upgrade request (many headers) split across TCP segments.
+    httpBuffer as roByteArray = CreateObject("roByteArray")
+    ' Consecutive poll() cycles where isReadable() reported true but
+    ' receive() returned a negative "not ready yet" result with no bytes
+    ' actually delivered - see onHttpReadable()/onWebSocketReadable(). Reset
+    ' to 0 on every poll that actually receives bytes. Guards against a dead
+    ' connection (peer vanished without a clean FIN) spinning forever now
+    ' that a negative receive() no longer closes the connection immediately.
+    staleReadPolls as integer = 0
   end class
+
+  ' Consecutive negative-receive polls before a connection is assumed dead
+  ' and closed - see ControllerConnection.staleReadPolls. At ~60 polls/sec
+  ' this is a multi-second grace period, comfortably longer than any real
+  ' multi-part request/frame should take to finish arriving.
+  const CONTROLLER_MAX_STALE_READ_POLLS = 300
 
   enum ControllerServerEventType
     onOpen = "onOpen"
@@ -133,11 +152,44 @@ namespace BGE.Controller
         return
       end if
       numReceivedBytes = socket.receive(m.buffer, 0, CONTROLLER_HTTP_BUFFER_SIZE)
-      if numReceivedBytes <= 0
+      if numReceivedBytes = 0
+        ' A clean read of zero bytes is the standard TCP half-close signal -
+        ' the peer actually closed the connection.
+        m.closeConnection(id)
+        return
+      else if numReceivedBytes < 0
+        ' A negative return does NOT necessarily mean the peer closed the
+        ' connection - on at least one real device, isReadable() has been
+        ' observed to report true for one poll() cycle with no bytes
+        ' actually available yet (e.g. immediately after a previous read
+        ' drained everything currently buffered, before a request split
+        ' across multiple TCP segments/writes has fully arrived). Treating
+        ' this the same as a real close prematurely killed the connection
+        ' before the rest of a multi-part request could arrive - confirmed
+        ' via a scripted client that split a request mid-headers with a
+        ' multi-second gap between writes. Just wait for a later poll(),
+        ' up to a point - see staleReadPolls doc comment.
+        connection.staleReadPolls += 1
+        if connection.staleReadPolls > CONTROLLER_MAX_STALE_READ_POLLS
+          m.closeConnection(id)
+        end if
+        return
+      end if
+      connection.staleReadPolls = 0
+      connection.httpBuffer.Append(m.buffer.Slice(0, numReceivedBytes))
+      if connection.httpBuffer.Count() > CONTROLLER_HTTP_BUFFER_SIZE
+        ' headers never terminated within a reasonable size - nothing safe to do
         m.closeConnection(id)
         return
       end if
-      request = m.parseHttpRequest(m.buffer, numReceivedBytes)
+      if Instr(1, connection.httpBuffer.ToAsciiString(), chr(13) + chr(10) + chr(13) + chr(10)) = 0
+        ' full request headers not received yet - a single recv() is not
+        ' guaranteed to deliver a whole request, especially a real browser's
+        ' larger WebSocket-upgrade request split across TCP segments. Wait
+        ' for poll() to call this again once more data is readable.
+        return
+      end if
+      request = m.parseHttpRequest(connection.httpBuffer, connection.httpBuffer.Count())
       if request = invalid
         ' malformed request line - nothing safe to respond with
         m.closeConnection(id)
@@ -228,10 +280,25 @@ namespace BGE.Controller
       chunk = CreateObject("roByteArray")
       chunk[CONTROLLER_WS_READ_SIZE] = 0
       numReceivedBytes = socket.receive(chunk, 0, CONTROLLER_WS_READ_SIZE)
-      if numReceivedBytes <= 0
+      if numReceivedBytes = 0
+        ' A clean read of zero bytes is the standard TCP half-close signal -
+        ' the peer actually closed the connection.
         m.closeConnection(id)
         return
+      else if numReceivedBytes < 0
+        ' A negative return does NOT necessarily mean the peer closed the
+        ' connection - see the identical comment in onHttpReadable(). Just
+        ' wait for a later poll(); this keeps a long-lived, otherwise-idle
+        ' websocket connection from being torn down on a spurious readable
+        ' notification with nothing actually behind it - but only up to a
+        ' point, see staleReadPolls doc comment.
+        connection.staleReadPolls += 1
+        if connection.staleReadPolls > CONTROLLER_MAX_STALE_READ_POLLS
+          m.closeConnection(id)
+        end if
+        return
       end if
+      connection.staleReadPolls = 0
       connection.wsBuffer.Append(chunk.Slice(0, numReceivedBytes))
       decodeResult = BGE.Controller.WebSocketFrameCodec.decodeFrames(connection.wsBuffer, connection.wsBuffer.Count())
       shouldClose = false

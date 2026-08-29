@@ -58,6 +58,38 @@ namespace tests
       m.assertEqual("websocket", request.headers["Upgrade"])
     end function
 
+    @describe("onHttpReadable buffers a request split across multiple recv() calls")
+
+    @it("does not misparse a request whose headers arrive across two reads as complete/malformed")
+    function _()
+      ' Root cause of the real WebSocket-handshake hang: onHttpReadable used
+      ' to parse whatever a single socket.receive() call returned as if it
+      ' were the complete request. A real browser's larger upgrade request
+      ' (many headers) can arrive split across TCP segments/recv() calls -
+      ' confirmed against a real device via a scripted client that split the
+      ' request mid-headers, which previously produced a 404 (falling through
+      ' to serveStaticFile because Sec-WebSocket-Key hadn't arrived yet)
+      ' instead of the 101 upgrade response. This spec exercises the buffering
+      ' fix directly: parseHttpRequest is only meaningful once the full
+      ' double-CRLF-terminated header block has accumulated, which callers
+      ' (onHttpReadable) are now responsible for waiting on. Since brs-cli
+      ' can't fake a real socket's partial-recv() behavior, this documents the
+      ' invariant at the parseHttpRequest level - fed a full header block
+      ' assembled from two concatenated fragments, it must return the
+      ' complete, correctly-parsed request (not a partial/malformed one).
+      server = new BGE.Controller.ControllerServer(8888)
+      fragment1 = "GET /ws HTTP/1.1" + m.crlf() + "Host: 192.168.1.5:8888" + m.crlf() + "Connection: Upgrade" + m.crlf()
+      fragment2 = "Upgrade: websocket" + m.crlf() + "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" + m.crlf() + m.crlf()
+      buffer = m.bufferFor(fragment1 + fragment2)
+      request = server.parseHttpRequest(buffer, buffer.Count())
+      m.assertEqual("GET", request.command)
+      m.assertEqual("/ws", request.path)
+      m.assertEqual("websocket", request.headers["Upgrade"])
+      m.assertEqual("Upgrade", request.headers["Connection"])
+      m.assertEqual("dGhlIHNhbXBsZSBub25jZQ==", request.headers["Sec-WebSocket-Key"])
+      m.assertTrue(server.isWebSocketUpgradeRequest(request))
+    end function
+
     @describe("isWebSocketUpgradeRequest")
 
     @it("is true when all three handshake headers are present")
