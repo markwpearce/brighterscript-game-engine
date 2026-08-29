@@ -1,0 +1,185 @@
+namespace tests
+  @suite("BGE.Controller.ControllerRegistry")
+  class ControllerRegistryTests extends rooibos.BaseTestSuite
+
+    @describe("assignPlayerIndex / releasePlayerIndex")
+
+    @it("assigns increasing indexes, then reuses a freed one")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      first = registry.assignPlayerIndex()
+      second = registry.assignPlayerIndex()
+      m.assertEqual(0, first)
+      m.assertEqual(1, second)
+      registry.releasePlayerIndex(0)
+      third = registry.assignPlayerIndex()
+      m.assertEqual(0, third)
+    end function
+
+    @describe("updateFromMessage")
+
+    @it("returns the indexes of buttons that changed since last update")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      changed = registry.updateFromMessage(playerIndex, [0.0, 0.0], [true, false, false])
+      m.assertEqual(1, changed.Count())
+      m.assertEqual(0, changed[0])
+    end function
+
+    @it("reports no change when the same buttons are sent again")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [0.0, 0.0], [true, false])
+      changed = registry.updateFromMessage(playerIndex, [0.0, 0.0], [true, false])
+      m.assertEqual(0, changed.Count())
+    end function
+
+    @it("isButtonHeld reflects the latest message")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [], [false, true])
+      m.assertTrue(registry.isButtonHeld(playerIndex, 1))
+      m.assertFalse(registry.isButtonHeld(playerIndex, 0))
+    end function
+
+    @describe("getButtonCount")
+
+    @it("reflects the last message's button count, 0 for a never-seen player")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      m.assertEqual(0, registry.getButtonCount(playerIndex))
+      registry.updateFromMessage(playerIndex, [], [false, false, true])
+      m.assertEqual(3, registry.getButtonCount(playerIndex))
+      m.assertEqual(0, registry.getButtonCount(playerIndex + 1))
+    end function
+
+    @describe("stick axes")
+
+    @it("stores stick1 from axes[0:1] and stick2 from axes[2:3]")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [0.5, -0.5, 1.0, -1.0], [])
+      stick1 = registry.getStick(playerIndex, 1)
+      stick2 = registry.getStick(playerIndex, 2)
+      m.assertEqual(0.5, stick1.x)
+      m.assertEqual(-0.5, stick1.y)
+      m.assertEqual(1.0, stick2.x)
+      m.assertEqual(-1.0, stick2.y)
+    end function
+
+    @it("resets sticks to neutral when a later message reports fewer axes")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [0.5, -0.5, 1.0, -1.0], [])
+      registry.updateFromMessage(playerIndex, [], [])
+      stick1 = registry.getStick(playerIndex, 1)
+      stick2 = registry.getStick(playerIndex, 2)
+      m.assertEqual(0.0, stick1.x)
+      m.assertEqual(0.0, stick1.y)
+      m.assertEqual(0.0, stick2.x)
+      m.assertEqual(0.0, stick2.y)
+    end function
+
+    @describe("getHeldTimeMs")
+
+    @it("returns 0 for a never-pressed button")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [], [false, false, false])
+      m.assertEqual(0, registry.getHeldTimeMs(playerIndex, 0))
+      m.assertEqual(0, registry.getHeldTimeMs(playerIndex, 1))
+    end function
+
+    @it("returns 0 after a button is released")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [], [true, false])
+      registry.updateFromMessage(playerIndex, [], [false, false])
+      m.assertEqual(0, registry.getHeldTimeMs(playerIndex, 0))
+    end function
+
+    @it("returns a non-zero value for a currently-held button")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [], [true, false])
+      heldTime = registry.getHeldTimeMs(playerIndex, 0)
+      m.assertTrue(heldTime >= 0)
+      m.assertTrue(registry.isButtonHeld(playerIndex, 0))
+    end function
+
+    @describe("button array shrinkage cleanup")
+
+    @it("cleans up held timers when buttons array shrinks, avoiding state leak")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [], [false, false, true])
+      m.assertTrue(registry.isButtonHeld(playerIndex, 2))
+      ' After shrinking, button 2 should be treated as released
+      registry.updateFromMessage(playerIndex, [], [false])
+      ' Both accessors should agree button 2 is not held
+      m.assertFalse(registry.isButtonHeld(playerIndex, 2))
+      m.assertEqual(0, registry.getHeldTimeMs(playerIndex, 2))
+    end function
+
+    @it("reports a shrinking array's dropped index as changed, so a release event still fires")
+    function _()
+      ' The change-detection loop used to only scan indexes present in the NEW message -
+      ' a button held true in a previous message that simply isn't in a later, shorter
+      ' array never appeared in `changed`, so nothing driven by change events (e.g.
+      ' ControlMap) ever saw a release for it, even though isButtonHeld/getHeldTimeMs
+      ' (bounds-checked) already reported it correctly released.
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [], [false, false, true])
+      changed = registry.updateFromMessage(playerIndex, [], [false])
+      m.assertEqual(1, changed.Count())
+      m.assertEqual(2, changed[0])
+    end function
+
+    @describe("malformed message elements")
+
+    @it("coerces a non-boolean button element to false instead of propagating it")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      changed = registry.updateFromMessage(playerIndex, [], [true, "not-a-bool", 5])
+      m.assertTrue(registry.isButtonHeld(playerIndex, 0))
+      m.assertFalse(registry.isButtonHeld(playerIndex, 1))
+      m.assertFalse(registry.isButtonHeld(playerIndex, 2))
+      m.assertEqual(1, changed.Count())
+      m.assertEqual(0, changed[0])
+    end function
+
+    @it("coerces a non-numeric axis element to 0.0 instead of propagating it")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      playerIndex = registry.assignPlayerIndex()
+      registry.updateFromMessage(playerIndex, [0.5, "not-a-number"], [])
+      stick1 = registry.getStick(playerIndex, 1)
+      m.assertEqual(0.5, stick1.x)
+      m.assertEqual(0.0, stick1.y)
+    end function
+
+    @describe("remote d-pad fallback state")
+
+    @it("stores and returns the remote d-pad vector")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      registry.setRemoteDpad(1, 0)
+      dpad = registry.getRemoteDpad()
+      m.assertEqual(1.0, dpad.x)
+      m.assertEqual(0.0, dpad.y)
+    end function
+
+  end class
+end namespace

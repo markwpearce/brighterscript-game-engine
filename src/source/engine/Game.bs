@@ -60,6 +60,10 @@ namespace BGE
     private device as roDeviceInfo = CreateObject("roDeviceInfo")
     private urlTransfers = {}
     private urlPort as roMessagePort = CreateObject("roMessagePort")
+    private controllerPort as roMessagePort = CreateObject("roMessagePort")
+    private controllerServer as BGE.Controller.ControllerServer = invalid
+    private controllerRegistry as BGE.Controller.ControllerRegistry = new BGE.Controller.ControllerRegistry()
+    private controllerConnectionPlayers = {} ' connectionId -> playerIndex
     private ecpInputPort as roMessagePort = CreateObject("roMessagePort")
     private ecpInput as roInput = CreateObject("roInput")
     public compositor as roCompositor = CreateObject("roCompositor")
@@ -114,6 +118,10 @@ namespace BGE
     ' Container for Debug UI
     debugUi as BGE.UI.UiContainer
 
+    ' Unified remote+controller input mapping - see enableControllerInput()
+    ' and BGE.Controller.ControlMap.
+    controls as BGE.Controller.ControlMap = invalid
+
 
     ' Constructor for GameEngine
     '
@@ -138,6 +146,7 @@ namespace BGE
       m.audioPlayer.SetMessagePort(m.musicPort)
       ' Set up the input port
       m.ecpInput.SetMessagePort(m.ecpInputPort)
+      m.controls = new BGE.Controller.ControlMap(m.controllerRegistry)
 
       ' Register all fonts in package
       m.setUpFonts()
@@ -312,8 +321,56 @@ namespace BGE
         m.buttonHeldTimeMs = m.buttonHeldTimer.TotalMilliseconds()
         musicMsg = m.musicPort.GetMessage() as roAudioPlayerEvent
 
+        controllerInputs = m.drainControllerInput()
+
+        ' All ControlMap work is skipped entirely until a game binds something -
+        ' a game that never calls bindAction/bindAxis pays nothing per frame.
+        if m.controls.hasBindings()
+          m.controls.beginFrame()
+          for each msg in universalControlEvents
+            m.controls.onInput(new GameInput(msg.GetInt(), 0))
+          end for
+          if m.buttonHeld <> -1
+            m.controls.onInput(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
+          end if
+          for each input in controllerInputs
+            m.controls.onInput(input)
+          end for
+
+          remoteDpadX = 0
+          remoteDpadY = 0
+          for each msg in universalControlEvents
+            directionInput = new GameInput(msg.GetInt(), 0)
+            if directionInput.press or directionInput.held
+              if directionInput.x <> 0
+                remoteDpadX = directionInput.x
+              end if
+              if directionInput.y <> 0
+                remoteDpadY = directionInput.y
+              end if
+            else if directionInput.release
+              if directionInput.isButton("left") or directionInput.isButton("right")
+                remoteDpadX = 0
+              end if
+              if directionInput.isButton("up") or directionInput.isButton("down")
+                remoteDpadY = 0
+              end if
+            end if
+          end for
+          if m.buttonHeld <> -1
+            heldDirectionInput = new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs)
+            if heldDirectionInput.x <> 0
+              remoteDpadX = heldDirectionInput.x
+            end if
+            if heldDirectionInput.y <> 0
+              remoteDpadY = heldDirectionInput.y
+            end if
+          end if
+          m.controllerRegistry.setRemoteDpad(remoteDpadX, remoteDpadY)
+        end if
+
         ' ----------------------Handle entity interactions (collisions, etc)--------------------
-        m.processEntitiesPreDraw(universalControlEvents, musicMsg, ecpMsg, urlMsg)
+        m.processEntitiesPreDraw(universalControlEvents, controllerInputs, musicMsg, ecpMsg, urlMsg)
 
         ' ----------------------Clear the screen before drawing entities-------------------------
         if m.background_color <> invalid
@@ -383,15 +440,83 @@ namespace BGE
       end while
     end sub
 
+    ' Drains ControllerServer socket events, updates ControllerRegistry, and
+    ' returns the list of GameInput events (press/release for changed
+    ' buttons, held for currently-held ones) synthesized this frame.
+    private function drainControllerInput() as GameInput[]
+      controllerInputs = [] as GameInput[]
+      if m.controllerServer = invalid
+        return controllerInputs
+      end if
+
+      m.controllerServer.poll()
+
+      for each event in m.controllerServer.drainEvents()
+        if event.type = BGE.Controller.ControllerServerEventType.onOpen
+          m.controllerConnectionPlayers[event.connectionId] = m.controllerRegistry.assignPlayerIndex()
+        else if event.type = BGE.Controller.ControllerServerEventType.onClose
+          playerIndex = m.controllerConnectionPlayers[event.connectionId]
+          if playerIndex <> invalid
+            m.controllerRegistry.releasePlayerIndex(playerIndex)
+            m.controllerConnectionPlayers.Delete(event.connectionId)
+          end if
+        else if event.type = BGE.Controller.ControllerServerEventType.onMessage
+          playerIndex = m.controllerConnectionPlayers[event.connectionId]
+          if playerIndex <> invalid
+            ' Anything on this socket is untrusted: ParseJson happily returns a
+            ' bare number/string/array, so check the shape before using it and
+            ' silently drop any message that doesn't match.
+            payload = ParseJson(event.message)
+            if payload <> invalid and GetInterface(payload, "ifAssociativeArray") <> invalid
+              axes = payload.axes ?? []
+              buttons = payload.buttons ?? []
+              if GetInterface(axes, "ifArray") <> invalid and GetInterface(buttons, "ifArray") <> invalid
+                changed = m.controllerRegistry.updateFromMessage(playerIndex, axes, buttons)
+                for each buttonIndex in changed
+                  ' Read the sanitized/coerced state back from the registry rather than
+                  ' indexing the raw, untrusted `buttons` array directly - a non-boolean
+                  ' JSON element there would crash this ternary (it requires a strict
+                  ' Boolean condition), and updateFromMessage() has already coerced it.
+                  isPressed = m.controllerRegistry.isButtonHeld(playerIndex, buttonIndex)
+                  code = isPressed ? (BGE.CONTROLLER_BUTTON_CODE_PRESS_BASE + buttonIndex) : (BGE.CONTROLLER_BUTTON_CODE_RELEASE_BASE + buttonIndex)
+                  controllerInputs.Push(new GameInput(code, 0, playerIndex, "controller" + buttonIndex.ToStr()))
+                end for
+              end if
+            end if
+          end if
+        end if
+      end for
+
+      for each key in m.controllerConnectionPlayers
+        playerIndex = m.controllerConnectionPlayers[key]
+        ' Scan the actual number of buttons this player's controller last reported,
+        ' not a hardcoded count - a real gamepad's button count varies (the W3C
+        ' standard mapping alone goes up to 17).
+        buttonCount = m.controllerRegistry.getButtonCount(playerIndex)
+        for buttonIndex = 0 to buttonCount - 1
+          if m.controllerRegistry.isButtonHeld(playerIndex, buttonIndex)
+            heldTimeMs = m.controllerRegistry.getHeldTimeMs(playerIndex, buttonIndex)
+            controllerInputs.Push(new GameInput(BGE.CONTROLLER_BUTTON_CODE_HELD_BASE + buttonIndex, heldTimeMs, playerIndex, "controller" + buttonIndex.ToStr()))
+          end if
+        end for
+      end for
+
+      return controllerInputs
+    end function
+
     ' Handles all the processing for the entities before drawing
     '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of any control events that happened since last frame
+    ' @param {GameInput[]} controllerInputs - array of controller-originated GameInput events synthesized this frame
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
     ' @return {void}
-    private sub processEntitiesPreDraw(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+    private sub processEntitiesPreDraw(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       startedPaused = m.paused
+      ' Checked once per frame, not per entity - always false unless
+      ' enableControllerInput() was called and a controller is connected.
+      hasControllerInputs = controllerInputs.Count() > 0
       ' Process all Entity Updates
       for i = m.sortedEntities.Count() to 0 step -1
         entity = invalid as BGE.GameEntity
@@ -410,6 +535,10 @@ namespace BGE
             m.processEntityOnInput(entity, universalControlEvents)
           end if
 
+          if hasControllerInputs and m.isValidEntity(entity)
+            m.processEntityOnControllerInput(entity, controllerInputs)
+          end if
+
           ' -------------------Then send the audioPlayer event msg if applicable-------------------
           if m.isValidEntity(entity) and invalid <> entity.onAudioEvent and "roAudioPlayerEvent" = type(musicMsg)
             entity.onAudioEvent(musicMsg)
@@ -424,6 +553,9 @@ namespace BGE
           if m.isValidEntity(entity) and invalid <> entity.onUrlEvent and "roUrlEvent" = type(urlMsg)
             entity.onUrlEvent(urlMsg)
           end if
+
+          ' -------------------Then process the onControls() function (only if the game has bound anything) ----------------------
+          m.processEntityOnControls(entity)
 
           ' -------------------Then process the onUpdate() function----------------------
           if m.isValidEntity(entity) and invalid <> entity.onUpdate
@@ -510,6 +642,57 @@ namespace BGE
 
 
 
+    ' Dispatches one GameInput to an entity's onInput(), re-validating the
+    ' entity immediately afterward - the common "call onInput, then check the
+    ' callback didn't invalidate/delete the entity" step shared by
+    ' processEntityOnInput's and processEntityOnControllerInput's dispatch
+    ' loops, factored out so the two can't drift out of sync with each other.
+    '
+    ' @param {GameEntity} entity
+    ' @param {GameInput} input
+    ' @return {boolean} true if this entity is still valid
+    private function dispatchOnInput(entity as GameEntity, input as GameInput) as boolean
+      if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
+        entity.onInput(input)
+      end if
+      return m.isValidEntity(entity)
+    end function
+
+    ' Dispatches this frame's controller-originated GameInput events to one
+    ' entity's onInput(), mirroring processEntityOnInput's remote-input path.
+    '
+    ' @param {GameEntity} entity - the entity to relay input to
+    ' @param {GameInput[]} controllerInputs - array of controller-originated GameInput events synthesized this frame
+    ' @return {boolean} true if this entity is still valid
+    private function processEntityOnControllerInput(entity as GameEntity, controllerInputs as GameInput[]) as boolean
+      if not m.isValidEntity(entity)
+        return false
+      end if
+      for each input in controllerInputs
+        if not m.dispatchOnInput(entity, input)
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    ' Dispatches onControls() to one entity, but only if the game has bound at
+    ' least one action/axis (ControlMap.hasBindings()) - see
+    ' GameEntity.onControls()'s doc comment for the zero-cost-when-unbound
+    ' guarantee this preserves. Not private, matching this file's own
+    ' precedent (BGE.Controller.ControllerServer.parseHttpRequest) of an
+    ' otherwise-internal method left public purely so a spec can exercise it
+    ' directly, since Game's real per-frame loop has no other test seam.
+    '
+    ' @param {GameEntity} entity
+    ' @return {boolean} true if this entity is still valid
+    function processEntityOnControls(entity as GameEntity) as boolean
+      if m.controls.hasBindings() and m.isValidEntity(entity) and invalid <> entity.onControls
+        entity.onControls(m.controls)
+      end if
+      return m.isValidEntity(entity)
+    end function
+
     ' Processes input events and calls the entity's onInput function
     '
     ' @param {GameEntity} entity - the entity to relay input to
@@ -521,11 +704,8 @@ namespace BGE
       end if
 
       for each msg in universalControlEvents
-        if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
-          entity.onInput(new GameInput(msg.GetInt(), 0))
-          if not m.isValidEntity(entity)
-            return false
-          end if
+        if not m.dispatchOnInput(entity, new GameInput(msg.GetInt(), 0))
+          return false
         end if
 
         if entity.onECPKeyboard <> invalid and msg.GetChar() <> 0 and msg.GetChar() = msg.GetInt()
@@ -538,12 +718,8 @@ namespace BGE
       if m.buttonHeld <> -1
         ' Button release codes are 100 plus the button press code
         ' This shows a button held code as 1000 plus the button press code
-        if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
-          entity.onInput(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
-
-          if not m.isValidEntity(entity)
-            return false
-          end if
+        if not m.dispatchOnInput(entity, new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
+          return false
         end if
       end if
       return true
@@ -709,6 +885,9 @@ namespace BGE
     ' @return {void}
     sub End()
       m.running = false
+      if m.controllerServer <> invalid
+        m.controllerServer.close()
+      end if
     end sub
 
 
@@ -940,6 +1119,45 @@ namespace BGE
       return m.debugUi
     end function
 
+
+    ' Starts a local HTTP + WebSocket server so a browser (phone/tablet) can
+    ' connect as a virtual twin-stick controller - see BGE.Controller.ControlMap
+    ' (game.controls) to map its input to named actions/axes.
+    '
+    ' Never calling this creates no socket and drains no messages. The
+    ' per-entity controller-input dispatch is likewise skipped whenever no
+    ' controller events were produced this frame, and all ControlMap work is
+    ' skipped until a game binds an action/axis - so a game using neither pays
+    ' nothing per frame, and a remote-only game that uses game.controls still
+    ' works without calling this.
+    '
+    ' @param {integer} [port=8888] - TCP port to listen on
+    ' @return {void}
+    sub enableControllerInput(port = 8888 as integer)
+      server = new BGE.Controller.ControllerServer(port)
+      if server.listen(m.controllerPort)
+        m.controllerServer = server
+      else
+        print "[BGE.Game] enableControllerInput: failed to listen on port "; port; " - controller input is disabled this run"
+      end if
+    end sub
+
+    ' The LAN URL to open on a phone/tablet to connect as a controller, or
+    ' "" if enableControllerInput() hasn't been called.
+    '
+    ' @return {string}
+    function getControllerConnectionInfo() as string
+      if m.controllerServer = invalid
+        return ""
+      end if
+      ipAddrs = m.device.GetIpAddrs()
+      ip = ""
+      for each key in ipAddrs
+        ip = ipAddrs[key]
+        exit for
+      end for
+      return `http://${ip}:${m.controllerServer.port}`
+    end function
 
     ' Adds the standard set of debug panels (fps, input, memory, garbageCollector, log) to the
     ' debug UI - the same five widgets nearly every example wires up by hand in main.bs. Pass

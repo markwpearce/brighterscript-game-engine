@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>Controller</title>
+  <script src="https://cdn.jsdelivr.net/npm/nipplejs@0.10.2/dist/nipplejs.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; color: #eee; font-family: sans-serif; touch-action: none; overscroll-behavior: none; }
+    #status { position: absolute; top: 8px; left: 8px; font-size: 14px; }
+    .stick { position: absolute; bottom: 60px; width: 140px; height: 140px; }
+    #stick1 { left: 30px; }
+    #stick2 { right: 30px; }
+    .btn { position: absolute; width: 64px; height: 64px; border-radius: 50%; background: #333; color: #eee; border: 2px solid #555; font-size: 14px; }
+    #btn0 { bottom: 220px; right: 40px; }
+    #btn1 { bottom: 300px; right: 110px; }
+  </style>
+</head>
+<body>
+  <div id="status">connecting...</div>
+  <div id="stick1" class="stick"></div>
+  <div id="stick2" class="stick"></div>
+  <button id="btn0" class="btn">A</button>
+  <button id="btn1" class="btn">B</button>
+  <script>
+    var axes = [0, 0, 0, 0];
+    var buttons = [false, false];
+    // "status" would shadow window.status (a no-op string setter in some browsers).
+    var statusEl = document.getElementById("status");
+    var gamepadActive = false;
+    var ws = null;
+
+    function connect() {
+      ws = new WebSocket("ws://" + location.host + "/ws");
+      ws.onopen = function () { statusEl.textContent = gamepadActive ? "connected (gamepad)" : "connected"; };
+      ws.onclose = function () {
+        statusEl.textContent = "reconnecting...";
+        setTimeout(connect, 2000);
+      };
+      ws.onerror = function () { ws.close(); };
+    }
+    connect();
+
+    function send() {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ axes: axes, buttons: buttons }));
+      }
+    }
+
+    // A stick/button only sends on an actual change, so a connection left
+    // untouched (the common case - most play is intermittent) would
+    // otherwise go silent for as long as the player doesn't move. On at
+    // least one real device, the server's socket-read polling loop can't
+    // reliably tell "idle but healthy" apart from "dead" on its own (see
+    // ControllerServer.bs's staleReadPolls comment) and will close a
+    // long-idle connection - this periodic resend keeps real bytes flowing
+    // so that never happens, and still lets a genuinely dead connection
+    // (tab closed, network gone) get cleaned up server-side once its
+    // heartbeats actually stop arriving.
+    setInterval(send, 1000);
+
+    function bindStick(elementId, axisOffset) {
+      var manager = nipplejs.create({ zone: document.getElementById(elementId), mode: "static", position: { left: "50%", top: "50%" }, color: "white" });
+      manager.on("move", function (evt, data) {
+        var rad = data.angle.radian;
+        var force = Math.min(data.force, 1);
+        axes[axisOffset] = Math.cos(rad) * force;
+        axes[axisOffset + 1] = Math.sin(rad) * force;
+        send();
+      });
+      manager.on("end", function () {
+        axes[axisOffset] = 0;
+        axes[axisOffset + 1] = 0;
+        send();
+      });
+    }
+    bindStick("stick1", 0);
+    bindStick("stick2", 2);
+
+    function bindButton(elementId, buttonIndex) {
+      var el = document.getElementById(elementId);
+      var setPressed = function (pressed) {
+        buttons[buttonIndex] = pressed;
+        send();
+      };
+      el.addEventListener("touchstart", function (e) { e.preventDefault(); setPressed(true); });
+      el.addEventListener("touchend", function (e) { e.preventDefault(); setPressed(false); });
+      el.addEventListener("mousedown", function () { setPressed(true); });
+      el.addEventListener("mouseup", function () { setPressed(false); });
+    }
+    bindButton("btn0", 0);
+    bindButton("btn1", 1);
+
+    // Real Gamepad, if one is connected, overrides the on-screen controls.
+    window.addEventListener("gamepadconnected", function () {
+      gamepadActive = true;
+      statusEl.textContent = "connected (gamepad)";
+      setInterval(function () {
+        var pads = navigator.getGamepads();
+        var pad = pads[0];
+        if (!pad) return;
+        // The Gamepad API's Y axes are screen-convention (-1 = up); the engine
+        // (and the nipplejs path above) use world space, where +1 is up.
+        axes = [pad.axes[0] || 0, -(pad.axes[1] || 0), pad.axes[2] || 0, -(pad.axes[3] || 0)];
+        buttons = pad.buttons.map(function (b) { return b.pressed; });
+        send();
+      }, 50);
+    });
+  </script>
+</body>
+</html>

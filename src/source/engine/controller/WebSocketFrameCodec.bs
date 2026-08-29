@@ -1,0 +1,202 @@
+namespace BGE.Controller.WebSocketFrameCodec
+  ' Server-side RFC 6455 websocket framing. Client -> server frames are
+  ' always masked; server -> client frames are always sent unmasked
+  ' (RFC 6455 section 5.1). Adapted from BrightWebSocket
+  ' (https://github.com/SuitestAutomation/BrightWebSocket), (c) Rolando
+  ' Islas, MIT license, via https://github.com/markwpearce/roku-gamepad.
+
+  const ACCEPT_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+  enum OpCode
+    continuation = 0
+    text = 1
+    binary = 2
+    close = 8
+    ping = 9
+    pong = 10
+  end enum
+
+  interface DecodedFrame
+    opcode as integer
+    final as boolean
+    payload as roByteArray
+  end interface
+
+  interface DecodeResult
+    frames as BGE.Controller.WebSocketFrameCodec.DecodedFrame[]
+    ' bytes at the start of the input consumed by `frames` - anything after
+    ' this is an incomplete trailing frame, keep it for the next call
+    bytesConsumed as integer
+  end interface
+
+  ' Computes the Sec-WebSocket-Accept header value for a given
+  ' Sec-WebSocket-Key request header (RFC 6455 section 4.2.2).
+  function computeAcceptKey(secWebSocketKey as string) as string
+    combined = CreateObject("roByteArray")
+    combined.FromAsciiString(secWebSocketKey + ACCEPT_GUID)
+    digest = CreateObject("roEVPDigest")
+    digest.Setup("sha1")
+    hexDigest = digest.Process(combined) as string
+    ' roEVPDigest.Process returns hex; Sec-WebSocket-Accept needs raw bytes.
+    return BGE.hexStringToByteArray(hexDigest).ToBase64String()
+  end function
+
+  ' Note: encodeTextFrame/encodeFrame are not called by ControllerServer today -
+  ' it never pushes a data frame to the browser (the handshake response is plain
+  ' HTTP text). Kept, tested, and intentionally unused, ready for a server->client
+  ' send path such as a keepalive ping/pong.
+  function encodeTextFrame(message as string) as roByteArray
+    payload = CreateObject("roByteArray")
+    payload.FromAsciiString(message)
+    return encodeFrame(BGE.Controller.WebSocketFrameCodec.OpCode.text, payload)
+  end function
+
+  function encodeFrame(opcode as integer, payload as roByteArray) as roByteArray
+    frame = CreateObject("roByteArray")
+    frame.Push(&h80 or opcode) ' FIN=1, RSV1-3=0
+    payloadLength = payload.Count()
+    if payloadLength > &hffff
+      frame.Push(127)
+      frame.Append(longToBytes(payloadLength))
+    else if payloadLength > 125
+      frame.Push(126)
+      frame.Append(shortToBytes(payloadLength))
+    else
+      frame.Push(payloadLength)
+    end if
+    frame.Append(payload)
+    return frame
+  end function
+
+  ' Decodes as many complete frames as are present in the first
+  ' `bufferSize` bytes of `buffer`. A trailing partial frame is left
+  ' undecoded - the caller keeps bytes from `bytesConsumed` onward.
+  function decodeFrames(buffer as roByteArray, bufferSize as integer) as BGE.Controller.WebSocketFrameCodec.DecodeResult
+    frames = [] as BGE.Controller.WebSocketFrameCodec.DecodedFrame[]
+    offset = 0
+    while true
+      decoded = decodeFrameAt(buffer, offset, bufferSize)
+      if decoded = invalid
+        exit while
+      end if
+      frames.Push({opcode: decoded.opcode, final: decoded.final, payload: decoded.payload})
+      offset = decoded.nextOffset
+    end while
+    return {frames: frames, bytesConsumed: offset}
+  end function
+
+  ' Returns invalid if fewer than a full frame's worth of bytes are
+  ' available yet (caller should wait for more data).
+  function decodeFrameAt(buffer as roByteArray, offset as integer, bufferSize as integer) as object
+    available = bufferSize - offset
+    if available < 2
+      return invalid
+    end if
+    byte0 = buffer[offset]
+    byte1 = buffer[offset + 1]
+    final = (byte0 >> 7) = 1
+    opcode = byte0 and &hf
+    masked = (byte1 >> 7) = 1
+    payloadLength7 = byte1 and &h7f
+    headerLength = 2
+    payloadLength = payloadLength7
+    if payloadLength7 = 126
+      if available < 4
+        return invalid
+      end if
+      payloadLength = bytesToShort(buffer[offset + 2], buffer[offset + 3])
+      headerLength += 2
+    else if payloadLength7 = 127
+      if available < 10
+        return invalid
+      end if
+      payloadLength = bytesToLong(buffer, offset + 2)
+      if payloadLength < 0
+        ' RFC 6455 section 5.2: the MSB of the 64-bit extended payload
+        ' length MUST be 0. bytesToLong() signals a violation with -1;
+        ' treat it the same as "not enough data yet" (this function's only
+        ' existing error signal) rather than letting a negative
+        ' payloadLength flow into frameLength/the buffer-bounds check
+        ' below, where it would silently defeat that check and lead to
+        ' indexing the buffer with a garbage negative offset. The caller's
+        ' outer buffer-size cap (ControllerServer.wsBufferExceedsMax) will
+        ' eventually close a connection that keeps sending this.
+        return invalid
+      end if
+      headerLength += 8
+    end if
+    maskLength = 0
+    if masked
+      maskLength = 4
+      if available < headerLength + maskLength
+        return invalid
+      end if
+    end if
+    frameLength = headerLength + maskLength + payloadLength
+    if available < frameLength
+      return invalid
+    end if
+    payloadStart = offset + headerLength + maskLength
+    payload = CreateObject("roByteArray")
+    if masked
+      maskBytes = CreateObject("roByteArray")
+      maskBytes.Push(buffer[offset + headerLength])
+      maskBytes.Push(buffer[offset + headerLength + 1])
+      maskBytes.Push(buffer[offset + headerLength + 2])
+      maskBytes.Push(buffer[offset + headerLength + 3])
+      for payloadIndex = 0 to payloadLength - 1
+        maskIndex = payloadIndex mod 4
+        payloadByte = buffer[payloadStart + payloadIndex]
+        maskByte = maskBytes[maskIndex]
+        ' XOR: (A or B) and not (A and B)
+        unmaskedByte = (payloadByte or maskByte) and (not (payloadByte and maskByte))
+        payload.Push(unmaskedByte)
+      end for
+    else
+      for payloadIndex = 0 to payloadLength - 1
+        payload.Push(buffer[payloadStart + payloadIndex])
+      end for
+    end if
+    return {opcode: opcode, final: final, payload: payload, nextOffset: offset + frameLength}
+  end function
+
+  function bytesToShort(b1 as integer, b2 as integer) as integer
+    return ((b1 and &hff) << 8) or (b2 and &hff)
+  end function
+
+  ' Returns -1 if the MSB of the top byte is set - RFC 6455 section 5.2
+  ' requires the MSB of a 64-bit extended payload length to be 0; the
+  ' caller (decodeFrameAt) treats -1 as "can't decode this frame."
+  function bytesToLong(buffer as roByteArray, offset as integer) as longinteger
+    if (buffer[offset] and &h80) <> 0
+      return -1&
+    end if
+    result = 0&
+    for i = 0 to 7
+      result = (result << 8) or (buffer[offset + i] and &hff)
+    end for
+    return result
+  end function
+
+  function shortToBytes(number as integer) as roByteArray
+    ba = CreateObject("roByteArray")
+    ba.Push((number >> 8) and &hff)
+    ba.Push(number and &hff)
+    return ba
+  end function
+
+  function longToBytes(number as longinteger) as roByteArray
+    ba = CreateObject("roByteArray")
+    ' Extract bytes from most-significant to least-significant
+    ba.Push(Int((number \ 72057594037927936&) and &hff)) ' byte 7 (56-bit shift)
+    ba.Push(Int((number \ 281474976710656&) and &hff))   ' byte 6 (48-bit shift)
+    ba.Push(Int((number \ 1099511627776&) and &hff))     ' byte 5 (40-bit shift)
+    ba.Push(Int((number \ 4294967296&) and &hff))        ' byte 4 (32-bit shift)
+    ba.Push(Int((number \ 16777216&) and &hff))          ' byte 3 (24-bit shift)
+    ba.Push(Int((number \ 65536&) and &hff))             ' byte 2 (16-bit shift)
+    ba.Push(Int((number \ 256&) and &hff))               ' byte 1 (8-bit shift)
+    ba.Push(Int(number and &hff))                        ' byte 0
+    return ba
+  end function
+
+end namespace
