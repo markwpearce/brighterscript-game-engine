@@ -1,13 +1,36 @@
 namespace BGE.Controller
 
+  ' One bindAction() binding - internal bookkeeping, not part of the public API.
+  interface ActionBinding
+    remoteButton as dynamic ' string, or invalid if this action has no remote binding
+    controllerButton as dynamic ' integer, or invalid if this action has no controller binding
+    playerIndex as integer
+  end interface
+
+  ' One bindAxis() binding - internal bookkeeping, not part of the public API.
+  interface AxisBinding
+    stick as integer
+    playerIndex as integer
+  end interface
+
+  ' One action's live press/held/release/duration state - internal bookkeeping, not part of
+  ' the public API (isActionPressed()/isActionHeld()/isActionReleased()/getActionHeldTimeMs()
+  ' are how a game reads this).
+  interface ActionState
+    press as boolean
+    held as boolean
+    release as boolean
+    heldTimeMs as integer
+  end interface
+
   ' Unified mapping from remote-button and controller input to named
   ' actions/axes - the one class a game needs to learn to support both
   ' input sources. Exposed as Game.controls; see Game.enableControllerInput().
   class ControlMap
     private registry as BGE.Controller.ControllerRegistry
-    private actionBindings = {} ' name -> {remoteButton, controllerButton, playerIndex}
-    private axisBindings = {} ' name -> {stick, playerIndex}
-    private actionState = {} ' name -> {press, held, release}
+    private actionBindings = {} ' name -> ActionBinding
+    private axisBindings = {} ' name -> AxisBinding
+    private actionState = {} ' name -> ActionState
     private anyBindings = false
 
     sub new(registry as BGE.Controller.ControllerRegistry)
@@ -54,7 +77,7 @@ namespace BGE.Controller
     ' @return {void}
     sub beginFrame()
       for each name in m.actionState
-        state = m.actionState[name]
+        state = m.actionState[name] as ActionState
         state.press = false
         state.release = false
       end for
@@ -72,21 +95,25 @@ namespace BGE.Controller
     ' @return {void}
     sub onInput(input as BGE.GameInput)
       for each name in m.actionBindings
-        binding = m.actionBindings[name]
+        binding = m.actionBindings[name] as ActionBinding
         matchesRemote = binding.remoteButton <> invalid and input.playerIndex = -1 and input.isButton(binding.remoteButton)
         matchesController = binding.controllerButton <> invalid and input.playerIndex = binding.playerIndex and input.button = "controller" + binding.controllerButton.ToStr()
         if matchesRemote or matchesController
-          state = m.actionState[name]
+          state = m.actionState[name] as ActionState
           if state = invalid
-            state = {press: false, held: false, release: false}
+            state = {press: false, held: false, release: false, heldTimeMs: 0}
             m.actionState[name] = state
           end if
           state.press = state.press or input.press
           state.release = state.release or input.release
           if input.release
             state.held = false
+            state.heldTimeMs = 0
           else
             state.held = state.held or input.held
+            if input.press or input.held
+              state.heldTimeMs = input.heldTimeMs
+            end if
           end if
         end if
       end for
@@ -113,14 +140,20 @@ namespace BGE.Controller
       return m.stateFor(name).release
     end function
 
-    private function stateFor(name as string) as object
-      return m.actionState[name] ?? {press: false, held: false, release: false}
+    ' @param {string} name
+    ' @return {integer} - ms the bound button has been continuously held, 0 if not currently held
+    function getActionHeldTimeMs(name as string) as integer
+      return m.stateFor(name).heldTimeMs
+    end function
+
+    private function stateFor(name as string) as ActionState
+      return m.actionState[name] ?? {press: false, held: false, release: false, heldTimeMs: 0}
     end function
 
     ' @param {string} name - a name previously passed to bindAxis()
     ' @return {BGE.Math.Vector} - the bound controller stick, or the remote d-pad if that stick is neutral
     function getAxis(name as string) as BGE.Math.Vector
-      binding = m.axisBindings[name]
+      binding = m.axisBindings[name] as AxisBinding
       if binding = invalid
         return BGE.Math.VectorOps.create()
       end if
