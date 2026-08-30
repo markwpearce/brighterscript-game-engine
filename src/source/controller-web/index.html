@@ -12,38 +12,59 @@
     #stick1 { left: 30px; }
     #stick2 { right: 30px; }
     .btn { position: absolute; width: 64px; height: 64px; border-radius: 50%; background: #333; color: #eee; border: 2px solid #555; font-size: 14px; }
-    #btn0 { bottom: 220px; right: 40px; }
-    #btn1 { bottom: 300px; right: 110px; }
+    #btna { bottom: 220px; right: 40px; }
+    #btnb { bottom: 300px; right: 110px; }
   </style>
 </head>
 <body>
   <div id="status">connecting...</div>
   <div id="stick1" class="stick"></div>
   <div id="stick2" class="stick"></div>
-  <button id="btn0" class="btn">A</button>
-  <button id="btn1" class="btn">B</button>
+  <button id="btna" class="btn">A</button>
+  <button id="btnb" class="btn">B</button>
   <script>
-    var axes = [0, 0, 0, 0];
-    var buttons = [false, false];
+    var sticks = { "1": { x: 0, y: 0 }, "2": { x: 0, y: 0 } };
+    var buttons = { a: false, b: false };
     // "status" would shadow window.status (a no-op string setter in some browsers).
     var statusEl = document.getElementById("status");
     var gamepadActive = false;
+    var playerIndex = null;
+    var labels = {};
     var ws = null;
+
+    function updateStatusText() {
+      var text = ws && ws.readyState === WebSocket.OPEN
+        ? (playerIndex === null ? "connected" : "connected as player " + (playerIndex + 1))
+        : "reconnecting...";
+      if (gamepadActive) text += " (gamepad)";
+      statusEl.textContent = text;
+    }
 
     function connect() {
       ws = new WebSocket("ws://" + location.host + "/ws");
-      ws.onopen = function () { statusEl.textContent = gamepadActive ? "connected (gamepad)" : "connected"; };
+      ws.onopen = updateStatusText;
       ws.onclose = function () {
-        statusEl.textContent = "reconnecting...";
+        playerIndex = null;
+        updateStatusText();
         setTimeout(connect, 2000);
       };
       ws.onerror = function () { ws.close(); };
+      ws.onmessage = function (evt) {
+        // {playerIndex, labels} sent once, right after the connection opens - see
+        // ControlMap.getLabels()/Game.enableControllerInput(). Labels aren't
+        // rendered by this simple demo page; a custom page could use them to
+        // relabel its own buttons.
+        var info = JSON.parse(evt.data);
+        if (typeof info.playerIndex === "number") playerIndex = info.playerIndex;
+        if (info.labels) labels = info.labels;
+        updateStatusText();
+      };
     }
     connect();
 
     function send() {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ axes: axes, buttons: buttons }));
+        ws.send(JSON.stringify({ buttons: buttons, sticks: sticks }));
       }
     }
 
@@ -59,28 +80,26 @@
     // heartbeats actually stop arriving.
     setInterval(send, 1000);
 
-    function bindStick(elementId, axisOffset) {
+    function bindStick(elementId, stickName) {
       var manager = nipplejs.create({ zone: document.getElementById(elementId), mode: "static", position: { left: "50%", top: "50%" }, color: "white" });
       manager.on("move", function (evt, data) {
         var rad = data.angle.radian;
         var force = Math.min(data.force, 1);
-        axes[axisOffset] = Math.cos(rad) * force;
-        axes[axisOffset + 1] = Math.sin(rad) * force;
+        sticks[stickName] = { x: Math.cos(rad) * force, y: Math.sin(rad) * force };
         send();
       });
       manager.on("end", function () {
-        axes[axisOffset] = 0;
-        axes[axisOffset + 1] = 0;
+        sticks[stickName] = { x: 0, y: 0 };
         send();
       });
     }
-    bindStick("stick1", 0);
-    bindStick("stick2", 2);
+    bindStick("stick1", "1");
+    bindStick("stick2", "2");
 
-    function bindButton(elementId, buttonIndex) {
+    function bindButton(elementId, buttonName) {
       var el = document.getElementById(elementId);
       var setPressed = function (pressed) {
-        buttons[buttonIndex] = pressed;
+        buttons[buttonName] = pressed;
         send();
       };
       el.addEventListener("touchstart", function (e) { e.preventDefault(); setPressed(true); });
@@ -88,21 +107,25 @@
       el.addEventListener("mousedown", function () { setPressed(true); });
       el.addEventListener("mouseup", function () { setPressed(false); });
     }
-    bindButton("btn0", 0);
-    bindButton("btn1", 1);
+    bindButton("btna", "a");
+    bindButton("btnb", "b");
 
     // Real Gamepad, if one is connected, overrides the on-screen controls.
+    // Buttons are named by their Gamepad API buttons[] index ("0", "1", ...) -
+    // bind to these on the engine side via bindAction(name, remoteButton, "0").
     window.addEventListener("gamepadconnected", function () {
       gamepadActive = true;
-      statusEl.textContent = "connected (gamepad)";
+      updateStatusText();
       setInterval(function () {
         var pads = navigator.getGamepads();
         var pad = pads[0];
         if (!pad) return;
         // The Gamepad API's Y axes are screen-convention (-1 = up); the engine
         // (and the nipplejs path above) use world space, where +1 is up.
-        axes = [pad.axes[0] || 0, -(pad.axes[1] || 0), pad.axes[2] || 0, -(pad.axes[3] || 0)];
-        buttons = pad.buttons.map(function (b) { return b.pressed; });
+        sticks["1"] = { x: pad.axes[0] || 0, y: -(pad.axes[1] || 0) };
+        sticks["2"] = { x: pad.axes[2] || 0, y: -(pad.axes[3] || 0) };
+        buttons = {};
+        pad.buttons.forEach(function (b, i) { buttons[String(i)] = b.pressed; });
         send();
       }, 50);
     });
