@@ -105,6 +105,8 @@ the intended way to consume controller input.
 - The controller page loads a small library from a public CDN - the
   *player's phone* needs internet access for the on-screen sticks to
   render (the Roku itself needs none).
-- Discovery is a plain LAN URL for now; a QR code is tracked separately.
+- Discovery is a plain LAN URL - draw it as a QR code with [`BGE.QrCode`](/qr-codes) instead of/alongside text so a player can scan rather than type it:
+
+  ![A QR code drawn next to the controller connection URL text](images/qr-code-controller-connect.jpg)
 
 See `examples/controller` for a full runnable demo.
