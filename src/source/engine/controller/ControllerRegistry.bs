@@ -1,13 +1,13 @@
 namespace BGE.Controller
 
-  ' Internal per-connection controller state (buttons/axes/held-timers) plus
-  ' the remote's own d-pad fallback state. Not part of the public API - a
-  ' game uses BGE.Controller.ControlMap (game.controls) instead.
+  ' Internal per-connection controller state (buttons/sticks/held-timers/custom
+  ' payload) plus the remote's own d-pad fallback state. Not part of the public
+  ' API - a game uses BGE.Controller.ControlMap (game.controls) instead.
   class ControllerConnectionState
-    buttons as boolean[] = []
-    heldTimers = {} ' buttonIndex.ToStr() -> roTimespan, present only while held
-    stick1 as BGE.Math.Vector = BGE.Math.VectorOps.create()
-    stick2 as BGE.Math.Vector = BGE.Math.VectorOps.create()
+    buttons = {} ' name -> boolean
+    heldTimers = {} ' name -> roTimespan, present only while held
+    sticks = {} ' name -> BGE.Math.Vector
+    custom = {} ' latest raw `custom` payload, untouched
   end class
 
   class ControllerRegistry
@@ -33,120 +33,109 @@ namespace BGE.Controller
       m.connections.Delete(playerIndex.ToStr())
     end sub
 
-    ' Updates one connection's raw state from a decoded {axes, buttons}
-    ' message. Returns the button indexes whose boolean flipped since the
-    ' last update, for Game to synthesize press/release GameInput events.
-    ' The message is untrusted (Game only checks axes/buttons are arrays,
-    ' not what's inside them) - a non-boolean button or non-numeric axis
-    ' element is coerced to a safe default (false / 0.0) rather than
-    ' propagating whatever ParseJson happened to hand back.
-    function updateFromMessage(playerIndex as integer, axes as dynamic, buttons as dynamic) as integer[]
+    ' Updates one connection's raw state from a decoded {buttons, sticks, custom}
+    ' message. Returns the button names whose boolean flipped since the last
+    ' update, for Game to synthesize press/release GameInput events. The
+    ' message is untrusted - a non-boolean button or non-numeric stick axis is
+    ' coerced to a safe default (false / 0.0) rather than propagating whatever
+    ' ParseJson happened to hand back.
+    '
+    ' @param {integer} playerIndex
+    ' @param {object} buttons - name -> dynamic (expected boolean)
+    ' @param {object} sticks - name -> {x, y} (each dynamic, expected numeric)
+    ' @param {object} custom - opaque, passed through untouched
+    ' @return {string[]}
+    function updateFromMessage(playerIndex as integer, buttons as object, sticks as object, custom as object) as string[]
       state = m.connections[playerIndex.ToStr()]
       if state = invalid
         return []
       end if
-      sanitizedButtons = []
-      for each rawButton in buttons
-        sanitizedButtons.Push(m.asBoolean(rawButton))
+      sanitizedButtons = {}
+      for each name in buttons
+        sanitizedButtons[name] = m.asBoolean(buttons[name])
       end for
-      sanitizedAxes = []
-      for each rawAxis in axes
-        sanitizedAxes.Push(m.asFloat(rawAxis))
-      end for
-      buttons = sanitizedButtons
-      axes = sanitizedAxes
-      ' Scan the union of old/new indexes, not just the new message's own
-      ' length - a shrinking buttons[] (a later message reports fewer
-      ' buttons than a previous one) must still emit a release for an index
-      ' that dropped out, or that index can appear permanently "held"
-      ' forever to anything driven by change events (e.g. ControlMap),
-      ' even though isButtonHeld/getHeldTimeMs already report it correctly
-      ' released via their own bounds checks.
+      ' Scan the union of old/new names - a button that dropped out of a later
+      ' message must still emit a release, or it can appear permanently "held"
+      ' forever to anything driven by change events (e.g. ControlMap), even
+      ' though isButtonHeld/getHeldTimeMs already report it correctly released
+      ' via their own lookups.
       changed = []
-      previousCount = state.buttons.Count()
-      newCount = buttons.Count()
-      maxCount = newCount
-      if previousCount > maxCount
-        maxCount = previousCount
-      end if
-      for i = 0 to maxCount - 1
-        previous = (i < previousCount) ? state.buttons[i] : false
-        current = (i < newCount) ? buttons[i] : false
+      allNames = {}
+      for each name in state.buttons
+        allNames[name] = true
+      end for
+      for each name in sanitizedButtons
+        allNames[name] = true
+      end for
+      for each name in allNames
+        previous = m.asBoolean(state.buttons[name])
+        current = m.asBoolean(sanitizedButtons[name])
         if previous <> current
-          changed.Push(i)
+          changed.Push(name)
           if current
             timer = CreateObject("roTimespan")
             timer.Mark()
-            state.heldTimers[i.ToStr()] = timer
+            state.heldTimers[name] = timer
           else
-            state.heldTimers.Delete(i.ToStr())
+            state.heldTimers.Delete(name)
           end if
         end if
       end for
-      ' Clean up any held timers for buttons that are no longer in the array
-      keysToDelete = []
-      for each keyStr in state.heldTimers
-        idx = val(keyStr)
-        if idx >= buttons.Count()
-          keysToDelete.Push(keyStr)
+      state.buttons = sanitizedButtons
+      sanitizedSticks = {}
+      for each name in sticks
+        raw = sticks[name]
+        x = 0.0
+        y = 0.0
+        if raw <> invalid and GetInterface(raw, "ifAssociativeArray") <> invalid
+          x = m.asFloat(raw.x)
+          y = m.asFloat(raw.y)
         end if
+        sanitizedSticks[name] = BGE.Math.VectorOps.create(x, y)
       end for
-      for each keyStr in keysToDelete
-        state.heldTimers.Delete(keyStr)
-      end for
-      state.buttons = buttons
-      ' A later message reporting fewer axes than before must reset the
-      ' now-missing stick(s) to neutral, not leave them stuck at their
-      ' last non-neutral value - matching the button-release fix above.
-      if axes.Count() >= 2
-        state.stick1 = BGE.Math.VectorOps.create(axes[0], axes[1])
-      else
-        state.stick1 = BGE.Math.VectorOps.create()
-      end if
-      if axes.Count() >= 4
-        state.stick2 = BGE.Math.VectorOps.create(axes[2], axes[3])
-      else
-        state.stick2 = BGE.Math.VectorOps.create()
-      end if
+      state.sticks = sanitizedSticks
+      state.custom = custom
       return changed
     end function
 
-    ' @return {integer} - the number of buttons last reported for this player (0 if never seen), so
-    '   callers can scan the actual reported button count rather than assuming a fixed number.
-    function getButtonCount(playerIndex as integer) as integer
+    ' @param {integer} playerIndex - which player's connection to read
+    ' @param {string} buttonName - which button to check
+    ' @return {boolean} - true if this button was reported held in the
+    '   last message, false if it wasn't (or the name/player is unknown)
+    function isButtonHeld(playerIndex as integer, buttonName as string) as boolean
       state = m.connections[playerIndex.ToStr()]
       if state = invalid
-        return 0
-      end if
-      return state.buttons.Count()
-    end function
-
-    ' @param {integer} playerIndex - which player's connection to read
-    ' @param {integer} buttonIndex - which button to check
-    ' @return {boolean} - true if this button was reported held in the
-    '   last message, false if it wasn't (or the index/player is unknown)
-    function isButtonHeld(playerIndex as integer, buttonIndex as integer) as boolean
-      state = m.connections[playerIndex.ToStr()]
-      if state = invalid or buttonIndex >= state.buttons.Count()
         return false
       end if
-      return state.buttons[buttonIndex]
+      return state.buttons[buttonName] = true
     end function
 
     ' @param {integer} playerIndex - which player's connection to read
-    ' @param {integer} buttonIndex - which button to check
+    ' @param {string} buttonName - which button to check
     ' @return {integer} - how many milliseconds this button has been
     '   continuously held, 0 if it's not currently held (or never was)
-    function getHeldTimeMs(playerIndex as integer, buttonIndex as integer) as integer
+    function getHeldTimeMs(playerIndex as integer, buttonName as string) as integer
       state = m.connections[playerIndex.ToStr()]
       if state = invalid
         return 0
       end if
-      timer = state.heldTimers[buttonIndex.ToStr()]
+      timer = state.heldTimers[buttonName]
       if timer = invalid
         return 0
       end if
       return timer.TotalMilliseconds()
+    end function
+
+    ' @param {integer} playerIndex
+    ' @return {string[]} - names of every button last reported for this
+    '   player (empty if never seen), so Game can scan without assuming a
+    '   fixed set.
+    function getButtonNames(playerIndex as integer) as string[]
+      state = m.connections[playerIndex.ToStr()]
+      if state = invalid
+        return []
+      end if
+      return state.buttons.Keys()
     end function
 
     ' @return {boolean} - value if it's actually a boolean, else false
@@ -166,19 +155,26 @@ namespace BGE.Controller
     end function
 
     ' @param {integer} playerIndex - which player's connection to read
-    ' @param {integer} stick - 1 for the first analog stick (axes[0:1]), 2
-    '   for the second (axes[2:3]); any other value is treated as 1
+    ' @param {string} stickName - the stick's name, as sent in the message's `sticks` map
     ' @return {BGE.Math.Vector} - the stick's current {x, y}, {0, 0} if
     '   never reported or the player is unknown
-    function getStick(playerIndex as integer, stick as integer) as BGE.Math.Vector
+    function getStick(playerIndex as integer, stickName as string) as BGE.Math.Vector
       state = m.connections[playerIndex.ToStr()]
       if state = invalid
         return BGE.Math.VectorOps.create()
       end if
-      if stick = 2
-        return state.stick2
+      return state.sticks[stickName] ?? BGE.Math.VectorOps.create()
+    end function
+
+    ' @param {integer} playerIndex
+    ' @return {object} - the latest `custom` payload for this player, {} if
+    '   never sent or the player is unknown
+    function getCustomPayload(playerIndex as integer) as object
+      state = m.connections[playerIndex.ToStr()]
+      if state = invalid
+        return {}
       end if
-      return state.stick1
+      return state.custom
     end function
 
     ' Records the remote control's own d-pad fallback state, used by

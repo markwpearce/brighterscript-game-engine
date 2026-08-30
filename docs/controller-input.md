@@ -32,9 +32,14 @@ your game code never has to know whether the remote or a connected
 controller produced the input.
 
 ```brighterscript
-game.controls.bindAction("jump", "ok", 0)   ' name, remoteButton, controllerButton
-game.controls.bindAxis("move")
+game.controls.bindAction("jump", "ok", "a")   ' name, remoteButton, controllerButton
+game.controls.bindAxis("move")                ' defaults to the controller's stick "1"
 ```
+
+`controllerButton`/the stick name are whatever the browser page sends - the built-in
+page (see below) uses `"a"`/`"b"` for its two buttons and `"1"`/`"2"` for its two
+sticks, but a custom page can send any name it likes (e.g. `"reload"`) and bind to
+it with no engine change.
 
 The recommended way to read bound state each frame is `onControls()`, a
 `GameEntity` lifecycle hook called once per frame with the game's
@@ -81,8 +86,8 @@ to say which controller a binding listens to; a single-player game can
 ignore it entirely (it defaults to 0).
 
 ```brighterscript
-game.controls.bindAction("p2fire", invalid, 0, 1)   ' player 1's button 0
-game.controls.bindAxis("p2move", 1, 1)              ' player 1's stick 1
+game.controls.bindAction("p2fire", invalid, "a", 1)   ' player 1's button "a"
+game.controls.bindAxis("p2move", "1", 1)              ' player 1's stick "1"
 
 if game.controls.isActionPressed("p2fire") then ...
 ```
@@ -92,13 +97,31 @@ to one player at bind time, so `isActionPressed("p2fire")`/`getAxis("p2move")`
 already know which controller they refer to. Give each player's actions
 their own names.
 
+## Labels and the raw custom payload
+
+`bindAction`/`bindAxis` take an optional trailing `label` - once a browser
+connects, the server sends it `{playerIndex, labels}` (its assigned player
+number plus a name -> label map for every labeled binding), so a custom
+controller page can render meaningful text instead of raw names:
+
+```brighterscript
+game.controls.bindAction("jump", "ok", "a", 0, "Jump")
+```
+
+A custom on-screen control that isn't button/stick shaped (a slider, a
+color picker, etc.) can send an arbitrary `custom` payload in its message;
+read the latest one with `getCustomPayload()`:
+
+```brighterscript
+payload = game.controls.getCustomPayload()   ' the raw object, {} if none sent yet
+```
+
 ## Advanced: raw controller input
 
 Every controller button press also flows through the normal `onInput`
-callback as a `BGE.GameInput`, with `playerIndex` set and
-`button = "controller" + <index>` (matching the browser Gamepad API's
-`buttons[]` order). Most games won't need this - `ControlMap` above is
-the intended way to consume controller input.
+callback as a `BGE.GameInput`, with `playerIndex` set and `button` equal to
+the raw name the browser sent. Most games won't need this - `ControlMap`
+above is the intended way to consume controller input.
 
 ## Limitations
 
