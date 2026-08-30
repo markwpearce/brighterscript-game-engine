@@ -1,0 +1,628 @@
+namespace BGE.QrCode
+
+  ' A QR Code symbol: an immutable square grid of dark/light modules. Covers
+  ' QR Code Model 2, versions 1-40, all 4 error correction levels. See
+  ' QrConstants.bs's file doc comment for provenance.
+  '
+  ' modules/isFunction store each cell as an integer 0 (light) or 1 (dark) -
+  ' not a real Boolean - since applyMask() flips cells with plain arithmetic.
+  class QrCode
+    version as integer
+    errorCorrectionLevel as integer ' a BGE.QrCode.EccLevel value
+    size as integer
+    mask as integer
+    private modules as integer[][]
+    private isFunction as integer[][]
+
+    ' Low-level constructor: builds a QR Code from already-assembled data
+    ' codewords (segment headers/padding included, ECC excluded). Most callers
+    ' should use qrEncodeText()/qrEncodeBinary()/qrEncodeSegments() instead.
+    '
+    ' @param {integer} version - 1 to 40
+    ' @param {integer} errorCorrectionLevel - a BGE.QrCode.EccLevel value
+    ' @param {integer[]} dataCodewords
+    ' @param {integer} msk - 0 to 7 to force a mask, or -1 to auto-choose the lowest-penalty one
+    sub new(version as integer, errorCorrectionLevel as integer, dataCodewords as integer[], msk as integer)
+      qrAssert(version >= MIN_VERSION and version <= MAX_VERSION, "Version value out of range")
+      qrAssert(msk >= -1 and msk <= 7, "Mask value out of range")
+      m.version = version
+      m.errorCorrectionLevel = errorCorrectionLevel
+      m.size = version * 4 + 17
+
+      m.modules = []
+      m.isFunction = []
+      for y = 0 to m.size - 1
+        m.modules[y] = []
+        m.isFunction[y] = []
+        for x = 0 to m.size - 1
+          m.modules[y][x] = 0 ' initially all light
+          m.isFunction[y][x] = 0
+        end for
+      end for
+
+      m.drawFunctionPatterns()
+      allCodewords = m.addEccAndInterleave(dataCodewords)
+      m.drawCodewords(allCodewords)
+
+      if msk = -1 ' automatically choose the lowest-penalty mask
+        minPenalty = 1000000000
+        for i = 0 to 7
+          m.applyMask(i)
+          m.drawFormatBits(i)
+          penalty = m.getPenaltyScore()
+          if penalty < minPenalty
+            msk = i
+            minPenalty = penalty
+          end if
+          m.applyMask(i) ' undoes the mask (XOR is its own inverse)
+        end for
+      end if
+      qrAssert(msk >= 0 and msk <= 7)
+      m.mask = msk
+      m.applyMask(msk) ' apply the final choice of mask
+      m.drawFormatBits(msk) ' overwrite the dummy format bits drawn above
+
+      m.isFunction = []
+    end sub
+
+    ' @param {integer} x
+    ' @param {integer} y
+    ' @return {boolean} - true (dark) or false (light); false if (x, y) is out of bounds.
+    ' The top-left corner is (0, 0).
+    function getModule(x as integer, y as integer) as boolean
+      inBounds = x >= 0 and x < m.size and y >= 0 and y < m.size
+      return inBounds and (m.modules[y][x] = 1)
+    end function
+
+    ' -- Drawing function modules --
+
+    private sub drawFunctionPatterns()
+      for i = 0 to m.size - 1
+        m.setFunctionModule(6, i, i mod 2 = 0)
+        m.setFunctionModule(i, 6, i mod 2 = 0)
+      end for
+
+      m.drawFinderPattern(3, 3)
+      m.drawFinderPattern(m.size - 4, 3)
+      m.drawFinderPattern(3, m.size - 4)
+
+      alignPatPos = m.getAlignmentPatternPositions()
+      numAlign = alignPatPos.Count()
+      for i = 0 to numAlign - 1
+        for j = 0 to numAlign - 1
+          ' Don't draw on the three finder corners
+          isFinderCorner = (i = 0 and j = 0) or (i = 0 and j = numAlign - 1) or (i = numAlign - 1 and j = 0)
+          if not isFinderCorner
+            m.drawAlignmentPattern(alignPatPos[i], alignPatPos[j])
+          end if
+        end for
+      end for
+
+      m.drawFormatBits(0) ' dummy mask value, overwritten later by the constructor
+      m.drawVersion()
+    end sub
+
+    private sub drawFormatBits(mask as integer)
+      data = (eccFormatBits(m.errorCorrectionLevel) << 3) or mask
+      remain = data
+      for i = 0 to 9
+        remain = qrXor(remain << 1, (remain >> 9) * &h537)
+      end for
+      bits = qrXor((data << 10) or remain, &h5412) ' uint15
+      qrAssert(bits >> 15 = 0)
+
+      for i = 0 to 5
+        m.setFunctionModule(8, i, qrGetBit(bits, i))
+      end for
+      m.setFunctionModule(8, 7, qrGetBit(bits, 6))
+      m.setFunctionModule(8, 8, qrGetBit(bits, 7))
+      m.setFunctionModule(7, 8, qrGetBit(bits, 8))
+      for i = 9 to 14
+        m.setFunctionModule(14 - i, 8, qrGetBit(bits, i))
+      end for
+
+      for i = 0 to 7
+        m.setFunctionModule(m.size - 1 - i, 8, qrGetBit(bits, i))
+      end for
+      for i = 8 to 14
+        m.setFunctionModule(8, m.size - 15 + i, qrGetBit(bits, i))
+      end for
+      m.setFunctionModule(8, m.size - 8, true) ' always dark
+    end sub
+
+    private sub drawVersion()
+      if m.version < 7
+        return
+      end if
+      remain = m.version ' uint6, in [7, 40]
+      for i = 0 to 11
+        remain = qrXor(remain << 1, (remain >> 11) * &h1F25)
+      end for
+      bits = (m.version << 12) or remain ' uint18
+      qrAssert(bits >> 18 = 0)
+
+      for i = 0 to 17
+        color = qrGetBit(bits, i)
+        a = m.size - 11 + (i mod 3)
+        b = qrFloor(i / 3)
+        m.setFunctionModule(a, b, color)
+        m.setFunctionModule(b, a, color)
+      end for
+    end sub
+
+    ' Draws a 9x9 finder pattern (with border separator) centered at (x, y).
+    ' Modules can be out of bounds.
+    private sub drawFinderPattern(x as integer, y as integer)
+      for dy = -4 to 4
+        for dx = -4 to 4
+          dist = qrMax(Abs(dx), Abs(dy)) ' Chebyshev distance
+          xx = x + dx
+          yy = y + dy
+          if xx >= 0 and xx < m.size and yy >= 0 and yy < m.size
+            m.setFunctionModule(xx, yy, dist <> 2 and dist <> 4)
+          end if
+        end for
+      end for
+    end sub
+
+    ' Draws a 5x5 alignment pattern centered at (x, y). All modules must be in bounds.
+    private sub drawAlignmentPattern(x as integer, y as integer)
+      for dy = -2 to 2
+        for dx = -2 to 2
+          m.setFunctionModule(x + dx, y + dy, qrMax(Abs(dx), Abs(dy)) <> 1)
+        end for
+      end for
+    end sub
+
+    private sub setFunctionModule(x as integer, y as integer, isDark as boolean)
+      if isDark
+        m.modules[y][x] = 1
+      else
+        m.modules[y][x] = 0
+      end if
+      m.isFunction[y][x] = 1
+    end sub
+
+    ' -- Codewords and masking --
+
+    ' @return {integer[]} - `data` with error correction codewords appended and
+    '   interleaved across blocks, per this QR Code's version/ECC level.
+    private function addEccAndInterleave(data as integer[]) as integer[]
+      ver = m.version
+      ecl = m.errorCorrectionLevel
+      qrAssert(data.Count() = qrGetNumDataCodewords(ver, ecl), "Invalid argument")
+
+      numBlocks = numErrorCorrectionBlocks()[ecl][ver]
+      blockEccLen = eccCodewordsPerBlock()[ecl][ver]
+      rawCodewords = qrFloor(qrGetNumRawDataModules(ver) / 8)
+      numShortBlocks = numBlocks - (rawCodewords mod numBlocks)
+      shortBlockLen = qrFloor(rawCodewords / numBlocks)
+
+      blocks = []
+      rsDiv = qrReedSolomonComputeDivisor(blockEccLen)
+      k = 0
+      for i = 0 to numBlocks - 1
+        extra = 0
+        if i >= numShortBlocks
+          extra = 1
+        end if
+        dat = qrSliceArray(data, k, k + shortBlockLen - blockEccLen + extra)
+        k += dat.Count()
+        ecc = qrReedSolomonComputeRemainder(dat, rsDiv)
+        if i < numShortBlocks
+          dat.Push(0)
+        end if
+        block = []
+        block.Append(dat)
+        block.Append(ecc)
+        blocks.Push(block)
+      end for
+
+      ' Interleave (not concatenate) the bytes from every block into one sequence
+      result = []
+      for i = 0 to blocks[0].Count() - 1
+        j = 0
+        for each block in blocks
+          ' Skip the padding byte in short blocks
+          if i <> shortBlockLen - blockEccLen or j >= numShortBlocks
+            result.Push(block[i])
+          end if
+          j += 1
+        end for
+      end for
+      qrAssert(result.Count() = rawCodewords)
+      return result
+    end function
+
+    ' Draws the given sequence of 8-bit codewords onto the data area (function
+    ' modules must already be marked off).
+    private sub drawCodewords(data as integer[])
+      qrAssert(data.Count() = qrFloor(qrGetNumRawDataModules(m.version) / 8), "Invalid argument")
+      i = 0 ' bit index into the data
+      ' The funny zigzag scan: right decrements by 2 each outer iteration, except
+      ' when it would land on column 6 (the vertical timing pattern) - that
+      ' iteration substitutes column 5 instead, and the FOLLOWING iteration's
+      ' `step -2` (applied to that substituted value) naturally continues from
+      ' there, matching the reference algorithm exactly.
+      right = m.size - 1
+      while right >= 1
+        if right = 6
+          right = 5
+        end if
+        for vert = 0 to m.size - 1
+          for j = 0 to 1
+            x = right - j
+            upward = ((right + 1) and 2) = 0
+            y = m.size - 1 - vert
+            if not upward
+              y = vert
+            end if
+            if m.isFunction[y][x] = 0 and i < data.Count() * 8
+              isDark = qrGetBit(data[i >> 3], 7 - (i and 7))
+              if isDark
+                m.modules[y][x] = 1
+              else
+                m.modules[y][x] = 0
+              end if
+              i += 1
+            end if
+            ' Any remainder bits (0 to 7) were already 0/light from the
+            ' constructor and are left unchanged here.
+          end for
+        end for
+        right -= 2
+      end while
+      qrAssert(i = data.Count() * 8)
+    end sub
+
+    ' XORs the codeword modules with the given mask pattern - function modules
+    ' are untouched. Calling this twice with the same mask undoes it (XOR is its
+    ' own inverse); exactly one call must remain in effect on a finished QR Code.
+    private sub applyMask(mask as integer)
+      qrAssert(mask >= 0 and mask <= 7, "Mask value out of range")
+      for y = 0 to m.size - 1
+        for x = 0 to m.size - 1
+          invert = false
+          if mask = 0
+            invert = (x + y) mod 2 = 0
+          else if mask = 1
+            invert = y mod 2 = 0
+          else if mask = 2
+            invert = x mod 3 = 0
+          else if mask = 3
+            invert = (x + y) mod 3 = 0
+          else if mask = 4
+            invert = (qrFloor(x / 3) + qrFloor(y / 2)) mod 2 = 0
+          else if mask = 5
+            invert = ((x * y) mod 2) + ((x * y) mod 3) = 0
+          else if mask = 6
+            invert = (((x * y) mod 2) + ((x * y) mod 3)) mod 2 = 0
+          else if mask = 7
+            invert = (((x + y) mod 2) + ((x * y) mod 3)) mod 2 = 0
+          end if
+          if m.isFunction[y][x] = 0 and invert
+            if m.modules[y][x] = 1
+              m.modules[y][x] = 0
+            else
+              m.modules[y][x] = 1
+            end if
+          end if
+        end for
+      end for
+    end sub
+
+    ' @return {integer} - the penalty score for this QR Code's current module state;
+    '   used by the constructor to pick the lowest-penalty mask.
+    private function getPenaltyScore() as integer
+      result = 0
+
+      ' Adjacent same-color modules in a row, plus finder-like patterns
+      for y = 0 to m.size - 1
+        runColor = 0
+        runX = 0
+        runHistory = [0, 0, 0, 0, 0, 0, 0]
+        for x = 0 to m.size - 1
+          if m.modules[y][x] = runColor
+            runX += 1
+            if runX = 5
+              result += PENALTY_N1
+            else if runX > 5
+              result += 1
+            end if
+          else
+            m.finderPenaltyAddHistory(runX, runHistory)
+            if runColor = 0
+              result += m.finderPenaltyCountPatterns(runHistory) * PENALTY_N3
+            end if
+            runColor = m.modules[y][x]
+            runX = 1
+          end if
+        end for
+        result += m.finderPenaltyTerminateAndCount(runColor, runX, runHistory) * PENALTY_N3
+      end for
+
+      ' Adjacent same-color modules in a column, plus finder-like patterns
+      for x = 0 to m.size - 1
+        runColor = 0
+        runY = 0
+        runHistory = [0, 0, 0, 0, 0, 0, 0]
+        for y = 0 to m.size - 1
+          if m.modules[y][x] = runColor
+            runY += 1
+            if runY = 5
+              result += PENALTY_N1
+            else if runY > 5
+              result += 1
+            end if
+          else
+            m.finderPenaltyAddHistory(runY, runHistory)
+            if runColor = 0
+              result += m.finderPenaltyCountPatterns(runHistory) * PENALTY_N3
+            end if
+            runColor = m.modules[y][x]
+            runY = 1
+          end if
+        end for
+        result += m.finderPenaltyTerminateAndCount(runColor, runY, runHistory) * PENALTY_N3
+      end for
+
+      ' 2x2 blocks of same-color modules
+      for y = 0 to m.size - 2
+        for x = 0 to m.size - 2
+          color = m.modules[y][x]
+          if color = m.modules[y][x + 1] and color = m.modules[y + 1][x] and color = m.modules[y + 1][x + 1]
+            result += PENALTY_N2
+          end if
+        end for
+      end for
+
+      ' Balance of dark and light modules
+      dark = 0
+      for each row in m.modules
+        for each cell in row
+          if cell = 1
+            dark += 1
+          end if
+        end for
+      end for
+      total = m.size * m.size ' size is odd, so dark/total is never exactly 1/2
+      ' Smallest integer k >= 0 such that (45-5k)% <= dark/total <= (55+5k)%
+      k = qrCeil(Abs(dark * 20 - total * 10) / total) - 1
+      qrAssert(k >= 0 and k <= 9)
+      result += k * PENALTY_N4
+      return result
+    end function
+
+    ' -- Private helpers --
+
+    ' @return {integer[]} - ascending alignment-pattern positions for this version,
+    '   each in [0, 177), used on both the x and y axes.
+    private function getAlignmentPatternPositions() as integer[]
+      if m.version = 1
+        return []
+      end if
+      numAlign = qrFloor(m.version / 7) + 2
+      stepSize = qrCeil((m.version * 4 + 4) / (numAlign * 2 - 2)) * 2
+      if m.version = 32
+        stepSize = 26
+      end if
+      result = [6]
+      position = m.size - 7
+      while result.Count() < numAlign
+        qrSpliceArray(result, 1, 0, [position])
+        position -= stepSize
+      end while
+      return result
+    end function
+
+    ' Can only be called immediately after a light run is added to `runHistory`.
+    ' @return {integer} - 0, 1, or 2
+    private function finderPenaltyCountPatterns(runHistory as integer[]) as integer
+      n = runHistory[1]
+      isCore = n > 0 and runHistory[2] = n and runHistory[3] = n * 3 and runHistory[4] = n and runHistory[5] = n
+      leadingMatch = 0
+      if isCore and runHistory[0] >= n * 4 and runHistory[6] >= n
+        leadingMatch = 1
+      end if
+      trailingMatch = 0
+      if isCore and runHistory[6] >= n * 4 and runHistory[0] >= n
+        trailingMatch = 1
+      end if
+      return leadingMatch + trailingMatch
+    end function
+
+    ' Must be called at the end of a row/column of modules.
+    private function finderPenaltyTerminateAndCount(currentRunColor as integer, currentRunLength as integer, runHistory as integer[]) as integer
+      length = currentRunLength
+      if currentRunColor = 1 ' terminate a dark run
+        m.finderPenaltyAddHistory(length, runHistory)
+        length = 0
+      end if
+      length += m.size ' add the light border to the final run
+      m.finderPenaltyAddHistory(length, runHistory)
+      return m.finderPenaltyCountPatterns(runHistory)
+    end function
+
+    ' Pushes `currentRunLength` to the front of `runHistory` and drops the last value.
+    private sub finderPenaltyAddHistory(currentRunLength as integer, runHistory as integer[])
+      length = currentRunLength
+      if runHistory[0] = 0
+        length += m.size ' add the light border to the initial run
+      end if
+      runHistory.Pop()
+      runHistory.Unshift(length)
+    end sub
+
+  end class
+
+  ' -- Static helpers (no per-instance state) --
+
+  ' @return {integer} - the number of data bits a QR Code of this version can store,
+  '   after all function modules are excluded (includes remainder bits, so may not
+  '   be a multiple of 8). Result is in [208, 29648].
+  function qrGetNumRawDataModules(ver as integer) as integer
+    qrAssert(ver >= MIN_VERSION and ver <= MAX_VERSION, "Version number out of range")
+    result = (16 * ver + 128) * ver + 64
+    if ver >= 2
+      numAlign = qrFloor(ver / 7) + 2
+      result -= (25 * numAlign - 10) * numAlign - 55
+      if ver >= 7
+        result -= 36
+      end if
+    end if
+    qrAssert(result >= 208 and result <= 29648)
+    return result
+  end function
+
+  ' @return {integer} - the number of 8-bit data codewords (excluding ECC) in a QR
+  '   Code of this version/ECC level, with remainder bits discarded.
+  function qrGetNumDataCodewords(ver as integer, ecl as integer) as integer
+    return qrFloor(qrGetNumRawDataModules(ver) / 8) - eccCodewordsPerBlock()[ecl][ver] * numErrorCorrectionBlocks()[ecl][ver]
+  end function
+
+  ' @return {integer[]} - a Reed-Solomon ECC generator polynomial of the given
+  '   degree, coefficients stored highest-to-lowest power, leading term omitted
+  '   (always 1). E.g. x^3 + 255x^2 + 8x + 93 is stored as [255, 8, 93].
+  function qrReedSolomonComputeDivisor(degree as integer) as integer[]
+    qrAssert(degree >= 1 and degree <= 255, "Degree out of range")
+    result = []
+    for i = 0 to degree - 2
+      result.Push(0)
+    end for
+    result.Push(1) ' start with the monomial x^0
+
+    ' Product polynomial (x - r^0)(x - r^1)...(x - r^{degree-1}), dropping the
+    ' leading 1x^degree term. r = 0x02, a generator element of GF(2^8/0x11D).
+    root = 1
+    for i = 0 to degree - 1
+      for j = 0 to result.Count() - 1
+        result[j] = qrReedSolomonMultiply(result[j], root)
+        if j + 1 < result.Count()
+          result[j] = qrXor(result[j], result[j + 1])
+        end if
+      end for
+      root = qrReedSolomonMultiply(root, &h02)
+    end for
+    return result
+  end function
+
+  ' @return {integer[]} - the Reed-Solomon ECC codeword for `data` against `divisor`.
+  function qrReedSolomonComputeRemainder(data as integer[], divisor as integer[]) as integer[]
+    result = []
+    for i = 1 to divisor.Count()
+      result.Push(0)
+    end for
+    for each b in data ' polynomial division
+      factor = qrXor(b, result.Shift())
+      result.Push(0)
+      for i = 0 to divisor.Count() - 1
+        result[i] = qrXor(result[i], qrReedSolomonMultiply(divisor[i], factor))
+      end for
+    end for
+    return result
+  end function
+
+  ' @return {integer} - the product of x and y in GF(2^8/0x11D). Both args and the
+  '   result are unsigned 8-bit integers.
+  function qrReedSolomonMultiply(x as integer, y as integer) as integer
+    qrAssert(x >> 8 = 0 and y >> 8 = 0, "Byte out of range")
+    ' Russian peasant multiplication
+    z = 0
+    for i = 7 to 0 step -1
+      z = qrXor(z << 1, (z >> 7) * &h11D)
+      z = qrXor(z, ((y >> i) and 1) * x)
+    end for
+    qrAssert(z >> 8 = 0)
+    return z
+  end function
+
+  ' -- Public entry points --
+
+  ' @param {string} text - Unicode text to encode
+  ' @param {integer} ecl - a BGE.QrCode.EccLevel value; may be boosted higher if it fits for free
+  ' @return {BGE.QrCode.QrCode} - the smallest QR Code version that fits `text`
+  function qrEncodeText(text as string, ecl as integer) as BGE.QrCode.QrCode
+    return qrEncodeSegments(qrMakeSegments(text), ecl)
+  end function
+
+  ' @param {integer[]} data - raw bytes, always encoded in byte mode (max 2953 bytes)
+  ' @param {integer} ecl - a BGE.QrCode.EccLevel value; may be boosted higher if it fits for free
+  ' @return {BGE.QrCode.QrCode}
+  function qrEncodeBinary(data as integer[], ecl as integer) as BGE.QrCode.QrCode
+    return qrEncodeSegments([qrMakeBytes(data)], ecl)
+  end function
+
+  ' Mid-level entry point: encodes a custom sequence of segments (e.g. mixing
+  ' numeric/alphanumeric/byte mode segments to save space).
+  '
+  ' @param {BGE.QrCode.QrSegment[]} segs
+  ' @param {integer} ecl - a BGE.QrCode.EccLevel value
+  ' @param {integer} [minVersion=1]
+  ' @param {integer} [maxVersion=40]
+  ' @param {integer} [mask=-1] - 0 to 7 to force a mask, or -1 to auto-choose
+  ' @param {boolean} [boostEcl=true] - allow a higher ECC level than `ecl` if it fits for free
+  ' @return {BGE.QrCode.QrCode}
+  function qrEncodeSegments(segs as BGE.QrCode.QrSegment[], ecl as integer, minVersion = 1 as integer, maxVersion = 40 as integer, mask = -1 as integer, boostEcl = true as boolean) as BGE.QrCode.QrCode
+    qrAssert(minVersion >= MIN_VERSION and minVersion <= maxVersion and maxVersion <= MAX_VERSION and mask >= -1 and mask <= 7, "Invalid value")
+
+    ' Find the minimal version that fits
+    version = maxVersion
+    dataUsedBits = 0
+    for v = minVersion to maxVersion
+      dataCapacityBits = qrGetNumDataCodewords(v, ecl) * 8
+      usedBits = qrGetTotalBits(segs, v)
+      if usedBits <= dataCapacityBits
+        version = v
+        dataUsedBits = usedBits
+        exit for
+      end if
+      qrAssert(v < maxVersion, "Data too long")
+    end for
+
+    ' Raise the ECC level while the data still fits at this version
+    if boostEcl
+      for newEcl = BGE.QrCode.EccLevel.low to BGE.QrCode.EccLevel.high
+        if dataUsedBits <= qrGetNumDataCodewords(version, newEcl) * 8
+          ecl = newEcl
+        end if
+      end for
+    end if
+
+    ' Concatenate every segment into the data bit string
+    bb = []
+    for each seg in segs
+      qrAppendBits(seg.mode.modeBits, 4, bb)
+      qrAppendBits(seg.numChars, seg.mode.numCharCountBits(version), bb)
+      for each b in seg.getData()
+        bb.Push(b)
+      end for
+    end for
+    qrAssert(bb.Count() = dataUsedBits)
+
+    ' Add the terminator and pad up to a byte
+    dataCapacityBits = qrGetNumDataCodewords(version, ecl) * 8
+    qrAssert(bb.Count() <= dataCapacityBits)
+    qrAppendBits(0, qrMin(4, dataCapacityBits - bb.Count()), bb)
+    qrAppendBits(0, (8 - bb.Count() mod 8) mod 8, bb)
+    qrAssert(bb.Count() mod 8 = 0)
+
+    ' Pad with alternating bytes until the version's data capacity is reached
+    padByte = &hEC
+    while bb.Count() < dataCapacityBits
+      qrAppendBits(padByte, 8, bb)
+      padByte = qrXor(padByte, qrXor(&hEC, &h11))
+    end while
+
+    ' Pack the bit buffer into bytes, big-endian
+    dataCodewords = []
+    while dataCodewords.Count() * 8 < bb.Count()
+      dataCodewords.Push(0)
+    end while
+    for i = 0 to bb.Count() - 1
+      dataCodewords[i >> 3] = dataCodewords[i >> 3] or (bb[i] << (7 - (i and 7)))
+    end for
+
+    return new BGE.QrCode.QrCode(version, ecl, dataCodewords, mask)
+  end function
+
+end namespace

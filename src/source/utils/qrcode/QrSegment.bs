@@ -1,0 +1,132 @@
+namespace BGE.QrCode
+
+  ' The set of all legal characters in alphanumeric mode, indexed by character value.
+  const ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"
+
+  ' A segment of character/binary/control data in a QR Code symbol. See
+  ' QrConstants.bs's file doc comment for provenance.
+  class QrSegment
+    mode as BGE.QrCode.QrMode
+    ' Unencoded length: characters for numeric/alphanumeric/kanji, bytes for
+    ' byte mode, 0 for ECI mode. Not the same as bitData's length.
+    numChars as integer
+    ' This segment's data bits, each element an individual 0/1 integer.
+    bitData as integer[]
+
+    sub new(modeName as string, numChars as integer, bitData as integer[])
+      qrAssert(numChars >= 0, "Invalid argument")
+      m.mode = newQrMode(modeName)
+      m.numChars = numChars
+      m.bitData = qrSliceArray(bitData) ' defensive copy
+    end sub
+
+    function getData() as integer[]
+      return qrSliceArray(m.bitData)
+    end function
+  end class
+
+  ' Calculates the number of bits needed to encode `segs` at `version`. Returns
+  ' a very large sentinel if a segment's length doesn't fit its mode's
+  ' character-count field width at this version.
+  function qrGetTotalBits(segs as BGE.QrCode.QrSegment[], version as integer) as integer
+    result = 0
+    for each seg in segs
+      ccbits = seg.mode.numCharCountBits(version)
+      if seg.numChars >= (1 << ccbits)
+        return 999999999
+      end if
+      result += 4 + ccbits + seg.bitData.Count()
+    end for
+    return result
+  end function
+
+  ' @return {integer[]} - `str` encoded as UTF-8 bytes (0-255 each).
+  function qrToUtf8ByteArray(str as string) as integer[]
+    escaped = str.Escape()
+    result = []
+    i = 0
+    while i < escaped.Len()
+      ch = escaped.Mid(i, 1)
+      if ch <> "%"
+        result.Push(Asc(ch))
+        i += 1
+      else
+        result.Push(Int(Val(escaped.Mid(i + 1, 2), 16)))
+        i += 3
+      end if
+    end while
+    return result
+  end function
+
+  ' @return {boolean} - true iff every character of `text` is 0-9 (numeric mode).
+  function qrIsNumeric(text as string) as boolean
+    return CreateObject("roRegex", "^[0-9]*$", "").IsMatch(text)
+  end function
+
+  ' @return {boolean} - true iff every character of `text` is encodable in alphanumeric mode
+  '   (0-9, A-Z, space, $ % * + - . / :).
+  function qrIsAlphanumeric(text as string) as boolean
+    return CreateObject("roRegex", "^[A-Z0-9 $%*+.\/:-]*$", "").IsMatch(text)
+  end function
+
+  ' A segment representing the given binary data in byte mode.
+  function qrMakeBytes(data as integer[]) as BGE.QrCode.QrSegment
+    bb = []
+    for each b in data
+      qrAppendBits(b, 8, bb)
+    end for
+    return new BGE.QrCode.QrSegment("BYTE", data.Count(), bb)
+  end function
+
+  ' A segment representing the given string of decimal digits in numeric mode.
+  function qrMakeNumeric(digits as string) as BGE.QrCode.QrSegment
+    qrAssert(qrIsNumeric(digits), "String contains non-numeric characters")
+    bb = []
+    ' A plain BrightScript `for` loop always applies its own +step at `next`,
+    ' even on top of a manual mutation of the loop variable inside the body -
+    ' unlike the Java this was ported from, whose empty for-clause applies no
+    ' automatic increment at all. A `while` loop sidesteps that mismatch (the
+    ' upstream reference's own `for i = ... : i += n : next` double-increments).
+    i = 0
+    while i < digits.Len()
+      n = qrMin(digits.Len() - i, 3)
+      qrAppendBits(Int(Val(digits.Mid(i, n), 10)), n * 3 + 1, bb)
+      i += n
+    end while
+    return new BGE.QrCode.QrSegment("NUMERIC", digits.Len(), bb)
+  end function
+
+  ' A segment representing the given text string in alphanumeric mode (see
+  ' qrIsAlphanumeric() for the allowed character set).
+  function qrMakeAlphanumeric(text as string) as BGE.QrCode.QrSegment
+    qrAssert(qrIsAlphanumeric(text), "String contains unencodable characters in alphanumeric mode")
+    bb = []
+    i = 0
+    while i <= text.Len() - 2 ' process groups of 2
+      temp = ALPHANUMERIC_CHARSET.Instr(text.Mid(i, 1)) * 45
+      temp += ALPHANUMERIC_CHARSET.Instr(text.Mid(i + 1, 1))
+      qrAppendBits(temp, 11, bb)
+      i += 2
+    end while
+    if i < text.Len() ' one character remaining
+      qrAppendBits(ALPHANUMERIC_CHARSET.Instr(text.Mid(i, 1)), 6, bb)
+    end if
+    return new BGE.QrCode.QrSegment("ALPHANUMERIC", text.Len(), bb)
+  end function
+
+  ' Selects the most efficient segment encoding automatically for `text` -
+  ' numeric, then alphanumeric, then byte (UTF-8) mode.
+  '
+  ' @return {BGE.QrCode.QrSegment[]}
+  function qrMakeSegments(text as string) as BGE.QrCode.QrSegment[]
+    if text = ""
+      return []
+    else if qrIsNumeric(text)
+      return [qrMakeNumeric(text)]
+    else if qrIsAlphanumeric(text)
+      return [qrMakeAlphanumeric(text)]
+    end if
+    return [qrMakeBytes(qrToUtf8ByteArray(text))]
+  end function
+
+end namespace
