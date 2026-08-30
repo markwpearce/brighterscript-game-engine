@@ -9,6 +9,9 @@ order: 7
 `BGE.QrCode` encodes and draws QR codes directly on a plain `roScreen` channel
 - no SceneGraph, no image asset. Handy anywhere you'd otherwise show a URL for
 a player to type in by hand, like [connecting a controller](/controller-input).
+Ports [Project Nayuki's QR Code generator](https://www.nayuki.io/page/qr-code-generator-library)
+via the [paramount-engineering BrightScript port](https://github.com/paramount-engineering/QR-Code-generator-brightscript)
+(both MIT-licensed; see `LICENSE-THIRD-PARTY.md`) to plain BrighterScript.
 
 ```brighterscript
 BGE.QrCode.draw(renderer, x, y, "https://example.com", 200)
@@ -30,13 +33,27 @@ BGE.QrCode.draw(renderer, x, y, code, width, BGE.Colors.White, BGE.Colors.Black)
 A `GameEntity`/`Room`'s `onDrawEnd(gameRenderer, uiRenderer)` hook runs once
 per frame after the normal scene draw - the natural place to draw a QR code
 alongside the rest of your UI. The UI renderer stays crisp regardless of game
-canvas scaling, so it's usually the right target for something like this:
+canvas scaling, so it's usually the right target for something like this.
+
+For text that doesn't change (a connection URL, say), don't call `draw()`
+itself every frame - it re-encodes from scratch each time (segment building,
+version-fit search, Reed-Solomon ECC, mask-penalty scoring), wasted work for
+byte-identical output. Encode once and cache the result, then re-blit the
+already-encoded code each frame with `qrDrawModules()`:
 
 ```brighterscript
+override sub onCreate(args as roAssociativeArray)
+  m.qr = BGE.QrCode.qrEncodeText(m.game.getControllerConnectionInfo(), BGE.QrCode.EccLevel.medium)
+end sub
+
 override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
-  BGE.QrCode.draw(uiRenderer, 20, 20, m.game.getControllerConnectionInfo(), 150)
+  draw2d = uiRenderer.getDraw2d()
+  uiRenderer.incrementDrawCalls(BGE.QrCode.qrDrawModules(draw2d, m.qr, 20, 20, 150))
 end sub
 ```
+
+If the text genuinely changes frame to frame, `draw()`'s one-call convenience
+is worth paying the re-encode cost for.
 
 ## Encoding without drawing
 
