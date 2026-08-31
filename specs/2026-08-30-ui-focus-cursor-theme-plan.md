@@ -569,11 +569,13 @@ git commit -m "feat(ui): add focus/hover state, lifecycle hooks, and hit-testing
 
 ## Task 5: `BGE.UI.Theme` and `Game.defaultTheme`
 
+**Controller ruling (post-brainstorming, during execution):** the original plan called for a brand-new `src/source/engine/ui/Theme.bs`. `src/source/engine/Game.bs` is a pre-existing file, and this toolchain (brighterscript 1.0.0-alpha.52 + `@rokucommunity/bslint` + `rooibos-roku`, run together as `bsconfig.test.json` does) cannot resolve a symbol in a brand-new `.bs` file from a pre-existing file's own class body (`cannot-find-name` for the new namespace/class) — confirmed project issue, see memory `project_bslint_rooibos_new_file_bug`. `BGE.UI.UiContainer` resolves fine in the same `Game.bs` file only because `UiContainer.bs` already existed before this branch. Verified fix: put the `Theme` class in the existing `src/source/engine/ui/Style.bs` file instead (already referenced elsewhere, small, same `BGE.UI` namespace) — confirmed this compiles and all tests pass. `Theme.spec.bs` is unaffected: a brand-new *test* file referencing a new symbol is fine (only pre-existing *production* files referencing brand-new files breaks), and no production file needs to reference `Theme.spec.bs` at all.
+
 **Files:**
-- Create: `src/source/engine/ui/Theme.bs`
+- Modify: `src/source/engine/ui/Style.bs` (append the `Theme` class after the existing `OffsetSize` class — do not create a new `Theme.bs`)
 - Create: `src/source/engine/ui/Theme.spec.bs`
 - Modify: `src/source/engine/Game.bs` (add `defaultTheme` field, constructed in `new()`)
-- Test: `src/source/engine/Game.spec.bs`
+- Test: `src/source/engine/Game.spec.bs`, `src/source/engine/ui/Style.spec.bs` is NOT touched — `Theme`'s own tests live in the new `Theme.spec.bs` file, kept separate from `Style.spec.bs`'s existing single `@suite("BGE.UI.OffsetSize")` class (one `@suite` per file — see Global Constraints).
 
 **Interfaces:**
 - Produces: `BGE.UI.Theme` class with fields `backgroundColor`, `foregroundColor`, `borderColor`, `focusedBorderColor`, `hoveredBackgroundColor`, `disabledColor` (all `as integer`, packed RGBA per `BGE.Colors`), `font as roFont`, `fontSize as integer`, `defaultPadding as BGE.UI.OffsetSize`, `defaultMargin as BGE.UI.OffsetSize`, `cursorColor as integer`, `cursorSize as float`.
@@ -618,13 +620,11 @@ end namespace
 Run: `npm run build-tests && npm run test:ci`
 Expected: FAIL — `BGE.UI.Theme` doesn't exist.
 
-- [ ] **Step 3: Create `Theme.bs`**
+- [ ] **Step 3: Append `Theme` to the existing `Style.bs`**
 
-Create `src/source/engine/ui/Theme.bs`:
+In `src/source/engine/ui/Style.bs`, add the `Theme` class inside the existing `namespace BGE.UI` block, after the `OffsetSize` class (do NOT create a new `Theme.bs` file — see the Controller ruling above):
 
 ```brightscript
-namespace BGE.UI
-
   ' Default colors/fonts/spacing for BGE.UI widgets. Game.defaultTheme is the
   ' engine-wide default (matching today's previously-hardcoded widget colors,
   ' so existing consumers see no visual change); a UiContainer.theme overrides
@@ -654,9 +654,9 @@ namespace BGE.UI
     end sub
 
   end class
-
-end namespace
 ```
+
+(`Style.bs`'s existing `end namespace` stays at the bottom of the file, now closing both classes.)
 
 - [ ] **Step 4: Run the `Theme` defaults test**
 
