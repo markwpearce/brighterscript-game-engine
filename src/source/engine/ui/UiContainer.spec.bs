@@ -167,6 +167,129 @@ namespace tests
       m.game.unsetInputEntity()
     end function
 
+    @it("stays captured for the whole frame when a press is consumed but the same frame's held event is not")
+    function _()
+      ' Game.bs dispatches two events per press frame: the press, then a
+      ' synthesized held event (1000 + press code). A widget that only reacts
+      ' to press leaves the held event unconsumed - the capture must survive it.
+      widget = new PressOnlyConsumingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.container.cursorPosition = BGE.Math.VectorOps.create(5, 5, 0)
+      m.container.onInput(new BGE.GameInput(6, 0)) ' OK press - focuses the widget
+      m.container.onUpdate(0.0) ' end of that frame - clears the consumption latch
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+
+      m.container.onInput(new BGE.GameInput(4, 0)) ' left press - consumed
+      m.container.onInput(new BGE.GameInput(1004, 100)) ' same frame's held left - NOT consumed
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(4, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("releases the capture on the next frame once nothing consumes")
+    function _()
+      widget = new PressOnlyConsumingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.container.cursorPosition = BGE.Math.VectorOps.create(5, 5, 0)
+      m.container.onInput(new BGE.GameInput(4, 0)) ' left press - consumed, capture set
+
+      m.container.onUpdate(0.0) ' frame boundary - latch resets
+      m.container.onInput(new BGE.GameInput(1004, 100)) ' next frame's held left - nothing consumes
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(4, 0))
+
+      m.assertTrue(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a focused Slider's press+held pair keeps input captured for the whole frame")
+    function _()
+      slider = new BGE.UI.Slider(m.game)
+      slider.customPosition = true
+      slider.customX = 0
+      slider.customY = 0
+      slider.width = 10
+      slider.height = 10
+      slider.repositionBasedOnParent(m.container)
+      m.container.addChild(slider)
+      m.container.cursorPosition = BGE.Math.VectorOps.create(5, 5, 0)
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+
+      m.container.onInput(new BGE.GameInput(5, 0)) ' right press
+      m.container.onInput(new BGE.GameInput(1005, 100)) ' same frame's held right
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(5, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+      m.assertEqual(2.0, slider.getValue()) ' press + held each stepped it once
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("does not move the cursor off a widget that consumed an earlier event this frame")
+    function _()
+      slider = new BGE.UI.Slider(m.game)
+      slider.customPosition = true
+      slider.customX = 0
+      slider.customY = 0
+      slider.width = 10
+      slider.height = 10
+      slider.repositionBasedOnParent(m.container)
+      m.container.addChild(slider)
+      m.container.cursorPosition = BGE.Math.VectorOps.create(5, 5, 0)
+
+      m.container.onInput(new BGE.GameInput(5, 0)) ' right press - slider consumes
+      m.container.onInput(new BGE.GameInput(1005, 100)) ' held right, same frame
+
+      m.assertEqual(5.0, m.container.cursorPosition.x)
+      m.assertTrue(slider.focused)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("does not move the cursor on a held event when the widget consumed only the press")
+    function _()
+      widget = new PressOnlyConsumingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.container.cursorPosition = BGE.Math.VectorOps.create(5, 5, 0)
+
+      m.container.onInput(new BGE.GameInput(4, 0)) ' left press - consumed
+      m.container.onInput(new BGE.GameInput(1004, 100)) ' held left - not consumed by the widget
+
+      m.assertEqual(5.0, m.container.cursorPosition.x)
+
+      m.game.unsetInputEntity()
+    end function
+
     @describe("initial focus seeding")
 
     @it("seeds the cursor onto the first focusable widget's center on first input")
@@ -214,6 +337,31 @@ namespace tests
       m.assertTrue(true)
     end function
 
+    @it("forwards onInput to a child that is itself a UiContainer, so the nested container runs its own focus dispatch")
+    function _()
+      innerContainer = new BGE.UI.UiContainer(m.game)
+      innerChild = new InputRecordingWidgetForUiContainerTests(m.game)
+      innerChild.focusable = true
+      innerChild.customPosition = true
+      innerChild.customX = 0
+      innerChild.customY = 0
+      innerChild.width = 10
+      innerChild.height = 10
+      innerChild.repositionBasedOnParent(innerContainer)
+      innerContainer.addChild(innerChild)
+      m.container.addChild(innerContainer)
+
+      ' Dispatched to the OUTER container only. The inner container is not
+      ' focusable (so it's not in the outer's focusOrder) - it only runs if
+      ' onInput is forwarded to container children directly.
+      m.container.onInput(new BGE.GameInput(2, 0)) ' up, press
+
+      m.assertTrue(innerChild.focused) ' inner container seeded its own cursor + hit-tested
+      m.assertTrue(innerChild.receivedInput) ' inner container dispatched to its focused child
+
+      m.game.unsetInputEntity()
+    end function
+
   end class
 
   class ClickCountingWidget extends BGE.UI.UiWidget
@@ -237,6 +385,33 @@ namespace tests
       if input.isButton("left")
         input.consume()
       end if
+    end sub
+  end class
+
+  ' Consumes "left" only on press, ignoring the held event Game.bs synthesizes
+  ' for the same frame - the exact shape of a widget that leaked capture before
+  ' UiContainer's per-frame consumption latch.
+  class PressOnlyConsumingWidget extends BGE.UI.UiWidget
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      if input.press and input.isButton("left")
+        input.consume()
+      end if
+    end sub
+  end class
+
+  class InputRecordingWidgetForUiContainerTests extends BGE.UI.UiWidget
+    receivedInput as boolean = false
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      m.receivedInput = true
     end sub
   end class
 

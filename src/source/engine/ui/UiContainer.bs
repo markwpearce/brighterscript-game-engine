@@ -28,6 +28,13 @@ namespace BGE.UI
 
     protected hasSeededFocus as boolean = false
 
+    ' Latched true as soon as anything consumes during this frame, and reset
+    ' once per frame in onUpdate(). Game.bs dispatches more than one event per
+    ' frame (a press, plus a synthesized held event while the button stays
+    ' down), and each of those calls onInput() separately - without this latch
+    ' a later, unconsumed event would undo an earlier one's input capture.
+    protected consumedThisFrame as boolean = false
+
     sub new(game as BGE.Game)
       super(game)
     end sub
@@ -90,10 +97,13 @@ namespace BGE.UI
 
 
     ' Method for handling any updates based on time since previous frame
-    ' Calls same method in all children
+    ' Calls same method in all children.
+    ' Also resets this frame's input-consumption latch - Game.bs runs this
+    ' container's whole onInput() dispatch before onUpdate(), once per frame.
     '
     ' @param {float} deltaTime - milliseconds since last frame
     override sub onUpdate(deltaTime as float)
+      m.consumedThisFrame = false
       for each child in m.children
         if child <> invalid
           child.onUpdate(deltaTime)
@@ -170,9 +180,14 @@ namespace BGE.UI
     ' widget's own onInput() (e.g. a future Slider adjusting via Left/Right).
     ' Only if the widget did NOT consume the event does it move the cursor -
     ' otherwise the same Left/Right that adjusted a focused widget would also
-    ' walk the cursor away from it. If anything along the way calls
-    ' input.consume(), this container captures all input for the rest of
-    ' this frame via Game.setInputEntity() - see GameInput.consume().
+    ' walk the cursor away from it. Any child that is itself a UiContainer
+    ' also receives onInput() directly, independent of focus, since a nested
+    ' container runs its own cursor/hit-testing/dispatch. If anything along
+    ' the way calls input.consume(), this container captures all input for the
+    ' rest of this frame via Game.setInputEntity() - see GameInput.consume().
+    ' "Rest of this frame" is latched in m.consumedThisFrame, because Game.bs
+    ' dispatches several events (press, plus a synthesized held event) through
+    ' this method within a single frame.
     '
     ' @param {BGE.GameInput} input - GameInput object for the last frame
     override sub onInput(input as BGE.GameInput)
@@ -191,17 +206,31 @@ namespace BGE.UI
           input.consume()
         else if input.release and input.isButton("ok")
           m.currentlyFocused.onMouseUp()
-        else if m.currentlyFocused.onInput <> invalid
+          input.consume()
+        else
           m.currentlyFocused.onInput(input)
         end if
       end if
 
-      if not input.consumed and (input.press or input.held)
+      ' A nested UiContainer child manages its own cursor/focus, so it gets the
+      ' event directly - it's never in focusOrder (containers aren't focusable),
+      ' so this can't double-dispatch with the branch above.
+      for each child in m.children
+        if child <> invalid and child.isContainer()
+          child.onInput(input)
+        end if
+      end for
+
+      if input.consumed
+        m.consumedThisFrame = true
+      end if
+
+      if not m.consumedThisFrame and (input.press or input.held)
         m.cursorPosition.x += input.x * m.cursorStep
         m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
       end if
 
-      if input.consumed
+      if m.consumedThisFrame
         m.game.setInputEntity(m)
       else
         m.game.unsetInputEntity()
