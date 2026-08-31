@@ -1500,7 +1500,7 @@ git commit -m "feat(ui): retrofit Slider onto focus, input consumption, and Them
 
 **Interfaces:**
 - Produces: `BGE.UI.Button extends UiWidget`, `focusable = true`, `setLabel(text as string)`, `onActivate as function or invalid` (settable callback field, called from `onClick()`), themed background/label/focus-ring rendering matching `Slider`'s theme-resolution pattern from Task 9.
-- Consumes: `UiWidget.isContainer()` (Task 9's note), `Theme` (Task 5), `BGE.DrawableText` (existing, same pattern as `Label`/`Slider`).
+- Consumes: `UiWidget.isContainer()` (Task 4), `Theme` (Task 5), `BGE.DrawableText` (existing, same pattern as `Label`/`Slider`).
 
 - [ ] **Step 1: Write the failing tests**
 
