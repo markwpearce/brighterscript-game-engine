@@ -16,6 +16,16 @@ namespace BGE.UI
     ' the cursor isn't over any widget. Rebuilt by addChild()/removeChild().
     focusOrder as UiWidget[] = []
 
+    ' Virtual cursor position, in this container's own UI-canvas coordinate
+    ' space (same space as m.position). Moved by directional input; hit-tested
+    ' against focusOrder each frame to drive hover/focus (cursor-primary -
+    ' hovering a widget focuses it, there's no separate keyboard-only scheme).
+    cursorPosition as BGE.Math.Vector = BGE.Math.VectorZero()
+    ' Pixels the cursor moves per press/held-frame of directional input.
+    cursorStep as float = 16.0
+
+    protected currentlyFocused as BGE.UI.UiWidget
+
     sub new(game as BGE.Game)
       super(game)
     end sub
@@ -146,14 +156,74 @@ namespace BGE.UI
       return true
     end function
 
-    ' Method to process input per frame
-    ' Calls same method in all children
+    ' Method to process input per frame.
+    ' Hit-tests the cursor against focusable children first (so hover/focus
+    ' state is current for this frame before anything dispatches), then gives
+    ' the focused widget first refusal on the event - OK dispatches
+    ' onMouseDown()/onClick() and consumes; anything else forwards to the
+    ' widget's own onInput() (e.g. a future Slider adjusting via Left/Right).
+    ' Only if the widget did NOT consume the event does it move the cursor -
+    ' otherwise the same Left/Right that adjusted a focused widget would also
+    ' walk the cursor away from it. If anything along the way calls
+    ' input.consume(), this container captures all input for the rest of
+    ' this frame via Game.setInputEntity() - see GameInput.consume().
     '
     ' @param {BGE.GameInput} input - GameInput object for the last frame
     override sub onInput(input as BGE.GameInput)
-      for each child in m.children
-        child.onInput(input)
+      m.updateHoverAndFocus()
+
+      if m.currentlyFocused <> invalid
+        if input.press and input.isButton("ok")
+          m.currentlyFocused.onMouseDown()
+          m.currentlyFocused.onClick()
+          input.consume()
+        else if input.release and input.isButton("ok")
+          m.currentlyFocused.onMouseUp()
+        else if m.currentlyFocused.onInput <> invalid
+          m.currentlyFocused.onInput(input)
+        end if
+      end if
+
+      if not input.consumed and (input.press or input.held)
+        m.cursorPosition.x += input.x * m.cursorStep
+        m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
+      end if
+
+      if input.consumed
+        m.game.setInputEntity(m)
+      else
+        m.game.unsetInputEntity()
+      end if
+    end sub
+
+    ' Hit-tests m.cursorPosition against focusOrder, updating hovered/focused
+    ' state and firing onMouseOver/onMouseOut/onFocus/onBlur for whatever
+    ' changed. At most one widget is hovered/focused at a time.
+    '
+    private sub updateHoverAndFocus()
+      hit = invalid as BGE.UI.UiWidget
+      for each widget in m.focusOrder
+        if widget.containsPoint(m.cursorPosition)
+          hit = widget
+          exit for
+        end if
       end for
+
+      if m.currentlyFocused <> invalid and (hit = invalid or hit.id <> m.currentlyFocused.id)
+        m.currentlyFocused.hovered = false
+        m.currentlyFocused.focused = false
+        m.currentlyFocused.onMouseOut()
+        m.currentlyFocused.onBlur()
+        m.currentlyFocused = invalid
+      end if
+
+      if hit <> invalid and m.currentlyFocused = invalid
+        hit.hovered = true
+        hit.focused = true
+        hit.onMouseOver()
+        hit.onFocus()
+        m.currentlyFocused = hit
+      end if
     end sub
 
 
