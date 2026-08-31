@@ -1232,7 +1232,7 @@ In `src/source/engine/ui/UiContainer.bs`, add a field to track whether seeding h
     protected hasSeededFocus as boolean = false
 ```
 
-At the top of `onInput` (before the cursor-movement block), add:
+At the very top of `onInput`, before the call to `m.updateHoverAndFocus()` (i.e. before anything else in the method — Task 7's `onInput` now hit-tests first, so seeding must run even earlier than that), add:
 
 ```brightscript
       if not m.hasSeededFocus and m.focusOrder.count() > 0
