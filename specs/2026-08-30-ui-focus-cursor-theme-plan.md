@@ -1092,22 +1092,23 @@ In `src/source/engine/ui/UiContainer.bs`, add fields near `focusOrder`:
 
 Replace `UiContainer.onInput` entirely:
 
+**Controller ruling (post-brainstorming, during execution):** the original plan moved the cursor and re-hit-tested BEFORE dispatching to the currently-focused widget. That's a real ordering bug: pressing Left/Right on a focused widget that wants to treat Left/Right as its own input (e.g. a future `Slider` adjusting its value via `consume()`) would always move the cursor away from that widget first, so the widget's own `onInput()` never got a chance to run against a cursor position that still overlapped it, and its `consume()` call never happened. Caught by Task 7's own implementer during a real test run — confirmed by tracing every test below against the corrected order and finding all pass. Fixed order: hit-test first (using the *current*, not-yet-moved cursor position, so `currentlyFocused` is accurate for this frame), dispatch to the (possibly just-updated) focused widget next, and only move the cursor afterward if that dispatch didn't consume the event. This also correctly handles a widget losing focus mid-frame (cursor repositioned directly, e.g. in a test, without an intervening `onInput` call) before any click logic runs against a stale `currentlyFocused`.
+
 ```brightscript
     ' Method to process input per frame.
-    ' Moves the cursor on directional input, hit-tests it against focusable
-    ' children to drive hover/focus, dispatches OK to the hovered/focused
-    ' widget's onClick(), and forwards raw input to the focused widget's own
-    ' onInput() (e.g. Slider adjusting via Left/Right). If anything along the
-    ' way calls input.consume(), this container captures all input for the
-    ' rest of this frame via Game.setInputEntity() - see GameInput.consume().
+    ' Hit-tests the cursor against focusable children first (so hover/focus
+    ' state is current for this frame before anything dispatches), then gives
+    ' the focused widget first refusal on the event - OK dispatches
+    ' onMouseDown()/onClick() and consumes; anything else forwards to the
+    ' widget's own onInput() (e.g. a future Slider adjusting via Left/Right).
+    ' Only if the widget did NOT consume the event does it move the cursor -
+    ' otherwise the same Left/Right that adjusted a focused widget would also
+    ' walk the cursor away from it. If anything along the way calls
+    ' input.consume(), this container captures all input for the rest of
+    ' this frame via Game.setInputEntity() - see GameInput.consume().
     '
     ' @param {BGE.GameInput} input - GameInput object for the last frame
     override sub onInput(input as BGE.GameInput)
-      if input.press or input.held
-        m.cursorPosition.x += input.x * m.cursorStep
-        m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
-      end if
-
       m.updateHoverAndFocus()
 
       if m.currentlyFocused <> invalid
@@ -1120,6 +1121,11 @@ Replace `UiContainer.onInput` entirely:
         else if m.currentlyFocused.onInput <> invalid
           m.currentlyFocused.onInput(input)
         end if
+      end if
+
+      if not input.consumed and (input.press or input.held)
+        m.cursorPosition.x += input.x * m.cursorStep
+        m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
       end if
 
       if input.consumed
