@@ -23,13 +23,15 @@ namespace BGE.UI
     theme as BGE.UI.Theme
 
     ' Does this container register its focusable children with the shared
-    ' BGE.UI.FocusManager (Game.focusManager) and drive its update() on
-    ' input? gameUi wants this (issue #133); debugUi opts out (set to false
-    ' by Game.bs) since debug UI should be non-blocking and never capture
-    ' input away from gameplay entities - it just uses onInput() like any
-    ' other GameEntity. Focus is global (issue #178): every focusEnabled
-    ' container anywhere in the tree shares the same one focused widget/
-    ' cursor, via Game.focusManager - not tracked per-container.
+    ' BGE.UI.FocusManager (Game.focusManager)? gameUi wants this (issue
+    ' #133); debugUi opts out (set to false by Game.bs) since debug UI
+    ' should be non-blocking and never capture input away from gameplay
+    ' entities - its widgets, if any, would just never be focusable, and it
+    ' still gets onInput()'s plain broadcast like any other GameEntity.
+    ' Focus is global (issue #178): every focusEnabled container anywhere in
+    ' the tree shares the same one focused widget, via Game.focusManager
+    ' (driven once per frame by Game.processFocusManagerInput() - not
+    ' per-container) - not tracked per-container.
     focusEnabled as boolean = true
 
     sub new(game as BGE.Game)
@@ -97,13 +99,11 @@ namespace BGE.UI
     ' Method for handling any updates based on time since previous frame
     ' Calls same method in all children.
     ' Also resets the shared FocusManager's input-consumption latch - safe to
-    ' call redundantly from every focusEnabled container's onUpdate().
+    ' call redundantly from every container's onUpdate() (idempotent).
     '
     ' @param {float} deltaTime - milliseconds since last frame
     override sub onUpdate(deltaTime as float)
-      if m.focusEnabled
-        m.game.focusManager.resetFrame()
-      end if
+      m.game.focusManager.resetFrame()
       for each child in m.children
         if child <> invalid
           child.onUpdate(deltaTime)
@@ -175,10 +175,13 @@ namespace BGE.UI
     ' this class, e.g. onAudioEvent()/onGameEvent()) - a plain, non-focusable
     ' widget added to a container still gets notified of every input this
     ' way, and a nested UiContainer child gets it too, running its own
-    ' broadcast + (if focusEnabled) focus-manager update in turn.
-    ' Separately, if m.focusEnabled, also drives Game.focusManager.update() -
-    ' see BGE.UI.FocusManager for the cursor/hover/focused-widget dispatch
-    ' itself (global, not per-container - issue #178).
+    ' broadcast in turn.
+    ' Focus itself is driven separately, once per frame, by
+    ' Game.processFocusManagerInput() calling BGE.UI.FocusManager.update()
+    ' directly - not from here. Doing it here instead (once per
+    ' focusEnabled container reached by this same broadcast) would call
+    ' update() more than once for one event whenever containers nest,
+    ' double-firing the one globally-focused widget's dispatch.
     '
     ' @param {BGE.GameInput} input - GameInput object for the last frame
     override sub onInput(input as BGE.GameInput)
@@ -187,10 +190,6 @@ namespace BGE.UI
           child.onInput(input)
         end if
       end for
-
-      if m.focusEnabled
-        m.game.focusManager.update(input)
-      end if
     end sub
 
 
@@ -349,10 +348,11 @@ namespace BGE.UI
     ' would undo an earlier one's input capture.
     protected consumedThisFrame as boolean = false
 
-    ' heldTimeMs of the last held event that moved focus, or -1 when no hold
-    ' is in progress. Throttles repeat-while-held the same way Slider/Select
-    ' throttle their own adjustment - see update().
-    protected lastNavigateMs as float = -1
+    ' Throttles repeat-while-held navigation to one step per
+    ' WIDGET_REPEAT_DELAY_MS, the same way Slider/Select throttle their own
+    ' adjustment - shared between list and pointer mode since only one mode
+    ' is ever active at a time.
+    protected repeatThrottle as BGE.UI.RepeatThrottle = new BGE.UI.RepeatThrottle()
 
     sub new(game as BGE.Game)
       m.game = game
@@ -390,6 +390,13 @@ namespace BGE.UI
       for i = m.focusOrder.count() - 1 to 0 step -1
         if m.focusOrder[i].id = widget.id
           m.focusOrder.delete(i)
+          ' list mode: currentlyFocusedIndex is a plain index into focusOrder,
+          ' so removing anything before it shifts every later index down by
+          ' one - without this, navigation desyncs from the visible list
+          ' (e.g. Down silently doing nothing, or landing on the wrong widget).
+          if not wasFocused and i < m.currentlyFocusedIndex
+            m.currentlyFocusedIndex--
+          end if
         end if
       end for
       if wasFocused
@@ -429,21 +436,14 @@ namespace BGE.UI
     ' of this frame - see GameInput.consume(). "Rest of this frame" is
     ' latched in m.consumedThisFrame (see resetFrame()).
     '
-    ' input.focusVisited guards against running twice for the same event: the
-    ' same GameInput instance can reach more than one focusEnabled container
-    ' this frame (an outer container's onInput() broadcasts to a nested
-    ' container's onInput() before running its own update() call) - without
-    ' this guard, the one globally-focused widget would double-fire (e.g. two
-    ' onClick() calls for one OK press).
+    ' Called exactly once per input event by Game.processFocusManagerInput() -
+    ' not from UiContainer.onInput(), so nesting focusEnabled containers can't
+    ' cause this to double-fire for one event (e.g. two onClick() calls for
+    ' one OK press).
     '
     ' @param {BGE.GameInput} input - GameInput object for the last frame
     ' @return {void}
     sub update(input as BGE.GameInput)
-      if input.focusVisited
-        return
-      end if
-      input.focusVisited = true
-
       isPointer = m.navigationMode = BGE.UI.FocusNavigationMode.pointer
       if isPointer
         m.seedAndHitTestPointer()
@@ -512,11 +512,7 @@ namespace BGE.UI
         return
       end if
 
-      shouldMove = input.press
-      if input.held and (m.lastNavigateMs < 0 or input.heldTimeMs - m.lastNavigateMs >= BGE.UI.WIDGET_REPEAT_DELAY_MS)
-        shouldMove = true
-      end if
-      if not shouldMove
+      if not m.repeatThrottle.shouldAct(input)
         return
       end if
 
@@ -533,12 +529,6 @@ namespace BGE.UI
         newIndex = ((newIndex mod count) + count) mod count
       else
         newIndex = BGE.Math.Clamp(newIndex, 0, count - 1)
-      end if
-
-      if input.press
-        m.lastNavigateMs = 0
-      else
-        m.lastNavigateMs = input.heldTimeMs
       end if
 
       if newIndex <> m.currentlyFocusedIndex
@@ -571,16 +561,41 @@ namespace BGE.UI
     private sub seedAndHitTestPointer()
       if not m.hasSeededFocus and m.focusOrder.count() > 0
         seed = m.focusOrder[0]
-        ' draw() is what normally positions a widget (repositionBasedOnParent())
-        ' - reposition explicitly here too, in case the first-ever update()
+        ' draw() is what normally positions a widget, cascading down from the
+        ' root container (repositionBasedOnParent()) - reposition the whole
+        ' ancestor chain explicitly here too, in case the first-ever update()
         ' call happens before the first draw() (e.g. input on the very first
-        ' frame), so seeding doesn't read a stale/default position.
-        seed.repositionBasedOnParent(seed.parentContainer)
+        ' frame), so seeding doesn't read a stale/default position. A single-
+        ' level reposition against just seed.parentContainer isn't enough if
+        ' that parent is itself nested and hasn't been positioned yet.
+        m.repositionAncestorChain(seed)
         m.cursorPosition = BGE.Math.VectorOps.create(seed.position.x + seed.width / 2, seed.position.y + seed.height / 2, 0)
         m.hasSeededFocus = true
       end if
 
       m.updateHoverAndFocus()
+    end sub
+
+    ' Repositions widget and every UiContainer ancestor above it, root-first,
+    ' via repositionBasedOnParent() - the same computation draw() normally
+    ' cascades top-down, but callable before any draw() has ever run. See
+    ' seedAndHitTestPointer().
+    '
+    ' @param {UiWidget} widget
+    ' @return {void}
+    private sub repositionAncestorChain(widget as UiWidget)
+      chain = [widget]
+      current = widget.parentContainer
+      while current <> invalid
+        chain.Unshift(current)
+        current = current.parentContainer
+      end while
+
+      parent = invalid
+      for each node in chain
+        node.repositionBasedOnParent(parent)
+        parent = node
+      end for
     end sub
 
     ' pointer mode: moves m.cursorPosition by cursorStep in the input
@@ -590,21 +605,12 @@ namespace BGE.UI
     ' @param {BGE.GameInput} input
     ' @return {void}
     private sub navigatePointer(input as BGE.GameInput)
-      shouldMove = input.press
-      if input.held and (m.lastNavigateMs < 0 or input.heldTimeMs - m.lastNavigateMs >= BGE.UI.WIDGET_REPEAT_DELAY_MS)
-        shouldMove = true
-      end if
-      if not shouldMove
+      if not m.repeatThrottle.shouldAct(input)
         return
       end if
 
       m.cursorPosition.x += input.x * m.cursorStep
       m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
-      if input.press
-        m.lastNavigateMs = 0
-      else
-        m.lastNavigateMs = input.heldTimeMs
-      end if
     end sub
 
     ' Hit-tests m.cursorPosition against focusOrder, updating hovered/focused
