@@ -1,5 +1,16 @@
 namespace BGE.UI
 
+  ' How BGE.UI.FocusManager moves focus on directional input.
+  enum FocusNavigationMode
+    ' Default: discrete list navigation, like a typical menu - Up/Down/Left/
+    ' Right step currentlyFocused to the next/previous registered widget, no
+    ' spatial cursor or hit-testing involved.
+    list = "list"
+    ' Opt-in: a virtual pixel cursor (cursorPosition) moves by cursorStep and
+    ' is hit-tested against widget bounds each frame - see FocusManager.
+    pointer = "pointer"
+  end enum
+
   class UiContainer extends BGE.UI.UiWidget
 
     backgroundRGBA as integer = BGE.RGBAtoRGBA(128, 128, 128, 0.8) ' RGBA value for the background of the window/container
@@ -11,29 +22,15 @@ namespace BGE.UI
     ' falls back to m.game.defaultTheme.
     theme as BGE.UI.Theme
 
-    ' Focusable children, in the order they were added via addChild() -
-    ' used to seed initial focus and as the OK-press fallback target when
-    ' the cursor isn't over any widget. Rebuilt by addChild()/removeChild().
-    focusOrder as UiWidget[] = []
-
-    ' Virtual cursor position, in this container's own UI-canvas coordinate
-    ' space (same space as m.position). Moved by directional input; hit-tested
-    ' against focusOrder each frame to drive hover/focus (cursor-primary -
-    ' hovering a widget focuses it, there's no separate keyboard-only scheme).
-    cursorPosition as BGE.Math.Vector = BGE.Math.VectorZero()
-    ' Pixels the cursor moves per press/held-frame of directional input.
-    cursorStep as float = 16.0
-
-    protected currentlyFocused as BGE.UI.UiWidget
-
-    protected hasSeededFocus as boolean = false
-
-    ' Latched true as soon as anything consumes during this frame, and reset
-    ' once per frame in onUpdate(). Game.bs dispatches more than one event per
-    ' frame (a press, plus a synthesized held event while the button stays
-    ' down), and each of those calls onInput() separately - without this latch
-    ' a later, unconsumed event would undo an earlier one's input capture.
-    protected consumedThisFrame as boolean = false
+    ' Does this container register its focusable children with the shared
+    ' BGE.UI.FocusManager (Game.focusManager) and drive its update() on
+    ' input? gameUi wants this (issue #133); debugUi opts out (set to false
+    ' by Game.bs) since debug UI should be non-blocking and never capture
+    ' input away from gameplay entities - it just uses onInput() like any
+    ' other GameEntity. Focus is global (issue #178): every focusEnabled
+    ' container anywhere in the tree shares the same one focused widget/
+    ' cursor, via Game.focusManager - not tracked per-container.
+    focusEnabled as boolean = true
 
     sub new(game as BGE.Game)
       super(game)
@@ -50,8 +47,9 @@ namespace BGE.UI
     sub addChild(element as UiWidget)
       if element <> invalid
         m.children.push(element)
-        if element.focusable
-          m.focusOrder.push(element)
+        element.parentContainer = m
+        if element.focusable and m.focusEnabled
+          m.game.focusManager.register(element)
         end if
       end if
     end sub
@@ -80,30 +78,32 @@ namespace BGE.UI
         m.children.delete(indexToRemove)
       end if
 
-      for i = m.focusOrder.count() - 1 to 0 step -1
-        if m.focusOrder[i].id = element.id
-          m.focusOrder.delete(i)
-        end if
-      end for
+      if element.focusable and m.focusEnabled
+        m.game.focusManager.unregister(element)
+      end if
     end sub
 
     sub clearChildren()
       for each element in m.children
         element.onDestroy()
+        if element.focusable and m.focusEnabled
+          m.game.focusManager.unregister(element)
+        end if
       end for
       m.children.clear()
-      m.focusOrder.clear()
     end sub
 
 
     ' Method for handling any updates based on time since previous frame
     ' Calls same method in all children.
-    ' Also resets this frame's input-consumption latch - Game.bs runs this
-    ' container's whole onInput() dispatch before onUpdate(), once per frame.
+    ' Also resets the shared FocusManager's input-consumption latch - safe to
+    ' call redundantly from every focusEnabled container's onUpdate().
     '
     ' @param {float} deltaTime - milliseconds since last frame
     override sub onUpdate(deltaTime as float)
-      m.consumedThisFrame = false
+      if m.focusEnabled
+        m.game.focusManager.resetFrame()
+      end if
       for each child in m.children
         if child <> invalid
           child.onUpdate(deltaTime)
@@ -139,10 +139,8 @@ namespace BGE.UI
           child.draw(m)
         end if
       end for
-      if m.focusOrder.count() > 0
-        theme = m.effectiveTheme()
-        m.canvas.renderer.drawRectangle(m.cursorPosition.x - theme.cursorSize / 2, m.cursorPosition.y - theme.cursorSize / 2, theme.cursorSize, theme.cursorSize, theme.cursorColor)
-      end if
+      ' The focus cursor is global (one indicator, not one per container) -
+      ' drawn once by Game.drawUI() via FocusManager.draw(), not here.
     end sub
 
 
@@ -172,102 +170,26 @@ namespace BGE.UI
       return true
     end function
 
-    ' Method to process input per frame.
-    ' Hit-tests the cursor against focusable children first (so hover/focus
-    ' state is current for this frame before anything dispatches), then gives
-    ' the focused widget first refusal on the event - OK dispatches
-    ' onMouseDown()/onClick() and consumes; anything else forwards to the
-    ' widget's own onInput() (e.g. a future Slider adjusting via Left/Right).
-    ' Only if the widget did NOT consume the event does it move the cursor -
-    ' otherwise the same Left/Right that adjusted a focused widget would also
-    ' walk the cursor away from it. Any child that is itself a UiContainer
-    ' also receives onInput() directly, independent of focus, since a nested
-    ' container runs its own cursor/hit-testing/dispatch. If anything along
-    ' the way calls input.consume(), this container captures all input for the
-    ' rest of this frame via Game.setInputEntity() - see GameInput.consume().
-    ' "Rest of this frame" is latched in m.consumedThisFrame, because Game.bs
-    ' dispatches several events (press, plus a synthesized held event) through
-    ' this method within a single frame.
+    ' Method to process input per frame. Broadcasts to every child
+    ' unconditionally (same as every other GameEntity notification method on
+    ' this class, e.g. onAudioEvent()/onGameEvent()) - a plain, non-focusable
+    ' widget added to a container still gets notified of every input this
+    ' way, and a nested UiContainer child gets it too, running its own
+    ' broadcast + (if focusEnabled) focus-manager update in turn.
+    ' Separately, if m.focusEnabled, also drives Game.focusManager.update() -
+    ' see BGE.UI.FocusManager for the cursor/hover/focused-widget dispatch
+    ' itself (global, not per-container - issue #178).
     '
     ' @param {BGE.GameInput} input - GameInput object for the last frame
     override sub onInput(input as BGE.GameInput)
-      if not m.hasSeededFocus and m.focusOrder.count() > 0
-        seed = m.focusOrder[0]
-        m.cursorPosition = BGE.Math.VectorOps.create(seed.position.x + seed.width / 2, seed.position.y + seed.height / 2, 0)
-        m.hasSeededFocus = true
-      end if
-
-      m.updateHoverAndFocus()
-
-      if m.currentlyFocused <> invalid
-        if input.press and input.isButton("ok")
-          m.currentlyFocused.onMouseDown()
-          m.currentlyFocused.onClick()
-          input.consume()
-        else if input.release and input.isButton("ok")
-          m.currentlyFocused.onMouseUp()
-          input.consume()
-        else
-          m.currentlyFocused.onInput(input)
-        end if
-      end if
-
-      ' A nested UiContainer child manages its own cursor/focus, so it gets the
-      ' event directly - it's never in focusOrder (containers aren't focusable),
-      ' so this can't double-dispatch with the branch above. Skipped once the
-      ' event is already consumed, otherwise one press would act on this
-      ' container's focused widget AND the nested container's focused widget.
-      if not input.consumed
-        for each child in m.children
-          if child <> invalid and child.isContainer()
-            child.onInput(input)
-          end if
-        end for
-      end if
-
-      if input.consumed
-        m.consumedThisFrame = true
-      end if
-
-      if not m.consumedThisFrame and (input.press or input.held)
-        m.cursorPosition.x += input.x * m.cursorStep
-        m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
-      end if
-
-      if m.consumedThisFrame
-        m.game.setInputEntity(m)
-      else
-        m.game.unsetInputEntity()
-      end if
-    end sub
-
-    ' Hit-tests m.cursorPosition against focusOrder, updating hovered/focused
-    ' state and firing onMouseOver/onMouseOut/onFocus/onBlur for whatever
-    ' changed. At most one widget is hovered/focused at a time.
-    '
-    private sub updateHoverAndFocus()
-      hit = invalid as BGE.UI.UiWidget
-      for each widget in m.focusOrder
-        if widget.containsPoint(m.cursorPosition)
-          hit = widget
-          exit for
+      for each child in m.children
+        if child <> invalid
+          child.onInput(input)
         end if
       end for
 
-      if m.currentlyFocused <> invalid and (hit = invalid or hit.id <> m.currentlyFocused.id)
-        m.currentlyFocused.hovered = false
-        m.currentlyFocused.focused = false
-        m.currentlyFocused.onMouseOut()
-        m.currentlyFocused.onBlur()
-        m.currentlyFocused = invalid
-      end if
-
-      if hit <> invalid and m.currentlyFocused = invalid
-        hit.hovered = true
-        hit.focused = true
-        hit.onMouseOver()
-        hit.onFocus()
-        m.currentlyFocused = hit
+      if m.focusEnabled
+        m.game.focusManager.update(input)
       end if
     end sub
 
@@ -371,6 +293,364 @@ namespace BGE.UI
     '
     override sub onDestroy()
       m.clearChildren()
+    end sub
+
+  end class
+
+  ' Owns the single, global focused-widget/cursor state shared by every
+  ' UiContainer that opts in (UiContainer.focusEnabled) - one Game instance
+  ' owns one FocusManager (Game.focusManager). Widget positions are already
+  ' absolute UI-canvas coordinates (each level of UiContainer.draw() adds its
+  ' own parent's position - see UiWidget.getWorldPosition()), so one shared
+  ' cursor/hit-test naturally spans nested containers with no translation.
+  ' Kept in this file rather than its own (despite the size) - a pre-existing
+  ' file referencing a brand-new one hits a bslint/rooibos-roku toolchain bug
+  ' (cannot-find-name), see CLAUDE.md/project memory on this.
+  class FocusManager
+
+    protected game as BGE.Game
+
+    ' How directional input moves focus - see BGE.UI.FocusNavigationMode.
+    ' Defaults to list (discrete next/previous, like a typical menu); a game
+    ' opts into pointer (spatial cursor) explicitly.
+    navigationMode as BGE.UI.FocusNavigationMode = BGE.UI.FocusNavigationMode.list
+
+    ' list mode only: does moving past the last (or first) registered widget
+    ' wrap around to the other end? Off by default - most menus stop at the
+    ' ends rather than cycling.
+    wrapFocus as boolean = false
+
+    ' Every focusable widget registered across every focusEnabled container
+    ' (gameUi and any of its focusEnabled descendants) - flat, in register()
+    ' order. In list mode this order IS the navigation order; in pointer mode
+    ' it's used only to seed initial focus and as the hit-test target.
+    protected focusOrder as UiWidget[] = []
+
+    ' list mode only: index of currentlyFocused within focusOrder, or -1
+    ' before anything is focused.
+    protected currentlyFocusedIndex as integer = -1
+
+    ' pointer mode only: virtual cursor position, in UI-canvas coordinate
+    ' space. Moved by directional input; hit-tested against focusOrder each
+    ' frame to drive hover/focus (cursor-primary - hovering a widget focuses
+    ' it).
+    cursorPosition as BGE.Math.Vector = BGE.Math.VectorZero()
+    ' pointer mode only: pixels the cursor moves per press/held-frame.
+    cursorStep as float = 16.0
+
+    protected currentlyFocused as BGE.UI.UiWidget
+
+    protected hasSeededFocus as boolean = false
+
+    ' Latched true as soon as anything consumes during a frame, and reset
+    ' once per frame (see resetFrame()). Game.bs dispatches more than one
+    ' event per frame (a press, plus a synthesized held event while the
+    ' button stays down) - without this latch a later, unconsumed event
+    ' would undo an earlier one's input capture.
+    protected consumedThisFrame as boolean = false
+
+    ' heldTimeMs of the last held event that moved focus, or -1 when no hold
+    ' is in progress. Throttles repeat-while-held the same way Slider/Select
+    ' throttle their own adjustment - see update().
+    protected lastNavigateMs as float = -1
+
+    sub new(game as BGE.Game)
+      m.game = game
+    end sub
+
+    ' Registers a focusable widget - called by UiContainer.addChild().
+    '
+    ' @param {UiWidget} widget
+    ' @return {void}
+    sub register(widget as UiWidget)
+      m.focusOrder.push(widget)
+    end sub
+
+    ' How many focusable widgets are currently registered.
+    '
+    ' @return {integer}
+    function registeredCount() as integer
+      return m.focusOrder.count()
+    end function
+
+    ' The widget registered at the given index, in register() order.
+    '
+    ' @param {integer} index
+    ' @return {UiWidget}
+    function getRegistered(index as integer) as UiWidget
+      return m.focusOrder[index]
+    end function
+
+    ' Unregisters a focusable widget - called by UiContainer.removeChild().
+    '
+    ' @param {UiWidget} widget
+    ' @return {void}
+    sub unregister(widget as UiWidget)
+      wasFocused = m.currentlyFocused <> invalid and m.currentlyFocused.id = widget.id
+      for i = m.focusOrder.count() - 1 to 0 step -1
+        if m.focusOrder[i].id = widget.id
+          m.focusOrder.delete(i)
+        end if
+      end for
+      if wasFocused
+        ' Removed while focused - don't leave currentlyFocused/currentlyFocusedIndex
+        ' pointing at a widget no longer in the registry. Re-seed on the next
+        ' update() instead of guessing a replacement.
+        m.currentlyFocused = invalid
+        m.currentlyFocusedIndex = -1
+        m.hasSeededFocus = false
+      end if
+    end sub
+
+    ' Top-of-frame reset of the input-consumption latch. Safe to call more
+    ' than once per frame (every focusEnabled UiContainer's onUpdate() calls
+    ' this) since resetting to false twice is a no-op.
+    '
+    ' @return {void}
+    sub resetFrame()
+      m.consumedThisFrame = false
+    end sub
+
+    ' Drives the focus side of input handling for the whole shared registry.
+    ' First seeds/updates currentlyFocused for whatever this frame's state
+    ' is (list mode: seeds index 0 once; pointer mode: hit-tests the cursor
+    ' each call - see seedList()/seedAndHitTestPointer()) - this happens
+    ' before dispatch, so hover/focus state is current for this frame. Then
+    ' gives the focused widget first refusal on the event - OK press
+    ' dispatches onMouseDown()/onClick() and consumes; OK release dispatches
+    ' onMouseUp() only (does NOT consume - a release is never a discrete
+    ' "act on this" event, so it's free to also reach GameEntity.onInput());
+    ' anything else forwards to the widget's own handleInput() (see
+    ' UiWidget.handleInput()). Only if the widget did NOT report the event as
+    ' handled does focus itself move (navigateList()/navigatePointer()) -
+    ' otherwise the same Left/Right that adjusted a focused Slider would also
+    ' walk focus away from it. If anything along the way calls
+    ' input.consume(), Game.setInputEntity() captures all input for the rest
+    ' of this frame - see GameInput.consume(). "Rest of this frame" is
+    ' latched in m.consumedThisFrame (see resetFrame()).
+    '
+    ' input.focusVisited guards against running twice for the same event: the
+    ' same GameInput instance can reach more than one focusEnabled container
+    ' this frame (an outer container's onInput() broadcasts to a nested
+    ' container's onInput() before running its own update() call) - without
+    ' this guard, the one globally-focused widget would double-fire (e.g. two
+    ' onClick() calls for one OK press).
+    '
+    ' @param {BGE.GameInput} input - GameInput object for the last frame
+    ' @return {void}
+    sub update(input as BGE.GameInput)
+      if input.focusVisited
+        return
+      end if
+      input.focusVisited = true
+
+      isPointer = m.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      if isPointer
+        m.seedAndHitTestPointer()
+      else
+        m.seedList()
+      end if
+
+      handled = false
+      if m.currentlyFocused <> invalid
+        if input.press and input.isButton("ok")
+          m.currentlyFocused.onMouseDown()
+          if m.currentlyFocused <> invalid and m.currentlyFocused.isValid()
+            m.currentlyFocused.onClick()
+          end if
+          input.consume()
+          handled = true
+        else if input.release and input.isButton("ok")
+          m.currentlyFocused.onMouseUp()
+          handled = true
+        else
+          handled = m.currentlyFocused.handleInput(input)
+        end if
+      end if
+
+      if input.consumed
+        m.consumedThisFrame = true
+      end if
+
+      if not handled and not m.consumedThisFrame and (input.x <> 0 or input.y <> 0)
+        if isPointer
+          m.navigatePointer(input)
+        else
+          m.navigateList(input)
+        end if
+      end if
+
+      if m.consumedThisFrame
+        m.game.setInputEntity(m.game.gameUi)
+      else
+        m.game.unsetInputEntity()
+      end if
+    end sub
+
+    ' list mode: establishes currentlyFocused on the very first call
+    ' (focusOrder[0]) and leaves it alone otherwise - actual movement is
+    ' navigateList().
+    '
+    ' @return {void}
+    private sub seedList()
+      if not m.hasSeededFocus and m.focusOrder.count() > 0
+        m.focusTo(0)
+        m.hasSeededFocus = true
+      end if
+    end sub
+
+    ' list mode: steps currentlyFocused to the next/previous registered
+    ' widget on Left/Right/Up/Down - "down"/"right" advance, "up"/"left" go
+    ' back - throttled the same way Slider/Select throttle their own repeat
+    ' (WIDGET_REPEAT_DELAY_MS), so a single tap moves exactly one item.
+    ' Movement stops at either end unless wrapFocus is true.
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {void}
+    private sub navigateList(input as BGE.GameInput)
+      if m.focusOrder.count() = 0
+        return
+      end if
+
+      shouldMove = input.press
+      if input.held and (m.lastNavigateMs < 0 or input.heldTimeMs - m.lastNavigateMs >= BGE.UI.WIDGET_REPEAT_DELAY_MS)
+        shouldMove = true
+      end if
+      if not shouldMove
+        return
+      end if
+
+      delta = 0
+      if input.y <> 0
+        delta = -input.y ' up (y=1) -> previous; down (y=-1) -> next
+      else if input.x <> 0
+        delta = input.x ' right (x=1) -> next; left (x=-1) -> previous
+      end if
+
+      newIndex = m.currentlyFocusedIndex + delta
+      count = m.focusOrder.count()
+      if m.wrapFocus
+        newIndex = ((newIndex mod count) + count) mod count
+      else
+        newIndex = BGE.Math.Clamp(newIndex, 0, count - 1)
+      end if
+
+      if input.press
+        m.lastNavigateMs = 0
+      else
+        m.lastNavigateMs = input.heldTimeMs
+      end if
+
+      if newIndex <> m.currentlyFocusedIndex
+        m.focusTo(newIndex)
+      end if
+    end sub
+
+    ' Focuses focusOrder[index] directly (list mode), blurring whatever was
+    ' focused before.
+    '
+    ' @param {integer} index
+    ' @return {void}
+    private sub focusTo(index as integer)
+      if m.currentlyFocused <> invalid
+        m.currentlyFocused.focused = false
+        m.currentlyFocused.onBlur()
+      end if
+      m.currentlyFocused = m.focusOrder[index]
+      m.currentlyFocusedIndex = index
+      m.currentlyFocused.focused = true
+      m.currentlyFocused.onFocus()
+    end sub
+
+    ' pointer mode: seeds m.cursorPosition on the very first call, then
+    ' hit-tests it against focusOrder, updating hovered/focused state and
+    ' firing onMouseOver/onMouseOut/onFocus/onBlur for whatever changed -
+    ' actual cursor movement is navigatePointer().
+    '
+    ' @return {void}
+    private sub seedAndHitTestPointer()
+      if not m.hasSeededFocus and m.focusOrder.count() > 0
+        seed = m.focusOrder[0]
+        ' draw() is what normally positions a widget (repositionBasedOnParent())
+        ' - reposition explicitly here too, in case the first-ever update()
+        ' call happens before the first draw() (e.g. input on the very first
+        ' frame), so seeding doesn't read a stale/default position.
+        seed.repositionBasedOnParent(seed.parentContainer)
+        m.cursorPosition = BGE.Math.VectorOps.create(seed.position.x + seed.width / 2, seed.position.y + seed.height / 2, 0)
+        m.hasSeededFocus = true
+      end if
+
+      m.updateHoverAndFocus()
+    end sub
+
+    ' pointer mode: moves m.cursorPosition by cursorStep in the input
+    ' direction, throttled the same way Slider/Select throttle their own
+    ' repeat (WIDGET_REPEAT_DELAY_MS) so a single tap moves it only once.
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {void}
+    private sub navigatePointer(input as BGE.GameInput)
+      shouldMove = input.press
+      if input.held and (m.lastNavigateMs < 0 or input.heldTimeMs - m.lastNavigateMs >= BGE.UI.WIDGET_REPEAT_DELAY_MS)
+        shouldMove = true
+      end if
+      if not shouldMove
+        return
+      end if
+
+      m.cursorPosition.x += input.x * m.cursorStep
+      m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
+      if input.press
+        m.lastNavigateMs = 0
+      else
+        m.lastNavigateMs = input.heldTimeMs
+      end if
+    end sub
+
+    ' Hit-tests m.cursorPosition against focusOrder, updating hovered/focused
+    ' state and firing onMouseOver/onMouseOut/onFocus/onBlur for whatever
+    ' changed. At most one widget is hovered/focused at a time, globally.
+    ' pointer mode only.
+    '
+    private sub updateHoverAndFocus()
+      hit = invalid as BGE.UI.UiWidget
+      for each widget in m.focusOrder
+        if widget.containsPoint(m.cursorPosition)
+          hit = widget
+          exit for
+        end if
+      end for
+
+      if m.currentlyFocused <> invalid and (hit = invalid or hit.id <> m.currentlyFocused.id)
+        m.currentlyFocused.hovered = false
+        m.currentlyFocused.focused = false
+        m.currentlyFocused.onMouseOut()
+        m.currentlyFocused.onBlur()
+        m.currentlyFocused = invalid
+      end if
+
+      if hit <> invalid and m.currentlyFocused = invalid
+        hit.hovered = true
+        hit.focused = true
+        hit.onMouseOver()
+        hit.onFocus()
+        m.currentlyFocused = hit
+      end if
+    end sub
+
+    ' Draws the single global cursor indicator. pointer mode only - list
+    ' mode has no spatial cursor (widgets self-render their own focus ring
+    ' off m.focused, e.g. Button/Slider/Select/Checkbox.draw()). Called once
+    ' per frame by Game.drawUI(), not per-container.
+    '
+    ' @param {BGE.Canvas} canvas
+    ' @param {BGE.UI.Theme} theme
+    ' @return {void}
+    sub draw(canvas as BGE.Canvas, theme as BGE.UI.Theme)
+      if m.navigationMode <> BGE.UI.FocusNavigationMode.pointer or m.focusOrder.count() = 0
+        return
+      end if
+      canvas.renderer.drawRectangle(m.cursorPosition.x - theme.cursorSize / 2, m.cursorPosition.y - theme.cursorSize / 2, theme.cursorSize, theme.cursorSize, theme.cursorColor)
     end sub
 
   end class
