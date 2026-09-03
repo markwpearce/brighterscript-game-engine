@@ -46,6 +46,9 @@ namespace BGE
     private buttonHeldTimeMs = 0
     private optional inputEntityId as string or dynamic = invalid
     private optional currentInputEntityId as string or dynamic = invalid
+    ' Was the entity that set inputEntityId a UiContainer (isContainer())?
+    ' Set by setInputEntity()/unsetInputEntity() - see clearStaleInputCapture().
+    private inputEntityIsContainer as boolean = false
     private dt as float = 0
     private totalRunTime = 0
     private fakeDT as float or dynamic = invalid
@@ -117,6 +120,13 @@ namespace BGE
 
     ' Container for Debug UI
     debugUi as BGE.UI.UiContainer
+
+    ' The single, global focused-widget/cursor state shared by gameUi and any
+    ' of its focusEnabled descendants - see BGE.UI.FocusManager.
+    focusManager as BGE.UI.FocusManager
+
+    ' Default theme for all UI widgets, set in new()
+    defaultTheme as BGE.UI.Theme
 
     ' Unified remote+controller input mapping - see enableControllerInput()
     ' and BGE.Controller.ControlMap.
@@ -207,6 +217,8 @@ namespace BGE
       m.uiCanvas.renderer.name = "UIRenderer"
       m.uiCanvas.scale = BGE.Math.VectorOps.create(m.screen.GetWidth() / m.uiCanvas.getWidth(), m.screen.GetHeight() / m.uiCanvas.getHeight(), 1)
 
+      m.focusManager = new BGE.UI.FocusManager(m)
+
       m.gameUi = new BGE.UI.UiContainer(m)
       m.gameUi.setCanvas(m.uiCanvas)
       m.gameUi.showBackground = false
@@ -220,6 +232,11 @@ namespace BGE
       m.debugUi.width = m.screen.getWidth()
       m.debugUi.height = m.screen.getHeight()
       m.debugUi.padding.set(BGE.UI.DEFAULT_PADDING)
+      ' Debug UI is non-blocking by design - it should never capture input
+      ' away from gameplay entities, so it skips the focus/cursor/consume
+      ' chain entirely and just gets onInput()'s plain broadcast like any
+      ' other GameEntity. See BGE.UI.UiContainer.focusEnabled.
+      m.debugUi.focusEnabled = false
     end sub
 
 
@@ -239,6 +256,8 @@ namespace BGE
 
       ' Create the default font
       m.fonts["default"] = m.fontRegistry.GetDefaultFont(28, false, false)
+      m.defaultTheme = new BGE.UI.Theme()
+      m.defaultTheme.font = m.fonts["default"]
       m.fonts["debugUi"] = m.fontRegistry.GetDefaultFont(20, false, false)
       m.fonts["debugUiSmall"] = m.fontRegistry.GetDefaultFont(10, false, false)
       m.fonts["debugUiXSmall"] = m.fontRegistry.GetDefaultFont(7, false, false)
@@ -277,10 +296,7 @@ namespace BGE
       while m.running
         m.roomChangedThisFrame = false
 
-        if m.inputEntityId <> invalid and m.getEntityByID(m.inputEntityId) = invalid
-          m.inputEntityId = invalid
-        end if
-        m.currentInputEntityId = m.inputEntityId
+        m.clearStaleInputCapture()
         m.compositor.draw() ' For some reason this has to be called or the colliders don't remove themselves from the compositor ¯\(°_°)/¯
 
         m.dt = m.dtTimer.TotalMilliseconds() / 1000
@@ -369,6 +385,11 @@ namespace BGE
           m.controllerRegistry.setRemoteDpad(remoteDpadX, remoteDpadY)
         end if
 
+        ' ----------------------Process UI input first, so a widget that consumes-------------
+        ' ----------------------an event (GameInput.consume()) can capture input before-------
+        ' ----------------------regular entities are dispatched this same frame---------------
+        m.processUiInput(universalControlEvents, musicMsg, ecpMsg, urlMsg)
+
         ' ----------------------Handle entity interactions (collisions, etc)--------------------
         m.processEntitiesPreDraw(universalControlEvents, controllerInputs, musicMsg, ecpMsg, urlMsg)
 
@@ -389,8 +410,8 @@ namespace BGE
           m.screen.DrawScaledObject(m.canvas.offset.x, m.canvas.offset.y, m.canvas.scale.x, m.canvas.scale.y, m.canvas.bitmap)
         end if
 
-        ' ---------------------- Handle all UI updates and draws -------------------------
-        m.processAndDrawUI(universalControlEvents, musicMsg, ecpMsg, urlMsg)
+        ' ---------------------- Draw UI (input already processed earlier this frame) -----
+        m.drawUI()
 
         ' ---------------------- Handle all Debug UI updates and draws -------------------------
         m.processAndDrawDebugUI(universalControlEvents, musicMsg, ecpMsg, urlMsg)
@@ -645,15 +666,65 @@ namespace BGE
     ' callback didn't invalidate/delete the entity" step shared by
     ' processEntityOnInput's and processEntityOnControllerInput's dispatch
     ' loops, factored out so the two can't drift out of sync with each other.
+    ' debugUi always bypasses the currentInputEntityId gate - it's meant to be
+    ' non-blocking in both directions (see debugUi.focusEnabled = false in
+    ' setupUi()): it never captures input itself, and another capture (e.g. a
+    ' gameUi widget's input.consume()) must never stop debugUi from seeing
+    ' input either, or the debug overlays would go deaf whenever gameplay UI
+    ' happens to be capturing that same frame.
     '
     ' @param {GameEntity} entity
     ' @param {GameInput} input
     ' @return {boolean} true if this entity is still valid
     private function dispatchOnInput(entity as GameEntity, input as GameInput) as boolean
-      if entity.onInput <> invalid and (m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
+      isDebugUi = m.debugUi <> invalid and entity.id = m.debugUi.id
+      if entity.onInput <> invalid and (isDebugUi or m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
         entity.onInput(input)
       end if
       return m.isValidEntity(entity)
+    end function
+
+    ' Top-of-frame reset of the input capture set by GameInput.consume() /
+    ' setInputEntity(). Capture is only ever meant to last for the single frame
+    ' it was set in - a UiContainer re-establishes it fresh on every frame its
+    ' own onInput() consumes something - so this always clears it.
+    '
+    ' @return {void}
+    private sub clearStaleInputCapture()
+      if m.inputEntityId <> invalid
+        if m.inputEntityIsContainer
+          ' A UiContainer (gameUi, debugUi, or any nested container) persists
+          ' for as long as it's referenced but is never registered via
+          ' addEntity(), so getEntityByID() would report it "not found" and
+          ' log a warning every frame capture is held - skip the lookup
+          ' entirely, but still clear so capture stays scoped to the single
+          ' frame it was set in.
+          m.inputEntityId = invalid
+        else if m.getEntityByID(m.inputEntityId) = invalid
+          m.inputEntityId = invalid
+        end if
+      end if
+      m.currentInputEntityId = m.inputEntityId
+    end sub
+
+    ' Test-only passthrough to the private clearStaleInputCapture(), so specs
+    ' can exercise the top-of-frame capture reset Game.Play() performs without
+    ' driving a full Play() loop iteration.
+    '
+    ' @return {void}
+    sub clearStaleInputCaptureForTest()
+      m.clearStaleInputCapture()
+    end sub
+
+    ' Test-only passthrough to the private dispatchOnInput(), so specs can
+    ' exercise the same currentInputEntityId gating Game.Play() relies on
+    ' without needing a full Play() loop iteration.
+    '
+    ' @param {GameEntity} entity
+    ' @param {GameInput} input
+    ' @return {boolean} true if the entity is still valid
+    function dispatchOnInputForTest(entity as GameEntity, input as GameInput) as boolean
+      return m.dispatchOnInput(entity, input)
     end function
 
     ' Dispatches this frame's controller-originated GameInput events to one
@@ -1052,20 +1123,50 @@ namespace BGE
       return m.gameUi
     end function
 
-    ' Function to handle all input and updates and draws for UI layer
+    ' Runs gameUi's input/update dispatch. Called BEFORE processEntitiesPreDraw()
+    ' each frame (see Play()) so a UiWidget that consumes an input event
+    ' (GameInput.consume() + Game.setInputEntity()) can stop that event from
+    ' also reaching GameEntity.onInput() for regular entities the same frame.
     '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
-    private sub processAndDrawUI(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+    private sub processUiInput(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       m.processUiUpdate(m.gameUi, universalControlEvents, musicMsg, ecpMsg, urlMsg)
+      m.processFocusManagerInput(universalControlEvents)
+    end sub
 
+    ' Drives BGE.UI.FocusManager.update() exactly once per input event (same
+    ' press/held granularity as processEntityOnInput()), rather than having
+    ' every focusEnabled UiContainer call it from its own onInput() during
+    ' the recursive broadcast - a nested container's onInput() would
+    ' otherwise trigger a second, redundant update() call for the very same
+    ' event before the outer container gets its own turn.
+    '
+    ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @return {void}
+    private sub processFocusManagerInput(universalControlEvents as roUniversalControlEvent[])
+      for each msg in universalControlEvents
+        m.focusManager.update(new GameInput(msg.GetInt(), 0))
+      end for
+      if m.buttonHeld <> -1
+        m.focusManager.update(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
+      end if
+    end sub
+
+    ' Draws gameUi to the UI canvas. Called after entity movement/collision/draw
+    ' each frame (see Play()), same position in the frame as before this reorder -
+    ' only the input dispatch above moved, not drawing.
+    '
+    ' @return {void}
+    private sub drawUI()
       m.uiCanvas.renderer.setupCameraForFrame()
       if m.isValidEntity(m.gameUi) and invalid <> m.gameUi.draw
         m.adjustEntityCompositorObjectPostCollision(m.gameUi)
 
         m.gameUi.draw()
+        m.focusManager.draw(m.uiCanvas, m.gameUi.effectiveTheme())
       end if
     end sub
 
@@ -2057,19 +2158,26 @@ namespace BGE
 
     ' Set only one entity to receive onInput() calls
     ' Useful for when a menu/pause screen should handle all input
+    ' Takes effect immediately (this frame's remaining dispatch), not just next frame.
     '
     ' @param {GameEntity} entity
     ' @return {void}
     sub setInputEntity(entity as GameEntity)
       m.inputEntityId = entity.id
+      m.currentInputEntityId = entity.id
+      dynamicEntity = entity as dynamic
+      m.inputEntityIsContainer = dynamicEntity.isContainer <> invalid and dynamicEntity.isContainer()
     end sub
 
 
     ' Unset that only one entity will receive onInputCalls()
+    ' Takes effect immediately (this frame's remaining dispatch), not just next frame.
     '
     ' @return {void}
     sub unsetInputEntity()
       m.inputEntityId = invalid
+      m.currentInputEntityId = invalid
+      m.inputEntityIsContainer = false
     end sub
 
 

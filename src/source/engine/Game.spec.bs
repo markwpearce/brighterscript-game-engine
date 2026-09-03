@@ -237,6 +237,18 @@ namespace tests
       m.assertEqual(2, m.game.getDebugUI().childCount())
     end function
 
+    @it("draws without crashing once standard debug panels (DebugWindow subclasses) are added")
+    function _()
+      m.game.enableStandardDebugUi()
+
+      m.game.getDebugUI().draw()
+
+      ' No assertion beyond "doesn't throw" - regression test for the crash
+      ' where UiContainer.draw(m) called on a DebugWindow child (itself a
+      ' zero-arg-draw UiContainer subclass) hit a Type Mismatch at runtime.
+      m.assertTrue(true)
+    end function
+
     ' processEntityOnControls is left non-private (like
     ' ControllerServer.parseHttpRequest) specifically so this gate can be
     ' exercised directly - Game's real per-frame loop has no other test seam.
@@ -264,6 +276,159 @@ namespace tests
       m.assertEqual(0, entity.controlsCallCount)
     end function
 
+    @describe("setInputEntity")
+
+    @it("takes effect the same frame it's called, not just the next one")
+    function _()
+      capturingEntity = new tests.InputCapturingEntity(m.game)
+      capturingEntity.onCreate({})
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+
+      ' Simulate what Game.Play() does at the top of a frame, then dispatch
+      ' input to both entities in registration order - mirrors
+      ' processEntitiesPreDraw calling processEntityOnInput per entity.
+      m.game.dispatchOnInputForTest(capturingEntity, new BGE.GameInput(6, 0)) ' OK, press
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+    end function
+
+    @it("unsetInputEntity() also takes effect the same frame")
+    function _()
+      capturingEntity = new tests.InputCapturingEntity(m.game)
+      capturingEntity.onCreate({})
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+
+      ' First prove the gate is actually closed: capturingEntity's own
+      ' onInput() calls setInputEntity(m) on itself, so dispatching to it
+      ' closes the gate for otherEntity.
+      m.game.dispatchOnInputForTest(capturingEntity, new BGE.GameInput(6, 0))
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+      m.assertFalse(otherEntity.receivedInput)
+
+      ' Now prove unsetInputEntity() reopens that same-frame gate immediately.
+      m.game.unsetInputEntity()
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+      m.assertTrue(otherEntity.receivedInput)
+    end function
+
+    @describe("UI input runs before entity input")
+
+    @it("gameUi's onInput can capture input before entities are dispatched this frame")
+    function _()
+      capturingWidget = new BGE.UI.UiWidget(m.game)
+      m.game.gameUi.addChild(capturingWidget)
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+
+      ' processUiInput must run before dispatching to otherEntity for this
+      ' to work - mirrors the fixed Play() order.
+      capturingWidget.game.setInputEntity(m.game.gameUi)
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a gameUi capture does not block debugUi's own onInput() this same frame - debugUi is always non-blockable")
+    function _()
+      ' debugUi.focusEnabled = false already means it never captures input
+      ' itself, but the reverse also has to hold: a gameUi widget capturing
+      ' input (e.g. input.consume() on a focused Button) must not stop
+      ' debugUi from seeing input later this same frame, or the debug
+      ' overlays would go deaf whenever gameplay UI happens to be capturing.
+      debugUiWidget = new InputRecordingWidgetForGameTests(m.game)
+      m.game.debugUi.addChild(debugUiWidget)
+
+      m.game.setInputEntity(m.game.gameUi)
+      m.game.dispatchOnInputForTest(m.game.debugUi, new BGE.GameInput(6, 0))
+
+      m.assertTrue(debugUiWidget.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a gameUi capture does not survive the next frame's top-of-frame reset")
+    function _()
+      ' gameUi/debugUi aren't registered via addEntity(), so the staleness check
+      ' skips the getEntityByID() lookup for them - but it must still CLEAR the
+      ' capture, or one remote-originated consume would block every entity's
+      ' onInput() indefinitely on later frames (including controller input),
+      ' since gameUi.onInput() only runs on frames with remote input.
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+
+      m.game.setInputEntity(m.game.gameUi)
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+      m.assertFalse(otherEntity.receivedInput) ' captured this frame
+
+      m.game.clearStaleInputCaptureForTest() ' top of the next frame
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+
+      m.assertTrue(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a debugUi capture does not survive the next frame's top-of-frame reset either")
+    function _()
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+
+      m.game.setInputEntity(m.game.debugUi)
+      m.game.clearStaleInputCaptureForTest()
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+
+      m.assertTrue(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a capture held by any UiContainer (not just gameUi/debugUi) does not survive the next frame's reset either")
+    function _()
+      ' setInputEntity() detects isContainer() generally, rather than special-
+      ' casing gameUi.id/debugUi.id - this proves a nested UiContainer (e.g. a
+      ' dialog, never registered via addEntity() either) gets the same
+      ' warning-free, always-cleared-next-frame treatment.
+      nestedContainer = new BGE.UI.UiContainer(m.game)
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+
+      m.game.setInputEntity(nestedContainer)
+      m.game.clearStaleInputCaptureForTest()
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+
+      m.assertTrue(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("clears a capture held by a regular entity that is no longer registered")
+    function _()
+      otherEntity = new tests.InputRecordingEntity(m.game)
+      otherEntity.onCreate({})
+      goneEntity = new tests.InputRecordingEntity(m.game)
+
+      m.game.setInputEntity(goneEntity) ' never added via addEntity()
+      m.game.clearStaleInputCaptureForTest()
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(6, 0))
+
+      m.assertTrue(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @describe("defaultTheme")
+
+    @it("constructs a default Theme using the game's default font")
+    function _()
+      m.assertNotInvalid(m.game.defaultTheme)
+      m.assertNotInvalid(m.game.defaultTheme.font)
+    end function
+
   end class
 
   ' Test double used only by the onControls dispatch-gating specs above -
@@ -281,6 +446,40 @@ namespace tests
 
     override sub onControls(controls as BGE.Controller.ControlMap)
       m.controlsCallCount++
+    end sub
+  end class
+
+  class InputCapturingEntity extends BGE.GameEntity
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      m.game.setInputEntity(m)
+    end sub
+  end class
+
+  class InputRecordingEntity extends BGE.GameEntity
+    receivedInput as boolean = false
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      m.receivedInput = true
+    end sub
+  end class
+
+  class InputRecordingWidgetForGameTests extends BGE.UI.UiWidget
+    receivedInput as boolean = false
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      m.receivedInput = true
     end sub
   end class
 

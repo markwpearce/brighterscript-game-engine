@@ -1,0 +1,723 @@
+namespace tests
+
+  @suite("BGE.UI.UiContainer")
+  class UiContainerTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    container as BGE.UI.UiContainer
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.container = new BGE.UI.UiContainer(m.game)
+    end function
+
+    ' Mirrors Game.processUiInput()'s real per-frame call shape: broadcast
+    ' (UiContainer.onInput()) then the focus dispatch Game drives separately
+    ' (Game.processFocusManagerInput() -> FocusManager.update()) - the tests
+    ' below exercise focus/click/capture behavior through this, the same way
+    ' Game.Play() actually invokes it, rather than through onInput() alone
+    ' (which is now pure broadcast with no focus side effects).
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {void}
+    sub dispatchFrameInput(input as BGE.GameInput)
+      m.container.onInput(input)
+      m.game.focusManager.update(input)
+    end sub
+
+    @describe("effectiveTheme")
+
+    @it("falls back to the game's defaultTheme when no theme is set")
+    function _()
+      m.container.effectiveTheme().cursorSize = 12345.0
+      m.assertEqual(12345.0, m.game.defaultTheme.cursorSize)
+    end function
+
+    @it("uses its own theme when one is set")
+    function _()
+      customTheme = new BGE.UI.Theme()
+      customTheme.cursorSize = 99.0
+      m.container.theme = customTheme
+
+      m.assertEqual(99.0, m.container.effectiveTheme().cursorSize)
+    end function
+
+    @describe("focus registration (BGE.UI.FocusManager)")
+
+    @it("starts empty")
+    function _()
+      m.assertEqual(0, m.game.focusManager.registeredCount())
+    end function
+
+    @it("registers a focusable child with the shared FocusManager, in addChild order")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+
+      m.container.addChild(first)
+      m.container.addChild(second)
+
+      m.assertEqual(2, m.game.focusManager.registeredCount())
+      m.assertEqual(first.id, m.game.focusManager.getRegistered(0).id)
+      m.assertEqual(second.id, m.game.focusManager.getRegistered(1).id)
+    end function
+
+    @it("does not register a non-focusable child")
+    function _()
+      notFocusable = new BGE.UI.UiWidget(m.game)
+
+      m.container.addChild(notFocusable)
+
+      m.assertEqual(0, m.game.focusManager.registeredCount())
+    end function
+
+    @it("does not register a focusable child when focusEnabled is false")
+    function _()
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      m.container.focusEnabled = false
+
+      m.container.addChild(widget)
+
+      m.assertEqual(0, m.game.focusManager.registeredCount())
+    end function
+
+    @it("unregisters a child when removed from the container")
+    function _()
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      m.container.addChild(widget)
+
+      m.container.removeChild(widget)
+
+      m.assertEqual(0, m.game.focusManager.registeredCount())
+    end function
+
+    @it("keeps navigation in sync after removing an earlier, unfocused widget")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      third = new BGE.UI.UiWidget(m.game)
+      third.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+      m.container.addChild(third)
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press - focuses second (index 1)
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press - focuses third (index 2)
+
+      m.container.removeChild(second) ' earlier, unfocused - focusOrder becomes [first, third]
+
+      m.assertTrue(third.focused) ' still focused after the removal
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press
+      m.assertTrue(third.focused) ' at the new last index (1) - stays put, doesn't silently misbehave
+      m.dispatchFrameInput(new BGE.GameInput(2, 0)) ' up, press
+      m.assertTrue(first.focused) ' moves to the correct previous widget, not a stale slot
+    end function
+
+    @it("two containers share one registry, fixing nested-container double-handling (issue #178)")
+    function _()
+      outerChild = new ClickCountingWidget(m.game)
+      outerChild.focusable = true
+      outerChild.customPosition = true
+      outerChild.width = 10
+      outerChild.height = 10
+      outerChild.repositionBasedOnParent(m.container)
+      m.container.addChild(outerChild)
+
+      innerContainer = new BGE.UI.UiContainer(m.game)
+      innerChild = new ClickCountingWidget(m.game)
+      innerChild.focusable = true
+      innerChild.customPosition = true
+      innerChild.customX = 100
+      innerChild.customY = 100
+      innerChild.width = 10
+      innerChild.height = 10
+      innerChild.repositionBasedOnParent(innerContainer)
+      innerContainer.addChild(innerChild)
+      m.container.addChild(innerContainer)
+
+      ' Both widgets register with the same shared FocusManager - only one can
+      ' ever be currentlyFocused, so only one OK press fires, never both.
+      m.assertEqual(2, m.game.focusManager.registeredCount())
+
+      m.dispatchFrameInput(new BGE.GameInput(6, 0)) ' OK press
+
+      m.assertEqual(1, outerChild.clickCount)
+      m.assertEqual(0, innerChild.clickCount)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @describe("onInput broadcast")
+
+    @it("calls onInput on every child, focused or not, focusEnabled or not")
+    function _()
+      widget = new InputRecordingWidgetForUiContainerTests(m.game)
+      m.container.addChild(widget) ' not focusable, never in focusOrder
+
+      m.container.onInput(new BGE.GameInput(2, 0)) ' up, press
+
+      m.assertTrue(widget.receivedInput)
+    end function
+
+    @it("still broadcasts to children when focusEnabled is false")
+    function _()
+      widget = new InputRecordingWidgetForUiContainerTests(m.game)
+      m.container.addChild(widget)
+      m.container.focusEnabled = false
+
+      m.container.onInput(new BGE.GameInput(2, 0))
+
+      m.assertTrue(widget.receivedInput)
+    end function
+
+    @it("does not run the focus chain (no navigation) when focusEnabled is false")
+    function _()
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      m.container.focusEnabled = false
+      m.container.addChild(widget)
+
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right, press
+
+      m.assertFalse(widget.focused)
+    end function
+
+    @describe("list navigation (default mode)")
+
+    @it("seeds focus onto the first registered widget on first input, without needing any directional input")
+    function _()
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      m.container.addChild(widget)
+
+      m.dispatchFrameInput(new BGE.GameInput(1000, 0)) ' an inert held-code with x=0,y=0
+
+      m.assertTrue(widget.focused)
+    end function
+
+    @it("down/right moves focus to the next registered widget")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press
+
+      m.assertFalse(first.focused)
+      m.assertTrue(second.focused)
+    end function
+
+    @it("up/left moves focus to the previous registered widget")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press - focuses second
+
+      m.dispatchFrameInput(new BGE.GameInput(2, 0)) ' up, press
+
+      m.assertTrue(first.focused)
+      m.assertFalse(second.focused)
+    end function
+
+    @it("a press plus the same frame's synthesized held event moves focus only once")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      third = new BGE.UI.UiWidget(m.game)
+      third.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+      m.container.addChild(third)
+
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press
+      m.dispatchFrameInput(new BGE.GameInput(1003, 0)) ' same frame's synthesized held down
+
+      m.assertTrue(second.focused)
+      m.assertFalse(third.focused)
+    end function
+
+    @it("a held event past the repeat delay moves focus again, so a sustained hold repeats")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      third = new BGE.UI.UiWidget(m.game)
+      third.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+      m.container.addChild(third)
+
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press
+      m.dispatchFrameInput(new BGE.GameInput(1003, 0)) ' same-frame held - throttled
+      m.dispatchFrameInput(new BGE.GameInput(1003, 500)) ' held well past the repeat delay
+
+      m.assertTrue(third.focused)
+    end function
+
+    @it("stops at the last widget when wrapFocus is false (the default)")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press - focuses second (last)
+
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down again - nothing past the end
+
+      m.assertTrue(second.focused)
+    end function
+
+    @it("wraps to the first widget past the last when wrapFocus is true")
+    function _()
+      first = new BGE.UI.UiWidget(m.game)
+      first.focusable = true
+      second = new BGE.UI.UiWidget(m.game)
+      second.focusable = true
+      m.container.addChild(first)
+      m.container.addChild(second)
+      m.game.focusManager.wrapFocus = true
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press - focuses second (last)
+
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down again - wraps to first
+
+      m.assertTrue(first.focused)
+    end function
+
+    @it("a focused widget's handleInput gets first refusal before focus moves (e.g. a Slider adjusting on Left/Right)")
+    function _()
+      slider = new BGE.UI.Slider(m.game)
+      other = new BGE.UI.UiWidget(m.game)
+      other.focusable = true
+      m.container.addChild(slider)
+      m.container.addChild(other)
+
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right, press - slider is focused (index 0)
+
+      m.assertTrue(slider.focused)
+      m.assertFalse(other.focused)
+      m.assertEqual(1.0, slider.getValue()) ' handled it, rather than moving focus to "other"
+    end function
+
+    @describe("pointer navigation (opt-in mode)")
+
+    @it("moving the cursor onto a focusable widget hovers and focuses it")
+    function _()
+      m.game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 100
+      widget.height = 100
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.game.focusManager.cursorPosition = BGE.Math.VectorOps.create(50, 50, 0)
+
+      m.dispatchFrameInput(new BGE.GameInput(6, 0)) ' OK press - triggers a hit-test pass
+
+      m.assertTrue(widget.hovered)
+      m.assertTrue(widget.focused)
+    end function
+
+    @it("moving the cursor off a widget blurs and unhovers it")
+    function _()
+      m.game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.game.focusManager.cursorPosition = BGE.Math.VectorOps.create(5, 5, 0)
+      m.dispatchFrameInput(new BGE.GameInput(6, 0))
+      m.assertTrue(widget.focused)
+
+      m.game.focusManager.cursorPosition = BGE.Math.VectorOps.create(999, 999, 0)
+      m.dispatchFrameInput(new BGE.GameInput(6, 0))
+
+      m.assertFalse(widget.hovered)
+      m.assertFalse(widget.focused)
+    end function
+
+    @it("a press moves the cursor right by cursorStep")
+    function _()
+      m.game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      startX = m.game.focusManager.cursorPosition.x
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right, press
+
+      m.assertEqual(startX + m.game.focusManager.cursorStep, m.game.focusManager.cursorPosition.x)
+    end function
+
+    @it("a press plus the same frame's synthesized held event moves the cursor only once")
+    function _()
+      ' Game.bs dispatches a press AND a synthesized held event (heldTimeMs ~0)
+      ' in the same frame as every button press - without throttling, one tap
+      ' would move focus to the next item twice instead of once.
+      m.game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      startX = m.game.focusManager.cursorPosition.x
+
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right, press
+      m.dispatchFrameInput(new BGE.GameInput(1005, 0)) ' same frame's synthesized held right
+
+      m.assertEqual(startX + m.game.focusManager.cursorStep, m.game.focusManager.cursorPosition.x)
+    end function
+
+    @it("a held event past the repeat delay moves the cursor again, so a sustained hold repeats")
+    function _()
+      m.game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      startX = m.game.focusManager.cursorPosition.x
+
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right, press
+      m.dispatchFrameInput(new BGE.GameInput(1005, 0)) ' same-frame held - throttled
+      m.dispatchFrameInput(new BGE.GameInput(1005, 500)) ' held well past the repeat delay
+
+      m.assertEqual(startX + m.game.focusManager.cursorStep * 2, m.game.focusManager.cursorPosition.x)
+    end function
+
+    @it("seeds the cursor onto the first focusable widget's center on first input, even before draw() has ever positioned it")
+    function _()
+      ' repositionBasedOnParent() is normally called by UiContainer.draw() -
+      ' this widget never gets that call before onInput() runs, regression-
+      ' testing that seeding repositions it itself rather than reading a
+      ' stale/default (0,0) position.
+      m.game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 40
+      widget.customY = 60
+      widget.width = 20
+      widget.height = 10
+      m.container.addChild(widget)
+
+      m.dispatchFrameInput(new BGE.GameInput(1000, 0))
+
+      m.assertEqual(40.0 + 10.0, m.game.focusManager.cursorPosition.x) ' customX + width/2
+      m.assertEqual(60.0 + 5.0, m.game.focusManager.cursorPosition.y) ' customY + height/2
+    end function
+
+    @describe("click/consume")
+
+    @it("OK press while hovering a widget fires onClick")
+    function _()
+      widget = new ClickCountingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+
+      m.dispatchFrameInput(new BGE.GameInput(6, 0)) ' OK press
+
+      m.assertEqual(1, widget.clickCount)
+    end function
+
+    @it("OK release fires onMouseUp but does not consume the input")
+    function _()
+      widget = new ClickCountingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.dispatchFrameInput(new BGE.GameInput(6, 0)) ' OK press - focuses the widget
+
+      releaseInput = new BGE.GameInput(106, 0) ' OK, release
+      m.dispatchFrameInput(releaseInput)
+
+      m.assertFalse(releaseInput.consumed)
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a focused widget's handleInput can consume an event, capturing input for the rest of the frame")
+    function _()
+      widget = new ConsumingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.dispatchFrameInput(new BGE.GameInput(6, 0)) ' OK press - focuses/hovers widget
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+
+      ' Left, with the widget focused - ConsumingWidget.handleInput consumes it.
+      m.dispatchFrameInput(new BGE.GameInput(4, 0))
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(4, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("stays captured for the whole frame when a press is consumed but the same frame's held event is not")
+    function _()
+      ' Game.bs dispatches two events per press frame: the press, then a
+      ' synthesized held event (1000 + press code). A widget that only reacts
+      ' to press leaves the held event unconsumed - the capture must survive it.
+      widget = new PressOnlyConsumingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.dispatchFrameInput(new BGE.GameInput(6, 0)) ' OK press - focuses the widget
+      m.container.onUpdate(0.0) ' end of that frame - clears the consumption latch
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+
+      m.dispatchFrameInput(new BGE.GameInput(4, 0)) ' left press - consumed
+      m.dispatchFrameInput(new BGE.GameInput(1004, 100)) ' same frame's held left - NOT consumed
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(4, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("releases the capture on the next frame once nothing consumes")
+    function _()
+      widget = new PressOnlyConsumingWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = 0
+      widget.customY = 0
+      widget.width = 10
+      widget.height = 10
+      widget.repositionBasedOnParent(m.container)
+      m.container.addChild(widget)
+      m.dispatchFrameInput(new BGE.GameInput(4, 0)) ' left press - consumed, capture set
+
+      m.container.onUpdate(0.0) ' frame boundary - latch resets
+      m.dispatchFrameInput(new BGE.GameInput(1004, 100)) ' next frame's held left - nothing consumes
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(4, 0))
+
+      m.assertTrue(otherEntity.receivedInput)
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("a focused Slider's press+held pair keeps input captured for the whole frame")
+    function _()
+      slider = new BGE.UI.Slider(m.game)
+      slider.customPosition = true
+      slider.customX = 0
+      slider.customY = 0
+      slider.width = 10
+      slider.height = 10
+      slider.repositionBasedOnParent(m.container)
+      m.container.addChild(slider)
+
+      otherEntity = new InputRecordingEntityForUiContainerTests(m.game)
+      otherEntity.onCreate({})
+
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right press
+      m.dispatchFrameInput(new BGE.GameInput(1005, 100)) ' same frame's held right
+      m.game.dispatchOnInputForTest(otherEntity, new BGE.GameInput(5, 0))
+
+      m.assertFalse(otherEntity.receivedInput)
+      ' One step only: the press acts, and the same frame's held event is
+      ' consumed (which is what keeps the capture) but throttled by the
+      ' repeat delay so it can't double-step. See Slider.handleInput().
+      m.assertEqual(1.0, slider.getValue())
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("does not move focus off a widget that handled an earlier event this frame")
+    function _()
+      slider = new BGE.UI.Slider(m.game)
+      other = new BGE.UI.UiWidget(m.game)
+      other.focusable = true
+      m.container.addChild(slider)
+      m.container.addChild(other)
+
+      m.dispatchFrameInput(new BGE.GameInput(5, 0)) ' right press - slider handles it
+      m.dispatchFrameInput(new BGE.GameInput(1005, 100)) ' held right, same frame
+
+      m.assertTrue(slider.focused)
+      m.assertFalse(other.focused) ' would be focused if the held event had also moved focus
+
+      m.game.unsetInputEntity()
+    end function
+
+    @it("does not move focus on a held event when the widget consumed only the press")
+    function _()
+      other = new BGE.UI.UiWidget(m.game)
+      other.focusable = true
+      widget = new PressOnlyConsumingWidget(m.game)
+      widget.focusable = true
+      m.container.addChild(other)
+      m.container.addChild(widget)
+      m.dispatchFrameInput(new BGE.GameInput(3, 0)) ' down, press - moves focus from other(0) to widget(1)
+
+      m.dispatchFrameInput(new BGE.GameInput(4, 0)) ' left press - consumed
+      m.dispatchFrameInput(new BGE.GameInput(1004, 100)) ' held left - not consumed by the widget itself, but the frame's capture latch still blocks movement
+
+      m.assertTrue(widget.focused)
+      m.assertFalse(other.focused) ' would be re-focused (index back to 0) if the held event had moved focus
+
+      m.game.unsetInputEntity()
+    end function
+
+    @describe("cursor drawing (BGE.UI.FocusManager.draw)")
+
+    @it("does not crash drawing with nothing registered")
+    function _()
+      m.game.focusManager.draw(m.game.uiCanvas, m.game.defaultTheme)
+      ' No assertion beyond "doesn't throw" - this only proves the guard for
+      ' an empty registry is safe.
+      m.assertTrue(true)
+    end function
+
+    @describe("nested containers")
+
+    @it("does not crash when a child is itself a UiContainer")
+    function _()
+      innerContainer = new BGE.UI.UiContainer(m.game)
+      m.container.addChild(innerContainer)
+
+      m.container.draw()
+
+      ' No assertion beyond "doesn't throw" - this specifically regression-
+      ' tests that UiContainer.draw()'s signature accepts the parent argument
+      ' UiContainer.draw() (the outer one) passes to every child, including a
+      ' child that is itself a UiContainer (e.g. DebugWindow subclasses via
+      ' Game.enableStandardDebugUi()).
+      m.assertTrue(true)
+    end function
+
+    @it("forwards onInput to a child that is itself a UiContainer, so the nested container runs its own focus dispatch")
+    function _()
+      innerContainer = new BGE.UI.UiContainer(m.game)
+      innerChild = new InputRecordingWidgetForUiContainerTests(m.game)
+      innerChild.focusable = true
+      innerChild.customPosition = true
+      innerChild.customX = 0
+      innerChild.customY = 0
+      innerChild.width = 10
+      innerChild.height = 10
+      innerChild.repositionBasedOnParent(innerContainer)
+      innerContainer.addChild(innerChild)
+      m.container.addChild(innerContainer)
+
+      ' Dispatched to the OUTER container only. The inner container is not
+      ' focusable (so it's not in the outer's focusOrder) - it only runs if
+      ' onInput's broadcast reaches container children too, same as any
+      ' other child.
+      m.dispatchFrameInput(new BGE.GameInput(2, 0)) ' up, press
+
+      m.assertTrue(innerChild.focused) ' innerChild registered with the shared FocusManager and got seeded
+      m.assertTrue(innerChild.receivedInput) ' inner container's own broadcast reached it too
+
+      m.game.unsetInputEntity()
+    end function
+
+  end class
+
+  class ClickCountingWidget extends BGE.UI.UiWidget
+    clickCount as integer = 0
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onClick()
+      m.clickCount++
+    end sub
+  end class
+
+  class ConsumingWidget extends BGE.UI.UiWidget
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override function handleInput(input as BGE.GameInput) as boolean
+      if input.isButton("left")
+        input.consume()
+        return true
+      end if
+      return false
+    end function
+  end class
+
+  ' Consumes "left" only on press, ignoring the held event Game.bs synthesizes
+  ' for the same frame - the exact shape of a widget that leaked capture before
+  ' UiContainer's per-frame consumption latch.
+  class PressOnlyConsumingWidget extends BGE.UI.UiWidget
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override function handleInput(input as BGE.GameInput) as boolean
+      if input.press and input.isButton("left")
+        input.consume()
+        return true
+      end if
+      return false
+    end function
+  end class
+
+  class InputRecordingWidgetForUiContainerTests extends BGE.UI.UiWidget
+    receivedInput as boolean = false
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      m.receivedInput = true
+    end sub
+  end class
+
+  class InputRecordingEntityForUiContainerTests extends BGE.GameEntity
+    receivedInput as boolean = false
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      m.receivedInput = true
+    end sub
+  end class
+
+end namespace

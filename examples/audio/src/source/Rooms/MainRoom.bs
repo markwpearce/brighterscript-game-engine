@@ -4,13 +4,11 @@
 '                  loop, but roAudioPlayer has no volume control on the Roku platform at all -
 '                  so unlike the sound effect, volume isn't adjustable here.
 '
-' Up/Down: focus row (Music or Sound Effect)   Left/Right: adjust the sound effect's volume
+' Up/Down: move the cursor between the row picker and the volume slider
+' Left/Right: change row (picker) or adjust volume (slider)
 ' OK: play (music toggles play/pause; sound effect fires the one-shot)
 ' Options (*): toggle music looping   Rewind: stop music
 class MainRoom extends BGE.Room
-
-  rowNames = ["Music", "Sound Effect"]
-  focusIndex = 0
 
   sfxVolume = 100
   loopMusic = true
@@ -21,14 +19,16 @@ class MainRoom extends BGE.Room
 
   infoLabel as BGE.UI.Label
   statusLabel as BGE.UI.Label
-  volumeSlider as BGE.UI.Slider
+  rowSelect as AudioRowSelect
+  volumeSlider as AudioVolumeSlider
 
   sub new(game as BGE.Game)
     super(game)
     m.name = "MainRoom"
     m.infoLabel = new BGE.UI.Label(m.game)
     m.statusLabel = new BGE.UI.Label(m.game)
-    m.volumeSlider = new BGE.UI.Slider(m.game)
+    m.rowSelect = new AudioRowSelect(m.game)
+    m.volumeSlider = new AudioVolumeSlider(m.game)
   end sub
 
   override sub onCreate(args as roAssociativeArray)
@@ -40,6 +40,18 @@ class MainRoom extends BGE.Room
     m.infoLabel.customY = height * 0.1
     m.game.gameUi.addChild(m.infoLabel)
 
+    m.rowSelect.customPosition = true
+    m.rowSelect.customX = width * 0.1
+    m.rowSelect.customY = height * 0.3
+    m.rowSelect.width = width * 0.3
+    m.rowSelect.height = 24
+    m.rowSelect.options = ["Music", "Sound Effect"]
+    m.rowSelect.room = m
+    m.rowSelect.onChanged = sub(select as BGE.UI.Select)
+      (select as AudioRowSelect).room.updateLabels()
+    end sub
+    m.game.gameUi.addChild(m.rowSelect)
+
     m.volumeSlider.customPosition = true
     m.volumeSlider.customX = width * 0.1
     m.volumeSlider.customY = height * 0.4
@@ -47,6 +59,7 @@ class MainRoom extends BGE.Room
     m.volumeSlider.height = 24
     m.volumeSlider.step = 10
     m.volumeSlider.setValue(m.sfxVolume)
+    m.volumeSlider.room = m
     m.game.gameUi.addChild(m.volumeSlider)
 
     m.statusLabel.customPosition = true
@@ -60,35 +73,29 @@ class MainRoom extends BGE.Room
 
   override sub onChangeRoom(newRoom as BGE.Room)
     m.game.gameUi.removeChild(m.infoLabel)
+    m.game.gameUi.removeChild(m.rowSelect)
     m.game.gameUi.removeChild(m.volumeSlider)
     m.game.gameUi.removeChild(m.statusLabel)
   end sub
 
+  ' OK/Left/Right on the row picker and slider are handled by BGE.UI's own
+  ' focus/cursor system (Select.onInput/Slider.onInput adjust; UiContainer
+  ' routes OK-while-focused to onClick(), which AudioRowSelect/AudioVolumeSlider
+  ' route back to playFocused() below) - this room's own onInput only sees
+  ' whatever those widgets don't consume: Up/Down (cursor movement, never
+  ' consumed) and Options/Rewind/Back (neither widget's onInput touches them).
   override sub onInput(input as BGE.GameInput)
     if not input.press
       return
     end if
 
-    if input.isButton("up") or input.isButton("down")
-      m.focusIndex = (m.focusIndex + 1) mod m.rowNames.count()
-      m.updateLabels()
-    else if input.isButton("left") and m.focusIndex = 1
-      m.volumeSlider.decrease()
-      m.sfxVolume = m.volumeSlider.getValue()
-      m.updateLabels()
-    else if input.isButton("right") and m.focusIndex = 1
-      m.volumeSlider.increase()
-      m.sfxVolume = m.volumeSlider.getValue()
-      m.updateLabels()
-    else if input.isButton("ok")
-      m.playFocused()
-    else if input.isButton("options")
-      if m.focusIndex = 0
+    if input.isButton("options")
+      if m.rowSelect.getValue() = "Music"
         m.loopMusic = not m.loopMusic
         m.updateLabels()
       end if
     else if input.isButton("rewind")
-      if m.focusIndex = 0
+      if m.rowSelect.getValue() = "Music"
         m.game.musicStop()
         m.musicState = "stopped"
         m.updateLabels()
@@ -127,8 +134,11 @@ class MainRoom extends BGE.Room
     end if
   end sub
 
-  private sub playFocused()
-    if m.focusIndex = 0
+  ' Public - called from AudioRowSelect/AudioVolumeSlider's onClick() override,
+  ' since UiContainer routes OK-while-focused to the focused widget's onClick(),
+  ' not to this room's own onInput() (see the class doc comment above).
+  sub playFocused()
+    if m.rowSelect.getValue() = "Music"
       if m.musicState = "stopped"
         m.game.musicPlay("pkg:/sounds/ambient.mp3", m.loopMusic)
         m.musicState = "playing"
@@ -145,17 +155,57 @@ class MainRoom extends BGE.Room
     m.updateLabels()
   end sub
 
-  private sub updateLabels()
-    focusName = m.rowNames[m.focusIndex]
-    if m.focusIndex = 1
+  ' Public - called from AudioRowSelect.onChanged (row cycling) as well as
+  ' this room's own onInput() and onAudioEvent().
+  sub updateLabels()
+    m.sfxVolume = m.volumeSlider.getValue()
+    if m.rowSelect.getValue() = "Sound Effect"
       m.volumeSlider.setLabel(`Sound Effect Volume: ${cint(m.volumeSlider.getValue())}`)
     else
       m.volumeSlider.setLabel("(roAudioPlayer has no volume control - only the sound effect's does)")
     end if
     m.infoLabel.setText("Audio Example" + Chr(10) +
-      "Up/Down: focus row   Left/Right: sound effect volume   OK: play/pause" + Chr(10) +
+      "Up/Down: move cursor   Left/Right: change row / adjust volume   OK: play/pause" + Chr(10) +
       "Options: toggle music loop   Rewind: stop music   Back: quit" + Chr(10) +
-      `Focus: ${focusName}   Music: ${m.musicState} (loop ${m.loopMusic})`)
+      `Row: ${m.rowSelect.getValue()}   Music: ${m.musicState} (loop ${m.loopMusic})`)
   end sub
 
+end class
+
+' Routes OK-press-while-focused (UiContainer's onClick() dispatch) back to
+' the owning room's playFocused() - Select has no built-in activate callback
+' the way Button/Checkbox do, so this example subclasses it instead.
+class AudioRowSelect extends BGE.UI.Select
+  room as MainRoom
+
+  sub new(game as BGE.Game)
+    super(game)
+  end sub
+
+  override sub onClick()
+    m.room.playFocused()
+  end sub
+end class
+
+' Same reasoning as AudioRowSelect - Slider has no built-in activate callback.
+class AudioVolumeSlider extends BGE.UI.Slider
+  room as MainRoom
+
+  sub new(game as BGE.Game)
+    super(game)
+  end sub
+
+  override sub onClick()
+    m.room.playFocused()
+  end sub
+
+  ' Slider.handleInput() is what actually mutates the value (see
+  ' BGE.UI.Slider) - it's called by BGE.UI.FocusManager.update(), not by
+  ' onInput()'s plain broadcast, so the label refresh has to hook here too
+  ' rather than onInput(), or it would read the pre-adjustment value.
+  override function handleInput(input as BGE.GameInput) as boolean
+    handled = super.handleInput(input)
+    m.room.updateLabels()
+    return handled
+  end function
 end class
