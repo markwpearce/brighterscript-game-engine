@@ -241,7 +241,11 @@ namespace tests
 
     @describe("temp bitmap reuse (issue #128/#163)")
 
-    @it("never reports a reusable transform, since a multi-face raster can't rigidly re-transform")
+    ' No prior tempBitmap/limitPointMap exists yet at this point (no draw() call has
+    ' happened), so the base class's own check already returns invalid regardless of
+    ' the rotation gate below - see the "gates whole-model reuse..." tests further down
+    ' for real coverage of that gate across two actual frames.
+    @it("reports no reusable transform before anything has ever been drawn")
     function _()
       face = m.makeTexturedFace()
       model = new BGE.Model3d([face])
@@ -283,6 +287,93 @@ namespace tests
 
       m.assertEqual(1, sceneObj.getPrimitiveCount())
       m.assertTrue(sceneObj.getFaceBrightness(0) >= drawableModel.ambientBrightness)
+    end function
+
+    @describe("per-face raster reuse (issue #163)")
+
+    ' A textured, continuously-rotating model was paying the full drawBitmapTriangleTo
+    ' pipeline for every visible face on every single frame after #128's fix disabled
+    ' the (unsound) whole-model reuse - this is what actually cuts that cost back down:
+    ' each face reuses its own last-rendered raster (repositioned, not redrawn) for
+    ' maxStaleFrames frames before a real redraw, alternating fresh/reused/fresh/...
+    @it("redraws a face fresh, then reuses its cache once, then redraws fresh again")
+    function _()
+      game3d = new BGE.Game(320, 240)
+      entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
+      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
+      entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
+
+      face = m.makeTexturedFace()
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(entity3d, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
+      sceneObj = drawableModel.addToScene(renderer3d) as BGE.SceneObjectModel
+
+      staleCounts = []
+      for i = 1 to 3
+        entity3d.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
+        entity3d.updateTransformationMatrix()
+        renderer3d.setupCameraForFrame()
+        renderer3d.drawScene()
+        staleCounts.push(sceneObj.getFaceStaleFrameCount(0))
+      end for
+
+      m.assertEqual(0, staleCounts[0]) ' frame 1: no cache yet, fresh redraw
+      m.assertEqual(1, staleCounts[1]) ' frame 2: reused (maxStaleFrames defaults to 1)
+      m.assertEqual(0, staleCounts[2]) ' frame 3: maxStaleFrames reached, fresh again
+    end function
+
+    ' DrawableModel.maxStaleFrames is the tunable knob - confirms it's actually read,
+    ' not just a hardcoded default.
+    @it("never reuses when maxStaleFrames is set to 0")
+    function _()
+      game3d = new BGE.Game(320, 240)
+      entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
+      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
+      entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
+
+      face = m.makeTexturedFace()
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(entity3d, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
+      drawableModel.maxStaleFrames = 0
+      sceneObj = drawableModel.addToScene(renderer3d) as BGE.SceneObjectModel
+
+      for i = 1 to 3
+        entity3d.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
+        entity3d.updateTransformationMatrix()
+        renderer3d.setupCameraForFrame()
+        renderer3d.drawScene()
+        m.assertEqual(0, sceneObj.getFaceStaleFrameCount(0))
+      end for
+    end function
+
+    @it("keeps drawing correctly across many frames of continuous rotation")
+    function _()
+      game3d = new BGE.Game(320, 240)
+      entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
+      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
+      entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
+
+      face = m.makeTexturedFace()
+      model = new BGE.Model3d([face])
+      drawableModel = new BGE.DrawableModel(entity3d, model)
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
+      drawableModel.addToScene(renderer3d)
+
+      totalDrawCalls = 0
+      for i = 1 to 10
+        entity3d.rotation = BGE.Math.VectorOps.create(0, 0.05 * i, 0)
+        entity3d.updateTransformationMatrix()
+        renderer3d.resetDrawCallCounter()
+        renderer3d.setupCameraForFrame()
+        renderer3d.drawScene()
+        totalDrawCalls += renderer3d.getDrawCallsLastFrame()
+      end for
+      m.assertTrue(totalDrawCalls > 0)
     end function
 
   end class
