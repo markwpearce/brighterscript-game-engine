@@ -54,6 +54,20 @@ end class
 - `Theme` gains `backgroundImage as BGE.UI.NinePatchImage = invalid` — `invalid` (the default) means "flat color, exactly today's behavior," so this is purely additive.
 - Each of `Button`/`Checkbox`/`Select`/`Slider`'s `draw()` gains one branch: `if theme.backgroundImage <> invalid then theme.backgroundImage.draw(...) else <existing drawRectangle fill>`. The **hovered/focused border-drawing lines stay untouched** — only the background *fill* branches.
 
+### 2a. Loading a 9-patch: Android `.9.png` border-marker convention (not hand-specified insets)
+
+Rather than requiring a game developer to hand-tune four inset numbers per image, `NinePatchImage` is normally constructed via a new loader that reads the insets *from the image itself*, using the same convention Android's `.9.png` format uses — a well-established format with existing authoring tools, so consumers aren't inventing a bespoke asset pipeline:
+
+- The source PNG has a 1px transparent border added around the real artwork. Opaque black pixels (`RGB` near `0x000000`, full alpha) drawn along a contiguous run of the **top** border row mark the horizontal stretch region; a run along the **left** border column marks the vertical stretch region. Everywhere else on that 1px border is transparent.
+- New namespaced function `BGE.UI.loadNinePatchImage(path as string) as BGE.UI.NinePatchImage`:
+  1. `bitmap = CreateObject("roBitmap", path)` (same construction Roku uses everywhere else, e.g. `Game.loadBitmap`).
+  2. Read the top border row via `bitmap.GetByteArray(0, 0, width, 1)` and the left border column via `bitmap.GetByteArray(0, 0, 1, height)` — both return an `roByteArray` of RGBA bytes (`GetByteArray(x, y, width, height) as roByteArray`, confirmed against `brighterscript`'s Roku component type data — 4 bytes/pixel, RGBA order).
+  3. Scan each border array for the first/last near-black-and-opaque pixel (threshold, not exact-`0x000000FF`, since PNG export can introduce minor color drift) to find the stretch run's start/end index.
+  4. Convert those run boundaries (in full-bitmap coordinates, which include the 1px border) into the *interior* content's own coordinate space (subtract 1) to get `left`/`top` (content before the run) and `right`/`bottom` (content after the run) insets.
+  5. Crop the 1px border away — `bitmap.GetRegion(1, 1, width - 2, height - 2)` — and pass that interior region plus the four computed insets to `NinePatchImage.new()`.
+- **Non-goal (first pass):** Android's optional bottom/right border also encodes a *content padding* box (where text should sit inside the 9-patch, independent of the stretch region) — this pass parses only the top/left stretch-region border; a bottom/right content-padding border is ignored (safe to have or omit in a source image either way, since only the top row / left column are read). File a follow-up if a consumer needs it.
+- **If no black marker pixels are found on an axis** (a plain PNG with no 9-patch border at all, or a border that never got authored on one axis): default that axis's insets to `0` and log a warning via a `print` diagnostic — this makes `loadNinePatchImage` degrade gracefully to "the whole image stretches on that axis" rather than crashing, at the cost of an unstretched-corners bug being silent; a game developer authoring their own `.9.png` assets should notice visually.
+
 ## 3. Popup/expanding list style for Select (#181)
 
 `Select` gains `style as BGE.UI.SelectStyle` (`enum { inline = "inline", popup = "popup" }`), default `inline` — zero behavior change for existing consumers.

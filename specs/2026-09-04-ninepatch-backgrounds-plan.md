@@ -4,11 +4,11 @@
 
 **Goal:** Let `Theme.backgroundColor`'s flat fill be replaced with a stretchable 9-patch image background, without breaking any existing flat-color widget.
 
-**Architecture:** A new standalone `BGE.UI.NinePatchImage` class pre-slices a source `roRegion` into 9 sub-regions once at construction, then blits all 9 (4 fixed corners, 4 stretched edges, 1 stretched center) via existing `Renderer.drawObjectTo`/`drawScaledObjectTo` calls. `Theme.backgroundImage` (default `invalid`) opts a container/widget in; every widget's `draw()` gains one `if theme.backgroundImage <> invalid` branch ahead of its existing flat-fill call, which stays untouched.
+**Architecture:** A new standalone `BGE.UI.NinePatchImage` class pre-slices a source `roRegion` into 9 sub-regions once at construction, then blits all 9 (4 fixed corners, 4 stretched edges, 1 stretched center) via existing `Renderer.drawObjectTo`/`drawScaledObjectTo` calls. `Theme.backgroundImage` (default `invalid`) opts a container/widget in; every widget's `draw()` gains one `if theme.backgroundImage <> invalid` branch ahead of its existing flat-fill call, which stays untouched. A separate `BGE.UI.loadNinePatchImage(path)` loader reads the four insets directly from the source PNG using Android's `.9.png` border-marker convention (1px transparent border, black pixel runs marking the stretch region) instead of requiring hand-specified inset numbers — see section 2a of the spec.
 
-**Tech Stack:** BrighterScript, Rooibos, native `roRegion`/`ifDraw2d`.
+**Tech Stack:** BrighterScript, Rooibos, native `roRegion`/`ifDraw2d`, `roBitmap.GetByteArray()`.
 
-**Spec:** `specs/2026-09-04-ui-followups-design.md` (section 2). Depends on `examples/ui` existing — run this plan after `specs/2026-09-04-analog-cursor-plan.md` (Task 1 scaffolds it).
+**Spec:** `specs/2026-09-04-ui-followups-design.md` (sections 2, 2a). Depends on `examples/ui` existing — run this plan after `specs/2026-09-04-analog-cursor-plan.md` (Task 1 scaffolds it).
 
 ## Global Constraints
 
@@ -341,25 +341,221 @@ git commit -m "feat: Theme.backgroundImage lets widgets use a 9-patch background
 
 ---
 
-### Task 4: `examples/ui` demo room + on-device verification
+### Task 4: `BGE.UI.loadNinePatchImage()` — Android `.9.png` border-marker parsing
+
+**Files:**
+- Create: `src/source/engine/ui/NinePatchLoader.bs`
+- Test: `src/source/engine/ui/NinePatchLoader.spec.bs`
+
+**Interfaces:**
+- Consumes: `NinePatchImage.new(sourceRegion, left, top, right, bottom)` from Task 1 (constructor, not the class's protected slice fields).
+- Produces: `BGE.UI.loadNinePatchImage(path as string) as BGE.UI.NinePatchImage` — this is what Task 5's demo room calls; no other task depends on it.
+
+See `specs/2026-09-04-ui-followups-design.md` section 2a for the full rationale (Android `.9.png` convention: a 1px transparent border, with black-opaque pixel runs on the top row / left column marking the stretch region) before starting this task.
+
+- [ ] **Step 1: Write the failing test — a synthetic in-memory 9-patch parses to the right insets**
+
+Build the test bitmap programmatically (no external asset needed) — a 20x20 bitmap: 1px transparent border, with a black run from x=5..14 on the top row (y=0) and y=5..14 on the left column (x=0). Content is 18x18 (20 minus the 1px border on each side), so the expected insets are `left=5, right=18-14=4, top=5, bottom=4` (run end index 14 is inclusive of 10 black pixels x=5..14, leaving `18 - 14 - 1 = 3`... compute this exactly against your own implementation's indexing once written, and correct the test's expected numbers to match rather than the reverse — the geometry is the source of truth, and Step 1 is written before Step 3's implementation exists, so treat these expected values as a first draft to verify against your own indexing convention once implemented, not as fixed constants to force the code to match).
+
+```brightscript
+' src/source/engine/ui/NinePatchLoader.spec.bs
+import "pkg:/source/engine/ui/NinePatchLoader.bs"
+
+namespace tests
+  @suite("NinePatchLoader")
+  class NinePatchLoaderTest extends BaseTestSuite
+
+    @beforeEach
+    sub before()
+      m.bmp = CreateObject("roBitmap", {width: 20, height: 20, AlphaEnable: true})
+      m.bmp.Clear(&h00000000) ' fully transparent
+      ' Interior artwork (doesn't matter for this test - just needs a non-transparent fill so it's visually distinguishable from the border)
+      m.bmp.DrawRect(1, 1, 18, 18, &hFFFFFFFF)
+      ' Top border stretch-region marker: x=5..14, y=0
+      m.bmp.DrawRect(5, 0, 10, 1, &h000000FF)
+      ' Left border stretch-region marker: x=0, y=5..14
+      m.bmp.DrawRect(0, 5, 1, 10, &h000000FF)
+      m.bmp.Finish()
+    end sub
+
+    @it("parses the top/left border markers into left/top/right/bottom insets")
+    function _()
+      np = BGE.UI.parseNinePatchBitmap(m.bmp) ' see Step 3 - a bitmap-in, NinePatchImage-out helper the file-loading wrapper calls, so this test doesn't need a real packaged file
+      m.assertEqual(4, np.getLeft())
+      m.assertEqual(4, np.getTop())
+      m.assertEqual(3, np.getRight())
+      m.assertEqual(3, np.getBottom())
+    end function
+
+  end class
+end namespace
+```
+
+(`getLeft()`/`getTop()`/`getRight()`/`getBottom()` are the same kind of test-only accessor Task 1 added for the slice regions — add them to `NinePatchImage` alongside `getTopLeft()`/`getCenter()` if not already present, returning the protected `left`/`top`/`right`/`bottom` fields.)
+
+Note the two-function split: `parseNinePatchBitmap(bitmap as roBitmap) as BGE.UI.NinePatchImage` (pure, testable without touching the filesystem) does the actual border-scan + cropping + `NinePatchImage` construction; `loadNinePatchImage(path as string) as BGE.UI.NinePatchImage` (Step 4) is a one-line wrapper that just does `CreateObject("roBitmap", path)` then calls `parseNinePatchBitmap`. This split exists specifically so this test can exercise the parsing logic against a synthetic in-memory bitmap instead of needing a real packaged asset file in the test build.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: FAIL — `NinePatchLoader.bs` doesn't exist.
+
+- [ ] **Step 3: Implement the border scan + `parseNinePatchBitmap`**
+
+```brightscript
+' src/source/engine/ui/NinePatchLoader.bs
+import "NinePatchImage.bs"
+
+namespace BGE.UI
+
+  ' RGBA byte threshold below which a channel is considered "black" - PNG
+  ' export/compression can introduce minor color drift in marker pixels, so
+  ' this isn't an exact &h000000FF match.
+  const NINE_PATCH_MARKER_THRESHOLD = 40
+  const NINE_PATCH_MARKER_MIN_ALPHA = 200
+
+  ' Loads a PNG authored in Android's .9.png convention (a 1px transparent
+  ' border with black-opaque pixel runs marking the stretch region on the
+  ' top row and left column) and returns a ready-to-use NinePatchImage with
+  ' insets read from the image itself - see BGE.UI.NinePatchImage and the
+  ' design doc (specs/2026-09-04-ui-followups-design.md section 2a) for the
+  ' full format. If a border has no marker pixels at all, that axis defaults
+  ' to a 0 inset (the whole image stretches on that axis) rather than
+  ' throwing - a game developer authoring their own asset should notice this
+  ' visually (unstretched corners look wrong), but a missing marker is not
+  ' otherwise treated as an error.
+  '
+  ' @param {string} path - a pkg:/ path to a .9.png-style PNG
+  ' @return {BGE.UI.NinePatchImage}
+  function loadNinePatchImage(path as string) as BGE.UI.NinePatchImage
+    bitmap = CreateObject("roBitmap", path)
+    return parseNinePatchBitmap(bitmap)
+  end function
+
+  ' Same as loadNinePatchImage(), but takes an already-loaded roBitmap -
+  ' split out specifically so this parsing logic is testable against a
+  ' synthetic in-memory bitmap without needing a packaged asset file.
+  '
+  ' @param {roBitmap} bitmap
+  ' @return {BGE.UI.NinePatchImage}
+  function parseNinePatchBitmap(bitmap as roBitmap) as BGE.UI.NinePatchImage
+    width = bitmap.GetWidth()
+    height = bitmap.GetHeight()
+
+    topRow = bitmap.GetByteArray(0, 0, width, 1)
+    leftCol = bitmap.GetByteArray(0, 0, 1, height)
+
+    horizontalRun = findMarkerRun(topRow, width)
+    verticalRun = findMarkerRun(leftCol, height)
+
+    contentWidth = width - 2
+    contentHeight = height - 2
+
+    left = horizontalRun.startIndex - 1
+    right = contentWidth - (horizontalRun.endIndex - 1) - 1
+    top = verticalRun.startIndex - 1
+    bottom = contentHeight - (verticalRun.endIndex - 1) - 1
+
+    interior = bitmap.GetRegion(1, 1, contentWidth, contentHeight)
+    return new BGE.UI.NinePatchImage(interior, left, top, right, bottom)
+  end function
+
+  ' Scans a 1-pixel-wide/tall RGBA byte array (4 bytes/pixel) for the first
+  ' and last near-black, near-opaque pixel, treating index 0 and index
+  ' (length-1) as the border corners (never part of a marker run - Android's
+  ' convention reserves the very first/last border pixel unconditionally).
+  ' Returns {startIndex, endIndex} in full-bitmap pixel coordinates (both
+  ' inclusive); {startIndex: length, endIndex: -1} (an empty/inverted range)
+  ' if no marker pixel was found, which the caller's inset math resolves to
+  ' 0 on that axis - see loadNinePatchImage()'s doc comment.
+  '
+  ' @param {roByteArray} pixels
+  ' @param {integer} lengthPx - width (for the top row) or height (for the left column)
+  ' @return {object} - {startIndex as integer, endIndex as integer}
+  private function findMarkerRun(pixels as roByteArray, lengthPx as integer) as object
+    startIndex = -1
+    endIndex = -1
+    for i = 1 to lengthPx - 2 ' skip the two border corners
+      offset = i * 4
+      r = pixels[offset]
+      g = pixels[offset + 1]
+      b = pixels[offset + 2]
+      a = pixels[offset + 3]
+      isMarker = r < NINE_PATCH_MARKER_THRESHOLD and g < NINE_PATCH_MARKER_THRESHOLD and b < NINE_PATCH_MARKER_THRESHOLD and a >= NINE_PATCH_MARKER_MIN_ALPHA
+      if isMarker
+        if startIndex = -1
+          startIndex = i
+        end if
+        endIndex = i
+      end if
+    end for
+    if startIndex = -1
+      return {startIndex: lengthPx, endIndex: -1}
+    end if
+    return {startIndex: startIndex, endIndex: endIndex}
+  end function
+
+end namespace
+```
+
+Double-check `roByteArray`'s indexing (`pixels[offset]`) actually returns an unsigned 0-255 integer per byte, not a signed value or a different type, against an existing `roByteArray` usage in this codebase (e.g. `WebSocketFrameCodec.bs`) before trusting the threshold comparisons above.
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: PASS. If the expected inset numbers in Step 1's test don't match, recompute them by hand against this exact `findMarkerRun`/inset-math implementation (draw out the pixel indices on paper if needed) rather than adjusting the implementation to fit a guessed expectation.
+
+- [ ] **Step 5: Add a no-marker-found regression test**
+
+```brightscript
+@it("defaults to 0 insets on an axis with no marker pixels")
+function _()
+  bmp = CreateObject("roBitmap", {width: 10, height: 10, AlphaEnable: true})
+  bmp.Clear(&h00000000)
+  bmp.DrawRect(1, 1, 8, 8, &hFFFFFFFF)
+  bmp.Finish() ' no border markers at all
+
+  np = BGE.UI.parseNinePatchBitmap(bmp)
+  m.assertEqual(0, np.getLeft())
+  m.assertEqual(0, np.getTop())
+  m.assertEqual(0, np.getRight())
+  m.assertEqual(0, np.getBottom())
+end function
+```
+
+Run: `npm run build-tests && npm run test:ci`
+Expected: PASS
+
+- [ ] **Step 6: Validate and commit**
+
+Run: `npm run validate`
+
+```bash
+git add src/source/engine/ui/NinePatchLoader.bs src/source/engine/ui/NinePatchLoader.spec.bs src/source/engine/ui/NinePatchImage.bs specs/2026-09-04-ui-followups-design.md
+git commit -m "feat: BGE.UI.loadNinePatchImage() parses Android .9.png border markers"
+```
+
+---
+
+### Task 5: `examples/ui` demo room + on-device verification
 
 **Files:**
 - Create: `examples/ui/src/source/Rooms/NinePatchRoom.bs`
-- Create: `examples/ui/src/source/images/` — a small hand-authored or generated 9-patch PNG (e.g. 24x24, 6px insets, a rounded-rect panel look)
+- Create: `examples/ui/src/source/images/panel.9.png` — a real `.9.png` asset (see Step 1)
 - Modify: `examples/ui/src/source/main.bs`
 
 **Interfaces:**
-- Consumes: `Game.load*` image-loading path used elsewhere for `roRegion` creation from a packaged image (check `Game.bs`/an existing example for the exact "load a pkg: image into a roRegion" call - likely `CreateObject("roBitmap", "pkg:/...")` then wrap in `roRegion`, matching whatever `Image` drawables already do in `src/source/engine/drawables/Image.bs`).
+- Consumes: `BGE.UI.loadNinePatchImage(path as string) as BGE.UI.NinePatchImage` (Task 4).
 
-- [ ] **Step 1: Produce a demo 9-patch asset**
+- [ ] **Step 1: Produce a demo `.9.png` asset**
 
-Create (or ask the user for) a simple 24x24 PNG panel graphic with a 6px border that tiles cleanly - a flat-colored rounded rectangle with a 1-2px outline is sufficient for demo purposes. Save to `examples/ui/src/source/images/panel-9patch.png`.
+Generate one programmatically rather than hand-drawing it in an image editor - e.g. a small Node script (using a PNG-writing library already available in `node_modules`, or a minimal hand-rolled PNG writer if none fits) that creates a 24x24 image: a 1px transparent border with a black run on the top row (x=5..18) and left column (y=5..18), and a simple rounded-rect-look fill (a solid color panel with a 2px darker outline) in the 22x22 interior. Save to `examples/ui/src/source/images/panel.9.png`. Confirm it round-trips correctly by running it through `BGE.UI.parseNinePatchBitmap()` in a throwaway Rooibos test (or reuse Task 4's suite temporarily) before wiring it into the room, so a malformed asset is caught before the on-device step.
 
 - [ ] **Step 2: Scaffold and build the room**
 
 Run: `npm run create-room -- ui NinePatchRoom`
 
-In `onCreate()`: load the PNG into a `roRegion` (following the exact pattern `Image`/an existing example uses for loading a packaged bitmap - check `examples/*/src/source/Rooms/*.bs` for a `CreateObject("roBitmap", "pkg:/images/...")` precedent before writing this from scratch), construct a `BGE.UI.NinePatchImage`, assign it to `m.game.defaultTheme.backgroundImage`, then add 2-3 `Button`s at different sizes to show the background stretching correctly at each size. Add a Back-button handler (guarded with `input.press`) to `MainRoom`.
+In `onCreate()`: `m.game.defaultTheme.backgroundImage = BGE.UI.loadNinePatchImage("pkg:/images/panel.9.png")` (confirm the exact `pkg:/` path per this example's `bsconfig.json`/`manifest` asset-copy rules), then add 2-3 `Button`s at different sizes to show the background stretching correctly at each size. Add a Back-button handler (guarded with `input.press`) to `MainRoom`.
 
 - [ ] **Step 3: Register in main.bs**
 
@@ -378,7 +574,7 @@ git commit -m "feat: add NinePatchRoom demo to examples/ui"
 
 ---
 
-### Task 5: Docs + issue close-out
+### Task 6: Docs + issue close-out
 
 **Files:**
 - Modify: `docs/engine-internals.md` or `docs/game-engine-overview.md` (whichever documents `BGE.UI.Theme` today - confirm via `grep -rn "Theme" docs/`)
