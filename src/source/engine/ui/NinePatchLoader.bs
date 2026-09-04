@@ -1,0 +1,108 @@
+import "NinePatchImage.bs"
+
+namespace BGE.UI
+
+  ' RGBA byte threshold below which a channel is considered "black" - PNG
+  ' export/compression can introduce minor color drift in marker pixels, so
+  ' this isn't an exact &h000000FF match.
+  const NINE_PATCH_MARKER_THRESHOLD = 40
+  const NINE_PATCH_MARKER_MIN_ALPHA = 200
+
+  ' Loads a PNG authored in Android's .9.png convention (a 1px transparent
+  ' border with black-opaque pixel runs marking the stretch region on the
+  ' top row and left column) and returns a ready-to-use NinePatchImage with
+  ' insets read from the image itself - see BGE.UI.NinePatchImage and the
+  ' design doc (specs/2026-09-04-ui-followups-design.md section 2a) for the
+  ' full format. If a border has no marker pixels at all, that axis defaults
+  ' to a 0 inset (the whole image stretches on that axis) rather than
+  ' throwing - a game developer authoring their own asset should notice this
+  ' visually (unstretched corners look wrong), but a missing marker is not
+  ' otherwise treated as an error.
+  '
+  ' @param {string} path - a pkg:/ path to a .9.png-style PNG
+  ' @return {BGE.UI.NinePatchImage}
+  function loadNinePatchImage(path as string) as BGE.UI.NinePatchImage
+    bitmap = CreateObject("roBitmap", path)
+    return parseNinePatchBitmap(bitmap)
+  end function
+
+  ' Same as loadNinePatchImage(), but takes an already-loaded roBitmap -
+  ' split out specifically so this parsing logic is testable against a
+  ' synthetic in-memory bitmap without needing a packaged asset file.
+  '
+  ' @param {roBitmap} bitmap
+  ' @return {BGE.UI.NinePatchImage}
+  function parseNinePatchBitmap(bitmap as roBitmap) as BGE.UI.NinePatchImage
+    width = bitmap.GetWidth()
+    height = bitmap.GetHeight()
+
+    topRow = bitmap.GetByteArray(0, 0, width, 1)
+    leftCol = bitmap.GetByteArray(0, 0, 1, height)
+
+    horizontalRun = findMarkerRun(topRow, width)
+    verticalRun = findMarkerRun(leftCol, height)
+
+    contentWidth = width - 2
+    contentHeight = height - 2
+
+    left = horizontalRun.startIndex - 1
+    right = contentWidth - (horizontalRun.endIndex - 1) - 1
+    top = verticalRun.startIndex - 1
+    bottom = contentHeight - (verticalRun.endIndex - 1) - 1
+
+    ' Crop the 1px border away into a genuinely separate bitmap. Can't just
+    ' hand NinePatchImage a roRegion cropped from this one and let it slice
+    ' further - CreateObject("roRegion", ...) only accepts a roBitmap as its
+    ' source, not another roRegion (see NinePatchImage's own doc comment) -
+    ' so draw the interior onto a fresh bitmap instead, the same
+    ' draw-into-a-scratch-bitmap pattern used elsewhere in this engine.
+    interiorBitmap = CreateObject("roBitmap", {width: contentWidth, height: contentHeight, AlphaEnable: true})
+    borderCrop = CreateObject("roRegion", bitmap, 1, 1, contentWidth, contentHeight)
+    interiorBitmap.DrawObject(0, 0, borderCrop)
+    interiorBitmap.Finish()
+
+    return new BGE.UI.NinePatchImage(interiorBitmap, left, top, right, bottom)
+  end function
+
+  ' Scans a 1-pixel-wide/tall RGBA byte array (4 bytes/pixel) for the first
+  ' and last near-black, near-opaque pixel, treating index 0 and index
+  ' (length-1) as the border corners (never part of a marker run - Android's
+  ' convention reserves the very first/last border pixel unconditionally).
+  ' Returns {startIndex, endIndex} in full-bitmap pixel coordinates (both
+  ' inclusive); if no marker pixel was found, returns a run spanning the
+  ' entire content region ({startIndex: 1, endIndex: lengthPx - 2}) so the
+  ' caller's left/top = startIndex - 1 and right/bottom =
+  ' contentLength - (endIndex - 1) - 1 formulas both resolve to 0 on that
+  ' axis (the whole image stretches) - see loadNinePatchImage()'s doc
+  ' comment. (A sentinel of startIndex = lengthPx would NOT resolve to 0
+  ' under those formulas - verified by hand against a synthetic no-marker
+  ' test case - so this is deliberately not "no run found" encoded as an
+  ' empty/inverted range.)
+  '
+  ' @param {roByteArray} pixels
+  ' @param {integer} lengthPx - width (for the top row) or height (for the left column)
+  ' @return {object} - {startIndex as integer, endIndex as integer}
+  function findMarkerRun(pixels as roByteArray, lengthPx as integer) as object
+    startIndex = -1
+    endIndex = -1
+    for i = 1 to lengthPx - 2 ' skip the two border corners
+      offset = i * 4
+      r = pixels[offset]
+      g = pixels[offset + 1]
+      b = pixels[offset + 2]
+      a = pixels[offset + 3]
+      isMarker = r < NINE_PATCH_MARKER_THRESHOLD and g < NINE_PATCH_MARKER_THRESHOLD and b < NINE_PATCH_MARKER_THRESHOLD and a >= NINE_PATCH_MARKER_MIN_ALPHA
+      if isMarker
+        if startIndex = -1
+          startIndex = i
+        end if
+        endIndex = i
+      end if
+    end for
+    if startIndex = -1
+      return {startIndex: 1, endIndex: lengthPx - 2}
+    end if
+    return {startIndex: startIndex, endIndex: endIndex}
+  end function
+
+end namespace
