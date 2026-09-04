@@ -62,6 +62,31 @@ namespace tests
       m.assertTrue(m.drawOnce(m.newImage({isShaded: true})) > 0)
     end function
 
+    @describe("ambientBrightness floor (issue #128 follow-up)")
+
+    ' A face at a glancing/edge-on angle to the camera has a near-zero camera-facing dot
+    ' product - without a floor, isShaded would darken it all the way to black, which
+    ' looks exactly like a missing texture rather than shading (this is what was actually
+    ' happening in examples/3d's D20Room, mistaken at first for a draw failure).
+    @it("never lets an edge-on shaded surface go fully black")
+    function _()
+      imageDrawable = m.newImage({
+        isShaded: true,
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        rotation: BGE.Math.VectorOps.create(0, BGE.Math.HALF_PI - 0.05, 0)
+      })
+      sceneObj = imageDrawable.addToScene(m.renderer) as BGE.SceneObjectImage
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      m.renderer.drawScene()
+
+      shadedColor = sceneObj.getShadedColorRGBA(m.renderer)
+      r = (shadedColor >> 24) and &hFF
+      g = (shadedColor >> 16) and &hFF
+      b = (shadedColor >> 8) and &hFF
+      m.assertTrue(r > 0 and g > 0 and b > 0)
+    end function
+
     @it("draws in the oriented draw mode when rotated in its own plane")
     function _()
       ' rotated about z only, so it still faces the camera
@@ -359,6 +384,95 @@ namespace tests
       ' frames 2 and 3 instead and leaves drawAttempts at 1 regardless, which is why the
       ' attempt count alone is not enough to pin this; the frustum-check count is.
       m.assertEqual(0, failing.frustumChecks)
+    end function
+
+    @describe("transformed fast draw path (issue #163, extending #105 from SceneObjectCircle)")
+
+    @it("takes the fast path for an image rotated only about the axis facing the camera")
+    function _()
+      ' z=500 keeps forwardDistance under the device's maxDrawDistance cap.
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 500)
+      imageDrawable = m.newImage({rotation: BGE.Math.VectorOps.create(0, 0, BGE.Math.PI / 6)})
+      m.drawOnce(imageDrawable)
+      sceneObj = imageDrawable.getSceneObjects()[0] as BGE.SceneObjectImage
+      m.assertTrue(sceneObj.usedTransformedFastDraw())
+    end function
+
+    @it("falls back to the exact drawPinnedCorners path when tilted away from the camera")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 500)
+      imageDrawable = m.newImage({
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        rotation: BGE.Math.VectorOps.create(1.0, 0, 0)
+      })
+      drawCalls = m.drawOnce(imageDrawable)
+      sceneObj = imageDrawable.getSceneObjects()[0] as BGE.SceneObjectImage
+      m.assertFalse(sceneObj.usedTransformedFastDraw())
+      m.assertTrue(drawCalls > 0)
+    end function
+
+    @describe("temp bitmap grow-only reuse (issue #128 follow-up)")
+
+    ' Both frames stay tilted away from the camera (orientedDrawBackFace + rotation about
+    ' x), so both take the exact drawPinnedCorners/temp-bitmap path, never the #163 fast
+    ' path - which would skip the temp bitmap entirely and defeat this test.
+    @it("keeps a larger backing bitmap instead of reallocating smaller when the footprint shrinks")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 500)
+      m.entity.scale = BGE.Math.VectorOps.create(3, 3, 3)
+      imageDrawable = m.newImage({
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        rotation: BGE.Math.VectorOps.create(1.0, 0, 0)
+      })
+      sceneObj = imageDrawable.addToScene(m.renderer) as BGE.SceneObjectImage
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      m.renderer.drawScene()
+      bigCapacity = sceneObj.getTempBitmapCapacity()
+      m.assertNotInvalid(bigCapacity)
+
+      ' Shrink the footprint and rotate slightly further, so MotionChecker's dirty-check
+      ' considers the object moved again (a stationary object short-circuits before ever
+      ' reaching createTempBitmap - see isRedrawToCanvasRequired).
+      m.entity.scale = BGE.Math.VectorOps.create(1, 1, 1)
+      m.entity.rotation = BGE.Math.VectorOps.create(1.05, 0, 0)
+      m.entity.updateTransformationMatrix()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.setupCameraForFrame()
+      m.renderer.drawScene()
+      smallCapacity = sceneObj.getTempBitmapCapacity()
+
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+      m.assertTrue(smallCapacity.x >= bigCapacity.x)
+      m.assertTrue(smallCapacity.y >= bigCapacity.y)
+    end function
+
+    @it("grows the backing bitmap when the footprint outgrows it")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 500)
+      m.entity.scale = BGE.Math.VectorOps.create(1, 1, 1)
+      imageDrawable = m.newImage({
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        rotation: BGE.Math.VectorOps.create(1.0, 0, 0)
+      })
+      sceneObj = imageDrawable.addToScene(m.renderer) as BGE.SceneObjectImage
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      m.renderer.drawScene()
+      smallCapacity = sceneObj.getTempBitmapCapacity()
+      m.assertNotInvalid(smallCapacity)
+
+      m.entity.scale = BGE.Math.VectorOps.create(3, 3, 3)
+      m.entity.rotation = BGE.Math.VectorOps.create(1.05, 0, 0)
+      m.entity.updateTransformationMatrix()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.setupCameraForFrame()
+      m.renderer.drawScene()
+      bigCapacity = sceneObj.getTempBitmapCapacity()
+
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+      m.assertTrue(bigCapacity.x > smallCapacity.x)
+      m.assertTrue(bigCapacity.y > smallCapacity.y)
     end function
 
     @describe("recovering from a camera projection change")
