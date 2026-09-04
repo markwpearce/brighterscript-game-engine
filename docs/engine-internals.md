@@ -171,6 +171,47 @@ unaffected. When it is set, the same image is used regardless of hover/focus sta
 hovered/focused background image is a possible future follow-up, as is letting a `UiContainer` (not
 just an individual widget) back itself with a 9-patch. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
 
+### Widget overlay rendering and popup Select
+
+`UiWidget.drawOverlay(canvas as BGE.Canvas, theme as BGE.UI.Theme)` is a general-purpose hook that fires
+once per frame for whichever widget currently has focus. The hook runs **after** the entire `gameUi` widget
+tree has drawn, so overlay content always renders above every other widget regardless of container nesting
+or z-order - this is the key property that makes floating overlays work without special `Game.bs` wiring to
+manage render order.
+
+By default, `UiWidget.drawOverlay()` is empty - most widgets don't need it. Override it if your widget needs
+to draw content that must float above everything else on the UI layer:
+
+```brightscript
+class MyWidget extends BGE.UI.UiWidget
+  override sub drawOverlay(canvas as BGE.Canvas, theme as BGE.UI.Theme)
+    ' Draw floating content here - it composites after every other widget
+  end sub
+end class
+```
+
+`BGE.UI.Select` is a focusable option picker with two distinct interaction styles, controlled by its `style`
+field (`BGE.UI.SelectStyle`):
+
+**Inline style (default):** `Select.style = BGE.UI.SelectStyle.inline`
+- Left/Right (while focused) cycle through the options with wraparound, changing the selected option in place
+- The current selection displays inline within the widget itself
+- No popup or overlay - a compact, space-efficient style matching the existing `Slider` widget's interaction pattern
+- This is the original behavior; it's the default so existing code breaks nothing
+
+**Popup style (opt-in):** `Select.style = BGE.UI.SelectStyle.popup`
+- OK (while focused) expands an overlay list of every option, rendered below the Select widget
+- While expanded, Up/Down move a visual highlight through the options (throttled to one step per `WIDGET_REPEAT_DELAY_MS`, matching inline cycling's throttle)
+- OK again commits the highlighted option as the new selection (firing `onChanged()`) and collapses the list
+- Back (while expanded) cancels without changing the selection and collapses the list
+- Left/Right (inline cycling buttons) do nothing in popup style - they're not part of the interaction model
+- The popup list draws via `UiWidget.drawOverlay()`, so it floats above all other UI regardless of nesting
+
+The popup list is an explicit non-goal: every option draws unclipped/unscrolled, and a list long enough to
+overflow the canvas bottom (e.g., 100 options on a 720-pixel display) extends past the visible canvas. This
+is a deliberate trade-off to keep the implementation simple and leave scrolling/virtualization as a
+follow-up. See `examples/ui/src/source/Rooms/PopupSelectRoom.bs` for a working demo.
+
 ## Collision, concretely
 
 Each `Collider` (`CircleCollider`, `RectangleCollider`) wraps one `roSprite` on the `Game`'s shared
