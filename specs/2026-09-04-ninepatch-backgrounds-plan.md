@@ -27,7 +27,9 @@
 - Test: `src/source/engine/ui/NinePatchImage.spec.bs`
 
 **Interfaces:**
-- Produces: `BGE.UI.NinePatchImage.new(sourceRegion as roRegion, left as integer, top as integer, right as integer, bottom as integer)`, with 9 protected sliced sub-region fields consumed by Task 2's `draw()`.
+- Produces: `BGE.UI.NinePatchImage.new(sourceBitmap as roBitmap, left as integer, top as integer, right as integer, bottom as integer)`, with 9 protected sliced sub-region fields consumed by Task 2's `draw()`.
+
+> **Correction (ruled during implementation — a real Roku API constraint, not a style choice):** the original draft of this task took a `roRegion` and called a non-existent `sourceRegion.GetRegion(x, y, w, h)` method to sub-slice it. Verified on-device/in-suite that this doesn't exist, and that `CreateObject("roRegion", ...)` does NOT accept another `roRegion` as its source either (only a `roBitmap` — confirmed both via `node_modules/brighterscript/dist/roku-types/data.json`'s `roRegion` constructor entry and by an actual runtime `Type Mismatch` crash when a `roRegion` was passed). **`NinePatchImage.new()` therefore takes a `roBitmap`, not a `roRegion`.** This also changes Task 4's loader (see that task's own correction note) — it hands `NinePatchImage` the full loaded bitmap directly (border included) with insets shifted by 1px, rather than cropping a smaller interior `roRegion` first.
 
 - [ ] **Step 1: Write the failing test — slices have correct dimensions**
 
@@ -43,19 +45,18 @@ namespace tests
     sub before()
       m.bmp = CreateObject("roBitmap", {width: 30, height: 30, AlphaEnable: true})
       m.bmp.Clear(&hFFFFFFFF)
-      m.region = CreateObject("roRegion", m.bmp, 0, 0, 30, 30)
     end sub
 
     @it("computes corner slice dimensions from the insets")
     function _()
-      np = new BGE.UI.NinePatchImage(m.region, 8, 8, 8, 8)
+      np = new BGE.UI.NinePatchImage(m.bmp, 8, 8, 8, 8)
       m.assertEqual(8, np.getTopLeft().GetWidth())
       m.assertEqual(8, np.getTopLeft().GetHeight())
     end function
 
     @it("computes center slice dimensions as source minus all insets")
     function _()
-      np = new BGE.UI.NinePatchImage(m.region, 8, 8, 8, 8)
+      np = new BGE.UI.NinePatchImage(m.bmp, 8, 8, 8, 8)
       m.assertEqual(14, np.getCenter().GetWidth()) ' 30 - 8 - 8
       m.assertEqual(14, np.getCenter().GetHeight())
     end function
@@ -77,13 +78,18 @@ Expected: FAIL — class/file doesn't exist.
 ' src/source/engine/ui/NinePatchImage.bs
 namespace BGE.UI
 
-  ' A 9-patch ("scale-9") stretchable background image: a source region is
-  ' sliced once (at construction) into 9 pieces - 4 corners (drawn at fixed
-  ' size), 4 edges (stretched along one axis), and a center (stretched both
-  ' axes) - so a single small source texture can back a background of any
-  ' width/height without visibly stretching its corners. Assign to
+  ' A 9-patch ("scale-9") stretchable background image: a source bitmap is
+  ' sliced once (at construction) into 9 roRegions - 4 corners (drawn at
+  ' fixed size), 4 edges (stretched along one axis), and a center (stretched
+  ' both axes) - so a single small source texture can back a background of
+  ' any width/height without visibly stretching its corners. Assign to
   ' Theme.backgroundImage to opt a widget's background fill into this
   ' instead of a flat color - see Theme.backgroundImage's own doc comment.
+  '
+  ' Takes a roBitmap, not a roRegion: CreateObject("roRegion", ...) only
+  ' accepts a roBitmap as its source, not another roRegion (confirmed via
+  ' Roku's own component type data and an actual runtime Type Mismatch when
+  ' a roRegion was tried) - so slicing has to start from the real bitmap.
   class NinePatchImage
 
     protected topLeft as roRegion
@@ -101,31 +107,31 @@ namespace BGE.UI
     protected right as integer
     protected bottom as integer
 
-    ' @param {roRegion} sourceRegion - the full source image
+    ' @param {roBitmap} sourceBitmap - the full source image
     ' @param {integer} left - px from the left edge that stay unstretched
     ' @param {integer} top - px from the top edge that stay unstretched
     ' @param {integer} right - px from the right edge that stay unstretched
     ' @param {integer} bottom - px from the bottom edge that stay unstretched
-    sub new(sourceRegion as roRegion, left as integer, top as integer, right as integer, bottom as integer)
+    sub new(sourceBitmap as roBitmap, left as integer, top as integer, right as integer, bottom as integer)
       m.left = left
       m.top = top
       m.right = right
       m.bottom = bottom
 
-      srcW = sourceRegion.GetWidth()
-      srcH = sourceRegion.GetHeight()
+      srcW = sourceBitmap.GetWidth()
+      srcH = sourceBitmap.GetHeight()
       midW = srcW - left - right
       midH = srcH - top - bottom
 
-      m.topLeft = sourceRegion.GetRegion(0, 0, left, top)
-      m.topEdge = sourceRegion.GetRegion(left, 0, midW, top)
-      m.topRight = sourceRegion.GetRegion(srcW - right, 0, right, top)
-      m.leftEdge = sourceRegion.GetRegion(0, top, left, midH)
-      m.center = sourceRegion.GetRegion(left, top, midW, midH)
-      m.rightEdge = sourceRegion.GetRegion(srcW - right, top, right, midH)
-      m.bottomLeft = sourceRegion.GetRegion(0, srcH - bottom, left, bottom)
-      m.bottomEdge = sourceRegion.GetRegion(left, srcH - bottom, midW, bottom)
-      m.bottomRight = sourceRegion.GetRegion(srcW - right, srcH - bottom, right, bottom)
+      m.topLeft = CreateObject("roRegion", sourceBitmap, 0, 0, left, top)
+      m.topEdge = CreateObject("roRegion", sourceBitmap, left, 0, midW, top)
+      m.topRight = CreateObject("roRegion", sourceBitmap, srcW - right, 0, right, top)
+      m.leftEdge = CreateObject("roRegion", sourceBitmap, 0, top, left, midH)
+      m.center = CreateObject("roRegion", sourceBitmap, left, top, midW, midH)
+      m.rightEdge = CreateObject("roRegion", sourceBitmap, srcW - right, top, right, midH)
+      m.bottomLeft = CreateObject("roRegion", sourceBitmap, 0, srcH - bottom, left, bottom)
+      m.bottomEdge = CreateObject("roRegion", sourceBitmap, left, srcH - bottom, midW, bottom)
+      m.bottomRight = CreateObject("roRegion", sourceBitmap, srcW - right, srcH - bottom, right, bottom)
     end sub
 
     ' Test-only accessors - not part of the public API surface, no JSDoc.
@@ -348,10 +354,12 @@ git commit -m "feat: Theme.backgroundImage lets widgets use a 9-patch background
 - Test: `src/source/engine/ui/NinePatchLoader.spec.bs`
 
 **Interfaces:**
-- Consumes: `NinePatchImage.new(sourceRegion, left, top, right, bottom)` from Task 1 (constructor, not the class's protected slice fields).
+- Consumes: `NinePatchImage.new(sourceBitmap as roBitmap, left, top, right, bottom)` from Task 1 (constructor, not the class's protected slice fields) — note this takes a `roBitmap`, per Task 1's own correction note.
 - Produces: `BGE.UI.loadNinePatchImage(path as string) as BGE.UI.NinePatchImage` — this is what Task 5's demo room calls; no other task depends on it.
 
 See `specs/2026-09-04-ui-followups-design.md` section 2a for the full rationale (Android `.9.png` convention: a 1px transparent border, with black-opaque pixel runs on the top row / left column marking the stretch region) before starting this task.
+
+> **Correction (ruled during Task 1's implementation):** `bitmap.GetRegion(...)` (used below to crop the 1px border away) is not a real `roBitmap` method either — confirmed against Roku's own component type data. Cropping the border away now happens by drawing the interior into a genuinely separate, freshly-created `roBitmap` (`DrawObject` + `Finish()`, the same draw-into-a-scratch-bitmap pattern used elsewhere in this engine, e.g. `Renderer`'s scratch-bitmap helpers) rather than trying to slice a `roRegion` a second time — see the corrected `parseNinePatchBitmap()` below. The inset math (Step 3's `left`/`top`/`right`/`bottom` calculation) is unchanged; only the final crop mechanism changed.
 
 - [ ] **Step 1: Write the failing test — a synthetic in-memory 9-patch parses to the right insets**
 
@@ -456,8 +464,18 @@ namespace BGE.UI
     top = verticalRun.startIndex - 1
     bottom = contentHeight - (verticalRun.endIndex - 1) - 1
 
-    interior = bitmap.GetRegion(1, 1, contentWidth, contentHeight)
-    return new BGE.UI.NinePatchImage(interior, left, top, right, bottom)
+    ' Crop the 1px border away into a genuinely separate bitmap. Can't just
+    ' hand NinePatchImage a roRegion cropped from this one and let it slice
+    ' further - CreateObject("roRegion", ...) only accepts a roBitmap as its
+    ' source, not another roRegion (see NinePatchImage's own doc comment) -
+    ' so draw the interior onto a fresh bitmap instead, the same
+    ' draw-into-a-scratch-bitmap pattern used elsewhere in this engine.
+    interiorBitmap = CreateObject("roBitmap", {width: contentWidth, height: contentHeight, AlphaEnable: true})
+    borderCrop = CreateObject("roRegion", bitmap, 1, 1, contentWidth, contentHeight)
+    interiorBitmap.DrawObject(0, 0, borderCrop)
+    interiorBitmap.Finish()
+
+    return new BGE.UI.NinePatchImage(interiorBitmap, left, top, right, bottom)
   end function
 
   ' Scans a 1-pixel-wide/tall RGBA byte array (4 bytes/pixel) for the first
