@@ -32,6 +32,16 @@ namespace BGE
     ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
     private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
 
+    ' Set false, per drawToTempBitmap() call, the moment any face reuses its own
+    ' cached raster instead of a real redraw - see anyFaceReusedThisDraw below and
+    ' attemptTransformTempBitmap()'s gate on it.
+    private lastDrawWasFullyFresh as boolean = true
+
+    ' Scratch flag for the current drawToTempBitmap() call - true once any face has
+    ' taken the reuse path this frame. Reset at the top of drawToTempBitmap(), read
+    ' into lastDrawWasFullyFresh at the end of it.
+    private anyFaceReusedThisDraw as boolean = false
+
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
       m.useTempBitmapMap = BGE.getDrawModeBooleanLookupArray(true)
@@ -179,6 +189,7 @@ namespace BGE
 
       if invalid <> cache.bitmap and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
+        m.anyFaceReusedThisDraw = true
         return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, cache.bitmap)
       end if
 
@@ -244,6 +255,10 @@ namespace BGE
       someWorked = false
       offsetX = -canvasPointsTopLeftBound.x
       offsetY = -canvasPointsTopLeftBound.y
+      ' Tracked so attemptTransformTempBitmap() can refuse to whole-model-stretch a
+      ' temp bitmap that's itself a patchwork of some-fresh-some-reused per-face
+      ' content - see m.lastDrawWasFullyFresh below.
+      m.anyFaceReusedThisDraw = false
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
@@ -257,6 +272,7 @@ namespace BGE
         end if
         someWorked = thisWorked or someWorked
       end for
+      m.lastDrawWasFullyFresh = not m.anyFaceReusedThisDraw
       return {worked: someWorked, didFastDraw: allowFastDraw}
     end function
 
@@ -409,7 +425,17 @@ namespace BGE
     ' class's fit only when its own rotation component is negligible (a zoom), and rejects
     ' it (falling through to a real redraw, which uses per-face raster reuse instead - see
     ' drawFaceWithReuse()) whenever real rotation is involved - see #163.
+    '
+    ' Also requires lastDrawWasFullyFresh: the cached m.tempBitmap this would stretch is
+    ' only a trustworthy whole-model image when every face in it was actually redrawn
+    ' the same frame it was captured - if any face instead reused ITS OWN stale raster
+    ' (drawFaceWithReuse()'s per-face path), the cached image is already a patchwork
+    ' approximation, and stretching that whole patchwork again would compound the error
+    ' on top of whatever staleness/drift each individual face already carries.
     protected override function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      if not m.lastDrawWasFullyFresh
+        return invalid
+      end if
       candidate = super.attemptTransformTempBitmap(renderObj, drawMode)
       if invalid = candidate or abs(candidate.rotation) > m.negligibleRotation
         return invalid
