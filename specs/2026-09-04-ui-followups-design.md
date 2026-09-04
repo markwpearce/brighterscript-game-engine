@@ -49,10 +49,12 @@ class NinePatchImage
 end class
 ```
 
-`draw()` blits the 4 corners unscaled (`drawObjectTo`), the 4 edges scaled along one axis only (`drawScaledObjectTo`), and the center scaled both axes — 9 draw calls total, same cost class as today's flat `drawRectangle` fill plus 8 more (acceptable; not a hot path — widget backgrounds redraw only when a widget's own geometry/state changes, same as today).
+`draw()` blits the 4 corners unscaled (`drawObjectTo`), the 4 edges scaled along one axis only (`drawScaledObjectTo`), and the center scaled both axes — 9 draw calls total, where today's flat fill is 1. Note this **is** a per-frame cost, not a per-change one: `Game.drawUI()` calls `gameUi.draw()` unconditionally every frame and `UiContainer.draw()` walks every child, so a 9-patch-backed widget costs 9 draw calls every frame for as long as it's on screen. That cost is real and currently un-measured — no claim is made here that it's negligible (per this repo's "never assert one draw path is cheaper without measuring it" rule); caching a composited background bitmap per widget size is an obvious future optimization if it ever shows up in a frame budget.
 
 - `Theme` gains `backgroundImage as BGE.UI.NinePatchImage = invalid` — `invalid` (the default) means "flat color, exactly today's behavior," so this is purely additive.
 - Each of `Button`/`Checkbox`/`Select`/`Slider`'s `draw()` gains one branch: `if theme.backgroundImage <> invalid then theme.backgroundImage.draw(...) else <existing drawRectangle fill>`. The **hovered/focused border-drawing lines stay untouched** — only the background *fill* branches.
+- **Non-goal (first pass):** the background image does not vary by hover/focus state — a themeable `hoveredBackgroundImage`/`focusedBackgroundImage` is a reasonable future follow-up.
+- **Non-goal (first pass):** `UiContainer`-level background images. Only the four widgets above read `theme.backgroundImage`; `UiContainer.draw()` still fills unconditionally with its own `backgroundRGBA` and ignores the theme's image. Letting a container back itself with a 9-patch is a future follow-up, not covered by this pass.
 
 ### 2a. Loading a 9-patch: Android `.9.png` border-marker convention (not hand-specified insets)
 

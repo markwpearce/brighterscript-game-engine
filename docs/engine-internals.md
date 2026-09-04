@@ -159,14 +159,17 @@ m.game.defaultTheme.backgroundImage = new BGE.UI.NinePatchImage(plainBitmap, 6, 
 
 **Authoring a `.9.png` file:** Add a 1-pixel transparent border around your source image, then mark
 the stretch region with solid black pixels (nearly black/opaque, to withstand PNG compression) on
-the top row and left column - the first and last pixel on each border are reserved as corners, so
-mark pixels 1 through (length-2) where the unstretched region ends. The border is discarded at load
+the top row and left column - the marked run is the *stretchable* part of the image, so the unmarked
+pixels either side of it become the fixed corner insets. Only pixels 1 through (length-2) of each
+border are scanned; the very first and last pixel are reserved as corners and are never read as part
+of a marker run. The border is discarded at load
 time, so your visible content doesn't include it. This is the same convention Android UI uses - any
 `.9.png` tool (including GIMP plugins) will prepare your asset correctly.
 
-`backgroundImage` is purely additive: existing flat-color `Theme`s are unaffected (defaults to
-`invalid`), and don't vary by hover/focus state - a themeable hovered/focused background image is a
-possible future follow-up. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
+`backgroundImage` is purely additive: it defaults to `invalid`, so existing flat-color `Theme`s are
+unaffected. When it is set, the same image is used regardless of hover/focus state - a themeable
+hovered/focused background image is a possible future follow-up, as is letting a `UiContainer` (not
+just an individual widget) back itself with a 9-patch. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
 
 ## Collision, concretely
 
