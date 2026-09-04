@@ -32,15 +32,11 @@ namespace BGE
     ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
     private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
 
-    ' Set false, per drawToTempBitmap() call, the moment any face reuses its own
-    ' cached raster instead of a real redraw - see anyFaceReusedThisDraw below and
-    ' attemptTransformTempBitmap()'s gate on it.
+    ' Whether every face drawn in the most recent drawToTempBitmap() call was a genuine
+    ' fresh redraw - reset true at the top of that call, flipped false the moment any
+    ' face instead reuses its own cached raster (drawFaceWithReuse()'s reuse branch).
+    ' See attemptTransformTempBitmap()'s gate on it.
     private lastDrawWasFullyFresh as boolean = true
-
-    ' Scratch flag for the current drawToTempBitmap() call - true once any face has
-    ' taken the reuse path this frame. Reset at the top of drawToTempBitmap(), read
-    ' into lastDrawWasFullyFresh at the end of it.
-    private anyFaceReusedThisDraw as boolean = false
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -187,21 +183,22 @@ namespace BGE
 
       cache = m.getFaceRasterCache(face.faceIndex)
 
-      if invalid <> cache.bitmap and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+      ' The drift check below only bounds each vertex's own movement since the cache's
+      ' last real redraw, not the resulting bounding-box size - three vertices can each
+      ' drift by just under maxFaceDriftDistance and still grow this frame's width/height
+      ' beyond what the cached bitmap was actually allocated for (grow-only sizing is tied
+      ' to the LAST redraw's footprint, not this frame's). Require the cache to already be
+      ' big enough before cropping it to this size, or a reused frame could ask
+      ' getCroppedFaceRegion() for a region larger than its backing bitmap.
+      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
-        m.anyFaceReusedThisDraw = true
-        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, cache.bitmap)
+        m.lastDrawWasFullyFresh = false
+        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(cache.bitmap, width, height))
       end if
 
-      faceBitmap = cache.bitmap
-      if invalid = faceBitmap or faceBitmap.GetWidth() < width or faceBitmap.GetHeight() < height
-        ' Grow-only reuse, same reasoning as SceneObjectBillboard.createTempBitmap().
-        faceBitmap = CreateObject("roBitmap", {width: width, height: height, alphaEnable: true})
-        if invalid = faceBitmap
-          return false
-        end if
-      else
-        faceBitmap.Clear(&h00000000)
+      faceBitmap = BGE.RendererHelpers.growOrClearBitmap(cache.bitmap, width, height)
+      if invalid = faceBitmap
+        return false
       end if
 
       localOffsetX = -bounds[0].x
@@ -221,7 +218,20 @@ namespace BGE
       cache.bitmap = faceBitmap
       cache.staleFrameCount = 0
       cache.triangleAtCapture = BGE.Math.vectorArrayCopy(face.vertices)
-      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, faceBitmap)
+      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(faceBitmap, width, height))
+    end function
+
+    ' Crops `bitmap` (which may be larger than `width`x`height` due to grow-only reuse -
+    ' see RendererHelpers.growOrClearBitmap) down to this frame's actual face footprint,
+    ' so a blit never carries stale/blank capacity left over from a previous, larger
+    ' frame's use of the same cached bitmap.
+    '
+    ' @param {roBitmap} bitmap
+    ' @param {integer} width
+    ' @param {integer} height
+    ' @return {roRegion}
+    private function getCroppedFaceRegion(bitmap as roBitmap, width as integer, height as integer) as roRegion
+      return CreateObject("roRegion", bitmap, 0, 0, width, height)
     end function
 
     ' Whether any of this face's 3 vertices has moved more than
@@ -257,8 +267,9 @@ namespace BGE
       offsetY = -canvasPointsTopLeftBound.y
       ' Tracked so attemptTransformTempBitmap() can refuse to whole-model-stretch a
       ' temp bitmap that's itself a patchwork of some-fresh-some-reused per-face
-      ' content - see m.lastDrawWasFullyFresh below.
-      m.anyFaceReusedThisDraw = false
+      ' content - see the field's own doc comment. Flipped false by drawFaceWithReuse()
+      ' the moment any face takes the reuse path this frame.
+      m.lastDrawWasFullyFresh = true
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
@@ -272,7 +283,6 @@ namespace BGE
         end if
         someWorked = thisWorked or someWorked
       end for
-      m.lastDrawWasFullyFresh = not m.anyFaceReusedThisDraw
       return {worked: someWorked, didFastDraw: allowFastDraw}
     end function
 
@@ -410,28 +420,20 @@ namespace BGE
     ' change could hide behind it.
     private negligibleRotation as float = 0.001
 
-    ' The base class's reuse check (see SceneObjectBillboard.attemptTransformTempBitmap)
-    ' fits one rotate+scale from 4 overall silhouette points and accepts it once close
-    ' enough - exact for a single rigidly-transforming quad, but NOT for a model: rotating
-    ' around any axis but the one facing the camera changes each face's shape/occlusion
-    ' *non-rigidly relative to the others* even while the whole-model silhouette still
-    ' reconstructs within tolerance (confirmed as the cause of issue #128 - D20Room's
-    ' rotation glitching exactly where a new face's visibility changed while the
-    ' silhouette-level check still passed).
-    '
-    ' A pure camera-distance zoom is different: every face scales by the same factor with
-    ' no rotation at all, so the whole cached image genuinely IS a single rigid object in
-    ' that case - reusing it is exact, not an approximation. So this accepts the base
-    ' class's fit only when its own rotation component is negligible (a zoom), and rejects
-    ' it (falling through to a real redraw, which uses per-face raster reuse instead - see
-    ' drawFaceWithReuse()) whenever real rotation is involved - see #163.
-    '
-    ' Also requires lastDrawWasFullyFresh: the cached m.tempBitmap this would stretch is
-    ' only a trustworthy whole-model image when every face in it was actually redrawn
-    ' the same frame it was captured - if any face instead reused ITS OWN stale raster
-    ' (drawFaceWithReuse()'s per-face path), the cached image is already a patchwork
-    ' approximation, and stretching that whole patchwork again would compound the error
-    ' on top of whatever staleness/drift each individual face already carries.
+    ' How far scaleX/scaleY may differ (see attemptTransformTempBitmap()) and still count
+    ' as a uniform zoom rather than an anisotropic stretch.
+    private negligibleScaleDifference as float = 0.01
+
+    ' The base class's reuse check (SceneObjectBillboard.attemptTransformTempBitmap) fits
+    ' one rotate+scale from the whole-model silhouette - exact for a single rigid quad, but
+    ' not for a model: rotating around any axis but the one facing the camera changes each
+    ' face's shape/occlusion non-rigidly relative to the others even while the silhouette
+    ' still fits (the cause of issue #128's rotation glitch). A pure camera-distance zoom
+    ' has no such risk (every face scales identically, no rotation), so this only accepts
+    ' the base class's fit when both its rotation and its scaleX/scaleY are negligible, and
+    ' only when every face was freshly redrawn this frame (lastDrawWasFullyFresh) rather
+    ' than reused per-face (drawFaceWithReuse()) - stretching an already-patchwork bitmap
+    ' would compound each face's own staleness/drift. See #163.
     protected override function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       if not m.lastDrawWasFullyFresh
         return invalid
@@ -440,7 +442,24 @@ namespace BGE
       if invalid = candidate or abs(candidate.rotation) > m.negligibleRotation
         return invalid
       end if
+      if abs(candidate.scaleX - candidate.scaleY) > m.negligibleScaleDifference
+        return invalid
+      end if
       return candidate
+    end function
+
+    ' Restores the wider drift tolerance the base class's 16px default is too tight for -
+    ' a model's whole-silhouette reuse (see attemptTransformTempBitmap() above) only ever
+    ' fires for a pure zoom, so it can safely tolerate more drift than a single quad's
+    ' rotate+scale fit before falling back to per-face reuse (drawFaceWithReuse()).
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {integer}
+    protected override function getTempBitmapThreshold(drawMode as SceneObjectDrawMode) as integer
+      if drawMode = SceneObjectDrawMode.wireFrame
+        return 24
+      end if
+      return 64
     end function
 
     ' For tests/telemetry only - exposes attemptTransformTempBitmap()'s result without

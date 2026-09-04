@@ -145,16 +145,78 @@ namespace BGE
     end function
 
 
+    ' Whether the most recent oriented/solid draw took the cheap rotate+scale fast path
+    ' (drawRegionAsRotatedQuad, below) instead of the exact drawPinnedCorners warp - see
+    ' canUseTransformedFastDraw() below. Exposed read-only for tests/telemetry via
+    ' usedTransformedFastDraw(). Shared by every single-quad billboard subclass that opts
+    ' into the fast-draw check (SceneObjectCircle/#105, SceneObjectImage+SceneObjectText/#163).
+    protected usedTransformedFastDrawLastFrame = false
+
+    ' For tests/telemetry only - see usedTransformedFastDrawLastFrame above.
+    '
+    ' @return {boolean}
+    function usedTransformedFastDraw() as boolean
+      return m.usedTransformedFastDrawLastFrame
+    end function
+
+    ' Opt-in hook (default: never eligible) for the single-quad fast-draw check used by
+    ' usesTempBitmap()/drawFastPath() below - override to return true for the draw modes
+    ' where this object's fill is always a flat quad, so it's worth checking whether this
+    ' frame's projected quad is a plain rotated rectangle (see canUseTransformedFastDraw()).
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function isEligibleForFastDrawCheck(drawMode as SceneObjectDrawMode) as boolean
+      return false
+    end function
+
+    ' Whether m.canvasPoints (this frame's projected quad) is close enough to a pure
+    ' rotation + non-uniform scale of a rectangle that drawRegionAsRotatedQuad() - one
+    ' native DrawTransformedObject call - is a safe stand-in for the exact
+    ' drawPinnedCorners triangle warp. True for a flat quad rotated only about the axis
+    ' facing the camera (including not rotated at all); false once perspective
+    ' foreshortening skews the quad into a general trapezoid - see issue #105.
+    '
+    ' @return {boolean}
+    protected function canUseTransformedFastDraw() as boolean
+      return m.canvasPoints.isApproximatelyRotatedRectangle()
+    end function
+
+    ' Draws this object's fill via the cheap rotate+scale fast path - only valid to call
+    ' once isEligibleForFastDrawCheck(drawMode) and canUseTransformedFastDraw() have both
+    ' been confirmed (usesTempBitmap() below already does this and caches the result into
+    ' usedTransformedFastDrawLastFrame for the same frame).
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function drawFastPath(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      regionToDraw = m.getRegionWithIdToDraw(rendererObj)
+      if invalid = regionToDraw or invalid = regionToDraw.region
+        return false
+      end if
+      color = m.getDrawColorRGBA(rendererObj)
+      return m.drawRegionAsRotatedQuad(rendererObj, regionToDraw.region, m.canvasPoints, color)
+    end function
+
     ' Whether this object caches its drawing into a temp bitmap in the given draw mode, so
     ' that later frames can blit (or just re-transform) that bitmap instead of rasterizing
     ' the object from scratch again. Worth it for anything whose draw involves triangle
     ' rasterization; not worth it for a draw that's already a single cheap call.
     '
-    ' Override to make the decision depend on more than the draw mode.
+    ' A subclass opted into the fast-draw check (isEligibleForFastDrawCheck() above)
+    ' skips the temp bitmap entirely whenever this frame's quad qualifies (issue #105/#163) -
+    ' unlike every other caller, this can flip frame-to-frame for the same draw mode (see
+    ' performDraw()'s own note on that). Override useTempBitmapMap/isEligibleForFastDrawCheck
+    ' to change the decision rather than this method itself.
     '
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+      if m.isEligibleForFastDrawCheck(drawMode)
+        m.usedTransformedFastDrawLastFrame = m.canUseTransformedFastDraw()
+        return not m.usedTransformedFastDrawLastFrame
+      end if
       return m.useTempBitmapMap[drawMode]
     end function
 
@@ -187,24 +249,13 @@ namespace BGE
       neededWidth = canvasSize.x + 1
       neededHeight = canvasSize.y + 1
 
-      tempBitmap = m.tempBitmap as roBitmap
-      if invalid = tempBitmap or tempBitmap.GetWidth() < neededWidth or tempBitmap.GetHeight() < neededHeight
-        ' Grow-only reuse: a fresh CreateObject() every single frame an object moves is
-        ' real, measured allocation cost (issue #128/#163's follow-up - this used to be
-        ' masked for SceneObjectModel by how often the since-removed reuse-via-transform
-        ' path skipped this allocation entirely). Keep whatever backing bitmap this
-        ' object already has across frames and only reallocate once this frame's
-        ' silhouette has actually outgrown it, rather than matching it exactly (and
-        ' reallocating) on every single frame its projected size changes even slightly.
-        tempBitmap = createObject("roBitmap", {width: neededWidth, height: neededHeight, alphaEnable: true})
-        if invalid = tempBitmap
-          return invalid
-        end if
-      else
-        ' A reused bitmap still carries whatever a previous (possibly larger, possibly
-        ' differently-shaped) frame drew into it - clear it or stale pixels bleed
-        ' through around/behind this frame's own content.
-        tempBitmap.Clear(&h00000000)
+      ' Grow-only reuse (issue #128/#163's follow-up): a fresh CreateObject() every single
+      ' frame an object moves is real, measured allocation cost, so this keeps whatever
+      ' backing bitmap the object already has across frames and only reallocates once this
+      ' frame's silhouette has actually outgrown it - see RendererHelpers.growOrClearBitmap.
+      tempBitmap = BGE.RendererHelpers.growOrClearBitmap(m.tempBitmap as roBitmap, neededWidth, neededHeight)
+      if invalid = tempBitmap
+        return invalid
       end if
 
       tempBitmapResult = m.drawToTempBitmap(rendererObj, tempBitmap, canvasBounds[0], drawMode, allowFastDraw)
