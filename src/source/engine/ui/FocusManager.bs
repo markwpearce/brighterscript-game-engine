@@ -10,6 +10,11 @@ import "../controller/ControlMap.bs"
 
 namespace BGE.UI
 
+  ' Minimum analog-stick magnitude before updateAnalogCursor() moves the
+  ' cursor at all. Local to the UI cursor, not applied in ControlMap - other
+  ' axis consumers get the raw stick value.
+  const CURSOR_ANALOG_DEADZONE = 0.15
+
   ' How BGE.UI.FocusManager moves focus on directional input.
   enum FocusNavigationMode
     ' Default: discrete list navigation, like a typical menu - Up/Down/Left/
@@ -64,7 +69,10 @@ namespace BGE.UI
     ' mode, alongside the existing d-pad press/held stepping. invalid (the
     ' default) means no analog input drives the cursor at all - zero behavior
     ' change. See updateAnalogCursor().
-    analogAxisName as string = invalid
+    ' dynamic, not string, so a game can reset it back to invalid (e.g. when
+    ' leaving the room that opted in) - the type checker rejects assigning
+    ' invalid to a string-typed field.
+    analogAxisName as dynamic = invalid
     ' Pixels/second the cursor moves at full stick deflection (magnitude 1.0).
     cursorAnalogSpeed as float = 400.0
 
@@ -205,7 +213,13 @@ namespace BGE.UI
 
       if not handled and not m.consumedThisFrame and (input.x <> 0 or input.y <> 0)
         if isPointer
-          m.navigatePointer(input)
+          ' Once an axis is bound, ControlMap.getAxis()'s remote-d-pad fallback
+          ' already routes d-pad input through updateAnalogCursor()'s continuous
+          ' model, so running the discrete stepper too would double-drive the
+          ' same input this frame.
+          if m.analogAxisName = invalid
+            m.navigatePointer(input)
+          end if
         else
           m.navigateList(input)
         end if
@@ -290,6 +304,17 @@ namespace BGE.UI
     '
     ' @return {void}
     private sub seedAndHitTestPointer()
+      m.seedPointerIfNeeded()
+      m.updateHoverAndFocus()
+    end sub
+
+    ' pointer mode: the seeding half of seedAndHitTestPointer(), split out so
+    ' updateAnalogCursor() can seed BEFORE applying its movement delta without
+    ' also hit-testing the pre-movement position. Idempotent after the first
+    ' call.
+    '
+    ' @return {void}
+    private sub seedPointerIfNeeded()
       if not m.hasSeededFocus and m.focusOrder.count() > 0
         seed = m.focusOrder[0]
         ' draw() is what normally positions a widget, cascading down from the
@@ -303,8 +328,6 @@ namespace BGE.UI
         m.cursorPosition = BGE.Math.VectorOps.create(seed.position.x + seed.width / 2, seed.position.y + seed.height / 2, 0)
         m.hasSeededFocus = true
       end if
-
-      m.updateHoverAndFocus()
     end sub
 
     ' Repositions widget and every UiContainer ancestor above it, root-first,
@@ -342,6 +365,21 @@ namespace BGE.UI
 
       m.cursorPosition.x += input.x * m.cursorStep
       m.cursorPosition.y -= input.y * m.cursorStep ' input.y is world-space (+up); cursor space is screen-space (+down)
+      m.clampCursorToCanvas()
+    end sub
+
+    ' Keeps cursorPosition inside the UI canvas - without this a held stick
+    ' pushes the cursor arbitrarily far off-screen, with no visual feedback
+    ' and no way back except holding the opposite direction just as long.
+    '
+    ' @return {void}
+    private sub clampCursorToCanvas()
+      canvas = m.game.uiCanvas
+      if canvas = invalid
+        return
+      end if
+      m.cursorPosition.x = BGE.Math.Clamp(m.cursorPosition.x, 0, canvas.getWidth())
+      m.cursorPosition.y = BGE.Math.Clamp(m.cursorPosition.y, 0, canvas.getHeight())
     end sub
 
     ' Continuously moves cursorPosition from a bound analog stick axis, then
@@ -350,6 +388,14 @@ namespace BGE.UI
     ' analog movement can't wait for a discrete input event. No-op unless
     ' navigationMode is pointer, analogAxisName is set, and controls has at
     ' least one binding - zero cost for a game that doesn't use this.
+    '
+    ' Once analogAxisName is set this becomes the ONLY thing moving the cursor
+    ' on directional input: ControlMap.getAxis() falls back to the remote d-pad
+    ' when the bound stick is neutral, so a d-pad press already flows through
+    ' here, and update()'s discrete cursorStep stepping is skipped to avoid
+    ' double-driving the same input. A single d-pad tap therefore moves the
+    ' cursor by one frame's worth of cursorAnalogSpeed rather than a full
+    ' cursorStep - a deliberate tradeoff of this mode.
     '
     ' @param {BGE.Controller.ControlMap} controls - Game.controls
     ' @param {float} dt - Game.getDeltaTime()
@@ -361,12 +407,20 @@ namespace BGE.UI
 
       axis = controls.getAxis(m.analogAxisName)
       magnitude = BGE.Math.VectorOps.length(axis)
-      if magnitude < 0.15 ' deadzone - see design doc section 1
+      if magnitude < BGE.UI.CURSOR_ANALOG_DEADZONE
         return
       end if
 
+      ' Seed first (idempotent after the first call), so a later d-pad press
+      ' can't re-seed and discard everything analog movement did.
+      m.seedPointerIfNeeded()
+
+      ' Deliberately un-normalized: magnitude gates the deadzone, then each
+      ' axis is applied independently, so a full diagonal moves ~1.41x faster
+      ' than a cardinal direction. Accepted simplification, not an oversight.
       m.cursorPosition.x += axis.x * m.cursorAnalogSpeed * dt
       m.cursorPosition.y -= axis.y * m.cursorAnalogSpeed * dt ' axis.y is world-space (+up); cursor space is screen-space (+down), matching navigatePointer()
+      m.clampCursorToCanvas()
       m.updateHoverAndFocus()
     end sub
 

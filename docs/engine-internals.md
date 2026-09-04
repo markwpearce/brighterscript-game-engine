@@ -97,6 +97,45 @@ the full per-type reference, the draw-mode table, a walkthrough of exactly how `
 processes a frame, and a deep dive on `SceneObjectPlane` (the ground-plane renderer used by
 `examples/terrain`).
 
+## Analog-stick cursor movement (`BGE.UI`)
+
+`BGE.UI` focus is global: one `Game` owns one `BGE.UI.FocusManager` (`Game.focusManager`), and its
+`navigationMode` is either `list` (the default - discrete next/previous stepping through registered
+widgets) or `pointer` (an opt-in virtual cursor, `cursorPosition`, hit-tested against widget bounds
+to drive hover/focus). In `pointer` mode, the cursor can also be driven continuously by a connected
+controller's analog stick:
+
+```brightscript
+' once, at startup (see examples/ui/src/source/main.bs)
+game.enableControllerInput()
+
+' in the room that wants a cursor
+game.controls.bindAxis("cursor", "1", 0) ' player 0's stick "1"
+game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
+game.focusManager.analogAxisName = "cursor"
+game.focusManager.cursorAnalogSpeed = 400.0 ' px/sec at full deflection (the default)
+```
+
+`analogAxisName` names an axis you bound through `Game.controls.bindAxis()` (see
+`BGE.Controller.ControlMap`) - the UI layer adds no controller plumbing of its own, it just reads
+that axis. It's `invalid` by default, so a game that never sets it gets exactly the previous
+behavior at zero cost.
+
+`FocusManager.updateAnalogCursor(controls, dt)` does the work, and unlike `FocusManager.update()`
+(driven once per input event) it runs **every frame**, from `Game.processUiInput()` - continuous
+analog movement can't wait for a discrete button event. It applies a `0.15` deadzone
+(`BGE.UI.CURSOR_ANALOG_DEADZONE`) before moving anything; that deadzone is local to the UI cursor,
+not applied inside `ControlMap`, so other axis consumers still see the raw stick value. The cursor is
+clamped to the UI canvas, so a held stick can't push it off-screen.
+
+One behavior to know about: `ControlMap.getAxis()` falls back to the remote's d-pad whenever the
+bound stick reads neutral, which means d-pad presses already flow through `updateAnalogCursor()`'s
+continuous model. So once `analogAxisName` is set, the older discrete `cursorStep` stepping in
+`update()` is skipped entirely - otherwise one d-pad press would drive the cursor twice, through two
+different movement models. A single d-pad tap consequently moves the cursor by one frame's worth of
+`cursorAnalogSpeed` rather than a full `cursorStep`; leave `analogAxisName` unset if you want the
+discrete stepping instead.
+
 ## Collision, concretely
 
 Each `Collider` (`CircleCollider`, `RectangleCollider`) wraps one `roSprite` on the `Game`'s shared
