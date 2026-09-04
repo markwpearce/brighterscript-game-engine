@@ -16,10 +16,10 @@ namespace BGE.UI
     popup = "popup"
   end enum
 
-  ' A focusable, inline-cycling option picker: Left/Right (while focused)
-  ' step through m.options with wraparound. For a full expanding/popup list,
-  ' see the follow-up issue filed alongside this widget - this is the
-  ' compact style, matching Slider's existing interaction pattern.
+  ' A focusable option picker. Its interaction style is controlled by
+  ' Select.style (see BGE.UI.SelectStyle): inline (the default) cycles
+  ' through m.options in place with Left/Right, matching Slider's existing
+  ' interaction pattern; popup expands a full option list on OK.
   class Select extends UiWidget
 
     options as dynamic[] = []
@@ -28,6 +28,11 @@ namespace BGE.UI
 
     ' Called after selectedIndex changes - function(select as Select) as void
     onChanged as function or dynamic
+
+    ' Test accessor: last value an onChanged callback stashed here. Not part
+    ' of the public API - exists purely because a plain local var captured by
+    ' an anonymous sub assigned to onChanged doesn't reliably update under
+    ' brs-cli, so tests need a field on the widget itself to observe.
     lastChangedValue as dynamic
 
     ' Which interaction style this Select uses - see BGE.UI.SelectStyle.
@@ -139,20 +144,41 @@ namespace BGE.UI
       end if
 
       if m.expanded
-        m.selectedIndex = m.highlightedIndex
+        ' options can be replaced while expanded, leaving highlightedIndex
+        ' past the new end - clamp before committing so getValue() can't
+        ' index out of range.
+        if m.options.count() = 0
+          m.selectedIndex = 0
+        else
+          m.selectedIndex = Fix(BGE.Math.Clamp(m.highlightedIndex, 0, m.options.count() - 1))
+        end if
+        m.highlightedIndex = m.selectedIndex
         m.expanded = false
         if m.onChanged <> invalid
           m.onChanged(m)
         end if
-      else
+      else if m.options.count() > 0
+        ' Nothing to show (and nothing to pick) with no options - don't expand.
         m.highlightedIndex = m.selectedIndex
         m.expanded = true
       end if
     end sub
 
+    ' Collapses the popup list whenever this Select loses focus. Only the
+    ' currently-focused widget's drawOverlay() runs, so an expanded-but-
+    ' unfocused Select would be invisible while still holding a stale
+    ' highlight that the next OK press would immediately commit. Covers every
+    ' blur path (list navigation, pointer hover-out, analog cursor) in one place.
+    '
+    ' @return {void}
+    override sub onBlur()
+      m.expanded = false
+    end sub
+
     ' popup style only: called from handleInput() while m.expanded. Up/Down
     ' move the highlight (throttled like the inline style's own Left/Right),
-    ' back cancels and collapses without changing selectedIndex. OK is NOT
+    ' back cancels and collapses without changing selectedIndex, and
+    ' Left/Right are consumed but inert (see below). OK is NOT
     ' handled here - FocusManager.update() intercepts OK press before it ever
     ' reaches handleInput(), calling onClick() directly instead (see onClick()
     ' above). Returns false (unhandled) once not expanded, so FocusManager
@@ -179,6 +205,14 @@ namespace BGE.UI
             m.highlightedIndex = Fix(BGE.Math.Clamp(m.highlightedIndex - 1, 0, m.options.count() - 1))
           end if
         end if
+        input.consume()
+        return true
+      end if
+
+      if (input.press or input.held) and (input.isButton("left") or input.isButton("right"))
+        ' Inert, but consumed: reporting these as unhandled would let
+        ' FocusManager.navigateList() walk focus off this Select while its
+        ' popup is open.
         input.consume()
         return true
       end if

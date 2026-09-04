@@ -204,7 +204,8 @@ field (`BGE.UI.SelectStyle`):
 - While expanded, Up/Down move a visual highlight through the options (throttled to one step per `WIDGET_REPEAT_DELAY_MS`, matching inline cycling's throttle)
 - OK again commits the highlighted option as the new selection (firing `onChanged()`) and collapses the list
 - Back (while expanded) cancels without changing the selection and collapses the list
-- Left/Right (inline cycling buttons) do nothing in popup style - they're not part of the interaction model
+- Left/Right (inline cycling buttons) never change the selection in popup style - they're not part of the interaction model. While collapsed they have no effect at all (focus navigation handles them as usual); while expanded they're consumed and inert, so they neither move the highlight nor walk focus away from the open list
+- Losing focus while expanded collapses the list (`onBlur()`), so a popup can't be left open-but-invisible with a stale highlight
 - The popup list draws via `UiWidget.drawOverlay()`, so it floats above all other UI regardless of nesting
 
 The popup list is an explicit non-goal: every option draws unclipped/unscrolled, and a list long enough to
