@@ -7,15 +7,27 @@
 //   task - one of: install, build, validate, clean, audit, ropm-install
 //
 // Each task is just a shell command run inside every examples/<name>/
-// directory in turn (matching the old examples_command.sh behavior). A
-// failure in one example does NOT stop the others from running - this
-// matches the original scripts, which never checked exit codes either.
+// directory in turn. A failure in one example does NOT stop the others (or
+// later steps in the same example) from running - this matches the original
+// scripts, which never checked exit codes either.
+//
+// Examples run CONCURRENTLY (a fixed-size worker pool, not all-at-once) since
+// steps like `npm install` are mostly I/O/network-bound and every example
+// pulls the same devDependencies - CI's "Install example dependencies" step
+// was previously the slowest part of the Validate workflow, running 19
+// installs back to back one at a time. Override the pool size with the
+// EXAMPLES_CONCURRENCY env var (e.g. for a constrained local machine).
+// Each example's own output is buffered and flushed as one block when it
+// finishes, rather than streamed live, so concurrent processes' output
+// doesn't interleave line-by-line into an unreadable mess.
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const os = require('os');
+const { spawn } = require('child_process');
 
 const EXAMPLES_DIR = path.join(__dirname, '..', 'examples');
+const CONCURRENCY = Number(process.env.EXAMPLES_CONCURRENCY) || Math.min(8, os.cpus().length * 2);
 
 // Each task is a list of {command, args} steps run in every example directory.
 const TASKS = {
@@ -35,21 +47,47 @@ function listExampleDirs() {
     .sort();
 }
 
+// Runs one step and resolves with its combined stdout/stderr instead of
+// streaming it, so the caller can print it as one uninterrupted block.
 function runStep(exampleDir, { command, args }) {
-  console.log(`\n> ${command} ${args.join(' ')}  (examples/${exampleDir})`);
-  // shell:true lets Windows resolve npm/npx/ropm's .cmd shims, and matches
-  // how these commands would be typed at a terminal on any platform.
-  const result = spawnSync(command, args, {
-    cwd: path.join(EXAMPLES_DIR, exampleDir),
-    stdio: 'inherit',
-    shell: true
+  return new Promise((resolve) => {
+    let output = `\n> ${command} ${args.join(' ')}  (examples/${exampleDir})\n`;
+    // shell:true lets Windows resolve npm/npx/ropm's .cmd shims, and matches
+    // how these commands would be typed at a terminal on any platform.
+    const child = spawn(command, args, {
+      cwd: path.join(EXAMPLES_DIR, exampleDir),
+      shell: true
+    });
+    child.stdout.on('data', (chunk) => { output += chunk; });
+    child.stderr.on('data', (chunk) => { output += chunk; });
+    child.on('close', (code) => {
+      if (code !== 0) {
+        output += `  (exited with status ${code} - continuing with the next example)\n`;
+      }
+      resolve(output);
+    });
   });
-  if (result.status !== 0) {
-    console.warn(`  (exited with status ${result.status} - continuing with the next example)`);
+}
+
+async function runExample(exampleDir, steps) {
+  for (const step of steps) {
+    process.stdout.write(await runStep(exampleDir, step));
   }
 }
 
-function main() {
+// A fixed-size worker pool over `items` - the simplest way to cap
+// concurrency without pulling in a dependency for it.
+async function runWithConcurrency(items, concurrency, worker) {
+  const queue = [...items];
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (queue.length > 0) {
+      await worker(queue.shift());
+    }
+  });
+  await Promise.all(workers);
+}
+
+async function main() {
   const taskName = process.argv[2];
   const task = TASKS[taskName];
 
@@ -58,20 +96,18 @@ function main() {
     process.exit(1);
   }
 
+  const exampleDirs = listExampleDirs();
+
   // ropm-install replaces the engine's copy of itself before reinstalling,
   // so each example always picks up the latest local engine source.
   if (taskName === 'ropm-install') {
-    for (const exampleDir of listExampleDirs()) {
+    for (const exampleDir of exampleDirs) {
       const bgeModulePath = path.join(EXAMPLES_DIR, exampleDir, 'node_modules', 'bge');
       fs.rmSync(bgeModulePath, { recursive: true, force: true });
     }
   }
 
-  for (const exampleDir of listExampleDirs()) {
-    for (const step of task) {
-      runStep(exampleDir, step);
-    }
-  }
+  await runWithConcurrency(exampleDirs, CONCURRENCY, (exampleDir) => runExample(exampleDir, task));
 }
 
 main();
