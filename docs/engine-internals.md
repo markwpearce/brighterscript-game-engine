@@ -136,6 +136,37 @@ different movement models. A single d-pad tap consequently moves the cursor by o
 `cursorAnalogSpeed` rather than a full `cursorStep`; leave `analogAxisName` unset if you want the
 discrete stepping instead.
 
+### 9-patch widget backgrounds
+
+`BGE.UI.NinePatchImage` is a stretchable background image (also called "scale-9" - used extensively
+in Android UI frameworks): a source bitmap is sliced into 9 regions at construction (4 fixed-size
+corners, 4 edges stretched along one axis, and a center stretched both ways), so a small texture can
+back a widget background of any size without visibly stretching its corners. Set `Theme.backgroundImage`
+to replace a flat-color background fill with a 9-patch image:
+
+```brightscript
+' Load from a packaged asset using Android's .9.png marker convention
+m.game.defaultTheme.backgroundImage = BGE.UI.loadNinePatchImage("pkg:/images/panel.9.png")
+
+' Or load from an already-loaded roBitmap
+bitmap = CreateObject("roBitmap", "pkg:/images/panel.9.png")
+m.game.defaultTheme.backgroundImage = BGE.UI.parseNinePatchBitmap(bitmap)
+
+' Or construct manually if you know the insets
+m.game.defaultTheme.backgroundImage = new BGE.UI.NinePatchImage(bitmap, 6, 6, 6, 6)
+```
+
+**Authoring a `.9.png` file:** Add a 1-pixel transparent border around your source image, then mark
+the stretch region with solid black pixels (nearly black/opaque, to withstand PNG compression) on
+the top row and left column - the first and last pixel on each border are reserved as corners, so
+mark pixels 1 through (length-2) where the unstretched region ends. The border is discarded at load
+time, so your visible content doesn't include it. This is the same convention Android UI uses - any
+`.9.png` tool (including GIMP plugins) will prepare your asset correctly.
+
+`backgroundImage` is purely additive: existing flat-color `Theme`s are unaffected (defaults to
+`invalid`), and don't vary by hover/focus state - a themeable hovered/focused background image is a
+possible future follow-up. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
+
 ## Collision, concretely
 
 Each `Collider` (`CircleCollider`, `RectangleCollider`) wraps one `roSprite` on the `Game`'s shared
