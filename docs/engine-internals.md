@@ -148,12 +148,13 @@ to replace a flat-color background fill with a 9-patch image:
 ' Load from a packaged asset using Android's .9.png marker convention
 m.game.defaultTheme.backgroundImage = BGE.UI.loadNinePatchImage("pkg:/images/panel.9.png")
 
-' Or load from an already-loaded roBitmap
-bitmap = CreateObject("roBitmap", "pkg:/images/panel.9.png")
-m.game.defaultTheme.backgroundImage = BGE.UI.parseNinePatchBitmap(bitmap)
+' Or load from an already-loaded .9.png roBitmap
+ninePatchBitmap = CreateObject("roBitmap", "pkg:/images/panel.9.png")
+m.game.defaultTheme.backgroundImage = BGE.UI.parseNinePatchBitmap(ninePatchBitmap)
 
-' Or construct manually if you know the insets
-m.game.defaultTheme.backgroundImage = new BGE.UI.NinePatchImage(bitmap, 6, 6, 6, 6)
+' Or construct manually if you know the insets (requires a plain image with no border/markers)
+plainBitmap = CreateObject("roBitmap", "pkg:/images/button-background.png")
+m.game.defaultTheme.backgroundImage = new BGE.UI.NinePatchImage(plainBitmap, 6, 6, 6, 6)
 ```
 
 **Authoring a `.9.png` file:** Add a 1-pixel transparent border around your source image, then mark
