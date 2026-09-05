@@ -103,6 +103,7 @@ The `examples/` directory has full Roku channels you can build and run:
 | [`asteroids`](examples/asteroids) | A complete 2D game - player movement, bullets, collisions, particle-style explosions, sound |
 | [`pong`](examples/pong) | Classic 2D Pong, playable in both 2D and 3D camera modes |
 | [`snake`](examples/snake) | Grid-based movement and growing collision shapes, in 2D and 3D |
+| [`platformer`](examples/platformer) | A side-scrolling platformer demonstrating gravity, jumping, and collision *resolution* built on top of the engine's detection-only collider system |
 | [`3d`](examples/3d) | Loading and rendering `.stl` 3D models with the pseudo-3D renderer |
 | [`pixels`](examples/pixels) | A tour of drawables - polygons, rectangles, sprites, and more, one room per shape |
 | [`canvas`](examples/canvas) | Using the engine's canvas/renderer as a standalone drawing surface |
