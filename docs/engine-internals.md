@@ -134,15 +134,30 @@ continuous model. So once `analogAxisName` is set, the older discrete `cursorSte
 `update()` is skipped entirely - otherwise one d-pad press would drive the cursor twice, through two
 different movement models. A single d-pad tap consequently moves the cursor by one frame's worth of
 `cursorAnalogSpeed` rather than a full `cursorStep`; leave `analogAxisName` unset if you want the
-discrete stepping instead.
+discrete stepping instead. If `analogAxisName` names an axis you forgot to actually pass to
+`controls.bindAxis()`, `update()` detects that (`ControlMap.hasAxisBinding()`) and falls back to the
+discrete stepper instead of leaving the cursor unresponsive.
 
-### 9-patch widget backgrounds
+### Widget background images: 9-patch and plain
 
-`BGE.UI.NinePatchImage` is a stretchable background image (also called "scale-9" - used extensively
-in Android UI frameworks): a source bitmap is sliced into 9 regions at construction (4 fixed-size
-corners, 4 edges stretched along one axis, and a center stretched both ways), so a small texture can
-back a widget background of any size without visibly stretching its corners. Set `Theme.backgroundImage`
-to replace a flat-color background fill with a 9-patch image:
+`Theme.backgroundImage` replaces a widget's flat-color background fill with an image, either a
+stretchable `BGE.UI.NinePatchImage` or a plain `BGE.UI.ImageBackground` - both share the same
+`draw(renderer, x, y, width, height)` shape, so any widget with a themed background (`Button`,
+`Checkbox`, `Slider`, `TextInput`, `Select`) accepts either one interchangeably. The easiest way to
+load either is `BGE.UI.loadBackgroundImage(path)`, which picks the right type for you from the
+filename:
+
+```brightscript
+' ".9.png" (case-insensitive) loads as a 9-patch; anything else loads as a plain image
+m.game.defaultTheme.backgroundImage = BGE.UI.loadBackgroundImage("pkg:/images/panel.9.png")
+m.game.defaultTheme.backgroundImage = BGE.UI.loadBackgroundImage("pkg:/images/button-background.png")
+```
+
+**`BGE.UI.NinePatchImage`** (also called "scale-9" - used extensively in Android UI frameworks): a
+source bitmap is sliced into 9 regions at construction (4 fixed-size corners, 4 edges stretched along
+one axis, and a center stretched both ways), so a small texture can back a widget background of any
+size without visibly stretching its corners. Beyond `loadBackgroundImage()`, it can also be loaded or
+constructed directly:
 
 ```brightscript
 ' Load from a packaged asset using Android's .9.png marker convention
@@ -166,10 +181,15 @@ of a marker run. The border is discarded at load
 time, so your visible content doesn't include it. This is the same convention Android UI uses - any
 `.9.png` tool (including GIMP plugins) will prepare your asset correctly.
 
+**`BGE.UI.ImageBackground`** is the plain-image counterpart: the whole source image is stretched to
+fill the widget's bounds, corners included - no insets, no marker convention, just
+`new BGE.UI.ImageBackground(bitmap)` (or `loadBackgroundImage()` for a path not ending in `.9.png`).
+Use this for a background that's meant to stretch uniformly rather than keep unstretched corners.
+
 `backgroundImage` is purely additive: it defaults to `invalid`, so existing flat-color `Theme`s are
 unaffected. When it is set, the same image is used regardless of hover/focus state - a themeable
 hovered/focused background image is a possible future follow-up, as is letting a `UiContainer` (not
-just an individual widget) back itself with a 9-patch. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
+just an individual widget) back itself with a background image. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
 
 ### Widget overlay rendering and popup Select
 

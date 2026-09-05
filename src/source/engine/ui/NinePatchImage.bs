@@ -2,6 +2,18 @@ import "../renderer/Renderer.bs"
 
 namespace BGE.UI
 
+  ' Describes one of a NinePatchImage's 9 slices: which segment of the
+  ' source/destination grid it occupies along each axis. 0 = the fixed
+  ' leading segment (the left/top inset), 1 = the stretchable middle segment,
+  ' 2 = the fixed trailing segment (the right/bottom inset). Both slicing
+  ' (in new()) and drawing (in draw()) are driven generically from this list
+  ' instead of writing out 9 near-identical blocks by hand.
+  interface NinePatchSliceSpec
+    name as string
+    gridX as integer
+    gridY as integer
+  end interface
+
   ' A 9-patch ("scale-9") stretchable background image: a source bitmap is
   ' sliced once (at construction) into 9 roRegions - 4 corners (drawn at
   ' fixed size), 4 edges (stretched along one axis), and a center (stretched
@@ -16,20 +28,17 @@ namespace BGE.UI
   ' a roRegion was tried) - so slicing has to start from the real bitmap.
   class NinePatchImage
 
-    protected topLeft as roRegion
-    protected topEdge as roRegion
-    protected topRight as roRegion
-    protected leftEdge as roRegion
-    protected center as roRegion
-    protected rightEdge as roRegion
-    protected bottomLeft as roRegion
-    protected bottomEdge as roRegion
-    protected bottomRight as roRegion
+    ' Slice name (see sliceSpecs()) -> roRegion, invalid if that slice's
+    ' inset resolved to 0 (see makeSlice()).
+    protected slices as object
 
     protected left as integer
     protected top as integer
     protected right as integer
     protected bottom as integer
+
+    protected sourceWidth as integer
+    protected sourceHeight as integer
 
     ' @param {roBitmap} sourceBitmap - the full source image
     ' @param {integer} left - px from the left edge that stay unstretched
@@ -41,33 +50,57 @@ namespace BGE.UI
       m.top = top
       m.right = right
       m.bottom = bottom
+      m.sourceWidth = sourceBitmap.GetWidth()
+      m.sourceHeight = sourceBitmap.GetHeight()
 
-      srcW = sourceBitmap.GetWidth()
-      srcH = sourceBitmap.GetHeight()
-      midW = srcW - left - right
-      midH = srcH - top - bottom
-
-      m.topLeft = m.makeSlice(sourceBitmap, 0, 0, left, top)
-      m.topEdge = m.makeSlice(sourceBitmap, left, 0, midW, top)
-      m.topRight = m.makeSlice(sourceBitmap, srcW - right, 0, right, top)
-      m.leftEdge = m.makeSlice(sourceBitmap, 0, top, left, midH)
-      m.center = m.makeSlice(sourceBitmap, left, top, midW, midH)
-      m.rightEdge = m.makeSlice(sourceBitmap, srcW - right, top, right, midH)
-      m.bottomLeft = m.makeSlice(sourceBitmap, 0, srcH - bottom, left, bottom)
-      m.bottomEdge = m.makeSlice(sourceBitmap, left, srcH - bottom, midW, bottom)
-      m.bottomRight = m.makeSlice(sourceBitmap, srcW - right, srcH - bottom, right, bottom)
+      m.slices = {}
+      for each spec in m.sliceSpecs()
+        m.slices[spec.name] = m.makeSlice(sourceBitmap, spec)
+      end for
     end sub
+
+    ' The 9 slice specs shared by new() (slicing) and draw() (drawing) - see
+    ' NinePatchSliceSpec.
+    private function sliceSpecs() as NinePatchSliceSpec[]
+      return [
+        { name: "topLeft", gridX: 0, gridY: 0 }
+        { name: "topEdge", gridX: 1, gridY: 0 }
+        { name: "topRight", gridX: 2, gridY: 0 }
+        { name: "leftEdge", gridX: 0, gridY: 1 }
+        { name: "center", gridX: 1, gridY: 1 }
+        { name: "rightEdge", gridX: 2, gridY: 1 }
+        { name: "bottomLeft", gridX: 0, gridY: 2 }
+        { name: "bottomEdge", gridX: 1, gridY: 2 }
+        { name: "bottomRight", gridX: 2, gridY: 2 }
+      ]
+    end function
+
+    ' The source-rect position/length a grid coordinate occupies along one
+    ' axis - grid 0/2 are the fixed leading/trailing inset, grid 1 is
+    ' whatever is left over in between.
+    private function gridSegment(gridPos as integer, startInset as integer, midLength as integer, endInset as integer, sourceLength as integer) as object
+      if gridPos = 0
+        return { pos: 0, length: startInset }
+      else if gridPos = 1
+        return { pos: startInset, length: midLength }
+      end if
+      return { pos: sourceLength - endInset, length: endInset }
+    end function
 
     ' A zero-width/height inset (e.g. a source image with no marker on one axis)
     ' would make CreateObject("roRegion", ...) return Invalid, which drawObject()
     ' does not guard against - so such a slice is left invalid here and skipped
     ' by draw(). Alpha blending is off by default on a new region, and these are
     ' composited over whatever is already on the canvas, so enable it explicitly.
-    private function makeSlice(sourceBitmap as roBitmap, x as integer, y as integer, w as integer, h as integer) as roRegion
-      if w <= 0 or h <= 0
+    private function makeSlice(sourceBitmap as roBitmap, spec as NinePatchSliceSpec) as roRegion
+      midW = m.sourceWidth - m.left - m.right
+      midH = m.sourceHeight - m.top - m.bottom
+      segX = m.gridSegment(spec.gridX, m.left, midW, m.right, m.sourceWidth)
+      segY = m.gridSegment(spec.gridY, m.top, midH, m.bottom, m.sourceHeight)
+      if segX.length <= 0 or segY.length <= 0
         return invalid
       end if
-      region = CreateObject("roRegion", sourceBitmap, x, y, w, h)
+      region = CreateObject("roRegion", sourceBitmap, segX.pos, segY.pos, segX.length, segY.length)
       if region <> invalid
         region.SetAlphaEnable(true)
       end if
@@ -87,45 +120,50 @@ namespace BGE.UI
       midW = width - m.left - m.right
       midH = height - m.top - m.bottom
 
-      ' A slice is invalid when its inset resolved to 0 - see makeSlice().
-      if m.topLeft <> invalid
-        renderer.drawObject(x, y, m.topLeft)
-      end if
-      if m.topEdge <> invalid
-        renderer.drawScaledObject(x + m.left, y, midW / m.topEdge.GetWidth(), 1.0, m.topEdge)
-      end if
-      if m.topRight <> invalid
-        renderer.drawObject(x + width - m.right, y, m.topRight)
-      end if
-
-      if m.leftEdge <> invalid
-        renderer.drawScaledObject(x, y + m.top, 1.0, midH / m.leftEdge.GetHeight(), m.leftEdge)
-      end if
-      if m.center <> invalid
-        renderer.drawScaledObject(x + m.left, y + m.top, midW / m.center.GetWidth(), midH / m.center.GetHeight(), m.center)
-      end if
-      if m.rightEdge <> invalid
-        renderer.drawScaledObject(x + width - m.right, y + m.top, 1.0, midH / m.rightEdge.GetHeight(), m.rightEdge)
-      end if
-
-      if m.bottomLeft <> invalid
-        renderer.drawObject(x, y + height - m.bottom, m.bottomLeft)
-      end if
-      if m.bottomEdge <> invalid
-        renderer.drawScaledObject(x + m.left, y + height - m.bottom, midW / m.bottomEdge.GetWidth(), 1.0, m.bottomEdge)
-      end if
-      if m.bottomRight <> invalid
-        renderer.drawObject(x + width - m.right, y + height - m.bottom, m.bottomRight)
-      end if
+      for each spec in m.sliceSpecs()
+        region = m.slices[spec.name]
+        ' A slice is invalid when its inset resolved to 0 - see makeSlice().
+        if region <> invalid
+          destX = m.gridDest(spec.gridX, x, m.left, width, m.right)
+          destY = m.gridDest(spec.gridY, y, m.top, height, m.bottom)
+          if spec.gridX = 1 or spec.gridY = 1
+            scaleX = 1.0
+            if spec.gridX = 1
+              scaleX = midW / region.GetWidth()
+            end if
+            scaleY = 1.0
+            if spec.gridY = 1
+              scaleY = midH / region.GetHeight()
+            end if
+            renderer.drawScaledObject(destX, destY, scaleX, scaleY, region)
+          else
+            ' Corners never stretch - a plain drawObject() is cheaper than a
+            ' drawScaledObject() at scale 1.0, and this is the common case.
+            renderer.drawObject(destX, destY, region)
+          end if
+        end if
+      end for
     end sub
+
+    ' The destination position a grid coordinate occupies along one axis -
+    ' grid 0/2 sit flush against the origin/far edge, grid 1 starts just past
+    ' the leading inset.
+    private function gridDest(gridPos as integer, origin as float, startInset as integer, totalLength as float, endInset as integer) as float
+      if gridPos = 0
+        return origin
+      else if gridPos = 1
+        return origin + startInset
+      end if
+      return origin + totalLength - endInset
+    end function
 
     ' Test-only accessors - not part of the public API surface, no JSDoc.
     function getTopLeft() as roRegion
-      return m.topLeft
+      return m.slices["topLeft"]
     end function
 
     function getCenter() as roRegion
-      return m.center
+      return m.slices["center"]
     end function
 
     function getLeft() as integer
