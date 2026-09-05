@@ -259,9 +259,14 @@ Roku mobile app remains as future work to confirm whether the real app does inde
 Left/Right arrow keys (while focused) move the caret one position at a time, repeating after a brief delay
 if held, matching the existing throttling pattern on `Slider` and `Select.popup` cycling.
 
-See `examples/ui/src/source/Rooms/TextInputRoom.bs` for a working demo including real on-device character
-entry via Roku mobile app (task #179, task 5 verification report documents end-to-end testing via
-`rokubot text` character injection).
+Note that `TextInput` neither clips nor scrolls text wider than the widget — text longer than the field
+simply draws past its right edge, a known limitation. Set `maxLength` to a value that fits for any field
+with a known reasonable size.
+
+See `examples/ui/src/source/Rooms/TextInputRoom.bs` for a working demo. ECP-delivered characters — as sent
+by any client speaking the ECP protocol, including a real connected controller or companion app — are
+verified end-to-end on real hardware by automated testing; the specific behavior of a real mobile app's
+on-screen-keyboard backspace key has not been separately confirmed.
 
 ## Collision, concretely
 
