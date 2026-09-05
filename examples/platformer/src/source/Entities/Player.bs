@@ -68,6 +68,18 @@ class Player extends BGE.GameEntity
       m.spawnCaptured = true
     end if
 
+    ' Clamp dt for this entity's own gravity/timer math. A real device's first
+    ' frame after launch is commonly a large one-time hitch (confirmed on
+    ' device, dt as high as ~0.4s) - left unclamped, gravity builds enough
+    ' velocity in that single step for the subsequent position update
+    ' (Game.bs's own processEntityMovement, driven by the *actual* unclamped
+    ' frame dt) to tunnel the player clean through the ground before any
+    ' collision check ever sees the overlap.
+    clampedDt = dt
+    if clampedDt > 1 / 30.0
+      clampedDt = 1 / 30.0
+    end if
+
     m.positionBeforeMove = BGE.Math.VectorOps.create(m.position.x, m.position.y)
 
     ' Horizontal run + facing/animation.
@@ -87,12 +99,12 @@ class Player extends BGE.GameEntity
     if m.grounded
       m.coyoteTimer = m.coyoteTime
     else
-      m.coyoteTimer = m.coyoteTimer - dt
+      m.coyoteTimer = m.coyoteTimer - clampedDt
     end if
     if m.wantsJump
       m.jumpBufferTimer = m.jumpBufferTime
     else
-      m.jumpBufferTimer = m.jumpBufferTimer - dt
+      m.jumpBufferTimer = m.jumpBufferTimer - clampedDt
     end if
     if m.jumpBufferTimer > 0.0 and m.coyoteTimer > 0.0
       m.velocity.y = m.jumpVelocity
@@ -109,7 +121,7 @@ class Player extends BGE.GameEntity
 
     ' Gravity, capped so one frame's fall never exceeds one tile (avoids
     ' tunneling through a thin floor without needing substeps).
-    m.velocity.y = m.velocity.y - m.gravity * dt
+    m.velocity.y = m.velocity.y - m.gravity * clampedDt
     if m.velocity.y < m.terminalVelocity
       m.velocity.y = m.terminalVelocity
     end if
@@ -117,6 +129,62 @@ class Player extends BGE.GameEntity
     ' Assume airborne; onCollision() re-grounds this same frame if the
     ' player is actually resting on something (Task 4).
     m.grounded = false
+  end sub
+
+  override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+    if otherEntity.name <> "Level"
+      return
+    end if
+
+    ' otherCollider is always a RectangleCollider here (Level only builds
+    ' rectangle tile colliders), but onCollision's signature is typed to the
+    ' base BGE.Collider, which has no width/height - reach for them dynamically.
+    tileTop = otherCollider.offset.y
+    ' bs:disable-next-line: cannot-find-name
+    tileBottom = otherCollider.offset.y - otherCollider.height
+    tileLeft = otherCollider.offset.x
+    ' bs:disable-next-line: cannot-find-name
+    tileRight = otherCollider.offset.x + otherCollider.width
+    isOneWay = otherCollider.tagsList.hasTag("oneWay")
+
+    ' Player.position is feet-anchored (matches the sprite's bottom-center
+    ' pretranslate and the "body" collider's offset_y = m.height, i.e. its
+    ' top edge sits one height above position) - so position.y IS the foot
+    ' position, and the head is m.height above it, not the other way round.
+    playerBottomBefore = m.positionBeforeMove.y
+    playerTopBefore = m.positionBeforeMove.y + m.height
+    playerLeftBefore = m.positionBeforeMove.x - m.width / 2.0
+    playerRightBefore = m.positionBeforeMove.x + m.width / 2.0
+
+    landedOnTop = m.velocity.y <= 0.0 and playerBottomBefore >= tileTop - 1.0
+    if landedOnTop
+      m.position.y = tileTop
+      m.velocity.y = 0.0
+      m.grounded = true
+      return
+    end if
+
+    if isOneWay
+      ' One-way platforms only ever block a landing-from-above - every
+      ' other case (rising into it, approaching from a side) passes through.
+      return
+    end if
+
+    hitHead = m.velocity.y > 0.0 and playerTopBefore <= tileBottom + 1.0
+    if hitHead
+      m.position.y = tileBottom - m.height
+      m.velocity.y = 0.0
+      return
+    end if
+
+    ' Horizontal: push out the side the player was already outside of.
+    if playerRightBefore <= tileLeft + 1.0
+      m.position.x = tileLeft - m.width / 2.0
+      m.velocity.x = 0.0
+    else if playerLeftBefore >= tileRight - 1.0
+      m.position.x = tileRight + m.width / 2.0
+      m.velocity.x = 0.0
+    end if
   end sub
 
   private function facingAnimation(prefix as string) as string
