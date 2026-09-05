@@ -1,0 +1,198 @@
+import "../drawables/DrawableText.bs"
+import "../Game.bs"
+import "../GameInput.bs"
+import "../../math/math.bs"
+import "Style.bs"
+import "UiWidget.bs"
+
+namespace BGE.UI
+
+  ' A focusable single-line text entry widget. Characters arrive via
+  ' onECPKeyboard() (Roku's mobile-app on-screen keyboard sends individual
+  ' characters this way - see Game.bs's existing onECPKeyboard dispatch,
+  ' which already reaches every UiContainer child unconditionally, same as
+  ' onInput()). Left/Right (while focused) move the caret; OK fires
+  ' onSubmit. No on-screen virtual keyboard is drawn by this widget - it
+  ' relies entirely on the platform's own text-entry mechanism delivering
+  ' onECPKeyboard() characters.
+  class TextInput extends UiWidget
+
+    ' Current text content.
+    text as string = ""
+    ' Caret position, 0..Len(text). Moved by Left/Right while focused, and
+    ' advances/retreats as characters are inserted/deleted.
+    cursorIndex as integer = 0
+    ' Maximum text length, 0 = unlimited. A character typed once text.Len()
+    ' already equals maxLength is silently dropped.
+    maxLength as integer = 0
+    ' Text shown (dimmed) when text is empty and this widget isn't focused.
+    placeholder as string = ""
+
+    ' Called after any edit (insert/delete) - function(input as TextInput) as void
+    onChanged as function or dynamic
+    ' Called on OK-press while focused - function(input as TextInput) as void
+    onSubmit as function or dynamic
+
+    ' Test accessor: last value an onChanged callback stashed here. Not part
+    ' of the public API - exists purely because a plain local var captured by
+    ' an anonymous sub assigned to onChanged doesn't reliably update under
+    ' brs-cli, so tests need a field on the widget itself to observe.
+    lastChangedValue as dynamic
+
+    drawableText as BGE.DrawableText
+
+    ' Throttles repeat-while-held Left/Right to one step per
+    ' WIDGET_REPEAT_DELAY_MS - see handleInput().
+    protected repeatThrottle as BGE.UI.RepeatThrottle = new BGE.UI.RepeatThrottle()
+
+    sub new(game as BGE.Game)
+      super(game)
+      m.focusable = true
+      m.drawableText = new BGE.DrawableText(m)
+    end sub
+
+    ' Gets the current text content.
+    '
+    ' @return {dynamic} - the current text (string)
+    override function getValue() as dynamic
+      return m.text
+    end function
+
+    ' Inserts/deletes a character at the caret. Called by the engine when the
+    ' platform's own text-entry mechanism (e.g. Roku's mobile-app on-screen
+    ' keyboard) sends a character - see the class doc comment above. char 8
+    ' (ASCII backspace) deletes the character before the caret; any other
+    ' char is inserted as text, subject to maxLength.
+    override sub onECPKeyboard(char as integer)
+      if not m.focused
+        return
+      end if
+
+      ' text can be replaced from outside (e.g. clearing it in onSubmit)
+      ' without cursorIndex following, and Left()/Mid() with an out-of-range
+      ' start silently misbehave rather than erroring - clamp before any edit.
+      m.cursorIndex = m.clampCursorIndex(m.cursorIndex)
+
+      if char = 8 ' backspace (ASCII BS)
+        if m.cursorIndex > 0
+          m.text = Left(m.text, m.cursorIndex - 1) + Mid(m.text, m.cursorIndex + 1)
+          m.cursorIndex--
+          m.fireChanged()
+        end if
+        return
+      end if
+
+      if m.maxLength > 0 and Len(m.text) >= m.maxLength
+        return
+      end if
+
+      m.text = Left(m.text, m.cursorIndex) + Chr(char) + Mid(m.text, m.cursorIndex + 1)
+      m.cursorIndex++
+      m.fireChanged()
+    end sub
+
+    private sub fireChanged()
+      if m.onChanged <> invalid
+        m.onChanged(m)
+      end if
+    end sub
+
+    ' Left/Right (while focused) move the caret and consume the event.
+    ' Called only while focused - see UiWidget.handleInput()/
+    ' BGE.UI.FocusManager.update(). A held Left/Right event is always
+    ' consumed too - Game.bs synthesizes one alongside every press, and it
+    ' has to be consumed rather than leaking through to GameEntity.onInput() -
+    ' but it only MOVES once WIDGET_REPEAT_DELAY_MS has passed since the
+    ' last step, so a single tap's press+held pair moves exactly once while
+    ' a sustained hold still repeats.
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {boolean} - true if this TextInput handled the input
+    override function handleInput(input as BGE.GameInput) as boolean
+      if not (input.press or input.held)
+        return false
+      end if
+      if not (input.isButton("left") or input.isButton("right"))
+        return false
+      end if
+
+      if m.repeatThrottle.shouldAct(input)
+        if input.isButton("right")
+          m.cursorIndex = m.clampCursorIndex(m.cursorIndex + 1)
+        else
+          m.cursorIndex = m.clampCursorIndex(m.cursorIndex - 1)
+        end if
+      end if
+
+      input.consume()
+      return true
+    end function
+
+    ' Clamps a caret index to the valid range for the current text (0..Len(text)) -
+    ' shared by onECPKeyboard() and handleInput()'s Left/Right stepping.
+    '
+    ' @param {integer} index
+    ' @return {integer}
+    private function clampCursorIndex(index as integer) as integer
+      return cint(BGE.Math.Clamp(index, 0, Len(m.text)))
+    end function
+
+    ' Fires onSubmit on OK press.
+    override sub onClick()
+      if m.onSubmit <> invalid
+        m.onSubmit(m)
+      end if
+    end sub
+
+    ' Draws the background/border (matching Select's pattern), the current
+    ' text - or, when empty and unfocused, the dimmed placeholder - and a
+    ' caret at cursorIndex while focused.
+    override sub draw(parent = invalid as UiWidget)
+      if m.width <= 0 or m.height <= 0
+        return
+      end if
+
+      theme = m.resolveTheme(parent)
+
+      backgroundColor = theme.backgroundColor
+      if m.hovered or m.focused
+        backgroundColor = theme.hoveredBackgroundColor
+      end if
+
+      if m.focused
+        ' Drawn first, larger, so the fill below sits on top of it as a
+        ' border - avoids redrawing the fill a second time just to layer it
+        ' over the border.
+        m.canvas.renderer.drawRectangle(m.position.x - 2, m.position.y - 2, m.width + 4, m.height + 4, theme.focusedBorderColor)
+      end if
+      m.drawThemedBackground(theme, m.position.x, m.position.y, m.width, m.height, backgroundColor)
+
+      displayText = m.text
+      textColor = theme.foregroundColor
+      if displayText = "" and not m.focused and m.placeholder <> ""
+        displayText = m.placeholder
+        textColor = theme.disabledColor
+      end if
+
+      ' Left-aligned with a small inset, unlike Button/Select's centered text.
+      textX = m.position.x + 6
+      textY = m.position.y + (m.height - m.drawableText.font.GetOneLineHeight()) / 2
+
+      m.drawableText.text = displayText
+      if displayText <> ""
+        m.drawableText.textColor = textColor
+        textImage = m.drawableText.getTextImage()
+        if textImage <> invalid
+          m.canvas.renderer.drawTransformedObject(textX, textY, 1.0, 1.0, 0, textImage)
+        end if
+      end if
+
+      if m.focused
+        caretX = textX + m.drawableText.font.GetOneLineWidth(Left(m.text, m.cursorIndex), 10000)
+        m.canvas.renderer.drawRectangle(caretX, textY, 2, m.drawableText.font.GetOneLineHeight(), theme.foregroundColor)
+      end if
+    end sub
+
+  end class
+
+end namespace

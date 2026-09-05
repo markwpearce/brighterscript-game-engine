@@ -1,0 +1,187 @@
+import "../Game.bs"
+import "FocusManager.bs"
+import "UiContainer.bs"
+import "UiWidget.bs"
+import "../controller/ControlMap.bs"
+import "../controller/ControllerRegistry.bs"
+
+namespace tests
+
+  @suite("BGE.UI.FocusManager")
+  class FocusManagerTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+    end function
+
+    @describe("updateAnalogCursor")
+
+    @it("updateAnalogCursor does nothing when analogAxisName is unset")
+    function _()
+      fm = new BGE.UI.FocusManager(m.game)
+      fm.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      startX = fm.cursorPosition.x
+      controls = new BGE.Controller.ControlMap(new BGE.Controller.ControllerRegistry())
+      fm.updateAnalogCursor(controls, 1.0)
+      m.assertEqual(startX, fm.cursorPosition.x)
+    end function
+
+    @it("updateAnalogCursor moves cursorPosition proportionally to axis magnitude and dt")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      controls = new BGE.Controller.ControlMap(registry)
+      controls.bindAxis("cursor", "1", 0)
+      registry.assignPlayerIndex() ' player 0
+      registry.updateFromMessage(0, {}, {"1": {x: 1.0, y: 0.0}}, {})
+
+      fm = new BGE.UI.FocusManager(m.game)
+      fm.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      fm.analogAxisName = "cursor"
+      fm.cursorAnalogSpeed = 100.0
+      startX = fm.cursorPosition.x
+
+      fm.updateAnalogCursor(controls, 0.5) ' half a second
+
+      m.assertEqual(startX + 50.0, fm.cursorPosition.x) ' 100px/s * 0.5s
+    end function
+
+    @it("updateAnalogCursor ignores axis input below the deadzone")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      controls = new BGE.Controller.ControlMap(registry)
+      controls.bindAxis("cursor", "1", 0)
+      registry.assignPlayerIndex()
+      registry.updateFromMessage(0, {}, {"1": {x: 0.05, y: 0.0}}, {}) ' below 0.15 deadzone
+
+      fm = new BGE.UI.FocusManager(m.game)
+      fm.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      fm.analogAxisName = "cursor"
+      startX = fm.cursorPosition.x
+
+      fm.updateAnalogCursor(controls, 1.0)
+
+      m.assertEqual(startX, fm.cursorPosition.x)
+    end function
+
+    @it("updateAnalogCursor does nothing in list mode")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      controls = new BGE.Controller.ControlMap(registry)
+      controls.bindAxis("cursor", "1", 0)
+      registry.assignPlayerIndex()
+      registry.updateFromMessage(0, {}, {"1": {x: 1.0, y: 0.0}}, {})
+
+      fm = new BGE.UI.FocusManager(m.game)
+      fm.navigationMode = BGE.UI.FocusNavigationMode.list
+      fm.analogAxisName = "cursor"
+      startX = fm.cursorPosition.x
+
+      fm.updateAnalogCursor(controls, 1.0)
+
+      m.assertEqual(startX, fm.cursorPosition.x)
+    end function
+
+    @it("updateAnalogCursor moves the cursor DOWN in screen space for a negative axis.y")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      controls = new BGE.Controller.ControlMap(registry)
+      controls.bindAxis("cursor", "1", 0)
+      registry.assignPlayerIndex()
+      registry.updateFromMessage(0, {}, {"1": {x: 0.0, y: -1.0}}, {}) ' stick pushed "down" (world-space -y)
+
+      fm = new BGE.UI.FocusManager(m.game)
+      fm.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      fm.analogAxisName = "cursor"
+      fm.cursorAnalogSpeed = 100.0
+      startY = fm.cursorPosition.y
+
+      fm.updateAnalogCursor(controls, 0.5)
+
+      m.assertEqual(startY + 50.0, fm.cursorPosition.y) ' screen-space +y is down
+    end function
+
+    @it("updateAnalogCursor hit-tests after moving, hovering and focusing the widget it lands on")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      controls = new BGE.Controller.ControlMap(registry)
+      controls.bindAxis("cursor", "1", 0)
+      registry.assignPlayerIndex()
+      registry.updateFromMessage(0, {}, {"1": {x: 1.0, y: 0.0}}, {})
+
+      container = new BGE.UI.UiContainer(m.game)
+      ' The cursor seeds onto the first registered widget's centre (20, 20),
+      ' then analog movement carries it right into the second one.
+      seedTarget = m.makeWidget(container, 0, 0)
+      target = m.makeWidget(container, 100, 0)
+
+      fm = m.game.focusManager
+      fm.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      fm.analogAxisName = "cursor"
+      fm.cursorAnalogSpeed = 100.0
+
+      fm.updateAnalogCursor(controls, 1.0) ' +100px right -> (120, 20)
+
+      m.assertEqual(120.0, fm.cursorPosition.x)
+      m.assertTrue(target.hovered)
+      m.assertTrue(target.focused)
+      m.assertFalse(seedTarget.focused)
+    end function
+
+    ' A 40x40 focusable widget at a fixed position within container.
+    private function makeWidget(container as BGE.UI.UiContainer, x as integer, y as integer) as BGE.UI.UiWidget
+      widget = new BGE.UI.UiWidget(m.game)
+      widget.focusable = true
+      widget.customPosition = true
+      widget.customX = x
+      widget.customY = y
+      widget.width = 40
+      widget.height = 40
+      widget.repositionBasedOnParent(container)
+      container.addChild(widget)
+      return widget
+    end function
+
+    @describe("draw")
+
+    @it("draw() calls drawOverlay() on the currently focused widget")
+    function _()
+      container = m.game.gameUi
+      probe = new tests.OverlayProbeWidget(m.game)
+      probe.focusable = true
+      container.addChild(probe)
+
+      m.game.focusManager.update(new BGE.GameInput(2, 0)) ' seeds focus in list mode
+      m.game.focusManager.draw(m.game.uiCanvas, m.game.defaultTheme)
+
+      m.assertTrue(probe.overlayDrawn)
+    end function
+
+    @it("draw() does not call drawOverlay() when nothing is focused")
+    function _()
+      probe = new tests.OverlayProbeWidget(m.game)
+      ' Not added to any container, so it is never registered with the FocusManager.
+
+      m.game.focusManager.draw(m.game.uiCanvas, m.game.defaultTheme)
+
+      m.assertFalse(probe.overlayDrawn)
+    end function
+
+  end class
+
+  ' Records whether drawOverlay() was invoked, since UiWidget's own
+  ' drawOverlay() is a no-op by design.
+  class OverlayProbeWidget extends BGE.UI.UiWidget
+    overlayDrawn as boolean = false
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub drawOverlay(canvas as BGE.Canvas, theme as BGE.UI.Theme)
+      m.overlayDrawn = true
+    end sub
+  end class
+
+end namespace

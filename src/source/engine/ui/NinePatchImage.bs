@@ -1,0 +1,194 @@
+import "../renderer/Renderer.bs"
+
+namespace BGE.UI
+
+  ' Describes one of a NinePatchImage's 9 slices: which segment of the
+  ' source/destination grid it occupies along each axis. 0 = the fixed
+  ' leading segment (the left/top inset), 1 = the stretchable middle segment,
+  ' 2 = the fixed trailing segment (the right/bottom inset). Both slicing
+  ' (in new()) and drawing (in draw()) are driven generically from this list
+  ' instead of writing out 9 near-identical blocks by hand.
+  interface NinePatchSliceSpec
+    name as string
+    gridX as integer
+    gridY as integer
+  end interface
+
+  ' A 9-patch ("scale-9") stretchable background image: a source bitmap is
+  ' sliced once (at construction) into 9 roRegions - 4 corners (drawn at
+  ' fixed size), 4 edges (stretched along one axis), and a center (stretched
+  ' both axes) - so a single small source texture can back a background of
+  ' any width/height without visibly stretching its corners. Assign to
+  ' Theme.backgroundImage to opt a widget's background fill into this
+  ' instead of a flat color - see Theme.backgroundImage's own doc comment.
+  '
+  ' Takes a roBitmap, not a roRegion: CreateObject("roRegion", ...) only
+  ' accepts a roBitmap as its source, not another roRegion (confirmed via
+  ' Roku's own component type data and an actual runtime Type Mismatch when
+  ' a roRegion was tried) - so slicing has to start from the real bitmap.
+  class NinePatchImage
+
+    ' Slice name (see specs) -> roRegion, invalid if that slice's inset
+    ' resolved to 0 (see makeSlice()).
+    protected slices as object
+
+    ' The 9 slice specs, computed once in new() and reused by draw() every
+    ' frame - see NinePatchSliceSpec. A fixed, unchanging list, so building
+    ' it once avoids 9 fresh AA allocations on every single draw() call.
+    protected specs as object
+
+    protected left as integer
+    protected top as integer
+    protected right as integer
+    protected bottom as integer
+
+    protected sourceWidth as integer
+    protected sourceHeight as integer
+
+    ' @param {roBitmap} sourceBitmap - the full source image
+    ' @param {integer} left - px from the left edge that stay unstretched
+    ' @param {integer} top - px from the top edge that stay unstretched
+    ' @param {integer} right - px from the right edge that stay unstretched
+    ' @param {integer} bottom - px from the bottom edge that stay unstretched
+    sub new(sourceBitmap as roBitmap, left as integer, top as integer, right as integer, bottom as integer)
+      m.left = left
+      m.top = top
+      m.right = right
+      m.bottom = bottom
+      m.sourceWidth = sourceBitmap.GetWidth()
+      m.sourceHeight = sourceBitmap.GetHeight()
+
+      m.specs = m.buildSliceSpecs()
+      m.slices = {}
+      for each spec in m.specs
+        m.slices[spec.name] = m.makeSlice(sourceBitmap, spec)
+      end for
+    end sub
+
+    ' The 9 slice specs shared by new() (slicing) and draw() (drawing) - see
+    ' NinePatchSliceSpec. Called once from new() and cached as m.specs; draw()
+    ' reuses that cached list rather than calling this again every frame.
+    private function buildSliceSpecs() as NinePatchSliceSpec[]
+      return [
+        { name: "topLeft", gridX: 0, gridY: 0 }
+        { name: "topEdge", gridX: 1, gridY: 0 }
+        { name: "topRight", gridX: 2, gridY: 0 }
+        { name: "leftEdge", gridX: 0, gridY: 1 }
+        { name: "center", gridX: 1, gridY: 1 }
+        { name: "rightEdge", gridX: 2, gridY: 1 }
+        { name: "bottomLeft", gridX: 0, gridY: 2 }
+        { name: "bottomEdge", gridX: 1, gridY: 2 }
+        { name: "bottomRight", gridX: 2, gridY: 2 }
+      ]
+    end function
+
+    ' The source-rect position/length a grid coordinate occupies along one
+    ' axis - grid 0/2 are the fixed leading/trailing inset, grid 1 is
+    ' whatever is left over in between.
+    private function gridSegment(gridPos as integer, startInset as integer, midLength as integer, endInset as integer, sourceLength as integer) as object
+      if gridPos = 0
+        return { pos: 0, length: startInset }
+      else if gridPos = 1
+        return { pos: startInset, length: midLength }
+      end if
+      return { pos: sourceLength - endInset, length: endInset }
+    end function
+
+    ' A zero-width/height inset (e.g. a source image with no marker on one axis)
+    ' would make CreateObject("roRegion", ...) return Invalid, which drawObject()
+    ' does not guard against - so such a slice is left invalid here and skipped
+    ' by draw(). Alpha blending is off by default on a new region, and these are
+    ' composited over whatever is already on the canvas, so enable it explicitly.
+    private function makeSlice(sourceBitmap as roBitmap, spec as NinePatchSliceSpec) as roRegion
+      midW = m.sourceWidth - m.left - m.right
+      midH = m.sourceHeight - m.top - m.bottom
+      segX = m.gridSegment(spec.gridX, m.left, midW, m.right, m.sourceWidth)
+      segY = m.gridSegment(spec.gridY, m.top, midH, m.bottom, m.sourceHeight)
+      if segX.length <= 0 or segY.length <= 0
+        return invalid
+      end if
+      region = CreateObject("roRegion", sourceBitmap, segX.pos, segY.pos, segX.length, segY.length)
+      if region <> invalid
+        region.SetAlphaEnable(true)
+      end if
+      return region
+    end function
+
+    ' Draws this 9-patch at (x, y) stretched to fill width x height. width/height
+    ' must each be >= left+right / top+bottom respectively, or the edge/corner
+    ' slices will overlap - same caveat as any 9-patch implementation.
+    '
+    ' @param {BGE.Renderer} renderer - the renderer to draw to
+    ' @param {float} x - destination x
+    ' @param {float} y - destination y
+    ' @param {float} width - destination width
+    ' @param {float} height - destination height
+    sub draw(renderer as BGE.Renderer, x as float, y as float, width as float, height as float)
+      midW = width - m.left - m.right
+      midH = height - m.top - m.bottom
+
+      for each spec in m.specs
+        region = m.slices[spec.name]
+        ' A slice is invalid when its inset resolved to 0 - see makeSlice().
+        if region <> invalid
+          destX = m.gridDest(spec.gridX, x, m.left, width, m.right)
+          destY = m.gridDest(spec.gridY, y, m.top, height, m.bottom)
+          if spec.gridX = 1 or spec.gridY = 1
+            scaleX = 1.0
+            if spec.gridX = 1
+              scaleX = midW / region.GetWidth()
+            end if
+            scaleY = 1.0
+            if spec.gridY = 1
+              scaleY = midH / region.GetHeight()
+            end if
+            renderer.drawScaledObject(destX, destY, scaleX, scaleY, region)
+          else
+            ' Corners never stretch - a plain drawObject() is cheaper than a
+            ' drawScaledObject() at scale 1.0, and this is the common case.
+            renderer.drawObject(destX, destY, region)
+          end if
+        end if
+      end for
+    end sub
+
+    ' The destination position a grid coordinate occupies along one axis -
+    ' grid 0/2 sit flush against the origin/far edge, grid 1 starts just past
+    ' the leading inset.
+    private function gridDest(gridPos as integer, origin as float, startInset as integer, totalLength as float, endInset as integer) as float
+      if gridPos = 0
+        return origin
+      else if gridPos = 1
+        return origin + startInset
+      end if
+      return origin + totalLength - endInset
+    end function
+
+    ' Test-only accessors - not part of the public API surface, no JSDoc.
+    function getTopLeft() as roRegion
+      return m.slices["topLeft"]
+    end function
+
+    function getCenter() as roRegion
+      return m.slices["center"]
+    end function
+
+    function getLeft() as integer
+      return m.left
+    end function
+
+    function getTop() as integer
+      return m.top
+    end function
+
+    function getRight() as integer
+      return m.right
+    end function
+
+    function getBottom() as integer
+      return m.bottom
+    end function
+
+  end class
+
+end namespace

@@ -1,15 +1,25 @@
 import "../drawables/DrawableText.bs"
 import "../Game.bs"
 import "../GameInput.bs"
+import "../../math/math.bs"
 import "Style.bs"
 import "UiWidget.bs"
 
 namespace BGE.UI
 
-  ' A focusable, inline-cycling option picker: Left/Right (while focused)
-  ' step through m.options with wraparound. For a full expanding/popup list,
-  ' see the follow-up issue filed alongside this widget - this is the
-  ' compact style, matching Slider's existing interaction pattern.
+  ' Select's interaction style. inline (default): Left/Right cycle the
+  ' current option in place, matching Slider's interaction pattern. popup:
+  ' OK expands a list of every option; Up/Down move a highlight, OK commits,
+  ' back cancels. See Select.style.
+  enum SelectStyle
+    inline = "inline"
+    popup = "popup"
+  end enum
+
+  ' A focusable option picker. Its interaction style is controlled by
+  ' Select.style (see BGE.UI.SelectStyle): inline (the default) cycles
+  ' through m.options in place with Left/Right, matching Slider's existing
+  ' interaction pattern; popup expands a full option list on OK.
   class Select extends UiWidget
 
     options as dynamic[] = []
@@ -18,6 +28,39 @@ namespace BGE.UI
 
     ' Called after selectedIndex changes - function(select as Select) as void
     onChanged as function or dynamic
+
+    ' Test accessor: last value an onChanged callback stashed here. Not part
+    ' of the public API - exists purely because a plain local var captured by
+    ' an anonymous sub assigned to onChanged doesn't reliably update under
+    ' brs-cli, so tests need a field on the widget itself to observe.
+    lastChangedValue as dynamic
+
+    ' Which interaction style this Select uses - see BGE.UI.SelectStyle.
+    ' Defaults to inline (Left/Right cycling), matching this widget's original
+    ' (and only) behavior - popup is opt-in, not a breaking change.
+    style as BGE.UI.SelectStyle = BGE.UI.SelectStyle.inline
+
+    ' popup style only: is the option list currently expanded?
+    expanded as boolean = false
+    ' popup style only: index within m.options currently highlighted while expanded.
+    highlightedIndex as integer = 0
+
+    ' Test accessor: how many option rows drawOverlay() drew last call. Not
+    ' part of the public API - exists purely so tests can distinguish
+    ' drawOverlay() actually rendering the popup list from its no-op paths.
+    lastDrawnRowCount as integer = 0
+
+    ' popup style only: one BGE.DrawableText per unique option string, keyed
+    ' by that string - reused across frames/rows instead of drawOverlay()
+    ' cycling every option's text through the single m.drawableText field
+    ' (also used by draw() for the current value), which would defeat
+    ' DrawableText.getTextImage()'s own cache (keyed on the instance's last
+    ' text/color) every single frame the popup stays open. See getOptionText().
+    ' m.options is a plain public field with no change hook, so entries for
+    ' strings no longer present in m.options are pruned in drawOverlay() (see
+    ' pruneOptionTextCache()) rather than left to accumulate forever across
+    ' an options reassignment (e.g. search/filter results changing over time).
+    protected optionTextDrawables as object = {}
 
     ' Throttles repeat-while-held Left/Right to one step per
     ' WIDGET_REPEAT_DELAY_MS - see handleInput().
@@ -77,6 +120,10 @@ namespace BGE.UI
     ' @param {BGE.GameInput} input
     ' @return {boolean} - true if this select handled the input
     override function handleInput(input as BGE.GameInput) as boolean
+      if m.style = BGE.UI.SelectStyle.popup
+        return m.handlePopupInput(input)
+      end if
+
       if not (input.press or input.held)
         return false
       end if
@@ -94,6 +141,95 @@ namespace BGE.UI
 
       input.consume()
       return true
+    end function
+
+    ' popup style only: toggles expand/commit on OK click. FocusManager.update()
+    ' intercepts OK press itself and calls onClick() directly rather than
+    ' forwarding it to handleInput() - so the popup commits on this SECOND
+    ' onClick() call (while already m.expanded), not through handleInput().
+    ' First click (not expanded): expands, seeding highlightedIndex from
+    ' selectedIndex. Second click (expanded): commits highlightedIndex to
+    ' selectedIndex, fires onChanged, and collapses.
+    override sub onClick()
+      if m.style <> BGE.UI.SelectStyle.popup
+        return
+      end if
+
+      if m.expanded
+        ' options can be replaced while expanded, leaving highlightedIndex
+        ' past the new end - clamp before committing so getValue() can't
+        ' index out of range.
+        if m.options.count() = 0
+          m.selectedIndex = 0
+        else
+          m.selectedIndex = Fix(BGE.Math.Clamp(m.highlightedIndex, 0, m.options.count() - 1))
+        end if
+        m.highlightedIndex = m.selectedIndex
+        m.expanded = false
+        if m.onChanged <> invalid
+          m.onChanged(m)
+        end if
+      else if m.options.count() > 0
+        ' Nothing to show (and nothing to pick) with no options - don't expand.
+        m.highlightedIndex = m.selectedIndex
+        m.expanded = true
+      end if
+    end sub
+
+    ' Collapses the popup list whenever this Select loses focus. Only the
+    ' currently-focused widget's drawOverlay() runs, so an expanded-but-
+    ' unfocused Select would be invisible while still holding a stale
+    ' highlight that the next OK press would immediately commit. Covers every
+    ' blur path (list navigation, pointer hover-out, analog cursor) in one place.
+    '
+    ' @return {void}
+    override sub onBlur()
+      m.expanded = false
+    end sub
+
+    ' popup style only: called from handleInput() while m.expanded. Up/Down
+    ' move the highlight (throttled like the inline style's own Left/Right),
+    ' back cancels and collapses without changing selectedIndex, and
+    ' Left/Right are consumed but inert (see below). OK is NOT
+    ' handled here - FocusManager.update() intercepts OK press before it ever
+    ' reaches handleInput(), calling onClick() directly instead (see onClick()
+    ' above). Returns false (unhandled) once not expanded, so FocusManager
+    ' falls back to normal focus navigation for this Select.
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {boolean}
+    private function handlePopupInput(input as BGE.GameInput) as boolean
+      if not m.expanded
+        return false
+      end if
+
+      if input.press and input.isButton("back")
+        m.expanded = false
+        input.consume()
+        return true
+      end if
+
+      if (input.press or input.held) and (input.isButton("up") or input.isButton("down"))
+        if m.repeatThrottle.shouldAct(input) and m.options.count() > 0
+          if input.isButton("down")
+            m.highlightedIndex = Fix(BGE.Math.Clamp(m.highlightedIndex + 1, 0, m.options.count() - 1))
+          else
+            m.highlightedIndex = Fix(BGE.Math.Clamp(m.highlightedIndex - 1, 0, m.options.count() - 1))
+          end if
+        end if
+        input.consume()
+        return true
+      end if
+
+      if (input.press or input.held) and (input.isButton("left") or input.isButton("right"))
+        ' Inert, but consumed: reporting these as unhandled would let
+        ' FocusManager.navigateList() walk focus off this Select while its
+        ' popup is open.
+        input.consume()
+        return true
+      end if
+
+      return false
     end function
 
     override sub draw(parent = invalid as UiWidget)
@@ -114,7 +250,7 @@ namespace BGE.UI
         ' over the border.
         m.canvas.renderer.drawRectangle(m.position.x - 2, m.position.y - 2, m.width + 4, m.height + 4, theme.focusedBorderColor)
       end if
-      m.canvas.renderer.drawRectangle(m.position.x, m.position.y, m.width, m.height, backgroundColor)
+      m.drawThemedBackground(theme, m.position.x, m.position.y, m.width, m.height, backgroundColor)
 
       value = m.getValue()
       if value <> invalid
@@ -128,6 +264,87 @@ namespace BGE.UI
         end if
       end if
     end sub
+
+    ' Draws the popup option list below this Select's own bounds, one row
+    ' per option, with the highlighted row visually distinct. No-op unless
+    ' m.style = popup and m.expanded - fires every frame while expanded via
+    ' UiWidget.drawOverlay() (called for the currently-focused widget only).
+    '
+    ' Non-goal: every option draws unclipped/unscrolled, so a list long
+    ' enough to overflow the canvas bottom is a known limitation, not a bug -
+    ' no scrolling/clipping here.
+    '
+    ' @param {BGE.Canvas} canvas
+    ' @param {BGE.UI.Theme} theme
+    override sub drawOverlay(canvas as BGE.Canvas, theme as BGE.UI.Theme)
+      m.lastDrawnRowCount = 0
+      if m.style <> BGE.UI.SelectStyle.popup or not m.expanded
+        return
+      end if
+
+      m.pruneOptionTextCache()
+
+      rowHeight = m.height
+      for i = 0 to m.options.count() - 1
+        rowY = m.position.y + m.height + i * rowHeight
+        bg = theme.backgroundColor
+        if i = m.highlightedIndex
+          bg = theme.hoveredBackgroundColor
+        end if
+        canvas.renderer.drawRectangle(m.position.x, rowY, m.width, rowHeight, bg)
+
+        optionText = m.getOptionText(m.options[i].ToStr())
+        textImage = optionText.getTextImage()
+        if textImage <> invalid
+          textSize = optionText.getDrawnSize()
+          textX = m.position.x + (m.width - textSize.width) / 2
+          textY = rowY + (rowHeight - textSize.height) / 2
+          canvas.renderer.drawTransformedObject(textX, textY, 1.0, 1.0, 0, textImage)
+        end if
+        m.lastDrawnRowCount++
+      end for
+      canvas.renderer.drawRectangleOutline(m.position.x, m.position.y + m.height, m.width, rowHeight * m.options.count(), theme.focusedBorderColor)
+    end sub
+
+    ' popup style only: the cached DrawableText for one option's rendered
+    ' label, creating and caching it on first use - see optionTextDrawables.
+    '
+    ' @param {string} text
+    ' @return {BGE.DrawableText}
+    private function getOptionText(text as string) as BGE.DrawableText
+      drawable = m.optionTextDrawables[text]
+      if drawable = invalid
+        drawable = new BGE.DrawableText(m, text)
+        m.optionTextDrawables[text] = drawable
+      end if
+      return drawable
+    end function
+
+    ' Removes any optionTextDrawables entry whose string is no longer present
+    ' in m.options - keeps the cache bounded to at most m.options.count()
+    ' entries instead of accumulating one per unique string ever seen across
+    ' every options reassignment over this Select's lifetime.
+    '
+    ' @return {void}
+    private sub pruneOptionTextCache()
+      activeKeys = {}
+      for each opt in m.options
+        activeKeys[opt.ToStr()] = true
+      end for
+      for each key in m.optionTextDrawables.Keys()
+        if activeKeys[key] = invalid
+          m.optionTextDrawables.Delete(key)
+        end if
+      end for
+    end sub
+
+    ' Test accessor: how many distinct option strings have a cached
+    ' DrawableText so far. Not part of the public API - exists purely so
+    ' tests can confirm optionTextDrawables stays bounded by the option list
+    ' rather than growing every drawOverlay() call.
+    function getOptionTextDrawableCount() as integer
+      return m.optionTextDrawables.Count()
+    end function
 
   end class
 
