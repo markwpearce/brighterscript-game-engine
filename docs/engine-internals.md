@@ -97,13 +97,32 @@ the full per-type reference, the draw-mode table, a walkthrough of exactly how `
 processes a frame, and a deep dive on `SceneObjectPlane` (the ground-plane renderer used by
 `examples/terrain`).
 
-## Analog-stick cursor movement (`BGE.UI`)
+## Focus seeding and analog-stick cursor movement (`BGE.UI`)
 
 `BGE.UI` focus is global: one `Game` owns one `BGE.UI.FocusManager` (`Game.focusManager`), and its
 `navigationMode` is either `list` (the default - discrete next/previous stepping through registered
 widgets) or `pointer` (an opt-in virtual cursor, `cursorPosition`, hit-tested against widget bounds
-to drive hover/focus). In `pointer` mode, the cursor can also be driven continuously by a connected
-controller's analog stick:
+to drive hover/focus).
+
+Focus is normally seeded lazily: `FocusManager.update()` only focuses the first registered widget
+on its *next* call, which is driven by an actual input event (a button press/held, or, in `pointer`
+mode, `updateAnalogCursor()`). Until the player's first press, nothing is focused and no widget
+shows its focus ring. Call `game.focusManager.ensureFocusSeeded()` once, right after adding a room's
+focusable widgets (e.g. at the end of `onCreate()`), to focus the first one immediately instead:
+
+```brightscript
+override sub onCreate(args as roAssociativeArray)
+  m.game.gameUi.clearChildren()
+  ' ... add buttons/widgets ...
+  m.game.focusManager.ensureFocusSeeded()
+end sub
+```
+
+It's safe to call with nothing registered yet, and a no-op once focus has already been seeded by
+some other path. See `examples/ui`'s rooms for this in every demo room.
+
+In `pointer` mode, the cursor can also be driven continuously by a connected controller's analog
+stick:
 
 ```brightscript
 ' once, at startup (see examples/ui/src/source/main.bs)
