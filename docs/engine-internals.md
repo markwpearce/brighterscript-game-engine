@@ -213,6 +213,56 @@ overflow the canvas bottom (e.g., 100 options on a 720-pixel display) extends pa
 is a deliberate trade-off to keep the implementation simple and leave scrolling/virtualization as a
 follow-up. See `examples/ui/src/source/Rooms/PopupSelectRoom.bs` for a working demo.
 
+### Text entry via ECP keyboard
+
+`BGE.UI.TextInput` is a focusable single-line text entry widget driven entirely by the platform's own
+text-entry mechanism — no virtual keyboard is drawn by the engine. A player needs a connected Roku mobile
+app (or equivalent remote-control extension supporting on-screen text input) to actually type; the local
+game code receives individual characters through the standard `onECPKeyboard(char as integer)` dispatch,
+the same mechanism that powers Roku's built-in `roKeyboardScreen` component.
+
+```brightscript
+textInput = new BGE.UI.TextInput(game)
+textInput.placeholder = "Enter your name"
+textInput.maxLength = 20
+textInput.onChanged = sub(input as BGE.UI.TextInput)
+  ' Fires after any character insertion or deletion
+end sub
+textInput.onSubmit = sub(input as BGE.UI.TextInput)
+  ' Fires on OK press while focused
+end sub
+gameUi.addChild(textInput)
+```
+
+**Key properties:**
+
+- `text` — Current text content (string). Modified by character entry and backspace; read via `getValue()`.
+- `cursorIndex` — Caret position, `0..Len(text)`. Moved by Left/Right while focused (clamped to valid range).
+- `maxLength` — Maximum text length; `0` means unlimited (default). Characters typed once `text.Len()` reaches
+  `maxLength` are silently dropped.
+- `placeholder` — Dimmed text shown when `text` is empty *and* the widget is unfocused; disappears on focus
+  or once the player types anything.
+- `onChanged()` — Callback fired after any edit (character inserted or deleted). Receives the `TextInput`
+  itself as an argument so a closure can read the modified `text`/`cursorIndex`.
+- `onSubmit()` — Callback fired on OK press while focused. Same callback signature as `onChanged()`.
+
+**Text input from Roku mobile app:** When a player has the Roku mobile app open (or a comparable remote
+extension that supports on-screen text entry), any character they type through the app's keyboard arrives
+as an `onECPKeyboard()` call with that character's ASCII code. Printable characters (letters, digits,
+punctuation) arrive as their normal ASCII values; the backspace/delete key is inferred to send ASCII 8
+(the `BS` control character) and deletes the character immediately before the caret. **This backspace-is-char-8
+assumption is unit-tested** (see `src/source/engine/ui/TextInput.spec.bs`, which directly calls
+`onECPKeyboard(8)` to verify deletion), **but it is inferred from the existing ECP-keyboard plumbing rather
+than tested against a real Roku mobile app's on-screen keyboard** — manual verification using an actual
+Roku mobile app remains as future work to confirm whether the real app does indeed send char-8 for backspace.
+
+Left/Right arrow keys (while focused) move the caret one position at a time, repeating after a brief delay
+if held, matching the existing throttling pattern on `Slider` and `Select.popup` cycling.
+
+See `examples/ui/src/source/Rooms/TextInputRoom.bs` for a working demo including real on-device character
+entry via Roku mobile app (task #179, task 5 verification report documents end-to-end testing via
+`rokubot text` character injection).
+
 ## Collision, concretely
 
 Each `Collider` (`CircleCollider`, `RectangleCollider`) wraps one `roSprite` on the `Game`'s shared
