@@ -3,16 +3,11 @@ import "Enemy.bs"
 
 class Player extends BGE.GameEntity
 
+  ' Collision hitbox - deliberately narrower/shorter than the 64x64 sprite cell (a smaller
+  ' hitbox than the visible art is normal platformer practice for forgiving collision) and
+  ' entirely independent of the sprite's own size below - it never scales the sprite.
   width = 56.0
   height = 72.0
-
-  ' Non-uniform scale applied to the 64x64 sprite cells so the art lines up with the
-  ' 56x72 hitbox above (rather than a plain uniform scale, which would either leave a gap
-  ' or overhang on one axis). Applied to the sprite drawable's own scale, not the entity's
-  ' m.scale - that field is already driven by the jump/landing squash-and-stretch tweens,
-  ' so mixing facing-flip into it would fight those tweens.
-  spriteScaleX = 0.875
-  spriteScaleY = 1.125
 
   runSpeed = 350.0
   gravity = 2000.0
@@ -72,10 +67,11 @@ class Player extends BGE.GameEntity
     ' player.png is a 10-col x 5-row grid of 64x64 cells, every frame facing right - there
     ' is no separate left-facing row, so facing left is done by mirroring (negative
     ' sprite.scale.x, see the facing block in onUpdate() below) rather than a different
-    ' frame set.
+    ' frame set. Sprite.scale is left at its default (1,1,1) - the only scale factor ever
+    ' applied to it is that facing-flip sign, so the character always renders at the
+    ' spritesheet's own natural 64x64 size, undistorted.
     m.sprite = m.addSprite("body", m.game.getBitmap("player"), 64, 64)
     m.sprite.applyPreTranslation(-32, -64)
-    m.sprite.scale = BGE.Math.VectorOps.create(m.spriteScaleX, m.spriteScaleY, 1)
     m.sprite.addAnimation("idle", {startFrame: 0, frameCount: 10}, 8, BGE.SpritePlayMode.Loop)
     ' Frames 18-19 of the run row are blank padding - only the first 8 are the real cycle.
     m.sprite.addAnimation("run", {startFrame: 10, frameCount: 8}, 14, BGE.SpritePlayMode.Loop)
@@ -202,9 +198,9 @@ class Player extends BGE.GameEntity
     ' image itself, so the feet-anchored pivot from applyPreTranslation() above stays put
     ' and the sprite flips in place instead of jumping sideways - confirmed on-device.
     if m.facingRight
-      m.sprite.scale.x = m.spriteScaleX
+      m.sprite.scale.x = 1.0
     else
-      m.sprite.scale.x = -m.spriteScaleX
+      m.sprite.scale.x = -1.0
     end if
 
     ' Horizontal run + facing/animation. Only forced to zero on neutral input
@@ -308,9 +304,29 @@ class Player extends BGE.GameEntity
       end if
     end if
 
-    ' Assume airborne; onCollision() re-grounds this same frame if the
-    ' player is actually resting on something (Task 4).
-    m.grounded = false
+    ' Was already resting on solid ground before this frame's own movement/jump logic ran,
+    ' and didn't just jump - re-verify it's still directly over a solid tile via LevelData
+    ' (the same static layout Level.bs itself builds colliders from), rather than falling
+    ' through to "assume airborne" and depending on onCollision() to re-fire and correct it.
+    ' Confirmed on real hardware (temporary logging) that Roku's compositor does not
+    ' reliably re-report an already-overlapping, unbroken pair's collision every single
+    ' frame - both at rest and while walking on flat ground - so relying on onCollision() to
+    ' re-confirm grounding every frame flipped m.grounded true/false on a roughly-every-
+    ' other-frame basis, which flipped the idle/run/jump animation it drives right along
+    ' with it: a rapid, constant flicker that read as "wrong frames playing" rather than a
+    ' smooth animation. A direct tile lookup is a cheap, exact, always-reliable substitute
+    ' for "am I still standing on something" that doesn't depend on the native collision
+    ' system re-confirming a state that hasn't actually changed - onCollision() is still
+    ' exactly what detects a *new* landing, a side hit, or a head bump below/above, all of
+    ' which are genuine transitions it does reliably fire for.
+    if wasGrounded and not jumpedThisFrame
+      m.grounded = isSolidGroundAt(m.position.x, m.position.y)
+    else
+      ' Assume airborne; onCollision() re-grounds this same frame if the player actually
+      ' lands on something (a genuine ungrounded -> grounded transition, which - unlike the
+      ' continued-contact case above - onCollision() does reliably detect).
+      m.grounded = false
+    end if
 
     ' Missed a jump into the level's pit and fell past any floor - same
     ' recovery as an enemy hit (takeDamage() posts "playerHurt" and
