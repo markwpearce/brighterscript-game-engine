@@ -6,6 +6,14 @@ class Player extends BGE.GameEntity
   width = 56.0
   height = 72.0
 
+  ' Non-uniform scale applied to the 64x64 sprite cells so the art lines up with the
+  ' 56x72 hitbox above (rather than a plain uniform scale, which would either leave a gap
+  ' or overhang on one axis). Applied to the sprite drawable's own scale, not the entity's
+  ' m.scale - that field is already driven by the jump/landing squash-and-stretch tweens,
+  ' so mixing facing-flip into it would fight those tweens.
+  spriteScaleX = 0.875
+  spriteScaleY = 1.125
+
   runSpeed = 350.0
   gravity = 2000.0
   terminalVelocity = -1400.0
@@ -43,6 +51,16 @@ class Player extends BGE.GameEntity
   sprite as BGE.Sprite
   facingRight = true
 
+  ' Set true by takeDamage(), cleared once the "dead" animation's beat (gated by
+  ' invulnerableTimer, reused rather than adding a second duplicate timer) finishes and
+  ' respawn() actually runs - see onUpdate()'s early-return branch below.
+  isDead = false
+
+  ' Set on a hard landing (see onCollision()'s impactSpeed check) to briefly hold the
+  ' "slide" animation instead of immediately falling back to idle/run.
+  slideTimer = 0.0
+  slideAnimTime = 5.0 / 16.0
+
   dust as BGE.DrawableParticles
 
   sub new(game as BGE.Game)
@@ -51,14 +69,25 @@ class Player extends BGE.GameEntity
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.sprite = m.addSprite("body", m.game.getBitmap("player"), 144, 180)
-    m.sprite.applyPreTranslation(-72, -180)
-    m.sprite.scale = BGE.Math.VectorOps.create(0.4, 0.4, 1)
-    m.sprite.addAnimation("idle_right", {startFrame: 0, frameCount: 1}, 12, BGE.SpritePlayMode.Forward)
-    m.sprite.addAnimation("idle_left", {startFrame: 17, frameCount: 1}, 12, BGE.SpritePlayMode.Forward)
-    m.sprite.addAnimation("run_right", {startFrame: 1, frameCount: 8}, 16, BGE.SpritePlayMode.Loop)
-    m.sprite.addAnimation("run_left", {startFrame: 9, frameCount: 8}, 16, BGE.SpritePlayMode.Loop)
-    m.sprite.playAnimation("idle_right")
+    ' player.png is a 10-col x 5-row grid of 64x64 cells, every frame facing right - there
+    ' is no separate left-facing row, so facing left is done by mirroring (negative
+    ' sprite.scale.x, see the facing block in onUpdate() below) rather than a different
+    ' frame set.
+    m.sprite = m.addSprite("body", m.game.getBitmap("player"), 64, 64)
+    m.sprite.applyPreTranslation(-32, -64)
+    m.sprite.scale = BGE.Math.VectorOps.create(m.spriteScaleX, m.spriteScaleY, 1)
+    m.sprite.addAnimation("idle", {startFrame: 0, frameCount: 10}, 8, BGE.SpritePlayMode.Loop)
+    ' Frames 18-19 of the run row are blank padding - only the first 8 are the real cycle.
+    m.sprite.addAnimation("run", {startFrame: 10, frameCount: 8}, 14, BGE.SpritePlayMode.Loop)
+    ' Forward (not Loop): plays once through the rise/fall arc and holds on the last
+    ' (falling) frame for however long the player stays airborne.
+    m.sprite.addAnimation("jump", {startFrame: 20, frameCount: 10}, 12, BGE.SpritePlayMode.Forward)
+    ' Frames 35-39 of the slide row are blank padding - only the first 5 are the real pose.
+    m.sprite.addAnimation("slide", {startFrame: 30, frameCount: 5}, 16, BGE.SpritePlayMode.Forward)
+    ' One-shot: frameRate chosen so 10 frames exactly fill invulnerableTime, the same
+    ' window takeDamage()/onUpdate() use to gate the death beat before respawn().
+    m.sprite.addAnimation("dead", {startFrame: 40, frameCount: 10}, 10.0 / m.invulnerableTime, BGE.SpritePlayMode.Forward)
+    m.sprite.playAnimation("idle")
 
     m.addRectangleCollider("body", m.width, m.height, -m.width / 2.0, m.height)
 
@@ -83,15 +112,21 @@ class Player extends BGE.GameEntity
     m.position = BGE.Math.VectorOps.create(m.spawnPosition.x, m.spawnPosition.y)
     m.velocity = BGE.Math.VectorOps.create()
     m.grounded = false
+    m.slideTimer = 0.0
   end sub
 
-  ' Starts invulnerability (so the same enemy can't re-hit the player the
-  ' instant it respawns on top of it) and respawns at the level start.
+  ' Starts invulnerability (so the same enemy can't re-hit the player the instant it
+  ' respawns on top of it), plays the death animation, and marks the player dead - actual
+  ' respawn() is deferred to onUpdate()'s isDead branch below, once invulnerableTimer (the
+  ' same window backing both invulnerability and the "dead" animation's frame rate) runs
+  ' out, so the death animation gets a visible beat at the hit location instead of an
+  ' instant teleport back to the spawn point.
   sub takeDamage()
     m.invulnerableTimer = m.invulnerableTime
     m.game.playSound("die")
     m.game.postGameEvent("playerHurt", {})
-    m.respawn()
+    m.isDead = true
+    m.sprite.playAnimation("dead")
   end sub
 
   override sub onControls(controls as BGE.Controller.ControlMap)
@@ -125,17 +160,50 @@ class Player extends BGE.GameEntity
       m.invulnerableTimer = m.invulnerableTimer - clampedDt
     end if
 
-    ' Horizontal run + facing/animation.
-    m.velocity.x = m.moveIntentX * m.runSpeed
     if m.moveIntentX > 0.05
       m.facingRight = true
     else if m.moveIntentX < -0.05
       m.facingRight = false
     end if
-    if abs(m.moveIntentX) > 0.05
-      m.sprite.playAnimation(m.facingAnimation("run"))
+    ' Every sprite frame faces right - mirror horizontally for left-facing by negating
+    ' the sprite drawable's own scale.x (not m.scale, the entity scale the jump/landing
+    ' squash-and-stretch tweens drive - mixing the two would fight those tweens). Roku's
+    ' DrawScaledObjectTo-family calls scale the region's pretranslation along with the
+    ' image itself, so the feet-anchored pivot from applyPreTranslation() above stays put
+    ' and the sprite flips in place instead of jumping sideways - confirmed on-device.
+    if m.facingRight
+      m.sprite.scale.x = m.spriteScaleX
     else
-      m.sprite.playAnimation(m.facingAnimation("idle"))
+      m.sprite.scale.x = -m.spriteScaleX
+    end if
+
+    if m.isDead
+      ' Ignore input entirely and let the death pose keep falling a little - a small
+      ' beat before respawn() (below), rather than freezing in place or teleporting
+      ' back to spawn instantly.
+      m.velocity.x = 0.0
+      m.velocity.y = m.velocity.y - m.gravity * clampedDt
+      if m.velocity.y < m.terminalVelocity
+        m.velocity.y = m.terminalVelocity
+      end if
+      if m.invulnerableTimer <= 0.0
+        m.isDead = false
+        m.respawn()
+      end if
+      return
+    end if
+
+    ' Horizontal run + facing/animation.
+    m.velocity.x = m.moveIntentX * m.runSpeed
+    if m.slideTimer > 0.0
+      m.slideTimer = m.slideTimer - clampedDt
+      m.sprite.playAnimation("slide")
+    else if not m.grounded
+      m.sprite.playAnimation("jump")
+    else if abs(m.moveIntentX) > 0.05
+      m.sprite.playAnimation("run")
+    else
+      m.sprite.playAnimation("idle")
     end if
 
     ' Direction buffering: remembers the last nonzero horizontal direction
@@ -267,6 +335,7 @@ class Player extends BGE.GameEntity
         m.game.tweenManager.to(m.scale, {x: 1.3, y: 0.7}, 60, BGE.Tweens.Easing.QuadraticEaseOut)
         m.game.tweenManager.to(m.scale, {x: 1.0, y: 1.0}, 180, BGE.Tweens.Easing.QuadraticEaseOut, {delay: 60})
         m.dust.burst(8)
+        m.slideTimer = m.slideAnimTime
       end if
       return
     end if
@@ -293,12 +362,5 @@ class Player extends BGE.GameEntity
       m.velocity.x = 0.0
     end if
   end sub
-
-  private function facingAnimation(prefix as string) as string
-    if m.facingRight
-      return prefix + "_right"
-    end if
-    return prefix + "_left"
-  end function
 
 end class
