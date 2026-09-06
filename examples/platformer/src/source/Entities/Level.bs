@@ -1,0 +1,107 @@
+import "../LevelData.bs"
+
+' Holds every static tile in the level as one named collider + one matching
+' drawable each - not one GameEntity per tile, so the static layout costs
+' nothing in per-frame onUpdate/onInput dispatch. See LevelData.bs for the
+' row/column -> world-position formula this class implements.
+class Level extends BGE.GameEntity
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Level"
+    m.persistent = false
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    rows = getLevelRows()
+    surfaceBitmap = m.game.getBitmap("tileSurface")
+    fillBitmap = m.game.getBitmap("tileFill")
+    ' Same region reused for every tile of a given kind - the bitmap/rect never
+    ' changes between iterations, so build each once rather than re-creating an
+    ' identical roRegion per tile.
+    surfaceRegion = CreateObject("roRegion", surfaceBitmap, 0, 0, surfaceBitmap.GetWidth(), surfaceBitmap.GetHeight())
+    fillRegion = CreateObject("roRegion", fillBitmap, 0, 0, fillBitmap.GetWidth(), fillBitmap.GetHeight())
+    for r = 0 to rows.count() - 1
+      row = rows[r]
+      for c = 0 to row.len() - 1
+        tileChar = row.mid(c, 1)
+        if tileChar = "#" or tileChar = "-"
+          ' A "#" is an exposed top surface only if the cell directly above it is
+          ' air (or off the top of the level) - anything else ("#" from the row
+          ' below piled on top of another) is buried and never seen from above,
+          ' so it gets the seamless fill texture instead of the non-tileable
+          ' decorative surface piece.
+          exposedTop = true
+          if tileChar = "#" and r > 0
+            exposedTop = rows[r - 1].mid(c, 1) <> "#"
+          end if
+          m.addTile(r, c, tileChar, exposedTop, surfaceBitmap, surfaceRegion, fillBitmap, fillRegion)
+        end if
+      end for
+    end for
+  end sub
+
+  private sub addTile(r as integer, c as integer, tileChar as string, exposedTop as boolean, surfaceBitmap as roBitmap, surfaceRegion as roRegion, fillBitmap as roBitmap, fillRegion as roRegion)
+    topY = (NumRows - r) * TileSize
+    leftX = c * TileSize
+    tileName = "tile_" + r.toStr() + "_" + c.toStr()
+
+    ' tile_surface.png is a one-off decorative rock/grass piece (not seamlessly
+    ' tileable) used for every visible top surface, including one-way platforms
+    ' (which read fine as a thin floating rock/grass slab); tile_fill.png tiles
+    ' seamlessly and is used for buried ground tiles where no repeat is visible
+    ' anyway. Each is scaled uniformly (both native pieces are square) to fill
+    ' one TileSize x TileSize cell - simplest option given the existing per-cell
+    ' loop, at the cost of the surface piece's crevice detail repeating once per
+    ' exposed-top column; the vertical pillar pieces aren't used here since this
+    ' level's ground/platforms are too flat and shallow to need a separate
+    ' vertical rock-face composition.
+    ' tile_surface.png's rock has a raised front lip, so its own flat "walkable" surface
+    ' sits a few pixels below the art's literal top edge - a 2.5D look that otherwise makes
+    ' the player appear to float above the ground, since collision rests the player's feet
+    ' exactly at the tile's grid top edge (topY). Nudging only the DRAWABLE up by this many
+    ' pixels (never the collider - collision geometry is untouched) lines the texture's
+    ' visual surface up with where the player already rests. Determined by eye against
+    ' on-device screenshots, not a formula.
+    surfaceVisualYOffset = 5
+    imageOffsetY = topY
+    imageHeight = TileSize
+    if tileChar = "-" or exposedTop
+      bitmap = surfaceBitmap
+      region = surfaceRegion
+      imageOffsetY += surfaceVisualYOffset
+    else
+      bitmap = fillBitmap
+      region = fillRegion
+      ' A buried tile's own top edge sits exactly at the tile above's bottom edge -
+      ' except when that tile above got nudged up by surfaceVisualYOffset (an exposed
+      ' "#"/"-" tile, per the comment above), which otherwise leaves a gap this many
+      ' pixels tall with nothing drawn in it (the parallax background shows straight
+      ' through - this was a real, confirmed-on-device bug, not merely cosmetic).
+      ' Stretching this tile's own top edge up by the same amount closes that seam;
+      ' its bottom edge (aligned to the collider) is untouched. Applied unconditionally
+      ' (not just when the tile above happens to be exposed) since two stacked buried
+      ' tiles overlapping by a few pixels of the same seamless fill texture is
+      ' invisible - simpler than tracking which specific neighbor needs it.
+      imageOffsetY += surfaceVisualYOffset
+      imageHeight += surfaceVisualYOffset
+    end if
+
+    image = m.addImage(tileName, region, {
+      offset: BGE.Math.VectorOps.create(leftX, imageOffsetY),
+      drawMode: BGE.SceneObjectDrawMode.matchCamera
+    })
+    ' Image.width/.height are protected, so the native bitmap size is scaled
+    ' down/up to TileSize (or TileSize + surfaceVisualYOffset for a buried tile,
+    ' see above) via scale instead of set directly.
+    image.scale = BGE.Math.createScaleVector(TileSize / bitmap.GetWidth(), imageHeight / bitmap.GetHeight())
+
+    collider = m.addRectangleCollider(tileName, TileSize, TileSize, leftX, topY)
+    if tileChar = "#"
+      collider.tagsList.add("solid")
+    else
+      collider.tagsList.add("oneWay")
+    end if
+  end sub
+
+end class

@@ -138,10 +138,15 @@ namespace BGE.UI
           end if
         end if
       end for
-      if wasFocused
-        ' Removed while focused - don't leave currentlyFocused/currentlyFocusedIndex
-        ' pointing at a widget no longer in the registry. Re-seed on the next
-        ' update() instead of guessing a replacement.
+      ' Reset whenever removal leaves nothing focused - either this removal
+      ' just blurred the focused widget (wasFocused), or nothing was focused
+      ' to begin with (e.g. a pointer-mode container cleared while its cursor
+      ' was hovering no widget - issue #190). In the latter case
+      ' currentlyFocusedIndex can still be a stale leftover from whatever
+      ' last set it in list mode (pointer mode never touches it), which would
+      ' otherwise desync navigateList()'s next-index math in the following
+      ' container. Re-seed on the next update() instead of guessing.
+      if wasFocused or m.currentlyFocused = invalid
         m.currentlyFocused = invalid
         m.currentlyFocusedIndex = -1
         m.hasSeededFocus = false
@@ -184,10 +189,11 @@ namespace BGE.UI
     ' @return {void}
     sub update(input as BGE.GameInput)
       isPointer = m.navigationMode = BGE.UI.FocusNavigationMode.pointer
+      justSeeded = false
       if isPointer
-        m.seedAndHitTestPointer()
+        justSeeded = m.seedAndHitTestPointer()
       else
-        m.seedList()
+        justSeeded = m.seedList()
       end if
 
       handled = false
@@ -202,7 +208,11 @@ namespace BGE.UI
         else if input.release and input.isButton("ok")
           m.currentlyFocused.onMouseUp()
           handled = true
-        else
+        else if not (justSeeded and input.held)
+          ' A widget just seeded this same call shouldn't act on stale held
+          ' input any more than it should navigate away from itself on that
+          ' same event - see the navigateList()/navigatePointer() comment
+          ' below (issue #198).
           handled = m.currentlyFocused.handleInput(input)
         end if
       end if
@@ -211,7 +221,14 @@ namespace BGE.UI
         m.consumedThisFrame = true
       end if
 
-      if not handled and not m.consumedThisFrame and (input.x <> 0 or input.y <> 0)
+      ' A fresh press (input.press) is allowed to seed and navigate within the
+      ' same call - that's the existing, intended single-tap behavior (e.g.
+      ' a first "down" press already landing on the second widget). Only a
+      ' held event (input.held) skips navigating on the same call that just
+      ' seeded - held means the button was already down before this widget
+      ' became focusable, so its "held" duration has nothing to do with
+      ' navigating away from the widget just seeded (issue #198).
+      if not handled and not m.consumedThisFrame and not (justSeeded and input.held) and (input.x <> 0 or input.y <> 0)
         if isPointer
           ' Once an axis is bound, ControlMap.getAxis()'s remote-d-pad fallback
           ' already routes d-pad input through updateAnalogCursor()'s continuous
@@ -259,15 +276,21 @@ namespace BGE.UI
 
     ' list mode: establishes currentlyFocused on the very first call
     ' (focusOrder[0]) and leaves it alone otherwise - actual movement is
-    ' navigateList().
+    ' navigateList(). Returns true exactly when this call just seeded, so
+    ' update() can skip navigateList() for the same input event that
+    ' produced the seed (issue #198) - otherwise a directional button
+    ' already held from a prior frame would seed onto focusOrder[0] and
+    ' immediately navigate away from it within the same update() call.
     '
-    ' @return {void}
-    private sub seedList()
+    ' @return {boolean}
+    private function seedList() as boolean
       if not m.hasSeededFocus and m.focusOrder.count() > 0
         m.focusTo(0)
         m.hasSeededFocus = true
+        return true
       end if
-    end sub
+      return false
+    end function
 
     ' list mode: steps currentlyFocused to the next/previous registered
     ' widget on Left/Right/Up/Down - "down"/"right" advance, "up"/"left" go
@@ -325,21 +348,25 @@ namespace BGE.UI
     ' pointer mode: seeds m.cursorPosition on the very first call, then
     ' hit-tests it against focusOrder, updating hovered/focused state and
     ' firing onMouseOver/onMouseOut/onFocus/onBlur for whatever changed -
-    ' actual cursor movement is navigatePointer().
+    ' actual cursor movement is navigatePointer(). Returns true exactly when
+    ' this call just seeded, mirroring seedList() - so update() can apply the
+    ' same "don't act on stale held input the same event that seeded"
+    ' guard (issue #198) in pointer mode too, not just list mode.
     '
-    ' @return {void}
-    private sub seedAndHitTestPointer()
-      m.seedPointerIfNeeded()
+    ' @return {boolean}
+    private function seedAndHitTestPointer() as boolean
+      justSeeded = m.seedPointerIfNeeded()
       m.updateHoverAndFocus()
-    end sub
+      return justSeeded
+    end function
 
     ' pointer mode: the seeding half of seedAndHitTestPointer(), split out so
     ' updateAnalogCursor() can seed BEFORE applying its movement delta without
     ' also hit-testing the pre-movement position. Idempotent after the first
-    ' call.
+    ' call. Returns true exactly when this call just seeded.
     '
-    ' @return {void}
-    private sub seedPointerIfNeeded()
+    ' @return {boolean}
+    private function seedPointerIfNeeded() as boolean
       if not m.hasSeededFocus and m.focusOrder.count() > 0
         seed = m.focusOrder[0]
         ' draw() is what normally positions a widget, cascading down from the
@@ -352,8 +379,10 @@ namespace BGE.UI
         m.repositionAncestorChain(seed)
         m.cursorPosition = BGE.Math.VectorOps.create(seed.position.x + seed.width / 2, seed.position.y + seed.height / 2, 0)
         m.hasSeededFocus = true
+        return true
       end if
-    end sub
+      return false
+    end function
 
     ' Repositions widget and every UiContainer ancestor above it, root-first,
     ' via repositionBasedOnParent() - the same computation draw() normally

@@ -1,0 +1,162 @@
+import "../LevelData.bs"
+import "../Entities/Level.bs"
+import "../Entities/Player.bs"
+import "../Entities/Coin.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/Goal.bs"
+import "../Entities/GameStateManager.bs"
+import "../Entities/PauseMenu.bs"
+
+class MainRoom extends BGE.Room
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainRoom"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    ' Added first so it draws behind everything else added afterward this frame
+    ' (draw order follows insertion order - there's no settable zIndex on a
+    ' Drawable/Image to reorder it explicitly).
+    '
+    ' Three DrawableParallaxLayers (not a plain Image scaled to the whole level) - a single
+    ' giant Image anchored at one corner gets frustum-culled wholesale once the camera
+    ' scrolls far enough from that anchor (SceneObjectBillboard's screen-aligned frustum
+    ' check tests only that one anchor point, not the image's full extent). A tiling
+    ' parallax layer's SceneObjectParallaxLayer never runs that check at all when
+    ' repeatX/repeatY are set - it always reports on-screen and re-tiles to cover the
+    ' canvas regardless of camera position, so it can't go missing mid-level.
+    '
+    ' Back-to-front draw order, increasing parallaxFactor per layer (examples/parallax's
+    ' multi-layer pattern): bg_back (flat, very-distant bright-green hint) drifts least,
+    ' bg_far (a full dark-forest silhouette scene) drifts a bit more, bg_middle (one large
+    ' close-up tree) drifts the most of the three.
+    '
+    ' All three share the same owner (m, this Room, sitting at the default (0,0,0)
+    ' position) as their parallax reference point, and their factors are all close to 1 -
+    ' with no offset compensation (unlike examples/parallax's newLayer(), which always
+    ' applies one), every layer's own tile-repeat boundary landed at nearly the same
+    ' on-canvas position for as long as the camera sits at its initial rest position (which
+    ' is also where it stays clamped for the level's whole opening stretch, until the
+    ' player runs far enough right to unclamp it) - three overlapping, reinforcing
+    ' boundaries read as one obvious seam, worse than any single layer's own repeat would
+    ' be alone. newBackgroundLayer()'s targetX staggers each layer's boundary to a
+    ' different on-canvas position instead so they don't reinforce each other, and its Y
+    ' offset pins every layer's vertical tile boundary to the very top edge permanently
+    ' (this Room's camera.y target never changes - see onUpdate() - so this isn't just a
+    ' best-effort anchor, it's an exact, permanent fix on that axis).
+    m.addDrawable("bgBack", m.newBackgroundLayer("bgBack", 0.02, 0))
+    m.addDrawable("bgFar", m.newBackgroundLayer("bgFar", 0.05, 96))
+    m.addDrawable("bgMiddle", m.newBackgroundLayer("bgMiddle", 0.1, 192))
+
+    m.game.addEntity(new Level(m.game))
+    m.game.addEntity(new GameStateManager(m.game))
+    m.game.addEntity(new PauseMenu(m.game))
+
+    for r = 0 to (getLevelRows()).count() - 1
+      row = (getLevelRows())[r]
+      for c = 0 to row.len() - 1
+        if row.mid(c, 1) = "P"
+          playerEntity = m.game.addEntity(new Player(m.game)) as Player
+          playerEntity.position.x = c * TileSize + TileSize / 2.0
+          playerEntity.position.y = (NumRows - r) * TileSize
+        else if row.mid(c, 1) = "o"
+          coinEntity = m.game.addEntity(new Coin(m.game)) as Coin
+          coinEntity.position.x = c * TileSize + TileSize / 2.0
+          coinEntity.position.y = (NumRows - r) * TileSize - TileSize / 2.0
+        else if row.mid(c, 1) = "e"
+          enemyEntity = m.game.addEntity(new Enemy(m.game)) as Enemy
+          enemyEntity.position.x = c * TileSize + TileSize / 2.0
+          ' Unlike Player, Enemy has no gravity (see Enemy.bs) - it never falls
+          ' into place, so its spawn Y must land it directly on the ground
+          ' tile's top edge (one row below the "e" marker's own grid row),
+          ' not the marker row's height like Player's fall-then-land formula.
+          enemyEntity.position.y = (NumRows - r - 1) * TileSize
+        else if row.mid(c, 1) = "G"
+          goalEntity = m.game.addEntity(new Goal(m.game)) as Goal
+          goalEntity.position.x = c * TileSize + TileSize / 2.0
+          ' Unlike Player, Goal has no gravity - it never falls into place, so its
+          ' spawn Y must land it directly on the ground tile's top edge (one row
+          ' below the "G" marker's own grid row), not the marker row's height like
+          ' Player's fall-then-land formula.
+          goalEntity.position.y = (NumRows - r - 1) * TileSize
+        end if
+      end for
+    end for
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if input.press and input.isButton("back")
+      m.game.End()
+    end if
+  end sub
+
+  override sub onUpdate(dt as float)
+    playerEntity = m.game.getEntityByName("Player") as Player
+    if invalid = playerEntity
+      return
+    end if
+
+    camera = m.game.canvas.renderer.camera
+    halfViewWidth = camera.frameSize.x / 2.0
+    levelWidth = NumCols * TileSize
+
+    targetX = playerEntity.position.x
+    minX = halfViewWidth
+    maxX = levelWidth - halfViewWidth
+    if targetX < minX
+      targetX = minX
+    else if targetX > maxX
+      targetX = maxX
+    end if
+
+    camera.setTarget(BGE.Math.VectorOps.create(targetX, camera.frameSize.y / 2.0))
+  end sub
+
+  ' Builds one repeating, canvas-height-filling background layer from an already-loaded
+  ' bitmap. See examples/parallax's MainRoom.newLayer() for the same pattern applied to a
+  ' foreground/background pair with off-origin owner entities.
+  '
+  ' targetX picks which on-canvas X position this layer's tile-repeat boundary lands at
+  ' while the camera sits at its initial rest position (world x = half the canvas width -
+  ' also where the camera stays clamped for the level's whole opening stretch, since the
+  ' player has to run past that point before onUpdate()'s clamp releases it). Callers pass
+  ' a different targetX per layer so the three layers' boundaries land at different
+  ' on-canvas spots instead of all landing near the same one (see onCreate()'s comment).
+  private function newBackgroundLayer(bitmapName as string, factor as float, targetX as float) as BGE.DrawableParallaxLayer
+    bmp = m.game.getBitmap(bitmapName)
+    region = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
+    layerScale = m.game.canvas.getHeight() / bmp.GetHeight()
+
+    ' onUpdate above pins the camera's Y target at half the canvas height for the whole
+    ' level (only X tracks the player) - but this Room (the layer's owner) sits at Y=0, a
+    ' mismatch from that fixed camera Y. Since each tile's height is scaled to exactly the
+    ' canvas height above, the tile-wrap seam SceneObjectParallaxLayer.computeTilePositions()
+    ' places needs to land exactly on the canvas's top/bottom edge (invisible) - with the
+    ' mismatch left uncorrected it instead lands mid-screen, in plain view, for every layer.
+    ' A constant Y offset fixes this the same way examples/parallax's newLayer() X-offset
+    ' does: computeEffectiveWorldPosition() only lets offset*factor survive per axis, so the
+    ' offset needed to land exactly on the far (top) edge has to be pre-divided by factor -
+    ' see that function's own derivation comment for the general form this follows. Since
+    ' this Room's camera.y target never changes, this is an exact fix for all time, not
+    ' just at the camera's rest position.
+    halfCanvasWidth = m.game.canvas.getWidth() / 2.0
+    halfCanvasHeight = m.game.canvas.getHeight() / 2.0
+    offsetY = halfCanvasHeight * (1 + 1 / factor)
+
+    ' Same "pre-divide by factor" derivation as offsetY above, but solved for a caller-
+    ' chosen target canvas X (at the camera's rest position, world x = halfCanvasWidth)
+    ' instead of always 0 - see this function's doc comment for why each layer wants a
+    ' different target.
+    offsetX = halfCanvasWidth + (targetX - halfCanvasWidth) / factor
+
+    return new BGE.DrawableParallaxLayer(m, region, {
+      offset: BGE.Math.VectorOps.create(offsetX, offsetY, 0),
+      parallaxFactor: BGE.Math.VectorOps.create(factor, factor),
+      repeatX: true,
+      repeatY: true,
+      scale: BGE.Math.createScaleVector(layerScale)
+    })
+  end function
+
+end class

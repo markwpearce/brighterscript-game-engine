@@ -19,6 +19,7 @@ import "drawables/Image.bs"
 import "drawables/Sprite.bs"
 import "Game.bs"
 import "GameInput.bs"
+import "GameTimer.bs"
 import "renderer/Renderer.bs"
 import "Room.bs"
 
@@ -78,6 +79,17 @@ namespace BGE
     ' so we only draw debug after the first frame this entity is created
     private hasDrawnDebug = false
 
+    ' True once invalidateAfter() has been called - lets game code (collision
+    ' handlers, scoring logic, etc.) check whether this entity is already in its
+    ' death sequence and skip re-triggering effects/logic on it, without needing
+    ' to know about the underlying timer mechanism.
+    isDying as boolean = false
+    ' Timer/delay backing invalidateAfter()'s grace period. Public (rather than
+    ' private) so tests can fast-forward it via GameTimer.addTime() the same way
+    ' other engine timers are tested - see checkDyingTimeout().
+    dyingTimer as GameTimer = invalid
+    dyingDelayMs as integer = 0
+
     ' Creates a new GameEntity
     '
     ' @param {Game} game - The game engine that this entity is going to be assigned to
@@ -133,6 +145,42 @@ namespace BGE
       end for
       m.drawables = []
       m.drawablesByName = {}
+    end sub
+
+
+    ' Marks this entity as dying: it stays fully alive, valid, and processed
+    ' normally (still updates, still draws, still collides) for delayMs
+    ' milliseconds, then invalidate() is called automatically. Use this instead
+    ' of calling invalidate() directly when an entity needs to trigger a
+    ' one-shot effect (e.g. a particle burst) that should have a chance to
+    ' actually render before the entity disappears - invalidate() removes all
+    ' of this entity's drawables from the scene immediately, which would cut
+    ' off that effect on its very first frame.
+    '
+    ' Sets isDying = true immediately, so other game code (e.g. a collision
+    ' handler) can check it to avoid re-triggering logic on an entity that's
+    ' already in its death sequence. Colliders are NOT removed during the grace
+    ' period - a dying entity can still register collisions until it's actually
+    ' invalidated, so guard on isDying at the very top of onCollision() (before
+    ' any score/sound/effect side effect) to avoid double-firing.
+    '
+    ' @param {integer} delayMs - how long to wait, in milliseconds, before this entity is actually invalidated
+    sub invalidateAfter(delayMs as integer)
+      m.isDying = true
+      m.dyingDelayMs = delayMs
+      m.dyingTimer = new GameTimer()
+      m.dyingTimer.mark()
+    end sub
+
+
+    ' Called once per frame (from Game's entity-processing loop) for every
+    ' valid entity, regardless of whether it overrides onUpdate() - checks
+    ' whether an invalidateAfter() grace period has elapsed and, if so, calls
+    ' the real invalidate(). A no-op for an entity that isn't dying.
+    sub checkDyingTimeout()
+      if m.isDying and m.dyingTimer <> invalid and m.dyingTimer.totalMilliseconds() >= m.dyingDelayMs
+        m.invalidate()
+      end if
     end sub
 
 

@@ -1,0 +1,424 @@
+import "../LevelData.bs"
+import "Enemy.bs"
+
+class Player extends BGE.GameEntity
+
+  ' Collision hitbox - deliberately narrower/shorter than the 64x64 sprite cell (a smaller
+  ' hitbox than the visible art is normal platformer practice for forgiving collision) and
+  ' entirely independent of the sprite's own size below - it never scales the sprite.
+  width = 56.0
+  height = 72.0
+
+  runSpeed = 350.0
+  gravity = 2000.0
+  terminalVelocity = -1400.0
+  jumpVelocity = 900.0
+  coyoteTime = 0.1
+  jumpBufferTime = 0.12
+  ' How long a recent direction press still "counts" for nudging a jump's
+  ' horizontal velocity - rescues a quick tap-direction-then-jump on a real
+  ' remote where moveIntentX can read neutral for the one frame jump triggers.
+  directionBufferTime = 0.15
+  invulnerableTime = 0.5
+  bounceVelocity = 700.0
+  ' Falling below this y (well under the level's y = 0 floor) means the
+  ' player missed a jump into the level's pit, with no floor below to land
+  ' on - treat it the same as an enemy hit (lose a life, respawn) rather
+  ' than let it fall forever, invisible and unrecoverable.
+  fallDeathY = -200.0
+
+  grounded = false
+  invulnerableTimer = 0.0
+  coyoteTimer = 0.0
+  jumpBufferTimer = 0.0
+  directionBufferTimer = 0.0
+  bufferedDirectionX = 1.0
+  jumpHeldLastFrame = false
+
+  positionBeforeMove = BGE.Math.VectorOps.create()
+  spawnPosition = BGE.Math.VectorOps.create()
+  spawnCaptured = false
+
+  moveIntentX = 0.0
+  wantsJump = false
+  jumpHeld = false
+
+  sprite as BGE.Sprite
+  facingRight = true
+
+  ' Set true by takeDamage(), cleared once the "dead" animation's beat (gated by
+  ' invulnerableTimer, reused rather than adding a second duplicate timer) finishes and
+  ' respawn() actually runs - see onUpdate()'s early-return branch below.
+  isDead = false
+
+  ' Set on a hard landing (see onCollision()'s impactSpeed check) to briefly hold the
+  ' "slide" animation instead of immediately falling back to idle/run.
+  slideTimer = 0.0
+  slideAnimTime = 5.0 / 16.0
+
+  dust as BGE.DrawableParticles
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Player"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    ' player.png is a 10-col x 5-row grid of 64x64 cells, every frame facing right - there
+    ' is no separate left-facing row, so facing left is done by mirroring (negative
+    ' sprite.scale.x, see the facing block in onUpdate() below) rather than a different
+    ' frame set. Sprite.scale is left at its default (1,1,1) - the only scale factor ever
+    ' applied to it is that facing-flip sign, so the character always renders at the
+    ' spritesheet's own natural 64x64 size, undistorted.
+    m.sprite = m.addSprite("body", m.game.getBitmap("player"), 64, 64)
+    m.sprite.applyPreTranslation(-32, -64)
+    m.sprite.addAnimation("idle", {startFrame: 0, frameCount: 10}, 8, BGE.SpritePlayMode.Loop)
+    ' Frames 18-19 of the run row are blank padding - only the first 8 are the real cycle.
+    m.sprite.addAnimation("run", {startFrame: 10, frameCount: 8}, 14, BGE.SpritePlayMode.Loop)
+    ' Forward (not Loop): plays once through the rise/fall arc and holds on the last
+    ' (falling) frame for however long the player stays airborne.
+    m.sprite.addAnimation("jump", {startFrame: 20, frameCount: 10}, 12, BGE.SpritePlayMode.Forward)
+    ' Frames 35-39 of the slide row are blank padding - only the first 5 are the real pose.
+    m.sprite.addAnimation("slide", {startFrame: 30, frameCount: 5}, 16, BGE.SpritePlayMode.Forward)
+    ' One-shot: frameRate chosen so 10 frames exactly fill invulnerableTime, the same
+    ' window takeDamage()/onUpdate() use to gate the death beat before respawn().
+    m.sprite.addAnimation("dead", {startFrame: 40, frameCount: 10}, 10.0 / m.invulnerableTime, BGE.SpritePlayMode.Forward)
+    m.sprite.playAnimation("idle")
+
+    m.addRectangleCollider("body", m.width, m.height, -m.width / 2.0, m.height)
+
+    m.dust = m.addParticles("dust", BGE.ParticleShape.Rectangle, {
+      lifetime: 0.35,
+      lifetimeSpread: 0.1,
+      velocitySpreadMagnitude: 90.0,
+      startColor: BGE.Colors.White,
+      endColor: BGE.Colors.White,
+      startAlpha: 180.0,
+      endAlpha: 0.0,
+      startSize: 6.0,
+      endSize: 1.0,
+      offset: BGE.Math.VectorOps.create(0, 4)
+    })
+  end sub
+
+  ' Restores the player to its level-start position with zero velocity -
+  ' called on the initial spawn (implicitly, since m.position is already the
+  ' spawn point from MainRoom) and again whenever the player is hurt (Task 8).
+  sub respawn()
+    m.position = BGE.Math.VectorOps.create(m.spawnPosition.x, m.spawnPosition.y)
+    m.velocity = BGE.Math.VectorOps.create()
+    m.grounded = false
+    m.slideTimer = 0.0
+  end sub
+
+  ' Starts invulnerability (covering the death-beat window below), plays the death
+  ' animation, and marks the player dead - actual respawn() is deferred to onUpdate()'s
+  ' isDead branch below, once invulnerableTimer (the same window backing both this and
+  ' the "dead" animation's frame rate) runs out, so the death animation gets a visible
+  ' beat at the hit location instead of an instant teleport back to the spawn point.
+  ' invulnerableTimer gets a second, fresh window right as respawn() actually fires (see
+  ' onUpdate()) - this first window is entirely spent on timing the death beat, not on
+  ' protecting the player once it's actually back at the spawn point, so the same enemy
+  ' can't re-hit it the instant it respawns on top of it.
+  sub takeDamage()
+    m.invulnerableTimer = m.invulnerableTime
+    m.game.playSound("die")
+    m.game.postGameEvent("playerHurt", {})
+    m.isDead = true
+    m.sprite.playAnimation("dead")
+  end sub
+
+  override sub onControls(controls as BGE.Controller.ControlMap)
+    move = controls.getAxis("move")
+    m.moveIntentX = move.x
+    m.wantsJump = controls.isActionPressed("jump")
+    m.jumpHeld = controls.isActionHeld("jump")
+  end sub
+
+  override sub onUpdate(dt as float)
+    if not m.spawnCaptured
+      m.spawnPosition = BGE.Math.VectorOps.create(m.position.x, m.position.y)
+      m.spawnCaptured = true
+    end if
+
+    ' Clamp dt for this entity's own gravity/timer math. A real device's first
+    ' frame after launch is commonly a large one-time hitch (confirmed on
+    ' device, dt as high as ~0.4s) - left unclamped, gravity builds enough
+    ' velocity in that single step for the subsequent position update
+    ' (Game.bs's own processEntityMovement, driven by the *actual* unclamped
+    ' frame dt) to tunnel the player clean through the ground before any
+    ' collision check ever sees the overlap.
+    clampedDt = dt
+    if clampedDt > 1 / 30.0
+      clampedDt = 1 / 30.0
+    end if
+
+    m.positionBeforeMove = BGE.Math.VectorOps.create(m.position.x, m.position.y)
+    ' Captured before this frame's jump-trigger/movement logic can change
+    ' m.grounded, so it reflects onCollision()'s verdict as of the end of
+    ' last frame - used below to skip gravity while already resting.
+    wasGrounded = m.grounded
+
+    if m.invulnerableTimer > 0.0
+      m.invulnerableTimer = m.invulnerableTimer - clampedDt
+    end if
+
+    if m.isDead
+      ' Ignore input entirely (including facing/mirroring, checked below - a dead/
+      ' falling player shouldn't visibly flip left-right) and let the death pose keep
+      ' falling a little - a small beat before respawn() (below), rather than freezing
+      ' in place or teleporting back to spawn instantly.
+      m.velocity.x = 0.0
+      m.velocity.y = m.velocity.y - m.gravity * clampedDt
+      if m.velocity.y < m.terminalVelocity
+        m.velocity.y = m.terminalVelocity
+      end if
+      if m.invulnerableTimer <= 0.0
+        m.isDead = false
+        m.respawn()
+        ' Re-arm a fresh invulnerability window now that the player is actually back at
+        ' the spawn point - the window that just expired above was spent on timing the
+        ' death beat, not on protecting the post-respawn player, so without this a hazard
+        ' placed near spawn could hit the player again the instant it respawns on top of
+        ' it (see takeDamage()'s doc comment - this restores that guarantee).
+        m.invulnerableTimer = m.invulnerableTime
+      end if
+      return
+    end if
+
+    if m.moveIntentX > 0.05
+      m.facingRight = true
+    else if m.moveIntentX < -0.05
+      m.facingRight = false
+    end if
+    ' Every sprite frame faces right - mirror horizontally for left-facing by negating
+    ' the sprite drawable's own scale.x (not m.scale, the entity scale the jump/landing
+    ' squash-and-stretch tweens drive - mixing the two would fight those tweens). Roku's
+    ' DrawScaledObjectTo-family calls scale the region's pretranslation along with the
+    ' image itself, so the feet-anchored pivot from applyPreTranslation() above stays put
+    ' and the sprite flips in place instead of jumping sideways - confirmed on-device.
+    if m.facingRight
+      m.sprite.scale.x = 1.0
+    else
+      m.sprite.scale.x = -1.0
+    end if
+
+    ' Horizontal run + facing/animation. Only forced to zero on neutral input
+    ' while grounded (walking stop) - while airborne, neutral input leaves
+    ' velocity.x untouched instead of zeroing it. This was the real reason
+    ' the direction buffer below "didn't work reliably": that buffer nudges
+    ' velocity.x for exactly the jump-trigger frame, but an unconditional
+    ' `velocity.x = moveIntentX * runSpeed` here ran every frame afterward
+    ' too, so the instant the direction key released (almost always true a
+    ' moment into a jump - a real player rarely holds it the whole arc), this
+    ' line wiped the nudge (or ordinary held-direction momentum) straight
+    ' back to zero on the very next frame - confirmed on-device via temporary
+    ' logging: velocity.x read correctly (350) on the jump-trigger frame,
+    ' then 0 on the following frame the instant direction released mid-air.
+    if abs(m.moveIntentX) > 0.05
+      m.velocity.x = m.moveIntentX * m.runSpeed
+    else if m.grounded
+      m.velocity.x = 0.0
+    end if
+    if m.slideTimer > 0.0
+      m.slideTimer = m.slideTimer - clampedDt
+      m.sprite.playAnimation("slide")
+    else if not m.grounded
+      m.sprite.playAnimation("jump")
+    else if abs(m.moveIntentX) > 0.05
+      m.sprite.playAnimation("run")
+    else
+      m.sprite.playAnimation("idle")
+    end if
+
+    ' Direction buffering: remembers the last nonzero horizontal direction
+    ' briefly, so a jump that triggers on a frame where moveIntentX happens to
+    ' read neutral (a quick tap-direction-then-jump on a real remote) can still
+    ' carry the horizontal velocity the player clearly intended.
+    if abs(m.moveIntentX) > 0.05
+      if m.moveIntentX > 0
+        m.bufferedDirectionX = 1.0
+      else
+        m.bufferedDirectionX = -1.0
+      end if
+      m.directionBufferTimer = m.directionBufferTime
+    else
+      m.directionBufferTimer = m.directionBufferTimer - clampedDt
+      if m.directionBufferTimer < 0.0
+        m.directionBufferTimer = 0.0
+      end if
+    end if
+
+    ' Coyote time + jump buffering.
+    jumpedThisFrame = false
+    if m.grounded
+      m.coyoteTimer = m.coyoteTime
+    else
+      m.coyoteTimer = m.coyoteTimer - clampedDt
+    end if
+    if m.wantsJump
+      m.jumpBufferTimer = m.jumpBufferTime
+    else
+      m.jumpBufferTimer = m.jumpBufferTimer - clampedDt
+    end if
+    if m.jumpBufferTimer > 0.0 and m.coyoteTimer > 0.0
+      m.game.tweenManager.to(m.scale, {x: 0.8, y: 1.25}, 80, BGE.Tweens.Easing.QuadraticEaseOut)
+      m.game.tweenManager.to(m.scale, {x: 1.0, y: 1.0}, 150, BGE.Tweens.Easing.QuadraticEaseOut, {delay: 80})
+      m.dust.burst(5)
+      m.game.playSound("jump")
+      m.velocity.y = m.jumpVelocity
+      ' Rescue a jump that would otherwise have zero horizontal velocity
+      ' despite a recent direction press - only when no direction is
+      ' currently held, so the normal (direction held through the jump) case
+      ' is untouched.
+      if abs(m.moveIntentX) <= 0.05 and m.directionBufferTimer > 0.0
+        m.velocity.x = m.bufferedDirectionX * m.runSpeed
+      end if
+      m.grounded = false
+      m.coyoteTimer = 0.0
+      m.jumpBufferTimer = 0.0
+      jumpedThisFrame = true
+    end if
+
+    ' Variable jump height: cut the rise short if the button releases early.
+    if not m.jumpHeld and m.jumpHeldLastFrame and m.velocity.y > 0.0
+      m.velocity.y = m.velocity.y * 0.5
+    end if
+    m.jumpHeldLastFrame = m.jumpHeld
+
+    ' Gravity, capped so one frame's fall never exceeds one tile (avoids
+    ' tunneling through a thin floor without needing substeps). Skipped
+    ' entirely while resting on solid ground as of last frame (and not
+    ' jumping this frame): applying it unconditionally every frame - even at
+    ' rest - built a small downward velocity that moved the player into the
+    ' tile, which onCollision()'s landedOnTop check then snapped back out to
+    ' tileTop the same frame. That real per-frame "sink, then get snapped
+    ' back" cycle relies on the collision check's tolerance catching it every
+    ' single frame, and was the actual cause of a visible 1-2px idle
+    ' bounce/jitter (confirmed - not the idle spritesheet, whose 10 frames
+    ' all share the same bottom-most opaque pixel row).
+    if not wasGrounded or jumpedThisFrame
+      m.velocity.y = m.velocity.y - m.gravity * clampedDt
+      if m.velocity.y < m.terminalVelocity
+        m.velocity.y = m.terminalVelocity
+      end if
+    end if
+
+    ' Was already resting on solid ground before this frame's own movement/jump logic ran,
+    ' and didn't just jump - re-verify it's still directly over a solid tile via LevelData
+    ' (the same static layout Level.bs itself builds colliders from), rather than falling
+    ' through to "assume airborne" and depending on onCollision() to re-fire and correct it.
+    ' Confirmed on real hardware (temporary logging) that Roku's compositor does not
+    ' reliably re-report an already-overlapping, unbroken pair's collision every single
+    ' frame - both at rest and while walking on flat ground - so relying on onCollision() to
+    ' re-confirm grounding every frame flipped m.grounded true/false on a roughly-every-
+    ' other-frame basis, which flipped the idle/run/jump animation it drives right along
+    ' with it: a rapid, constant flicker that read as "wrong frames playing" rather than a
+    ' smooth animation. A direct tile lookup is a cheap, exact, always-reliable substitute
+    ' for "am I still standing on something" that doesn't depend on the native collision
+    ' system re-confirming a state that hasn't actually changed - onCollision() is still
+    ' exactly what detects a *new* landing, a side hit, or a head bump below/above, all of
+    ' which are genuine transitions it does reliably fire for.
+    if wasGrounded and not jumpedThisFrame
+      m.grounded = isSolidGroundAt(m.position.x, m.position.y)
+    else
+      ' Assume airborne; onCollision() re-grounds this same frame if the player actually
+      ' lands on something (a genuine ungrounded -> grounded transition, which - unlike the
+      ' continued-contact case above - onCollision() does reliably detect).
+      m.grounded = false
+    end if
+
+    ' Missed a jump into the level's pit and fell past any floor - same
+    ' recovery as an enemy hit (takeDamage() posts "playerHurt" and
+    ' respawns), rather than falling forever off-screen. Gated by
+    ' invulnerableTimer for the same reason the enemy-hit branch in
+    ' onCollision() is: without it, a fall that happens to straddle two
+    ' processed frames (or a respawn whose reset position hasn't yet been
+    ' reflected everywhere this same frame) can call takeDamage() twice in
+    ' quick succession, costing two lives for what a player experiences as
+    ' one single fall (confirmed on-device during full-playthrough testing).
+    if m.position.y < m.fallDeathY and m.invulnerableTimer <= 0.0
+      m.takeDamage()
+    end if
+  end sub
+
+  override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+    if otherEntity.name = "Enemy"
+      enemyEntity = otherEntity as Enemy
+      ' Both Player.position and Enemy.position are feet-anchored (see the
+      ' comment below on playerBottomBefore/playerTopBefore) - so a stomp is
+      ' the player falling with its feet at/above the enemy's head (top edge),
+      ' not "- m.height" (that would test a point below the player's feet).
+      playerBottomBefore = m.positionBeforeMove.y
+      enemyTop = enemyEntity.position.y + enemyEntity.height
+      if m.velocity.y <= 0.0 and playerBottomBefore >= enemyTop - 4.0
+        enemyEntity.stomp()
+        m.velocity.y = m.bounceVelocity
+      else if m.invulnerableTimer <= 0.0
+        m.takeDamage()
+      end if
+      return
+    end if
+
+    if otherEntity.name <> "Level"
+      return
+    end if
+
+    ' otherCollider is always a RectangleCollider here (Level only builds
+    ' rectangle tile colliders), but onCollision's signature is typed to the
+    ' base BGE.Collider, which has no width/height - cast to reach them.
+    tileCollider = otherCollider as BGE.RectangleCollider
+    tileTop = tileCollider.offset.y
+    tileBottom = tileCollider.offset.y - tileCollider.height
+    tileLeft = tileCollider.offset.x
+    tileRight = tileCollider.offset.x + tileCollider.width
+    isOneWay = otherCollider.tagsList.hasTag("oneWay")
+
+    ' Player.position is feet-anchored (matches the sprite's bottom-center
+    ' pretranslate and the "body" collider's offset_y = m.height, i.e. its
+    ' top edge sits one height above position) - so position.y IS the foot
+    ' position, and the head is m.height above it, not the other way round.
+    playerBottomBefore = m.positionBeforeMove.y
+    playerTopBefore = m.positionBeforeMove.y + m.height
+    playerLeftBefore = m.positionBeforeMove.x - m.width / 2.0
+    playerRightBefore = m.positionBeforeMove.x + m.width / 2.0
+
+    landedOnTop = m.velocity.y <= 0.0 and playerBottomBefore >= tileTop - 1.0
+    if landedOnTop
+      impactSpeed = -m.velocity.y
+      m.position.y = tileTop
+      m.velocity.y = 0.0
+      m.grounded = true
+      if impactSpeed > 300.0
+        m.game.tweenManager.to(m.scale, {x: 1.3, y: 0.7}, 60, BGE.Tweens.Easing.QuadraticEaseOut)
+        m.game.tweenManager.to(m.scale, {x: 1.0, y: 1.0}, 180, BGE.Tweens.Easing.QuadraticEaseOut, {delay: 60})
+        m.dust.burst(8)
+        m.slideTimer = m.slideAnimTime
+      end if
+      return
+    end if
+
+    if isOneWay
+      ' One-way platforms only ever block a landing-from-above - every
+      ' other case (rising into it, approaching from a side) passes through.
+      return
+    end if
+
+    hitHead = m.velocity.y > 0.0 and playerTopBefore <= tileBottom + 1.0
+    if hitHead
+      m.position.y = tileBottom - m.height
+      m.velocity.y = 0.0
+      return
+    end if
+
+    ' Horizontal: push out the side the player was already outside of.
+    if playerRightBefore <= tileLeft + 1.0
+      m.position.x = tileLeft - m.width / 2.0
+      m.velocity.x = 0.0
+    else if playerLeftBefore >= tileRight - 1.0
+      m.position.x = tileRight + m.width / 2.0
+      m.velocity.x = 0.0
+    end if
+  end sub
+
+end class

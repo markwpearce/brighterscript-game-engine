@@ -1,0 +1,169 @@
+' Tracks score/lives, listens for the game events Coin/Enemy/Goal post
+' (BGE.Game.postGameEvent), and owns the HUD + win/game-over BGE.UI panels -
+' the same "entity reacts to broadcast events, doesn't know who sent them"
+' pattern as examples/breakout's ScoreHandler, but with real BGE.UI widgets
+' instead of a drawText overlay.
+class GameStateManager extends BGE.GameEntity
+
+  score = 0
+  lives = 3
+  gameOver = false
+  won = false
+
+  scoreLabel as BGE.UI.Label
+  livesLabel as BGE.UI.Label
+  endPanel as BGE.UI.UiContainer
+  endMessageLabel as BGE.UI.Label
+  endPanelBuilt = false
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "GameStateManager"
+    ' Not persistent: MainRoom.onCreate() unconditionally adds a fresh
+    ' GameStateManager every time it runs (initial load and every
+    ' Game.resetRoom() on Retry). A persistent instance would survive that
+    ' reset and coexist with the new one - two listeners double-handling
+    ' every game event, two overlapping HUDs. Letting it be destroyed and
+    ' recreated like every other level entity (Level/Player/Coin/...) gives
+    ' Retry a genuinely fresh score/lives/gameOver state for free.
+    m.persistent = false
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    ' gameUi persists across a room reset (unlike entities). Clear it first so
+    ' Retry doesn't stack a second HUD/end-panel on top of the previous
+    ' (now-destroyed) GameStateManager's widgets - same pattern as
+    ' examples/ui's MainRoom.
+    m.game.gameUi.clearChildren()
+
+    ' A fresh GameStateManager.onCreate() means either the initial level load
+    ' (game not paused, this is a no-op) or a Retry-triggered resetRoom()
+    ' (game.pause() was called by the just-destroyed previous instance's
+    ' showEndPanel() and is never undone by resetRoom() itself).
+    m.game.Resume()
+
+    width = m.game.uiCanvas.getWidth()
+    height = m.game.uiCanvas.getHeight()
+
+    m.scoreLabel = new BGE.UI.Label(m.game)
+    m.scoreLabel.customPosition = true
+    m.scoreLabel.customX = width * 0.1
+    m.scoreLabel.customY = height * 0.06
+    m.scoreLabel.setText("Score: 0")
+    m.scoreLabel.drawableText.textColor = &hF5E6C8FF ' warm cream, readable over the parallax forest
+    m.game.gameUi.addChild(m.scoreLabel)
+
+    ' Right-edge-anchored via the actual measured text width (not a fixed
+    ' percentage) so this stays inside the title-safe area regardless of how
+    ' wide "Lives: N" renders in the display font.
+    livesText = "Lives: 3"
+    livesWidth = m.game.getFont("body").GetOneLineWidth(livesText, 10000)
+    m.livesLabel = new BGE.UI.Label(m.game)
+    m.livesLabel.customPosition = true
+    m.livesLabel.customX = width * 0.9 - livesWidth
+    m.livesLabel.customY = height * 0.06
+    m.livesLabel.setText(livesText)
+    m.livesLabel.drawableText.textColor = &hF5E6C8FF
+    m.game.gameUi.addChild(m.livesLabel)
+
+    ' Sized/colored to actually show as a panel - UiContainer's background
+    ' rect draws at m.width/m.height, which default to 0 (invisible) unless
+    ' set explicitly. Widened/heightened from the original 340x185 to fit the
+    ' larger body font (24 -> 30) and taller buttons (48px -> 56px) - see
+    ' buildEndPanel() below.
+    m.endPanel = new BGE.UI.UiContainer(m.game)
+    m.endPanel.customPosition = true
+    m.endPanel.width = 460
+    m.endPanel.height = 200
+    m.endPanel.customX = (width - m.endPanel.width) / 2
+    m.endPanel.customY = (height - m.endPanel.height) / 2
+    m.endPanel.backgroundRGBA = &h2B1B12E6 ' near-opaque dark rock-brown
+  end sub
+
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    if m.gameOver or m.won
+      return
+    end if
+
+    if eventName = "coinCollected"
+      m.score += 10
+      m.scoreLabel.setText("Score: " + m.score.toStr())
+    else if eventName = "enemyStomped"
+      m.score += 25
+      m.scoreLabel.setText("Score: " + m.score.toStr())
+    else if eventName = "playerHurt"
+      m.lives -= 1
+      m.livesLabel.setText("Lives: " + m.lives.toStr())
+      if m.lives <= 0
+        m.gameOver = true
+        m.showEndPanel("Game Over - Score: " + m.score.toStr())
+      end if
+    else if eventName = "levelComplete"
+      m.won = true
+      m.showEndPanel("You Win! - Score: " + m.score.toStr())
+    end if
+  end sub
+
+  ' Builds the end-panel message + Retry/Quit buttons the first time an end
+  ' state actually happens, rather than upfront in onCreate(). A Button
+  ' registers itself with the shared, global BGE.UI.FocusManager the instant
+  ' it's added to any focusEnabled container (UiContainer.addChild()),
+  ' regardless of whether that container is itself attached to gameUi yet -
+  ' building Retry/Quit eagerly made them focusable (and OK-clickable) from
+  ' the start of the level, silently swallowing the player's jump button
+  ' (also bound to "ok") the moment D-pad navigation happened to focus one of
+  ' them, confirmed on-device.
+  private sub buildEndPanel()
+    if m.endPanelBuilt
+      return
+    end if
+    m.endPanelBuilt = true
+
+    buttonWidth = m.endPanel.width * 0.76
+    buttonX = (m.endPanel.width - buttonWidth) / 2
+    buttonHeight = 56 ' bumped from 48 to comfortably fit the larger 30pt body font
+
+    m.endMessageLabel = new BGE.UI.Label(m.game)
+    m.endMessageLabel.customPosition = true
+    m.endMessageLabel.customY = 14
+    m.endMessageLabel.drawableText.textColor = &hFFD966FF ' bright gold, matches PauseMenu's heading
+    m.endPanel.addChild(m.endMessageLabel)
+
+    retryButton = new BGE.UI.Button(m.game)
+    retryButton.setLabel("Retry")
+    retryButton.customPosition = true
+    retryButton.customX = buttonX
+    retryButton.customY = 62
+    retryButton.width = buttonWidth
+    retryButton.height = buttonHeight
+    retryButton.onActivate = sub(button as BGE.UI.Button)
+      button.game.resetRoom()
+    end sub
+    m.endPanel.addChild(retryButton)
+
+    quitButton = new BGE.UI.Button(m.game)
+    quitButton.setLabel("Quit to Title")
+    quitButton.customPosition = true
+    quitButton.customX = buttonX
+    quitButton.customY = 128
+    quitButton.width = buttonWidth
+    quitButton.height = buttonHeight
+    quitButton.onActivate = sub(button as BGE.UI.Button)
+      button.game.changeRoom("TitleRoom")
+    end sub
+    m.endPanel.addChild(quitButton)
+  end sub
+
+  private sub showEndPanel(message as string)
+    m.buildEndPanel()
+    m.endMessageLabel.setText(message)
+    ' Re-centered every time (the message includes a running score, so its
+    ' width varies) using the theme's own body font to measure it directly,
+    ' rather than waiting on the label's own lazily-computed drawn size.
+    messageWidth = m.game.getFont("body").GetOneLineWidth(message, 10000)
+    m.endMessageLabel.customX = BGE.Math.Max((m.endPanel.width - messageWidth) / 2, 10)
+    m.game.gameUi.addChild(m.endPanel)
+    m.game.pause()
+  end sub
+
+end class

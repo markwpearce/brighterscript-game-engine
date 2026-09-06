@@ -16,8 +16,8 @@ the engine implements these pieces internally, see [Engine Internals](/engine-in
 BGE is an object-oriented 2D-first game engine for Roku channels, written in
 [BrighterScript](https://github.com/rokucommunity/brighterscript) and distributed via
 [ROPM](https://ropm.dev). Everything lives under the `BGE` namespace. The `examples/` folder in
-the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `3d`, `canvas`,
-`pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
+the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `platformer`, `3d`,
+`canvas`, `pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
 `quickstart` in particular is a minimal scaffold worth copying as a starting point for a new game.
 
 ## Architecture at a glance
@@ -231,6 +231,14 @@ draws every collider's actual bounds directly on screen, alongside each entity's
 Compare that to the same scene with debug drawing off:
 
 ![Asteroids mid-game: a red rocket ship near a gray rock, on a starfield background](images/asteroids-gameplay.jpg)
+
+Everything above is *detection* - `onCollision` fires, but nothing stops two colliders from
+overlapping on screen. `examples/platformer` is the first example that also *resolves* what it
+detects: depenetrating the player out of solid ground/walls, tracking a grounded state so jumping
+only works while standing on something, and treating one-way platforms as solid from above but
+passable from below. None of that lives in the engine - it's ordinary `onCollision` logic built on
+top of the same detection-only colliders described above. Read `Player.onCollision` in
+`examples/platformer/src/source/Entities/Player.bs` for the concrete pattern.
 
 ## The game loop
 
