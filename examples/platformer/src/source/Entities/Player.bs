@@ -158,6 +158,10 @@ class Player extends BGE.GameEntity
     end if
 
     m.positionBeforeMove = BGE.Math.VectorOps.create(m.position.x, m.position.y)
+    ' Captured before this frame's jump-trigger/movement logic can change
+    ' m.grounded, so it reflects onCollision()'s verdict as of the end of
+    ' last frame - used below to skip gravity while already resting.
+    wasGrounded = m.grounded
 
     if m.invulnerableTimer > 0.0
       m.invulnerableTimer = m.invulnerableTimer - clampedDt
@@ -203,8 +207,23 @@ class Player extends BGE.GameEntity
       m.sprite.scale.x = -m.spriteScaleX
     end if
 
-    ' Horizontal run + facing/animation.
-    m.velocity.x = m.moveIntentX * m.runSpeed
+    ' Horizontal run + facing/animation. Only forced to zero on neutral input
+    ' while grounded (walking stop) - while airborne, neutral input leaves
+    ' velocity.x untouched instead of zeroing it. This was the real reason
+    ' the direction buffer below "didn't work reliably": that buffer nudges
+    ' velocity.x for exactly the jump-trigger frame, but an unconditional
+    ' `velocity.x = moveIntentX * runSpeed` here ran every frame afterward
+    ' too, so the instant the direction key released (almost always true a
+    ' moment into a jump - a real player rarely holds it the whole arc), this
+    ' line wiped the nudge (or ordinary held-direction momentum) straight
+    ' back to zero on the very next frame - confirmed on-device via temporary
+    ' logging: velocity.x read correctly (350) on the jump-trigger frame,
+    ' then 0 on the following frame the instant direction released mid-air.
+    if abs(m.moveIntentX) > 0.05
+      m.velocity.x = m.moveIntentX * m.runSpeed
+    else if m.grounded
+      m.velocity.x = 0.0
+    end if
     if m.slideTimer > 0.0
       m.slideTimer = m.slideTimer - clampedDt
       m.sprite.playAnimation("slide")
@@ -235,6 +254,7 @@ class Player extends BGE.GameEntity
     end if
 
     ' Coyote time + jump buffering.
+    jumpedThisFrame = false
     if m.grounded
       m.coyoteTimer = m.coyoteTime
     else
@@ -261,6 +281,7 @@ class Player extends BGE.GameEntity
       m.grounded = false
       m.coyoteTimer = 0.0
       m.jumpBufferTimer = 0.0
+      jumpedThisFrame = true
     end if
 
     ' Variable jump height: cut the rise short if the button releases early.
@@ -270,10 +291,21 @@ class Player extends BGE.GameEntity
     m.jumpHeldLastFrame = m.jumpHeld
 
     ' Gravity, capped so one frame's fall never exceeds one tile (avoids
-    ' tunneling through a thin floor without needing substeps).
-    m.velocity.y = m.velocity.y - m.gravity * clampedDt
-    if m.velocity.y < m.terminalVelocity
-      m.velocity.y = m.terminalVelocity
+    ' tunneling through a thin floor without needing substeps). Skipped
+    ' entirely while resting on solid ground as of last frame (and not
+    ' jumping this frame): applying it unconditionally every frame - even at
+    ' rest - built a small downward velocity that moved the player into the
+    ' tile, which onCollision()'s landedOnTop check then snapped back out to
+    ' tileTop the same frame. That real per-frame "sink, then get snapped
+    ' back" cycle relies on the collision check's tolerance catching it every
+    ' single frame, and was the actual cause of a visible 1-2px idle
+    ' bounce/jitter (confirmed - not the idle spritesheet, whose 10 frames
+    ' all share the same bottom-most opaque pixel row).
+    if not wasGrounded or jumpedThisFrame
+      m.velocity.y = m.velocity.y - m.gravity * clampedDt
+      if m.velocity.y < m.terminalVelocity
+        m.velocity.y = m.terminalVelocity
+      end if
     end if
 
     ' Assume airborne; onCollision() re-grounds this same frame if the
