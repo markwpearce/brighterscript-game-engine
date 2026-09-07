@@ -1,0 +1,188 @@
+import "UiContainer.bs"
+import "Label.bs"
+import "Button.bs"
+import "Theme.bs"
+import "../Game.bs"
+import "../../math/math.bs"
+
+namespace BGE.UI
+
+  ' One button spec for MessagePanel: a label plus the same onActivate callback shape
+  ' BGE.UI.Button itself uses (function(button as BGE.UI.Button) as void).
+  class MessagePanelButton
+    label as string
+    onActivate as function or dynamic
+
+    sub new(label as string, onActivate as function or dynamic)
+      m.label = label
+      m.onActivate = onActivate
+    end sub
+  end class
+
+  ' A centered modal panel (translucent background, optional heading, optional body
+  ' message, a vertical stack of buttons) for pause menus, win/game-over screens, and
+  ' similar - promoted from the same shape hand-rolled independently by several
+  ' BGE.UI-based examples, including the same focus-safety fix each needed by hand: a
+  ' Button registers itself with the global FocusManager the instant it's added to any
+  ' focusEnabled container, even one not yet attached to gameUi - so a panel must be
+  ' built fresh right before it's shown and torn down (not just hidden) when closed, or
+  ' its buttons stay focusable/clickable while invisible. show()/hide() handle this
+  ' internally: hide() removes the panel (and its buttons) from its parent entirely, and
+  ' show() rebuilds its children fresh each time.
+  '
+  ' Font-name assumption: the title is measured AND drawn with the same resolved
+  ' "heading"-or-"default" font (self-consistent), but the message label is measured with
+  ' "body"-or-"default" while actually DRAWN with whatever font its resolved theme yields
+  ' (via the normal Label/resolveTheme() path). If a consumer's container theme sets a
+  ' different font than what they registered as "body", the message text could measure
+  ' slightly off from how it's centered.
+  class MessagePanel extends BGE.UI.UiContainer
+
+    ' Panel heading, shown in a larger font above the message/buttons. Empty ("") means
+    ' no heading is drawn.
+    title as string = ""
+    ' Body message, shown below the heading. Empty ("") means no message is drawn. Call
+    ' setMessage() (not this field directly) to update it after the panel is already
+    ' shown - it re-measures/re-centers the label.
+    message as string = ""
+    ' Buttons, top to bottom, in the order given to the constructor.
+    buttons as BGE.UI.MessagePanelButton[] = []
+    ' The actual BGE.UI.Button widgets built from `buttons`, in the same order - only
+    ' valid after show() has built the panel's children.
+    buttonWidgets as BGE.UI.Button[] = []
+
+    private titleLabel as BGE.UI.Label = invalid
+    private messageLabel as BGE.UI.Label = invalid
+    private built as boolean = false
+
+    ' @param game
+    ' @param {float} panelWidth
+    ' @param {float} panelHeight
+    ' @param {BGE.UI.MessagePanelButton[]} buttons - shown top to bottom
+    ' @param [title=""] - optional heading, drawn in a larger font
+    ' @param [message=""] - optional body text below the heading
+    sub new(game as BGE.Game, panelWidth as float, panelHeight as float, buttons as BGE.UI.MessagePanelButton[], title = "" as string, message = "" as string)
+      super(game)
+      m.customPosition = true
+      m.width = panelWidth
+      m.height = panelHeight
+      m.backgroundRGBA = &h2B1B12E6
+      m.title = title
+      m.message = message
+      m.buttons = buttons
+    end sub
+
+    ' Centers this panel within a `withinWidth` x `withinHeight` area (typically the ui
+    ' canvas size), builds its children fresh, and adds it to `parent`. Call hide() first
+    ' if this panel is already shown - calling show() again without hiding first stacks a
+    ' second copy of every child on top of the first.
+    '
+    ' @param {BGE.UI.UiContainer} parent
+    ' @param {float} withinWidth
+    ' @param {float} withinHeight
+    sub show(parent as BGE.UI.UiContainer, withinWidth as float, withinHeight as float)
+      m.customX = (withinWidth - m.width) / 2.0
+      m.customY = (withinHeight - m.height) / 2.0
+      m.buildChildren()
+      parent.addChild(m)
+    end sub
+
+    ' Removes this panel (and its buttons) from `parent` entirely - not just a visibility
+    ' toggle - so its buttons unregister from the shared FocusManager instead of staying
+    ' focusable/clickable while hidden. Call show() again to reopen; it rebuilds fresh
+    ' children each time.
+    '
+    ' @param {BGE.UI.UiContainer} parent
+    sub hide(parent as BGE.UI.UiContainer)
+      parent.removeChild(m)
+      m.built = false
+    end sub
+
+    ' Updates the body message after the panel has already been shown (e.g. a running
+    ' score baked into the text) and re-centers it, since its width varies with the text.
+    '
+    ' @param {string} message
+    sub setMessage(message as string)
+      m.message = message
+      if m.messageLabel <> invalid
+        m.messageLabel.setText(message)
+        ' Same "default" fallback as buildChildren()'s heading-font lookup above - a
+        ' consumer that never registered a "body" font would otherwise crash here too.
+        bodyFont = m.game.getFont("body")
+        if bodyFont = invalid
+          bodyFont = m.game.getFont("default")
+        end if
+        messageWidth = bodyFont.GetOneLineWidth(message, 10000)
+        m.messageLabel.customX = BGE.Math.Max((m.width - messageWidth) / 2.0, 10.0)
+      end if
+    end sub
+
+    private sub buildChildren()
+      if m.built
+        return
+      end if
+      m.built = true
+      m.clearChildren()
+      m.titleLabel = invalid
+      m.messageLabel = invalid
+      m.buttonWidgets = []
+
+      buttonWidth = m.width * 0.76
+      buttonX = (m.width - buttonWidth) / 2.0
+      buttonHeight = 56.0
+      nextY = 14.0
+
+      if m.title <> ""
+        titleContainer = new BGE.UI.UiContainer(m.game)
+        titleContainer.showBackground = false
+        titleContainer.theme = new BGE.UI.Theme()
+        ' Falls back to "default" (always registered by the engine itself, see
+        ' Game.setUpFonts()) if the consumer never registered a "heading" font -
+        ' confirmed on real hardware that calling GetOneLineWidth() on the invalid
+        ' Game.getFont("heading") would otherwise crash outright.
+        headingFont = m.game.getFont("heading")
+        if headingFont = invalid
+          headingFont = m.game.getFont("default")
+        end if
+        titleContainer.theme.font = headingFont
+        titleWidth = headingFont.GetOneLineWidth(m.title, 10000)
+
+        m.titleLabel = new BGE.UI.Label(m.game)
+        m.titleLabel.customPosition = true
+        m.titleLabel.customX = (m.width - titleWidth) / 2.0
+        m.titleLabel.customY = nextY
+        m.titleLabel.setText(m.title)
+        m.titleLabel.drawableText.textColor = &hFFD966FF
+        titleContainer.addChild(m.titleLabel)
+        m.addChild(titleContainer)
+        nextY += 51.0
+      end if
+
+      if m.message <> ""
+        m.messageLabel = new BGE.UI.Label(m.game)
+        m.messageLabel.customPosition = true
+        m.messageLabel.customY = nextY
+        m.messageLabel.drawableText.textColor = &hFFD966FF
+        m.addChild(m.messageLabel)
+        m.setMessage(m.message)
+        nextY += 48.0
+      end if
+
+      for each spec in m.buttons
+        button = new BGE.UI.Button(m.game)
+        button.setLabel(spec.label)
+        button.customPosition = true
+        button.customX = buttonX
+        button.customY = nextY
+        button.width = buttonWidth
+        button.height = buttonHeight
+        button.onActivate = spec.onActivate
+        m.addChild(button)
+        m.buttonWidgets.push(button)
+        nextY += buttonHeight + 12.0
+      end for
+    end sub
+
+  end class
+
+end namespace

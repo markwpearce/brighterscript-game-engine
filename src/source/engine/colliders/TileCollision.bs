@@ -1,0 +1,129 @@
+import "../../math/vector.bs"
+import "RectangleCollider.bs"
+
+namespace BGE
+
+  ' Which side of the tile (if any) resolveAabbTileCollision() resolved a collision
+  ' against. "none" means the tile didn't block the entity at all this frame (e.g.
+  ' rising through a one-way platform, or no overlap).
+  enum TileCollisionSide
+    none = "none"
+    top = "top"
+    bottom = "bottom"
+    left = "left"
+    right = "right"
+  end enum
+
+  ' The result of resolveAabbTileCollision(): the corrected position/velocity to apply
+  ' this frame, and which side of the tile (if any) was resolved. When side = none, both
+  ' position and velocity are returned exactly as the `currentPosition`/`velocity` inputs
+  ' were - nothing to apply, safe to write back unconditionally either way.
+  class TileCollisionResult
+    position as BGE.Math.Vector
+    velocity as BGE.Math.Vector
+    side as BGE.TileCollisionSide
+
+    sub new(position as BGE.Math.Vector, velocity as BGE.Math.Vector, side as BGE.TileCollisionSide)
+      m.position = position
+      m.velocity = velocity
+      m.side = side
+    end sub
+  end class
+
+  ' Resolves an entity's axis-aligned hitbox against one static rectangular tile
+  ' collider, using the entity's pre-move position to determine which side it
+  ' approached from - the generic "solid tile world" resolution algorithm (landing on
+  ' top, one-way-platform pass-through, head bumps, side pushes) needed by a tile-based
+  ' platformer or top-down game's GameEntity.onCollision(). It does not replace
+  ' BGE.Collider/CheckMultipleCollisions() for entity-vs-entity collision - use it only
+  ' for collisions against static tile geometry.
+  '
+  ' The entity's own hitbox is assumed feet-anchored, matching
+  ' GameEntity.addRectangleCollider()'s own convention: `positionBefore` is the bottom-
+  ' center point (x = horizontal center, y = bottom edge), so the hitbox spans
+  ' `positionBefore.x -+ width/2` horizontally and `positionBefore.y` to
+  ' `positionBefore.y + height` vertically.
+  '
+  ' Precondition: only call this when the entity's *current* (post-move) position is
+  ' already known to overlap this tile - e.g. from inside onCollision(), which only
+  ' fires on a genuine overlap. This function has no independent way to verify an
+  ' overlap actually exists (it trusts positionBefore/currentPosition/velocity at face
+  ' value); called with values that were never actually approaching/touching, its
+  ' returned side is not meaningful (this mirrors the exact same precondition the
+  ' hand-rolled onCollision() logic it replaces already had, implicitly, by virtue of
+  ' only ever running inside onCollision()).
+  '
+  ' @param {BGE.Math.Vector} positionBefore - the entity's position as of the start of
+  '   this frame, before this frame's own movement was applied (capture it at the top of
+  '   onUpdate(), before integrating velocity) - used to tell which side of the tile the
+  '   entity approached from.
+  ' @param {BGE.Math.Vector} currentPosition - the entity's actual position right now (at
+  '   the moment onCollision() fires) - this is what gets returned unchanged on the axis
+  '   that isn't resolved this call, and as the base every resolved axis's correction is
+  '   applied on top of. Do NOT pass positionBefore here - by the time onCollision() runs,
+  '   the engine has already integrated this frame's velocity into the entity's position
+  '   (see Game.bs's processEntitiesPreDraw -> processEntitiesCollisions ordering), so
+  '   currentPosition and positionBefore are genuinely different values whenever the entity
+  '   moved at all this frame.
+  ' @param {float} width - the entity's hitbox width (matching the width passed to
+  '   addRectangleCollider())
+  ' @param {float} height - the entity's hitbox height
+  ' @param {BGE.Math.Vector} velocity - the entity's current velocity (only .y's sign
+  '   matters for landing/head-bump detection)
+  ' @param {BGE.RectangleCollider} tileCollider - the tile's own collider (the
+  '   otherCollider passed to onCollision())
+  '   (this function reads tileCollider.offset.y as the tile's TOP edge and
+  '   tileCollider.offset.x as its LEFT edge in world space - matching how
+  '   examples/platformer's Level.bs actually constructs its tile colliders via
+  '   addRectangleCollider(tileName, TileSize, TileSize, leftX, topY) - not
+  '   RectangleCollider's own class doc, which describes offset as the shape's
+  '   bottom-left corner; tileTop/tileBottom below are derived accordingly)
+  ' @param [isOneWay=false] - true if this tile only blocks a from-above landing and
+  '   passes through from below/the sides (e.g. a one-way platform)
+  ' @param [tolerancePx=1.0] - how many pixels of overlap/gap still count as "touching"
+  '   a side, absorbing floating-point/frame-step slack
+  ' @return {BGE.TileCollisionResult}
+  function resolveAabbTileCollision(positionBefore as BGE.Math.Vector, currentPosition as BGE.Math.Vector, width as float, height as float, velocity as BGE.Math.Vector, tileCollider as BGE.RectangleCollider, isOneWay = false as boolean, tolerancePx = 1.0 as float) as BGE.TileCollisionResult
+    tileTop = tileCollider.offset.y
+    tileBottom = tileCollider.offset.y - tileCollider.height
+    tileLeft = tileCollider.offset.x
+    tileRight = tileCollider.offset.x + tileCollider.width
+
+    bottomBefore = positionBefore.y
+    topBefore = positionBefore.y + height
+    leftBefore = positionBefore.x - width / 2.0
+    rightBefore = positionBefore.x + width / 2.0
+
+    resultPosition = BGE.Math.VectorOps.create(currentPosition.x, currentPosition.y)
+    resultVelocity = BGE.Math.VectorOps.create(velocity.x, velocity.y)
+
+    if velocity.y <= 0.0 and bottomBefore >= tileTop - tolerancePx
+      resultPosition.y = tileTop
+      resultVelocity.y = 0.0
+      return new BGE.TileCollisionResult(resultPosition, resultVelocity, BGE.TileCollisionSide.top)
+    end if
+
+    if isOneWay
+      return new BGE.TileCollisionResult(resultPosition, resultVelocity, BGE.TileCollisionSide.none)
+    end if
+
+    if velocity.y > 0.0 and topBefore <= tileBottom + tolerancePx
+      resultPosition.y = tileBottom - height
+      resultVelocity.y = 0.0
+      return new BGE.TileCollisionResult(resultPosition, resultVelocity, BGE.TileCollisionSide.bottom)
+    end if
+
+    if rightBefore <= tileLeft + tolerancePx
+      resultPosition.x = tileLeft - width / 2.0
+      resultVelocity.x = 0.0
+      return new BGE.TileCollisionResult(resultPosition, resultVelocity, BGE.TileCollisionSide.left)
+    else if leftBefore >= tileRight - tolerancePx
+      resultPosition.x = tileRight + width / 2.0
+      resultVelocity.x = 0.0
+      return new BGE.TileCollisionResult(resultPosition, resultVelocity, BGE.TileCollisionSide.right)
+    end if
+
+    return new BGE.TileCollisionResult(resultPosition, resultVelocity, BGE.TileCollisionSide.none)
+  end function
+
+end namespace
