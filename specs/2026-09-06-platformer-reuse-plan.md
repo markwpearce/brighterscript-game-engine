@@ -1669,4 +1669,4 @@ If either smoke test surfaces a bug, fix it in the relevant task's file, re-run 
 
 ## Task 13: Finish the branch
 
-- [ ] Use the `superpowers:finishing-a-development-branch` skill to decide how this branch's commits become one or more PRs (all four issues were approved together in one pass, but they're independent enough that separate PRs per issue - or one combined PR referencing all four - are both reasonable; let that skill's process pick based on the actual commit history at that point) and open whichever PR(s) it lands on, each with a body ending in the required `Co-Authored-By`/`Generated with Claude Code` footer per this repo's git conventions.
+- [ ] User confirmed (2026-09-06) one combined PR touching all of it is fine - no need to split into 4. Use the `superpowers:finishing-a-development-branch` skill to open one PR from this branch referencing all four issues (#202, #203, #204, #205), with a body ending in the required `Co-Authored-By`/`Generated with Claude Code` footer per this repo's git conventions.
