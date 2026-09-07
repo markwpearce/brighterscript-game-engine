@@ -465,7 +465,7 @@ namespace Tests
     @it("lands on top of a solid tile: snaps to tileTop, zeroes vertical velocity, side = top")
     sub _()
       tile = m.makeTile(64.0, 64.0, 0.0, 64.0) ' top edge at world y = 64
-      positionBefore = BGE.Math.VectorOps.create(32.0, 60.0) ' feet just below tileTop
+      positionBefore = BGE.Math.VectorOps.create(32.0, 63.5) ' feet within the 1px tolerance of tileTop
       velocity = BGE.Math.VectorOps.create(0.0, -200.0)
       result = BGE.resolveAabbTileCollision(positionBefore, 56.0, 72.0, velocity, tile)
       m.assertEqual(result.side, BGE.TileCollisionSide.top)
@@ -485,7 +485,7 @@ namespace Tests
     @it("a one-way tile blocks a from-above landing exactly like a solid tile")
     sub _()
       tile = m.makeTile(64.0, 64.0, 0.0, 64.0)
-      positionBefore = BGE.Math.VectorOps.create(32.0, 60.0)
+      positionBefore = BGE.Math.VectorOps.create(32.0, 63.5) ' within the 1px tolerance of tileTop
       velocity = BGE.Math.VectorOps.create(0.0, -200.0)
       result = BGE.resolveAabbTileCollision(positionBefore, 56.0, 72.0, velocity, tile, true)
       m.assertEqual(result.side, BGE.TileCollisionSide.top)
@@ -505,7 +505,7 @@ namespace Tests
     @it("hits its head on the underside of a solid tile: snaps below tileBottom, zeroes vertical velocity, side = bottom")
     sub _()
       tile = m.makeTile(64.0, 64.0, 0.0, 128.0) ' tileBottom at world y = 64
-      positionBefore = BGE.Math.VectorOps.create(32.0, 0.0) ' head (0 + 72) just above tileBottom
+      positionBefore = BGE.Math.VectorOps.create(32.0, -9.0) ' head (-9 + 72 = 63) within the 1px tolerance of tileBottom
       velocity = BGE.Math.VectorOps.create(0.0, 200.0)
       result = BGE.resolveAabbTileCollision(positionBefore, 56.0, 72.0, velocity, tile)
       m.assertEqual(result.side, BGE.TileCollisionSide.bottom)
@@ -516,7 +516,6 @@ namespace Tests
     @it("is pushed out the left side when approaching from the left: side = left")
     sub _()
       tile = m.makeTile(64.0, 64.0, 100.0, 64.0) ' tileLeft = 100, tileRight = 164
-      positionBefore = BGE.Math.VectorOps.create(97.0, 10.0) ' rightBefore = 97 + 28 = 125... use a case clearly left of tileLeft
       positionBefore = BGE.Math.VectorOps.create(70.0, 10.0) ' rightBefore = 70 + 28 = 98 <= 100 + 1
       velocity = BGE.Math.VectorOps.create(150.0, 0.0)
       result = BGE.resolveAabbTileCollision(positionBefore, 56.0, 72.0, velocity, tile)
@@ -536,16 +535,19 @@ namespace Tests
       m.assertEqual(result.velocity.x, 0.0)
     end sub
 
-    @it("reports side = none and leaves position/velocity unchanged when nothing overlaps")
+    @it("reports side = none and leaves position/velocity unchanged when rising past a one-way tile with no landing")
     sub _()
-      tile = m.makeTile(64.0, 64.0, 1000.0, 64.0) ' far away
+      ' Covered by the "one-way tile does not block rising" test above too - this one
+      ' additionally asserts position/velocity pass through completely unchanged.
+      tile = m.makeTile(64.0, 64.0, 0.0, 64.0)
       positionBefore = BGE.Math.VectorOps.create(32.0, 10.0)
-      velocity = BGE.Math.VectorOps.create(150.0, 0.0)
-      result = BGE.resolveAabbTileCollision(positionBefore, 56.0, 72.0, velocity, tile)
+      velocity = BGE.Math.VectorOps.create(150.0, 200.0)
+      result = BGE.resolveAabbTileCollision(positionBefore, 56.0, 72.0, velocity, tile, true)
       m.assertEqual(result.side, BGE.TileCollisionSide.none)
       m.assertEqual(result.position.x, 32.0)
       m.assertEqual(result.position.y, 10.0)
       m.assertEqual(result.velocity.x, 150.0)
+      m.assertEqual(result.velocity.y, 200.0)
     end sub
   end class
 end namespace
@@ -603,6 +605,15 @@ namespace BGE
   ' center point (x = horizontal center, y = bottom edge), so the hitbox spans
   ' `positionBefore.x -+ width/2` horizontally and `positionBefore.y` to
   ' `positionBefore.y + height` vertically.
+  '
+  ' Precondition: only call this when the entity's *current* (post-move) position is
+  ' already known to overlap this tile - e.g. from inside onCollision(), which only
+  ' fires on a genuine overlap. This function is only given the entity's pre-move
+  ' position/velocity (not its current position), so it has no independent way to
+  ' verify an overlap actually exists; called with a position/tile pair that was never
+  ' actually approaching/touching, its returned side is not meaningful (this mirrors the
+  ' exact same precondition the hand-rolled onCollision() logic it replaces already had,
+  ' implicitly, by virtue of only ever running inside onCollision()).
   '
   ' @param {BGE.Math.Vector} positionBefore - the entity's position as of the start of
   '   this frame, before this frame's own movement was applied (capture it at the top of
