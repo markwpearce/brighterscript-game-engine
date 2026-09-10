@@ -10,16 +10,23 @@ namespace BGE.UI
   ' Select's interaction style. inline (default): Left/Right cycle the
   ' current option in place, matching Slider's interaction pattern. popup:
   ' OK expands a list of every option; Up/Down move a highlight, OK commits,
-  ' back cancels. See Select.style.
+  ' back cancels. horizontal: every option renders side-by-side in one row,
+  ' with the current selection visually distinct; Left/Right move directly
+  ' to the adjacent shown option (clamping at the ends, no wrap - there's
+  ' nothing to wrap to once every option is already on screen). See
+  ' Select.style.
   enum SelectStyle
     inline = "inline"
     popup = "popup"
+    horizontal = "horizontal"
   end enum
 
   ' A focusable option picker. Its interaction style is controlled by
   ' Select.style (see BGE.UI.SelectStyle): inline (the default) cycles
   ' through m.options in place with Left/Right, matching Slider's existing
-  ' interaction pattern; popup expands a full option list on OK.
+  ' interaction pattern; popup expands a full option list on OK; horizontal
+  ' shows every option side-by-side in one row, with Left/Right moving
+  ' directly between them.
   class Select extends UiWidget
 
     options as dynamic[] = []
@@ -50,14 +57,15 @@ namespace BGE.UI
     ' drawOverlay() actually rendering the popup list from its no-op paths.
     lastDrawnRowCount as integer = 0
 
-    ' popup style only: one BGE.DrawableText per unique option string, keyed
-    ' by that string - reused across frames/rows instead of drawOverlay()
-    ' cycling every option's text through the single m.drawableText field
-    ' (also used by draw() for the current value), which would defeat
-    ' DrawableText.getTextImage()'s own cache (keyed on the instance's last
-    ' text/color) every single frame the popup stays open. See getOptionText().
+    ' popup and horizontal styles only: one BGE.DrawableText per unique
+    ' option string, keyed by that string - reused across frames/rows instead
+    ' of drawOverlay()/drawHorizontal() cycling every option's text through
+    ' the single m.drawableText field (also used by draw() for the inline/
+    ' popup current value), which would defeat DrawableText.getTextImage()'s
+    ' own cache (keyed on the instance's last text/color) every single frame
+    ' the popup stays open or a horizontal Select is drawn. See getOptionText().
     ' m.options is a plain public field with no change hook, so entries for
-    ' strings no longer present in m.options are pruned in drawOverlay() (see
+    ' strings no longer present in m.options are pruned each use (see
     ' pruneOptionTextCache()) rather than left to accumulate forever across
     ' an options reassignment (e.g. search/filter results changing over time).
     protected optionTextDrawables as object = {}
@@ -122,6 +130,9 @@ namespace BGE.UI
     override function handleInput(input as BGE.GameInput) as boolean
       if m.style = BGE.UI.SelectStyle.popup
         return m.handlePopupInput(input)
+      end if
+      if m.style = BGE.UI.SelectStyle.horizontal
+        return m.handleHorizontalInput(input)
       end if
 
       if not (input.press or input.held)
@@ -232,6 +243,43 @@ namespace BGE.UI
       return false
     end function
 
+    ' horizontal style only: Left/Right move directly to the adjacent shown
+    ' option and consume the event, throttled the same way as inline's
+    ' Left/Right (see repeatThrottle). Unlike inline's next()/previous(),
+    ' this clamps at the ends instead of wrapping - closer to popup's
+    ' highlightedIndex navigation than inline's cycle, since there's nothing
+    ' to wrap to once every option is already shown side-by-side. The
+    ' selection changes immediately (no separate highlight/commit step, since
+    ' there's no expand/collapse in this style).
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {boolean} - true if this select handled the input
+    private function handleHorizontalInput(input as BGE.GameInput) as boolean
+      if not (input.press or input.held)
+        return false
+      end if
+      if not (input.isButton("left") or input.isButton("right"))
+        return false
+      end if
+
+      if m.repeatThrottle.shouldAct(input) and m.options.count() > 0
+        step = 1
+        if input.isButton("left")
+          step = -1
+        end if
+        newIndex = Fix(BGE.Math.Clamp(m.selectedIndex + step, 0, m.options.count() - 1))
+        if newIndex <> m.selectedIndex
+          m.selectedIndex = newIndex
+          if m.onChanged <> invalid
+            m.onChanged(m)
+          end if
+        end if
+      end if
+
+      input.consume()
+      return true
+    end function
+
     override sub draw(parent = invalid as UiWidget)
       if m.width <= 0 or m.height <= 0
         return
@@ -239,6 +287,11 @@ namespace BGE.UI
 
       theme = m.resolveTheme(parent)
       m.applyThemeFont(theme, m.drawableText)
+
+      if m.style = BGE.UI.SelectStyle.horizontal
+        m.drawHorizontal(theme)
+        return
+      end if
 
       backgroundColor = theme.backgroundColor
       if m.hovered or m.focused
@@ -264,6 +317,63 @@ namespace BGE.UI
           m.canvas.renderer.drawTransformedObject(textX, textY, 1.0, 1.0, 0, textImage)
         end if
       end if
+    end sub
+
+    ' horizontal style only: draws every option side-by-side in one row
+    ' across this Select's own bounds (m.width/m.height), each in an equal
+    ' width slot, instead of the single current-value box inline/popup draw -
+    ' the row IS the widget, there's no separate collapsed state. The
+    ' currently selected option is visually distinct: a highlighted slot
+    ' background plus an underline beneath its label. Options are laid out
+    ' left-to-right in m.options order, matching Left/Right's navigation
+    ' direction (see handleHorizontalInput()).
+    '
+    ' Sizing is fixed-width, matching inline/popup (m.width/m.height are set
+    ' by whoever creates the widget) rather than auto-sizing to fit every
+    ' label - a slot narrower than its label's text is simply not clipped,
+    ' the same "unclipped is an accepted non-goal for v1" precedent as
+    ' popup's overflowing option list (see drawOverlay() below).
+    '
+    ' @param {BGE.UI.Theme} theme
+    ' @return {void}
+    private sub drawHorizontal(theme as BGE.UI.Theme)
+      m.pruneOptionTextCache()
+
+      if m.focused
+        ' Drawn first, larger, so the fill below sits on top of it as a
+        ' border - matches draw()'s inline/popup focus-border treatment.
+        m.canvas.renderer.drawRectangle(m.position.x - 2, m.position.y - 2, m.width + 4, m.height + 4, theme.focusedBorderColor)
+      end if
+      m.drawThemedBackground(theme, m.position.x, m.position.y, m.width, m.height, theme.backgroundColor)
+
+      optionCount = m.options.count()
+      if optionCount = 0
+        return
+      end if
+
+      slotWidth = m.width / optionCount
+      for i = 0 to optionCount - 1
+        slotX = m.position.x + i * slotWidth
+        isSelected = i = m.selectedIndex
+
+        if isSelected
+          m.canvas.renderer.drawRectangle(slotX, m.position.y, slotWidth, m.height, theme.hoveredBackgroundColor)
+        end if
+
+        optionText = m.getOptionText(m.options[i].ToStr())
+        textImage = optionText.getTextImage()
+        if textImage <> invalid
+          textSize = optionText.getDrawnSize()
+          textX = slotX + (slotWidth - textSize.width) / 2
+          textY = m.position.y + (m.height - textSize.height) / 2
+          m.canvas.renderer.drawTransformedObject(textX, textY, 1.0, 1.0, 0, textImage)
+
+          if isSelected
+            underlineY = BGE.Math.min(textY + textSize.height, m.position.y + m.height - 2)
+            m.canvas.renderer.drawRectangle(textX, underlineY, textSize.width, 2, theme.focusedBorderColor)
+          end if
+        end if
+      end for
     end sub
 
     ' Draws the popup option list below this Select's own bounds, one row
@@ -307,8 +417,9 @@ namespace BGE.UI
       canvas.renderer.drawRectangleOutline(m.position.x, m.position.y + m.height, m.width, rowHeight * m.options.count(), theme.focusedBorderColor)
     end sub
 
-    ' popup style only: the cached DrawableText for one option's rendered
-    ' label, creating and caching it on first use - see optionTextDrawables.
+    ' popup and horizontal styles only: the cached DrawableText for one
+    ' option's rendered label, creating and caching it on first use - see
+    ' optionTextDrawables.
     '
     ' @param {string} text
     ' @return {BGE.DrawableText}
