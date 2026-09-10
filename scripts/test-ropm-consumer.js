@@ -22,21 +22,7 @@ const FIXTURE_TEMPLATE_DIR = path.join(__dirname, 'ropmConsumerFixture');
 const PACKAGE_NAME = require(path.join(ROOT_DIR, 'package.json')).name;
 const IS_WINDOWS = process.platform === 'win32';
 
-// The fixture deliberately subclasses BGE.Room/BGE.GameEntity (the single most
-// common real-world usage pattern for this engine), which currently trips a real,
-// upstream `brighterscript` `emitDefinitions` bug: it emits a class type's flat
-// compiled name (e.g. `BGE_Room`) instead of the namespace-qualified type a
-// consumer needs to resolve it against the real class - see
-// https://github.com/rokucommunity/brighterscript/issues/1758. This is a *static
-// type-checker* false positive only - `.brs` type annotations aren't enforced at
-// runtime, so the actual compiled code still runs correctly - but it does mean a
-// consumer gating their own CI on `bsc --validate` passing cleanly will see this.
-// Track the exact known count here rather than requiring 0, so this check still
-// catches an actual regression (the count changing) without being permanently red
-// over a bug we don't control. If this ever changes, don't just bump the number -
-// figure out why (a real regression, or the upstream bug finally got fixed) and
-// update this comment/the README's caveat accordingly.
-const EXPECTED_KNOWN_TYPEDEF_ERRORS = 3;
+const EXPECTED_KNOWN_ERRORS = 0;
 
 function run(cmd, args, cwd) {
     console.log(`\n$ ${cmd} ${args.join(' ')}  (in ${cwd})`);
@@ -112,17 +98,17 @@ function main() {
     // 4. The real proof: does a downstream consumer's own `bsc --validate` pass?
     // (modulo the known, upstream-tracked errors documented above).
     const errorCount = countValidateErrors(consumerDir);
-    if (errorCount !== EXPECTED_KNOWN_TYPEDEF_ERRORS) {
-        const direction = errorCount > EXPECTED_KNOWN_TYPEDEF_ERRORS ? 'more' : 'fewer';
+    if (errorCount > EXPECTED_KNOWN_ERRORS) {
+        const direction = errorCount > EXPECTED_KNOWN_ERRORS ? 'more' : 'fewer';
         throw new Error(
-            `Expected exactly ${EXPECTED_KNOWN_TYPEDEF_ERRORS} known errors (see the comment at the top ` +
-            `of this script), but got ${errorCount} - ${direction} than expected. If this is a genuine ` +
+            `Expected exactly ${EXPECTED_KNOWN_ERRORS} known errors, ` +
+            `but got ${errorCount} - ${direction} than expected. If this is a genuine ` +
             `regression, fix it. If the upstream brighterscript/ropm bugs got fixed, update ` +
-            `EXPECTED_KNOWN_TYPEDEF_ERRORS and the README's caveat instead of just bumping this number.`
+            `EXPECTED_KNOWN_ERRORS and the README's caveat instead of just bumping this number.`
         );
     }
 
-    console.log(`\nropm consumer check passed - exactly the ${EXPECTED_KNOWN_TYPEDEF_ERRORS} known, upstream-tracked errors, nothing new.`);
+    console.log(`\nropm consumer check passed - nothing new.`);
     fs.rmSync(packDir, { recursive: true, force: true });
     fs.rmSync(consumerDir, { recursive: true, force: true });
 }
