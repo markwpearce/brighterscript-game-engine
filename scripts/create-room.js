@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Scaffolds a new BGE.Room subclass under examples/<example>/src/source/Rooms
-// from scripts/roomTemplate.bs.
+// from scripts/templates/roomTemplate.bs.
 //
 // Usage: node scripts/create-room.js [example] [RoomName]
 //   example  - directory name under examples/, e.g. "quickstart"
@@ -15,7 +15,7 @@ if (require.main === module) {
   runCli({
     classKind: 'Room',
     subDir: path.join('Rooms'),
-    templatePath: path.join(__dirname, 'roomTemplate.bs'),
+    templatePath: path.join(__dirname, 'templates', 'roomTemplate.bs'),
     printNextSteps(filePath, className) {
       const relativePath = path.relative(process.cwd(), filePath);
       console.log(`Created ${relativePath}`);
