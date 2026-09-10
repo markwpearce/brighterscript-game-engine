@@ -81,10 +81,13 @@ function runTests(zipPath) {
 }
 
 async function main() {
+    // roku-deploy v4's zip() only honors a full `out` path - `outDir`/`outFile`
+    // are silently ignored, which used to leave the zip at its own default
+    // location (./out/roku-deploy.zip) instead of here, so brs-cli below failed
+    // with ENOENT looking for a file that was never written to this path.
     await rokuDeploy.zip({
-        stagingDir: BUILD_DIR,
-        outDir: OUT_DIR,
-        outFile: ZIP_NAME
+        dir: BUILD_DIR,
+        out: path.join(OUT_DIR, ZIP_NAME)
     });
 
     const outcome = await runTests(path.join(OUT_DIR, ZIP_NAME));

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Scaffolds a new BGE.GameEntity subclass under examples/<example>/src/source/Entities
-// from scripts/entityTemplate.bs.
+// from scripts/templates/entityTemplate.bs.
 //
 // Usage: node scripts/create-entity.js [example] [EntityName]
 //   example    - directory name under examples/, e.g. "quickstart"
@@ -15,7 +15,7 @@ if (require.main === module) {
   runCli({
     classKind: 'Entity',
     subDir: path.join('Entities'),
-    templatePath: path.join(__dirname, 'entityTemplate.bs'),
+    templatePath: path.join(__dirname, 'templates', 'entityTemplate.bs'),
     printNextSteps(filePath, className) {
       const relativePath = path.relative(process.cwd(), filePath);
       console.log(`Created ${relativePath}`);
