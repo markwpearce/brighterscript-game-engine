@@ -82,7 +82,7 @@ function runTests(zipPath) {
 
 async function main() {
     await rokuDeploy.zip({
-        stagingDir: BUILD_DIR,
+        dir: BUILD_DIR,
         outDir: OUT_DIR,
         outFile: ZIP_NAME
     });
