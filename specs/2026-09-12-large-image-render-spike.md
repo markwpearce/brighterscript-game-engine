@@ -75,20 +75,71 @@ Added `examples/rendererTest`'s **"Large Image Render Test (issue #211)"** demo
   tested with this **off** for the results below, i.e. the worst case per the
   missing-`forceDraw()` hypothesis
 
-Ran this on **both** targets, at the largest documented-bad size range:
+Ran this on **both** targets, at the largest documented-bad size range. Note a
+correction made mid-spike: the first "real hardware" pass actually re-hit the
+same local BrightScript Simulator instance (`.env`'s default `ROKU_HOST` also
+resolves to the simulator, confirmed via `rokubot info` reporting
+`BrightScript Simulator` with no `--host` override at all) - the results below
+are from re-running against an explicit `--host <lan-ip>` pointed at an actual
+physical Roku (`rokubot info` there reports the real device's own model/name),
+confirmed genuine.
 
 | Target | Size | Source | Finish | Frames | Result |
 |---|---|---|---|---|---|
 | BrightScript Simulator (GUI app) | 576px | memory | off | 119 | 119/119 pass |
 | BrightScript Simulator (GUI app) | 576px | disk | off | 116 | 116/116 pass |
-| Real Roku hardware | 640px | memory | off | 115 | 115/115 pass |
-| Real Roku hardware | 640px | disk | off | 148 | 148/148 pass |
+| Real Roku hardware (confirmed via device-model check) | 640px | memory | off | 115 | renders correctly, no flicker over multiple screenshots |
+| Real Roku hardware (confirmed via device-model check) | 640px | disk | off | 146+ | renders correctly, no flicker over multiple screenshots |
 
-Both the in-app `GetByteArray` check and an actual `rokubot` screenshot of the
-physical/simulated screen agreed at every sample: the green square rendered
-correctly, at every size tried, on both targets, in-memory or disk-loaded,
-with no `Finish()` call at all - zero failures across ~500 sustained frames of
-sampling.
+On the simulator, the in-app `GetByteArray` check and a `rokubot` screenshot
+agreed at every sample: the green square rendered correctly at every size
+tried, in-memory or disk-loaded, with no `Finish()` call at all - zero
+failures across ~500 sustained frames of sampling.
+
+**On real hardware, `roScreen.GetByteArray()` itself doesn't work the same way**
+(see "Platform difference found" below) - so verification there relies purely
+on repeated real screenshots (multiple captures a couple seconds apart at each
+size/source combo, sampling the fixed marker-pixel location via ImageMagick):
+consistently correct, no flicker, at every combo tried.
+
+### Also tested: many large images in the same frame, not just one
+
+`examples/platformer`'s level bakes well over 10 chunks - a single isolated
+blit per frame might not be representative. Extended the demo with a `count`
+dimension (1/4/8/12/16 copies, tiled across the screen, all drawn - and, where
+supported, all individually GetByteArray-verified - in the same frame) and
+re-ran on the real device:
+
+| Target | Size | Source | Count | Finish | Frames | Result |
+|---|---|---|---|---|---|---|
+| Real Roku hardware | 320px | memory | 16 | off | 148 | all 6 on-screen copies render correctly, no flicker |
+| Real Roku hardware | 320px | disk | 16 | off | 570 | all 6 on-screen copies render correctly across 3 screenshots ~1.5s apart, no flicker |
+
+Still no reproduction - 16 simultaneous 320px blits per frame, sustained for
+~9.5 seconds real time on real hardware, rendered correctly throughout.
+
+## Platform difference found: `roScreen.GetByteArray()` on real hardware
+
+While wiring up this test's in-app auto-verification, discovered that
+`m.screenRef.GetByteArray(x, y, w, h)` (called on a real `roScreen`, not an
+`roBitmap`) **returns `Invalid` on real Roku hardware** instead of an
+`roByteArray` - confirmed via a real device crash (`Array operation attempted
+on variable not DIM'd`, `pixel[1]` on an `Invalid` value) the first time this
+test ran there. The exact same call, on the exact same code path, returns
+real pixel data on **both** the BrightScript Simulator GUI app and headless
+`brs-cli` (`brs-node`) - i.e. this is a genuine simulator/real-hardware
+behavioral difference in the engine, not a bug in this test. `roBitmap.GetByteArray()`
+is unaffected on either platform (used throughout this repo's own Rooibos
+suite, e.g. `TileMapBaking.spec.bs`) - the difference is specific to calling
+it on a live `roScreen`.
+
+The test now detects this (`type(pixel) = "roByteArray"`) and falls back to
+relying purely on a real screenshot of an on-screen marker instead of crashing
+or silently misreporting.
+
+This is worth its own upstream report to `lvcabral/brs-engine` with a minimal
+repro (a real Roku device is required to confirm the platform side; already
+confirmed on the simulator side, where it works).
 
 ## Conclusion
 
@@ -138,11 +189,17 @@ Answering the three original questions directly:
    calls, or many small allocations churning in the same frame as the large
    blit) alongside this demo's existing size/source/finish matrix - `Game.bs`'s
    own periodic GC and general allocation churn during real gameplay is a
-   plausible missing ingredient this spike didn't yet isolate.
+   plausible missing ingredient this spike didn't yet isolate. Multiple
+   simultaneous large blits (up to 16/frame) didn't reproduce it either (see
+   above), so raw draw-call volume alone isn't the missing ingredient - GC/
+   allocation pressure and the full `GameEntity`/`Room`/collision pipeline
+   remain the more likely candidates.
 4. Keep `LargeImageRenderTest` in `examples/rendererTest` as a reusable
-   diagnostic - it's driven entirely by up/down/left/right/OK, so it's cheap to
-   extend with a "GC pressure" or "many concurrent draws" toggle for whoever
-   picks up step 1 or 3.
+   diagnostic - it's driven entirely by up/down/left/right/rev/fwd/OK, so it's
+   cheap to extend with a "GC pressure" toggle for whoever picks up step 1 or 3.
+5. File the `roScreen.GetByteArray()` simulator/real-hardware discrepancy
+   upstream to `lvcabral/brs-engine` - a real, previously-undocumented platform
+   difference found along the way (see above).
 
 ## Artifacts from this spike
 
@@ -152,6 +209,7 @@ Answering the three original questions directly:
   field, set by `main.bs` right after each demo is constructed - lets a demo
   that needs to verify the *actual* screen buffer, not just something drawn
   into an offscreen bitmap via `Renderer`, get at the raw `roScreen`)
-- `examples/rendererTest/src/source/main.bs` (sets `activeDemo.screenRef`)
+- `examples/rendererTest/src/source/main.bs` (sets `activeDemo.screenRef`;
+  `rev`/`fwd` cycle the simultaneous-copy count)
 - `examples/rendererTest/src/images/sizetest/size-{64,128,192,256,320,384,448,512,576,640}.png`
   (generated solid-green test images, one per size in the sweep)
