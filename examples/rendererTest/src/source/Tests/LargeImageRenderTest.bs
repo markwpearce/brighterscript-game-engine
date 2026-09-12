@@ -1,0 +1,211 @@
+' Spike test for issue #211 / the platformer chunk-size cap (see
+' src/source/utils/tilemap/TileMapBaking.bs's doc comment): a screen-aligned
+' Image above ~192px was observed to silently fail to render on both the
+' BrightScript Simulator and real hardware, even though its content was
+' provably correct (GetByteArray/PNG roundtrip) and the draw call reported
+' success.
+'
+' This test draws ONE selected size/source/finish combo, held STATIC (same
+' combo, same fixed on-screen position, every frame) so it can be driven
+' interactively (up/down = size, left/right = source, OK = toggle an
+' explicit m.screenRef.Finish() call right after the draw and before
+' SwapBuffers - Renderer.forceDraw() already does exactly this for every
+' OTHER path that draws into a scratch bitmap and reads it back afterward -
+' triangle warps, oriented-mode temp bitmaps - but never for the plain
+' single-blit path SceneObjectImage's matchCamera/directToCamera draw mode
+' uses) while an external tool (rokubot) takes real screenshots of the
+' actual displayed screen.
+'
+' Critically, this test ALSO reads back the pixel data itself, via
+' m.screenRef.GetByteArray(), immediately after drawing and before
+' SwapBuffers() - i.e. exactly what the real screen's own software buffer
+' contains right before the frame is presented. Comparing that in-app
+' verdict against what a real screenshot shows a moment later is the
+' experiment: if the in-app check says "pixel data is correct" every frame
+' but a real screenshot still sometimes shows nothing at that spot, that's
+' proof the failure is in presenting an already-correct frame (something
+' between SwapBuffers() and the display), not in writing the pixel data -
+' matching every prior report that GetByteArray/PNG-roundtrip always came
+' back correct even when the screen visibly showed nothing.
+class LargeImageRenderTest extends RendererTest
+
+  sizes as object = [64, 128, 192, 256, 320, 384, 448, 512, 576, 640]
+  sourceKinds as object = ["memory", "disk"]
+  ' How many copies to draw simultaneously, every frame - a real platformer
+  ' level bakes many chunks per screen (examples/platformer's level baked at
+  ' least 10), so a single isolated large draw might not be representative of
+  ' the actual per-frame load the original bug was seen under.
+  counts as object = [1, 4, 8, 12, 16]
+
+  memoryImages as object = {}
+  diskImages as object = {}
+
+  sizeIndex = 4 ' start at 320 - comfortably past the documented ~192px threshold
+  sourceIndex = 0
+  countIndex = 0
+  finishEnabled = false
+
+  frameCount = 0
+  passCount = 0
+  failCount = 0
+  lastLanded = true
+  getByteArraySupported = true
+
+  sub new()
+    super("Large Image Render Test (issue #211 spike)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    for each size in m.sizes
+      sizeKey = size.toStr()
+
+      mem = CreateObject("roBitmap", {width: size, height: size, alphaEnable: true})
+      mem.Clear(&h00000000)
+      mem.DrawRect(0, 0, size, size, &h00FF00FF)
+      mem.Finish()
+      m.memoryImages[sizeKey] = mem
+
+      m.diskImages[sizeKey] = CreateObject("roBitmap", "pkg:/images/sizetest/size-" + sizeKey + ".png")
+    end for
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "up"
+      m.sizeIndex = (m.sizeIndex + 1) mod m.sizes.count()
+      m.resetCounters()
+    else if buttonName = "down"
+      m.sizeIndex = m.sizeIndex - 1
+      if m.sizeIndex < 0
+        m.sizeIndex = m.sizes.count() - 1
+      end if
+      m.resetCounters()
+    else if buttonName = "left" or buttonName = "right"
+      m.sourceIndex = (m.sourceIndex + 1) mod m.sourceKinds.count()
+      m.resetCounters()
+    else if buttonName = "OK"
+      m.finishEnabled = not m.finishEnabled
+      m.resetCounters()
+    else if buttonName = "fastforward"
+      m.countIndex = (m.countIndex + 1) mod m.counts.count()
+      m.resetCounters()
+    else if buttonName = "rewind"
+      m.countIndex = m.countIndex - 1
+      if m.countIndex < 0
+        m.countIndex = m.counts.count() - 1
+      end if
+      m.resetCounters()
+    end if
+  end sub
+
+  ' Tiled grid position for copy `index` of `count` total, each `size`px -
+  ' wraps columns to fit the 1280px-wide screen, allowing rows to run off the
+  ' bottom for a large size/count combo (acceptable for a diagnostic - only
+  ' the on-screen portion matters for verification).
+  function gridPosition(index as integer, size as integer) as object
+    cols = Fix(1240 / (size + 10))
+    if cols < 1
+      cols = 1
+    end if
+    col = index mod cols
+    row = Fix(index / cols)
+    return {x: 20 + col * (size + 10), y: 140 + row * (size + 10)}
+  end function
+
+  sub resetCounters()
+    m.frameCount = 0
+    m.passCount = 0
+    m.failCount = 0
+  end sub
+
+  ' Runs before this app's own screen.SwapBuffers() call in main.bs -
+  ' matching the real per-frame draw-then-swap gap the original bug's
+  ' timing-sensitivity depends on. Draws `count` copies, tiled across the
+  ' screen, ALL in this one frame - matching a real level baking many chunks
+  ' that all need to draw the same frame, rather than just one isolated blit.
+  override sub draw(renderer as BGE.Renderer)
+    size = m.sizes[m.sizeIndex]
+    source = m.sourceKinds[m.sourceIndex]
+    count = m.counts[m.countIndex]
+    sizeKey = size.toStr()
+    if source = "memory"
+      img = m.memoryImages[sizeKey]
+    else
+      img = m.diskImages[sizeKey]
+    end if
+
+    m.screenRef.DrawRect(0, 0, 1280, 720, &h000000FF)
+
+    framePassCount = 0
+    frameFailCount = 0
+    frameSupported = true
+
+    for i = 0 to count - 1
+      gridPos = m.gridPosition(i, size)
+      renderer.drawObjectTo(m.screenRef, gridPos.x, gridPos.y, img)
+      if m.finishEnabled
+        m.screenRef.Finish()
+      end if
+
+      center = Fix(size / 2)
+      pixel = m.screenRef.GetByteArray(gridPos.x + center, gridPos.y + center, 1, 1)
+      ' roScreen.GetByteArray() behaves differently by platform - confirmed on
+      ' real Roku hardware it returns Invalid (not an roByteArray) rather than
+      ' crashing or returning pixel data, unlike an roBitmap's GetByteArray
+      ' (which works everywhere) or roScreen.GetByteArray() on the
+      ' BrightScript Simulator (which does return real pixel data there).
+      ' Where it's unsupported, fall back to relying entirely on an actual
+      ' screenshot of the on-screen markers below.
+      if type(pixel) = "roByteArray"
+        landed = pixel[1] > 200 and pixel[3] > 200 ' green channel + opaque alpha
+        if landed
+          framePassCount++
+        else
+          frameFailCount++
+        end if
+        ' A tiny marker at each copy's exact sampled coordinates.
+        markerColor = BGE.Colors.White
+        if not landed
+          markerColor = BGE.Colors.Red
+        end if
+        renderer.drawRectangle(gridPos.x + center - 3, gridPos.y + center - 3, 6, 6, markerColor)
+      else
+        frameSupported = false
+      end if
+    end for
+
+    m.lastLanded = frameFailCount = 0
+    m.getByteArraySupported = frameSupported
+
+    m.frameCount++
+    if frameSupported
+      m.passCount += framePassCount
+      m.failCount += frameFailCount
+    end if
+
+    m.drawHud(renderer, size, source, count, framePassCount, frameFailCount)
+
+    if frameSupported and (m.frameCount mod 60) = 0
+      print `[LargeImageRenderTest] size=${size} source=${source} count=${count} finish=${m.finishEnabled} frame=${m.frameCount} totalPass=${m.passCount} totalFail=${m.failCount} thisFrame=${framePassCount}/${framePassCount + frameFailCount}`
+    else if not frameSupported and (m.frameCount mod 60) = 0
+      print `[LargeImageRenderTest] size=${size} source=${source} count=${count} finish=${m.finishEnabled} frame=${m.frameCount} - roScreen.GetByteArray() unsupported on this platform, check screenshots instead`
+    end if
+  end sub
+
+  sub drawHud(renderer as BGE.Renderer, size as integer, source as string, count as integer, framePassCount as integer, frameFailCount as integer)
+    statusColor = BGE.Colors.Lime
+    statusText = "IN-APP CHECK: all landed"
+    if not m.getByteArraySupported
+      statusColor = BGE.Colors.Gray
+      statusText = "IN-APP CHECK: unsupported on this platform - use a real screenshot (a red marker below = a real miss)"
+    else if frameFailCount > 0
+      statusColor = BGE.Colors.Red
+      statusText = `IN-APP CHECK: ${frameFailCount}/${count} MISSING this frame`
+    end if
+
+    renderer.drawText(`size=${size} (up/down)  source=${source} (left/right)  count=${count} (rev/fwd)  finish=${m.finishEnabled} (OK)`, 20, 20, BGE.Colors.White)
+    renderer.drawText(statusText, 20, 44, statusColor)
+    renderer.drawText(`frame=${m.frameCount} totalPass=${m.passCount} totalFail=${m.failCount}`, 20, 68, BGE.Colors.Yellow)
+    renderer.drawText("Each copy's sampled pixel is marked - white = landed, red = missing:", 20, 92, BGE.Colors.Gray)
+  end sub
+
+end class
