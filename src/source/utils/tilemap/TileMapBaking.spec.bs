@@ -1,0 +1,118 @@
+import "pkg:/source/utils/tilemap/TileMapBaking.bs"
+
+namespace tests
+  @suite("BGE.TileMap.bakeTileMapImages")
+  class TileMapBakingTest extends rooibos.BaseTestSuite
+
+    ' A small solid-color source region every test tile draws from - content isn't the point,
+    ' just needs to be a real roRegion so DrawScaledObject has something real to draw.
+    sourceBitmap as roBitmap
+
+    protected override function beforeEach()
+      m.sourceBitmap = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
+      m.sourceBitmap.Clear(&hFF0000FF) ' opaque red
+      m.sourceBitmap.Finish()
+    end function
+
+    private function makeRegion() as roRegion
+      return CreateObject("roRegion", m.sourceBitmap, 0, 0, 8, 8)
+    end function
+
+    @describe("bakeTileMapImages")
+
+    @it("returns an empty array for no tiles")
+    function _()
+      chunks = BGE.TileMap.bakeTileMapImages([], 512.0)
+      m.assertEqual(0, chunks.count())
+    end function
+
+    @it("bakes a single tile into one chunk sized/anchored to that tile's own bounding box")
+    function _()
+      tiles = [{worldX: 10.0, worldY: 20.0, region: m.makeRegion(), width: 64.0, height: 64.0}]
+      chunks = BGE.TileMap.bakeTileMapImages(tiles, 512.0)
+      m.assertEqual(1, chunks.count())
+      ' The bitmap is sized/anchored to the tile's own footprint, not a fixed chunkSize x
+      ' chunkSize square - chunkSize only controls which tiles get grouped together (see the
+      ' function's doc comment on why: a tile whose visual offset/nudge pushes its footprint
+      ' past a grid-aligned bucket boundary must never be clipped).
+      m.assertEqual(10.0, chunks[0].worldX)
+      m.assertEqual(20.0, chunks[0].worldY)
+      m.assertEqual(64, chunks[0].bitmap.GetWidth())
+      m.assertEqual(64, chunks[0].bitmap.GetHeight())
+    end function
+
+    @it("bakes two tiles in the same chunk into a single chunk sized to their combined bounding box")
+    function _()
+      tiles = [
+        {worldX: 0.0, worldY: 0.0, region: m.makeRegion(), width: 64.0, height: 64.0},
+        {worldX: 64.0, worldY: 0.0, region: m.makeRegion(), width: 64.0, height: 64.0}
+      ]
+      chunks = BGE.TileMap.bakeTileMapImages(tiles, 512.0)
+      m.assertEqual(1, chunks.count())
+      m.assertEqual(128, chunks[0].bitmap.GetWidth())
+    end function
+
+    @it("bakes tiles in different chunks into separate chunks, each anchored at its own tile's position")
+    function _()
+      tiles = [
+        {worldX: 0.0, worldY: 0.0, region: m.makeRegion(), width: 64.0, height: 64.0},
+        {worldX: 600.0, worldY: 0.0, region: m.makeRegion(), width: 64.0, height: 64.0}
+      ]
+      chunks = BGE.TileMap.bakeTileMapImages(tiles, 512.0)
+      m.assertEqual(2, chunks.count())
+      m.assertEqual(0.0, chunks[0].worldX)
+      m.assertEqual(600.0, chunks[1].worldX)
+    end function
+
+    @it("buckets a negative world position into the chunk below the origin, not chunk 0")
+    function _()
+      tiles = [{worldX: -64.0, worldY: -64.0, region: m.makeRegion(), width: 64.0, height: 64.0}]
+      chunks = BGE.TileMap.bakeTileMapImages(tiles, 512.0)
+      m.assertEqual(1, chunks.count())
+      ' Still grouped into the chunk below the origin (a separate chunk from a tile at (0,0)),
+      ' but the resulting bitmap is anchored at this tile's own position, not the bucket's
+      ' grid-aligned corner - see the bounding-box comment above.
+      m.assertEqual(-64.0, chunks[0].worldX)
+      m.assertEqual(-64.0, chunks[0].worldY)
+    end function
+
+    @it("draws each tile at its position local to the chunk's own bounding-box top-left corner")
+    function _()
+      ' Two tiles sharing one chunk (same bucket at chunkSize=512), far enough apart that a
+      ' point between them is provably outside both tiles' own footprints.
+      tiles = [
+        {worldX: 0.0, worldY: 500.0, region: m.makeRegion(), width: 8.0, height: 8.0},
+        {worldX: 100.0, worldY: 500.0, region: m.makeRegion(), width: 8.0, height: 8.0}
+      ]
+      chunks = BGE.TileMap.bakeTileMapImages(tiles, 512.0)
+      chunk = chunks[0]
+      ' Bounding box: worldX 0..108, worldY (top) 500, so tile A draws at local (0,0) and
+      ' tile B at local (100,0).
+      tileABytes = chunk.bitmap.GetByteArray(2, 4, 1, 1)
+      tileBBytes = chunk.bitmap.GetByteArray(102, 4, 1, 1)
+      betweenBytes = chunk.bitmap.GetByteArray(50, 4, 1, 1)
+      m.assertEqual(255, tileABytes[0])
+      m.assertEqual(255, tileBBytes[0])
+      ' A pixel between the two tiles was never drawn to, so it's still transparent.
+      m.assertEqual(0, betweenBytes[3])
+    end function
+
+    @it("never clips a tile whose visual footprint straddles a grid-aligned bucket boundary")
+    function _()
+      ' Mirrors examples/platformer's Level.bs: a tile nominally on a 128-aligned grid line,
+      ' nudged 5px so its actual footprint spans across that boundary (here: worldY 133,
+      ' height 64, spanning world Y [69, 133] - straddling the chunkSize=128 boundary at
+      ' world Y 128). A fixed chunkSize x chunkSize bitmap anchored at the grid boundary
+      ' would clip most of this tile; bounding-box sizing must not.
+      tiles = [{worldX: 0.0, worldY: 133.0, region: m.makeRegion(), width: 64.0, height: 64.0}]
+      chunks = BGE.TileMap.bakeTileMapImages(tiles, 128.0)
+      m.assertEqual(1, chunks.count())
+      ' The tile's full 64px height must be present, not clipped down to a handful of pixels.
+      m.assertEqual(64, chunks[0].bitmap.GetHeight())
+      ' Its bottom-most row (world Y 69, local row 63) must still contain real content.
+      bottomRowBytes = chunks[0].bitmap.GetByteArray(2, 63, 1, 1)
+      m.assertEqual(255, bottomRowBytes[0])
+    end function
+
+  end class
+end namespace

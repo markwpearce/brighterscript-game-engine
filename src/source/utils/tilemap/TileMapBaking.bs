@@ -1,0 +1,139 @@
+namespace BGE.TileMap
+
+  ' One occupied tile to bake into a chunked tilemap image - addressed by world position
+  ' (not row/col) since baking is fundamentally about pixels/chunks, not grid adjacency
+  ' (compare BGE.TileMap.ColliderCell, which stays in grid space).
+  interface TileSpec
+    worldX as float
+    worldY as float
+    region as roRegion
+    width as float
+    height as float
+  end interface
+
+  ' One non-empty baked chunk: a single pre-composited bitmap, ready to become one Image
+  ' drawable (one addImage() call instead of one per tile). worldX/worldY is the chunk's own
+  ' top-left world corner - worldX the chunk's minimum X, but worldY the chunk's MAXIMUM Y
+  ' (its top edge, matching TileSpec.worldY's own top-edge convention and Image's
+  ' top-left-anchor convention, where pixel rows increase downward as world Y decreases) -
+  ' i.e. where to position the resulting drawable via addImage()'s offset. The bitmap's own
+  ' width/height are sized to this chunk's actual tile content (see bakeTileMapImages()'s doc
+  ' comment) - not necessarily the chunkSize passed in.
+  interface BakedChunk
+    bitmap as roBitmap
+    worldX as float
+    worldY as float
+  end interface
+
+  ' Bakes a sparse grid of stationary tiles into one or more chunked bitmaps - so a whole
+  ' screen's worth of static tiles (a platformer level's ground, say) costs one
+  ' SceneObject/draw call per chunk instead of one per tile. Only chunks that actually contain
+  ' at least one tile are returned.
+  '
+  ' Each tile is drawn into its chunk exactly once, at bake time (when this function runs) -
+  ' not per frame - so this is a one-time cost paid when the level is built, not a recurring
+  ' one.
+  '
+  ' chunkSize only controls which tiles get grouped together (tiles are bucketed by
+  ' Int(worldX / chunkSize), Int(worldY / chunkSize)) - each resulting chunk's bitmap is then
+  ' sized/anchored to the actual bounding box of the tiles bucketed into it, not to a fixed
+  ' chunkSize x chunkSize square. This means a tile's footprint is never clipped, even when a
+  ' visual offset/nudge (e.g. examples/platformer's Level.bs +-5px surface/fill adjustment)
+  ' pushes it past a grid-aligned bucket boundary - it just makes that one chunk's bitmap a
+  ' little larger than chunkSize, rather than losing part of the tile.
+  '
+  ' Keep chunkSize modest (128 confirmed reliable; 192+ silently failed to render at all in
+  ' testing, on both the BrightScript Simulator and a real device) - a screen-aligned Image
+  ' above roughly this size can silently fail to draw even though its content is fully
+  ' correct (confirmed via GetByteArray and a tmp:/ PNG round-trip) and the engine's own draw
+  ' path reports success; this is a real, unexplained platform limit, not a bug in this
+  ' function - see issue #211 for the follow-up (spreading a room's baking work across
+  ' multiple frames during a loading step).
+  '
+  ' @param {BGE.TileMap.TileSpec[]} tiles
+  ' @param {float} chunkSize - grouping granularity, in world pixels (keep <= 128)
+  ' @return {BGE.TileMap.BakedChunk[]}
+  function bakeTileMapImages(tiles as BGE.TileMap.TileSpec[], chunkSize as float) as BGE.TileMap.BakedChunk[]
+    tilesByChunk = {}
+    for each tile in tiles
+      chunkCol = floorDiv(tile.worldX, chunkSize)
+      chunkRow = floorDiv(tile.worldY, chunkSize)
+      chunkKey = chunkCol.toStr() + "," + chunkRow.toStr()
+      if tilesByChunk[chunkKey] = invalid
+        tilesByChunk[chunkKey] = []
+      end if
+      tilesByChunk[chunkKey].push(tile)
+    end for
+
+    ' Sort chunk keys so output order is deterministic (by column, then row) rather than
+    ' depending on tile input order.
+    chunkKeys = []
+    for each chunkKey in tilesByChunk
+      chunkKeys.push(chunkKey)
+    end for
+    chunkKeys.sort()
+
+    chunks = []
+    for each chunkKey in chunkKeys
+      chunkTiles = tilesByChunk[chunkKey]
+
+      ' This chunk's actual bounding box, from its tiles' real footprints - not the nominal
+      ' chunkSize grid cell they were bucketed by. minX/maxX are the leftmost/rightmost
+      ' edges; minY/maxY the bottom-most/top-most edges (a tile's own worldY is its TOP edge,
+      ' extending down by its height).
+      minX = chunkTiles[0].worldX
+      maxX = chunkTiles[0].worldX + chunkTiles[0].width
+      maxY = chunkTiles[0].worldY
+      minY = chunkTiles[0].worldY - chunkTiles[0].height
+      for each tile in chunkTiles
+        if tile.worldX < minX
+          minX = tile.worldX
+        end if
+        if tile.worldX + tile.width > maxX
+          maxX = tile.worldX + tile.width
+        end if
+        if tile.worldY > maxY
+          maxY = tile.worldY
+        end if
+        if tile.worldY - tile.height < minY
+          minY = tile.worldY - tile.height
+        end if
+      end for
+
+      ' roBitmap's width/height (and DrawScaledObject's x/y below) are native Integer
+      ' params - Fix() them explicitly rather than pass the float values straight through,
+      ' matching Renderer.bs's own drawScaledObjectTo() wrapper. brs-node (what the Rooibos
+      ' suite runs under) tolerates a raw float here; the real BrightScript Simulator/device
+      ' does not - it silently draws nothing rather than erroring, which is what made this
+      ' worth calling out explicitly instead of leaving implicit.
+      bitmap = CreateObject("roBitmap", {width: Fix(maxX - minX), height: Fix(maxY - minY), AlphaEnable: true})
+      bitmap.Clear(&h00000000) ' fresh bitmap, but clear explicitly rather than trust uninitialized memory
+      for each tile in chunkTiles
+        localX = tile.worldX - minX
+        ' Pixel rows increase downward as world Y decreases (top-left-anchor convention, same
+        ' as every other Image in this engine) - so a tile's destination row is how far its
+        ' own top edge (tile.worldY) sits below this chunk's top (maxY).
+        localY = maxY - tile.worldY
+        scaleX = tile.width / tile.region.GetWidth()
+        scaleY = tile.height / tile.region.GetHeight()
+        bitmap.DrawScaledObject(Fix(localX), Fix(localY), scaleX, scaleY, tile.region)
+      end for
+      bitmap.Finish()
+      chunks.push({bitmap: bitmap, worldX: minX, worldY: maxY})
+    end for
+
+    return chunks
+  end function
+
+  ' Floor division (not BrightScript's truncate-toward-zero Int()/\\) - a tile at a negative
+  ' world position must bucket into the chunk below/left of the origin, not get pulled back
+  ' toward chunk 0.
+  function floorDiv(value as float, divisor as float) as integer
+    result = Int(value / divisor)
+    if result * divisor > value
+      result -= 1
+    end if
+    return result
+  end function
+
+end namespace

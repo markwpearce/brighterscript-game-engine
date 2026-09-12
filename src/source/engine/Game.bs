@@ -114,6 +114,8 @@ namespace BGE
     private nextGameEntityId as integer = 0
     private secondsBetweenGarbageCollection = 10
     private lastGarbageCollection as GarbageCollectionInfo = invalid
+    ' Timer backing debugPrintPerfStats()'s independent print cadence - see Play().
+    private perfStatsTimer as roTimespan = CreateObject("roTimespan")
     private roomChangedThisFrame as boolean = false
     private roomChangeDetails as RoomChangeInfo = invalid
 
@@ -420,9 +422,17 @@ namespace BGE
         ' ----------------------an event (GameInput.consume()) can capture input before-------
         ' ----------------------regular entities are dispatched this same frame---------------
         m.processUiInput(universalControlEvents, musicMsg, ecpMsg, urlMsg)
+        uiInputTime = 0
+        if m.debugging.print_perf_stats
+          uiInputTime = m.dtTimer.TotalMilliseconds()
+        end if
 
         ' ----------------------Handle entity interactions (collisions, etc)--------------------
         m.processEntitiesPreDraw(universalControlEvents, controllerInputs, musicMsg, ecpMsg, urlMsg)
+        updateAndCollisionTime = 0
+        if m.debugging.print_perf_stats
+          updateAndCollisionTime = m.dtTimer.TotalMilliseconds() - uiInputTime
+        end if
 
         ' ----------------------Clear the screen before drawing entities-------------------------
         if m.background_color <> invalid
@@ -432,6 +442,10 @@ namespace BGE
 
         ' ----------------------Then draw all of the entities and call onDrawBegin() and onDrawEnd()-------------------------
         m.drawEntities()
+        entityDrawTime = 0
+        if m.debugging.print_perf_stats
+          entityDrawTime = m.dtTimer.TotalMilliseconds() - uiInputTime - updateAndCollisionTime
+        end if
 
         ' ---------------------- Draw debug items in game space -------------------------
         m.drawDebugItems()
@@ -471,6 +485,22 @@ namespace BGE
           if invalid <> url_transfer_id_string and invalid <> m.urlTransfers[url_transfer_id_string]
             m.urlTransfers.Delete(url_transfer_id_string)
           end if
+        end if
+
+        ' Console perf stats, gated behind debugPrintPerfStats() (off by default - the extra
+        ' entity/collider counting and phase timestamps above are only ever taken when this
+        ' is on, so there's no per-frame cost otherwise). Independent of the GC print below:
+        ' it runs on its own (typically much shorter) interval for faster iteration while
+        ' investigating a perf issue.
+        if m.debugging.print_perf_stats and m.perfStatsTimer.totalMilliseconds() > (m.debugging.perf_stats_interval_seconds * 1000)
+          entityCount = m.sortedEntities.count()
+          colliderCount = 0
+          for each entity in m.sortedEntities
+            colliderCount += entity.colliders.count()
+          end for
+          print `Entities: ${entityCount} | Colliders: ${colliderCount}`
+          print `Phase ms - uiInput: ${uiInputTime} | update+collision: ${updateAndCollisionTime} | entityDraw: ${entityDrawTime} | swap: ${drawTime}`
+          m.perfStatsTimer.mark()
         end if
 
         if m.garbageCollectionTimer.totalMilliseconds() > (m.secondsBetweenGarbageCollection * 1000)
@@ -1433,6 +1463,20 @@ namespace BGE
     function isDebugUiEnabled() as boolean
       return m.debugging.show_debug_ui
     end function
+
+    ' Set whether Play() prints per-frame perf stats to the console (entity/collider counts
+    ' and per-phase timing: UI input, update+collision, entity draw, buffer swap). Off by
+    ' default - each phase timestamp above is only measured while this is on, so leaving it
+    ' off costs nothing per frame. Independent of, and typically a much shorter interval than,
+    ' the periodic garbage-collection print.
+    '
+    ' @param {boolean} enabled
+    ' @param {float} intervalSeconds How often to print, in seconds (default 2)
+    sub debugPrintPerfStats(enabled as boolean, intervalSeconds = 2.0 as float)
+      m.debugging.print_perf_stats = enabled
+      m.debugging.perf_stats_interval_seconds = intervalSeconds
+      m.perfStatsTimer.mark()
+    end sub
 
     function getDebugValue(debugKey as string) as dynamic
       return m.debugging[debugKey]
