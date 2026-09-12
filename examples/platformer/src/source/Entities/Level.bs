@@ -1,10 +1,29 @@
 import "../LevelData.bs"
+import "pkg:/source/utils/tilemap/TileMapBaking.bs"
+import "pkg:/source/utils/tilemap/TileMapColliderMerging.bs"
 
-' Holds every static tile in the level as one named collider + one matching
-' drawable each - not one GameEntity per tile, so the static layout costs
-' nothing in per-frame onUpdate/onInput dispatch. See LevelData.bs for the
-' row/column -> world-position formula this class implements.
+' Holds every static tile in the level, baked down to a handful of drawables/colliders
+' instead of one of each per tile - a naive one-GameEntity-per-tile (or even one-drawable-
+' and-one-collider-per-tile) approach doesn't cost anything in per-frame onUpdate/onInput
+' dispatch (this was never a GameEntity-per-tile design), but it does still cost a per-frame
+' SceneObject in the renderer's depth sort and a collider in the compositor's collision
+' checks for every single tile, whether or not the tile ever moves. BGE.TileMap.
+' bakeTileMapImages()/mergeTileColliderRuns() collapse those down to one drawable per screen-
+' sized chunk of stationary tiles and one collider per contiguous same-tag run - see their own
+' doc comments for how. See LevelData.bs for the row/column -> world-position formula this
+' class implements.
 class Level extends BGE.GameEntity
+
+  ' Each chunkSize x chunkSize area of stationary tiles becomes one baked Image/draw call
+  ' instead of one per tile - must be a multiple of TileSize so no tile ever straddles two
+  ' chunks (see bakeTileMapImages()'s own doc comment). Capped at 128 (2x2 tiles/chunk),
+  ' well under the largest size confirmed safe by binary search on both the BrightScript
+  ' Simulator and a real device (128 reliable, 192+ silently failed to render - a real,
+  ' unexplained platform limit on large screen-aligned Image draws, not a bug in this
+  ' baking logic; see issue #211 for the follow-up - spreading a room's own baking work
+  ' across multiple frames during a loading step - and CLAUDE.md's own prior art on large
+  ' ifDraw2D blits having hard, hardware-dependent limits, e.g. SceneObjectPlane on SD/HD).
+  private chunkSize = 128.0
 
   sub new(game as BGE.Game)
     super(game)
@@ -21,6 +40,10 @@ class Level extends BGE.GameEntity
     ' identical roRegion per tile.
     surfaceRegion = CreateObject("roRegion", surfaceBitmap, 0, 0, surfaceBitmap.GetWidth(), surfaceBitmap.GetHeight())
     fillRegion = CreateObject("roRegion", fillBitmap, 0, 0, fillBitmap.GetWidth(), fillBitmap.GetHeight())
+
+    tiles = [] as BGE.TileMap.TileSpec[]
+    colliderCells = [] as BGE.TileMap.ColliderCell[]
+
     for r = 0 to rows.count() - 1
       row = rows[r]
       for c = 0 to row.len() - 1
@@ -35,16 +58,26 @@ class Level extends BGE.GameEntity
           if tileChar = "#" and r > 0
             exposedTop = rows[r - 1].mid(c, 1) <> "#"
           end if
-          m.addTile(r, c, tileChar, exposedTop, surfaceBitmap, surfaceRegion, fillBitmap, fillRegion)
+          tiles.push(m.buildTileSpec(r, c, tileChar, exposedTop, surfaceRegion, fillRegion))
+          colliderTag = "oneWay"
+          if tileChar = "#"
+            colliderTag = "solid"
+          end if
+          colliderCells.push({row: r, col: c, tag: colliderTag})
         end if
       end for
     end for
+
+    m.addBakedTileImages(tiles)
+    m.addMergedTileColliders(colliderCells)
   end sub
 
-  private sub addTile(r as integer, c as integer, tileChar as string, exposedTop as boolean, surfaceBitmap as roBitmap, surfaceRegion as roRegion, fillBitmap as roBitmap, fillRegion as roRegion)
+  ' Builds one BGE.TileMap.TileSpec describing tile (r, c)'s drawable - position, source
+  ' texture region, and size - matching this level's exact visual conventions (see the
+  ' inline comments below for why each tile kind needs its own y-offset/height nudge).
+  private function buildTileSpec(r as integer, c as integer, tileChar as string, exposedTop as boolean, surfaceRegion as roRegion, fillRegion as roRegion) as BGE.TileMap.TileSpec
     topY = (NumRows - r) * TileSize
     leftX = c * TileSize
-    tileName = "tile_" + r.toStr() + "_" + c.toStr()
 
     ' tile_surface.png is a one-off decorative rock/grass piece (not seamlessly
     ' tileable) used for every visible top surface, including one-way platforms
@@ -67,11 +100,9 @@ class Level extends BGE.GameEntity
     imageOffsetY = topY
     imageHeight = TileSize
     if tileChar = "-" or exposedTop
-      bitmap = surfaceBitmap
       region = surfaceRegion
       imageOffsetY += surfaceVisualYOffset
     else
-      bitmap = fillBitmap
       region = fillRegion
       ' A buried tile's own top edge sits exactly at the tile above's bottom edge -
       ' except when that tile above got nudged up by surfaceVisualYOffset (an exposed
@@ -87,21 +118,35 @@ class Level extends BGE.GameEntity
       imageHeight += surfaceVisualYOffset
     end if
 
-    image = m.addImage(tileName, region, {
-      offset: BGE.Math.VectorOps.create(leftX, imageOffsetY),
-      drawMode: BGE.SceneObjectDrawMode.matchCamera
-    })
-    ' Image.width/.height are protected, so the native bitmap size is scaled
-    ' down/up to TileSize (or TileSize + surfaceVisualYOffset for a buried tile,
-    ' see above) via scale instead of set directly.
-    image.scale = BGE.Math.createScaleVector(TileSize / bitmap.GetWidth(), imageHeight / bitmap.GetHeight())
+    return {worldX: leftX, worldY: imageOffsetY, region: region, width: TileSize, height: imageHeight}
+  end function
 
-    collider = m.addRectangleCollider(tileName, TileSize, TileSize, leftX, topY)
-    if tileChar = "#"
-      collider.tagsList.add("solid")
-    else
-      collider.tagsList.add("oneWay")
-    end if
+  ' Bakes every tile's drawable into one Image per occupied chunkSize x chunkSize chunk (see
+  ' BGE.TileMap.bakeTileMapImages()) instead of one Image per tile.
+  private sub addBakedTileImages(tiles as BGE.TileMap.TileSpec[])
+    chunks = BGE.TileMap.bakeTileMapImages(tiles, m.chunkSize)
+    for i = 0 to chunks.count() - 1
+      chunk = chunks[i]
+      chunkRegion = CreateObject("roRegion", chunk.bitmap, 0, 0, chunk.bitmap.GetWidth(), chunk.bitmap.GetHeight())
+      m.addImage("tileChunk_" + i.toStr(), chunkRegion, {
+        offset: BGE.Math.VectorOps.create(chunk.worldX, chunk.worldY),
+        drawMode: BGE.SceneObjectDrawMode.matchCamera
+      })
+    end for
+  end sub
+
+  ' Merges every tile's collider into one RectangleCollider per contiguous same-tag run
+  ' within a row (see BGE.TileMap.mergeTileColliderRuns()) instead of one per tile.
+  private sub addMergedTileColliders(colliderCells as BGE.TileMap.ColliderCell[])
+    colliderRuns = BGE.TileMap.mergeTileColliderRuns(colliderCells)
+    for i = 0 to colliderRuns.count() - 1
+      colliderRun = colliderRuns[i]
+      topY = (NumRows - colliderRun.row) * TileSize
+      leftX = colliderRun.startCol * TileSize
+      width = (colliderRun.endCol - colliderRun.startCol + 1) * TileSize
+      collider = m.addRectangleCollider("tileRun_" + i.toStr(), width, TileSize, leftX, topY)
+      collider.tagsList.add(colliderRun.tag)
+    end for
   end sub
 
 end class
