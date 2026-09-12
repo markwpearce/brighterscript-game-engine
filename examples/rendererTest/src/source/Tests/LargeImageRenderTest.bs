@@ -1,0 +1,157 @@
+' Spike test for issue #211 / the platformer chunk-size cap (see
+' src/source/utils/tilemap/TileMapBaking.bs's doc comment): a screen-aligned
+' Image above ~192px was observed to silently fail to render on both the
+' BrightScript Simulator and real hardware, even though its content was
+' provably correct (GetByteArray/PNG roundtrip) and the draw call reported
+' success.
+'
+' This test draws ONE selected size/source/finish combo, held STATIC (same
+' combo, same fixed on-screen position, every frame) so it can be driven
+' interactively (up/down = size, left/right = source, OK = toggle an
+' explicit m.screenRef.Finish() call right after the draw and before
+' SwapBuffers - Renderer.forceDraw() already does exactly this for every
+' OTHER path that draws into a scratch bitmap and reads it back afterward -
+' triangle warps, oriented-mode temp bitmaps - but never for the plain
+' single-blit path SceneObjectImage's matchCamera/directToCamera draw mode
+' uses) while an external tool (rokubot) takes real screenshots of the
+' actual displayed screen.
+'
+' Critically, this test ALSO reads back the pixel data itself, via
+' m.screenRef.GetByteArray(), immediately after drawing and before
+' SwapBuffers() - i.e. exactly what the real screen's own software buffer
+' contains right before the frame is presented. Comparing that in-app
+' verdict against what a real screenshot shows a moment later is the
+' experiment: if the in-app check says "pixel data is correct" every frame
+' but a real screenshot still sometimes shows nothing at that spot, that's
+' proof the failure is in presenting an already-correct frame (something
+' between SwapBuffers() and the display), not in writing the pixel data -
+' matching every prior report that GetByteArray/PNG-roundtrip always came
+' back correct even when the screen visibly showed nothing.
+class LargeImageRenderTest extends RendererTest
+
+  sizes as object = [64, 128, 192, 256, 320, 384, 448, 512, 576, 640]
+  sourceKinds as object = ["memory", "disk"]
+
+  memoryImages as object = {}
+  diskImages as object = {}
+
+  sizeIndex = 4 ' start at 320 - comfortably past the documented ~192px threshold
+  sourceIndex = 0
+  finishEnabled = false
+
+  ' Fixed on-screen box the test image is always drawn into - note this
+  ' independent of the image's own size, so a screenshot can always sample
+  ' the same coordinates regardless of which combo is selected.
+  boxX = 300
+  boxY = 150
+
+  frameCount = 0
+  passCount = 0
+  failCount = 0
+  lastLanded = true
+
+  sub new()
+    super("Large Image Render Test (issue #211 spike)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    for each size in m.sizes
+      sizeKey = size.toStr()
+
+      mem = CreateObject("roBitmap", {width: size, height: size, alphaEnable: true})
+      mem.Clear(&h00000000)
+      mem.DrawRect(0, 0, size, size, &h00FF00FF)
+      mem.Finish()
+      m.memoryImages[sizeKey] = mem
+
+      m.diskImages[sizeKey] = CreateObject("roBitmap", "pkg:/images/sizetest/size-" + sizeKey + ".png")
+    end for
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "up"
+      m.sizeIndex = (m.sizeIndex + 1) mod m.sizes.count()
+      m.resetCounters()
+    else if buttonName = "down"
+      m.sizeIndex = m.sizeIndex - 1
+      if m.sizeIndex < 0
+        m.sizeIndex = m.sizes.count() - 1
+      end if
+      m.resetCounters()
+    else if buttonName = "left" or buttonName = "right"
+      m.sourceIndex = (m.sourceIndex + 1) mod m.sourceKinds.count()
+      m.resetCounters()
+    else if buttonName = "OK"
+      m.finishEnabled = not m.finishEnabled
+      m.resetCounters()
+    end if
+  end sub
+
+  sub resetCounters()
+    m.frameCount = 0
+    m.passCount = 0
+    m.failCount = 0
+  end sub
+
+  ' Runs before this app's own screen.SwapBuffers() call in main.bs -
+  ' matching the real per-frame draw-then-swap gap the original bug's
+  ' timing-sensitivity depends on.
+  override sub draw(renderer as BGE.Renderer)
+    size = m.sizes[m.sizeIndex]
+    source = m.sourceKinds[m.sourceIndex]
+    sizeKey = size.toStr()
+    if source = "memory"
+      img = m.memoryImages[sizeKey]
+    else
+      img = m.diskImages[sizeKey]
+    end if
+
+    ' Clear just this box so stale content from a previous (possibly
+    ' larger) size can't make a failed draw look like a pass.
+    m.screenRef.DrawRect(m.boxX - 4, m.boxY - 4, m.sizes[m.sizes.count() - 1] + 8, m.sizes[m.sizes.count() - 1] + 8, &h000000FF)
+    renderer.drawObjectTo(m.screenRef, m.boxX, m.boxY, img)
+    if m.finishEnabled
+      m.screenRef.Finish()
+    end if
+
+    center = Fix(size / 2)
+    pixel = m.screenRef.GetByteArray(m.boxX + center, m.boxY + center, 1, 1)
+    landed = pixel[1] > 200 and pixel[3] > 200 ' green channel + opaque alpha
+    m.lastLanded = landed
+
+    m.frameCount++
+    if landed
+      m.passCount++
+    else
+      m.failCount++
+    end if
+
+    m.drawHud(renderer, size, source)
+
+    if (m.frameCount mod 60) = 0
+      print `[LargeImageRenderTest] size=${size} source=${source} finish=${m.finishEnabled} frame=${m.frameCount} pass=${m.passCount} fail=${m.failCount} lastLanded=${m.lastLanded}`
+    end if
+  end sub
+
+  sub drawHud(renderer as BGE.Renderer, size as integer, source as string)
+    statusColor = BGE.Colors.Lime
+    statusText = "IN-APP CHECK: landed"
+    if not m.lastLanded
+      statusColor = BGE.Colors.Red
+      statusText = "IN-APP CHECK: MISSING"
+    end if
+
+    renderer.drawText(`size=${size} (up/down)  source=${source} (left/right)  finish=${m.finishEnabled} (OK)`, 20, 20, BGE.Colors.White)
+    renderer.drawText(statusText, 20, 44, statusColor)
+    renderer.drawText(`frame=${m.frameCount} pass=${m.passCount} fail=${m.failCount}`, 20, 68, BGE.Colors.Yellow)
+    renderer.drawText("Sampled pixel marked with a small white dot at its exact location:", 20, 92, BGE.Colors.Gray)
+
+    ' A tiny, fixed-size marker drawn AFTER the big image and its own
+    ' GetByteArray check, at the exact coordinates being sampled - so a
+    ' human (or an external screenshot pixel-sample) can find precisely
+    ' the same spot without having to compute it from size/box offsets.
+    center = Fix(size / 2)
+    renderer.drawRectangle(m.boxX + center - 3, m.boxY + center - 3, 6, 6, BGE.Colors.White)
+  end sub
+
+end class
