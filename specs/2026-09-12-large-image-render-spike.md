@@ -137,9 +137,7 @@ The test now detects this (`type(pixel) = "roByteArray"`) and falls back to
 relying purely on a real screenshot of an on-screen marker instead of crashing
 or silently misreporting.
 
-This is worth its own upstream report to `lvcabral/brs-engine` with a minimal
-repro (a real Roku device is required to confirm the platform side; already
-confirmed on the simulator side, where it works).
+Filed upstream as [lvcabral/brs-engine#1229](https://github.com/lvcabral/brs-engine/issues/1229).
 
 ## Conclusion
 
@@ -197,9 +195,8 @@ Answering the three original questions directly:
 4. Keep `LargeImageRenderTest` in `examples/rendererTest` as a reusable
    diagnostic - it's driven entirely by up/down/left/right/rev/fwd/OK, so it's
    cheap to extend with a "GC pressure" toggle for whoever picks up step 1 or 3.
-5. File the `roScreen.GetByteArray()` simulator/real-hardware discrepancy
-   upstream to `lvcabral/brs-engine` - a real, previously-undocumented platform
-   difference found along the way (see above).
+5. ~~File the `roScreen.GetByteArray()` simulator/real-hardware discrepancy
+   upstream~~ - done: [lvcabral/brs-engine#1229](https://github.com/lvcabral/brs-engine/issues/1229).
 
 ## Artifacts from this spike
 
