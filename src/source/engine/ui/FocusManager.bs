@@ -7,6 +7,7 @@ import "../Canvas.bs"
 import "../../math/vector.bs"
 import "../../math/math.bs"
 import "../controller/ControlMap.bs"
+import "../../utils/CountdownTimer.bs"
 
 namespace BGE.UI
 
@@ -92,6 +93,23 @@ namespace BGE.UI
     ' adjustment - shared between list and pointer mode since only one mode
     ' is ever active at a time.
     protected repeatThrottle as BGE.UI.RepeatThrottle = new BGE.UI.RepeatThrottle()
+
+    ' list mode only, analog stick navigation (see updateAnalogList()): was
+    ' the bound axis already deflected past CURSOR_ANALOG_DEADZONE as of the
+    ' last call? Distinguishes a fresh push (act immediately) from an
+    ' ongoing hold (wait for analogListRepeatTimer instead).
+    protected analogListDirectionActive as boolean = false
+    ' list mode only: counts down analogListRepeatDelay between repeat steps
+    ' while the stick stays deflected. Restarted on every step (the initial
+    ' one included), and stopped outright once the stick returns to neutral
+    ' so the next push acts immediately rather than inheriting a stale delay.
+    protected analogListRepeatTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+    ' Seconds to hold the stick deflected before updateAnalogList() repeats a
+    ' step - matches WIDGET_REPEAT_DELAY_MS's role for discrete held-button
+    ' navigation, just slower and in a dt-driven method instead of a
+    ' GameInput.heldTimeMs one (analog holding has no discrete "held" event
+    ' to key off of).
+    analogListRepeatDelay as float = 0.5
 
     sub new(game as BGE.Game)
       m.game = game
@@ -316,6 +334,23 @@ namespace BGE.UI
         delta = input.x ' right (x=1) -> next; left (x=-1) -> previous
       end if
 
+      m.stepFocus(delta)
+    end sub
+
+    ' list mode: moves currentlyFocusedIndex by delta (-1/0/+1), wrapping or
+    ' clamping per wrapFocus - the shared move-by-one-step primitive behind
+    ' both navigateList() (discrete d-pad) and updateAnalogList() (continuous
+    ' stick) below, so the two can't drift out of sync on wrap/clamp
+    ' behavior. A delta of 0 (nothing pressed/deflected) or an empty registry
+    ' is a no-op.
+    '
+    ' @param {integer} delta
+    ' @return {void}
+    private sub stepFocus(delta as integer)
+      if delta = 0 or m.focusOrder.count() = 0
+        return
+      end if
+
       newIndex = m.currentlyFocusedIndex + delta
       count = m.focusOrder.count()
       if m.wrapFocus
@@ -326,6 +361,75 @@ namespace BGE.UI
 
       if newIndex <> m.currentlyFocusedIndex
         m.focusTo(newIndex)
+      end if
+    end sub
+
+    ' list mode: continuously drives focus from a bound analog stick axis,
+    ' the list-mode counterpart to updateAnalogCursor() (pointer mode) - see
+    ' that method's own doc comment for why this needs to run every frame
+    ' (Game.processUiInput()) rather than waiting for a discrete input event.
+    ' No-op unless navigationMode is list, analogAxisName is set, and controls
+    ' has at least one binding - zero cost for a game that doesn't use this.
+    '
+    ' Crossing CURSOR_ANALOG_DEADZONE moves focus by one step immediately
+    ' (edge-triggered, like a fresh button press); continuing to hold past it
+    ' repeats one step every analogListRepeatDelay seconds until the stick
+    ' returns to neutral, at which point the next push acts immediately again
+    ' rather than inheriting a stale repeat delay. Reuses the pointer mode's
+    ' same analogAxisName field - only one navigationMode is ever active at a
+    ' time, so there's no ambiguity in sharing it.
+    '
+    ' Direction picks whichever axis component has the larger magnitude
+    ' (dominant axis) - a d-pad's remote fallback (see ControlMap.getAxis())
+    ' always reports a pure cardinal direction, but a real analog stick
+    ' rarely reads as perfectly on-axis, and always requiring y to win (the
+    ' way the discrete d-pad path does, since a d-pad tap can't be diagonal
+    ' anyway) would make a mostly-horizontal push on a vertical list feel
+    ' unresponsive.
+    '
+    ' @param {BGE.Controller.ControlMap} controls - Game.controls
+    ' @param {float} dt - Game.getDeltaTime()
+    ' @return {void}
+    sub updateAnalogList(controls as BGE.Controller.ControlMap, dt as float)
+      if m.navigationMode <> BGE.UI.FocusNavigationMode.list or m.analogAxisName = invalid or not controls.hasBindings()
+        return
+      end if
+
+      axis = controls.getAxis(m.analogAxisName)
+      magnitude = BGE.Math.VectorOps.length(axis)
+      if magnitude < BGE.UI.CURSOR_ANALOG_DEADZONE
+        m.analogListDirectionActive = false
+        m.analogListRepeatTimer.stop()
+        return
+      end if
+
+      delta = 0
+      if Abs(axis.y) >= Abs(axis.x)
+        if axis.y > 0
+          delta = -1 ' up -> previous
+        else
+          delta = 1 ' down -> next
+        end if
+      else if axis.x > 0
+        delta = 1 ' right -> next
+      else
+        delta = -1 ' left -> previous
+      end if
+
+      if not m.analogListDirectionActive
+        ' Seed first (idempotent after the first call), matching
+        ' updateAnalogCursor()'s own seed-before-move ordering, so a fresh
+        ' room's very first frame can be driven by the stick alone.
+        m.seedList()
+        m.analogListDirectionActive = true
+        m.stepFocus(delta)
+        m.analogListRepeatTimer.start(m.analogListRepeatDelay)
+      else
+        m.analogListRepeatTimer.tick(dt)
+        if not m.analogListRepeatTimer.isActive()
+          m.stepFocus(delta)
+          m.analogListRepeatTimer.start(m.analogListRepeatDelay)
+        end if
       end if
     end sub
 
