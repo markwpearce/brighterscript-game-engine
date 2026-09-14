@@ -25,37 +25,48 @@
     #players { opacity: .65; font-weight: 500; }
     #players:empty { display: none; }
 
-    .zone { position: absolute; top: 40px; bottom: 0; width: 50%; }
-    #zone1 { left: 0; }
-    #zone2 { right: 0; }
-    /* Base (portrait/default): small corner sticks, matching the old compact layout. */
-    .zone .nipple-hint {
-      position: absolute; width: 130px; height: 130px; border-radius: 50%;
-      border: 2px dashed #ffffff22; bottom: 30px; pointer-events: none;
-    }
-    #zone1 .nipple-hint { left: 30px; }
-    #zone2 .nipple-hint { right: 30px; }
+    /* Base (portrait/default): small corner touch zones - nipplejs's "static"
+       mode spawns the joystick at this element's own 50%/50% (see bindStick()),
+       so the zone's SIZE AND POSITION are what actually place the joystick, not
+       just decoration - sizing only a visual hint here (an earlier version of
+       this page did that) leaves the real joystick spawning at the zone's true
+       center, wherever that ends up being. */
+    .zone { position: absolute; bottom: 24px; width: 150px; height: 150px; }
+    #zone1 { left: 24px; }
+    #zone2 { right: 24px; }
 
-    /* Landscape (the common orientation for actually playing): sticks become the
-       whole left/right half of the screen, like a real mobile game's virtual pad -
-       nipplejs's "static" mode still draws the joystick at a fixed spot, but any
-       touch anywhere in the zone drags it, so a bigger zone is a bigger, easier
-       touch target, not just a visual change. */
+    /* Landscape (the common orientation for actually playing): the zone becomes
+       the whole left/right half of the screen, like a real mobile game's
+       virtual pad - any touch anywhere in it now drags the joystick, a much
+       bigger and easier touch target, not just a visual change. The joystick
+       itself still only ever spawns at the zone's 50%/50%, i.e. screen center
+       height, which is why the buttons below move to the top corner in this
+       orientation instead of sitting where they'd now overlap it. */
     @media (orientation: landscape) {
-      .zone .nipple-hint { width: 170px; height: 170px; bottom: 50%; margin-bottom: -85px; }
-      #zone1 .nipple-hint { left: 12%; }
-      #zone2 .nipple-hint { right: 12%; }
+      .zone { top: 40px; bottom: 0; left: auto; right: auto; width: 50%; height: auto; }
+      #zone1 { left: 0; }
+      #zone2 { right: 0; }
     }
 
     .btn {
-      position: absolute; width: 66px; height: 66px; border-radius: 50%;
+      position: absolute; width: 62px; height: 62px; border-radius: 50%;
       background: #21262dd0; color: #e6edf3; border: 2px solid #30363d;
       font-size: 15px; font-weight: 700; display: flex; align-items: center; justify-content: center;
       box-shadow: 0 2px 10px #00000060; z-index: 5;
     }
     .btn:active { background: #30363dd0; border-color: #484f58; }
-    #btna { bottom: 32%; right: 8%; }
-    #btnb { bottom: 16%; right: 26%; }
+    /* Portrait: A/B stacked just above the right stick's small corner zone;
+       Back sits by itself near the status bar, well clear of both sticks. */
+    #btna { bottom: 200px; right: 30px; }
+    #btnb { bottom: 270px; right: 100px; }
+    #btnback { top: 52px; left: 16px; width: auto; height: 34px; border-radius: 17px; padding: 0 16px; font-size: 12px; }
+    /* Landscape: the right zone is now the whole right half with its joystick
+       at screen-center height, so A/B move to a top corner clear of it. Back
+       stays in the same top-left spot in both orientations. */
+    @media (orientation: landscape) {
+      #btna { bottom: auto; top: 56px; right: 20px; }
+      #btnb { bottom: auto; top: 130px; right: 90px; }
+    }
 
     #gamepadBanner {
       position: absolute; inset: 40px 0 0 0; z-index: 20;
@@ -82,21 +93,30 @@
     <div class="sub">Touch controls are hidden while a gamepad is active</div>
   </div>
 
-  <div id="zone1" class="zone"><div class="nipple-hint"></div></div>
-  <div id="zone2" class="zone"><div class="nipple-hint"></div></div>
+  <div id="zone1" class="zone"></div>
+  <div id="zone2" class="zone"></div>
   <button id="btna" class="btn">A</button>
   <button id="btnb" class="btn">B</button>
+  <button id="btnback" class="btn">Back</button>
 
   <script>
     var sticks = { "1": { x: 0, y: 0 }, "2": { x: 0, y: 0 } };
-    var buttons = { a: false, b: false };
+    // Labeled "A"/"B"/"Back" on screen (generic, gamepad-style captions), but
+    // sent over the wire as "ok"/"b"/"back" - "ok" and "back" are BGE's own
+    // canonical button names (see BGE.buttonNameFromCode()/isButton()), so
+    // pressing either also drives menus (Game.processFocusManagerInput()
+    // dispatches controller input to the focus system, same as a real
+    // remote's OK/Back would), not just whatever ControlMap action a game
+    // separately binds them to. "b" is plain/generic - bind it to whatever a
+    // given game wants via bindAction().
+    var buttons = { ok: false, b: false, back: false };
     // "status" would shadow window.status (a no-op string setter in some browsers).
     var statusEl = document.getElementById("status");
     var dotEl = document.getElementById("dot");
     var playersEl = document.getElementById("players");
     var gamepadBannerEl = document.getElementById("gamepadBanner");
     var gamepadNameEl = document.getElementById("gamepadName");
-    var touchEls = [document.getElementById("zone1"), document.getElementById("zone2"), document.getElementById("btna"), document.getElementById("btnb")];
+    var touchEls = [document.getElementById("zone1"), document.getElementById("zone2"), document.getElementById("btna"), document.getElementById("btnb"), document.getElementById("btnback")];
     var gamepadActive = false;
     var gamepadPollId = null;
     var playerIndex = null;
@@ -129,7 +149,13 @@
         // Game.broadcastControllerConnectionInfo()/enableControllerInput(). labels
         // aren't rendered by this simple demo page; a custom page could use them
         // to relabel its own buttons.
-        var info = JSON.parse(evt.data);
+        var info;
+        try {
+          info = JSON.parse(evt.data);
+        } catch (err) {
+          console.error("Controller: could not parse server message", evt.data, err);
+          return;
+        }
         if (typeof info.playerIndex === "number") playerIndex = info.playerIndex;
         if (info.labels) labels = info.labels;
         if (typeof info.connectedCount === "number") connectedCount = info.connectedCount;
@@ -157,7 +183,11 @@
     setInterval(send, 1000);
 
     function bindStick(elementId, stickName) {
-      var manager = nipplejs.create({ zone: document.getElementById(elementId), mode: "static", position: { left: "50%", top: "50%" }, color: "white" });
+      // zIndex: nipplejs defaults to 999, which painted its joystick UI over
+      // the A/B buttons once the zones grew large enough to visually overlap
+      // them (landscape especially) - buttons use z-index 5, so 1 keeps
+      // nipplejs comfortably under them without needing !important anywhere.
+      var manager = nipplejs.create({ zone: document.getElementById(elementId), mode: "static", position: { left: "50%", top: "50%" }, color: "white", zIndex: 1 });
       manager.on("move", function (evt, data) {
         var rad = data.angle.radian;
         var force = Math.min(data.force, 1);
@@ -183,8 +213,17 @@
       el.addEventListener("mousedown", function () { setPressed(true); });
       el.addEventListener("mouseup", function () { setPressed(false); });
     }
-    bindButton("btna", "a");
+    bindButton("btna", "ok");
     bindButton("btnb", "b");
+    // Back only ever "presses"/"releases" from a real touchstart/touchend (or
+    // mousedown/mouseup) pair below, same as A/B - never something that can
+    // fire repeatedly just from being held (the 1s heartbeat resend further
+    // up only resends the *current* state, it doesn't synthesize a fresh
+    // press). Server-side, Room.onInput()'s own `input.press` guard (see
+    // examples/platformer's TitleRoom/MainRoom) is what actually makes a
+    // long hold act once instead of repeatedly - documented here since it's
+    // easy to assume this needs a client-side debounce and it doesn't.
+    bindButton("btnback", "back");
 
     // Real Gamepad, if one is connected, overrides the on-screen controls - hide
     // the touch zones/buttons entirely (rather than just leaving them inert)
