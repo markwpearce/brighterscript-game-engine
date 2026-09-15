@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) conventions. This project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `BGE.UI.Button` can play a `Game.loadSound()` key on focus/click (`Button.focusSoundKey`/`clickSoundKey`), falling back to a new game-wide default (`Game.uiFocusSoundKey`/`uiClickSoundKey`) when unset - see `docs/engine-internals.md`.
+- `examples/platformer`: sound effects for sliding, the dino eating/dying, touching the level-end flag, and UI focus/click; touching the flag now freezes the player and plays a confetti burst for a beat before advancing to the next level.
+
 ## [0.6.0] - 2026-07-24
 
 ### Added
