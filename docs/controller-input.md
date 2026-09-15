@@ -82,11 +82,13 @@ sources automatically.
 
 `playerIndex` (0, 1, 2, ...) is shared across every input source - a
 physical Roku remote, a brs-engine simulator gamepad, and a connected
-browser all draw from the same pool, assigned in the order each first
-sends input. A single-player game can ignore `playerIndex` entirely (it
-defaults to 0, which the first remote/controller used always gets).
-Pass `playerIndex` to `bindAction`/`bindAxis` to say which player's
-input a binding listens to:
+browser all draw from the same pool, but index 0 is always reserved for
+the first physical remote/gamepad. A connected browser is assigned the
+next free index starting from 1, in the order each one connects. A
+single-player game can ignore `playerIndex` entirely (it defaults to 0,
+which the first remote/controller used always gets). Pass `playerIndex`
+to `bindAction`/`bindAxis` to say which player's input a binding listens
+to:
 
 ```brighterscript
 game.controls.bindAction("p2fire", invalid, "a", 1)   ' player 1's button "a"
