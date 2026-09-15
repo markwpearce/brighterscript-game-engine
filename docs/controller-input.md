@@ -84,10 +84,15 @@ sources automatically.
 
 ## Multiple controllers
 
-Each connected browser is assigned its own `playerIndex` (0, 1, 2, ...)
-in the order it connects. Pass `playerIndex` to `bindAction`/`bindAxis`
-to say which controller a binding listens to; a single-player game can
-ignore it entirely (it defaults to 0).
+`playerIndex` (0, 1, 2, ...) is shared across every input source - a
+physical Roku remote, a brs-engine simulator gamepad, and a connected
+browser all draw from the same pool, but index 0 is always reserved for
+the first physical remote/gamepad. A connected browser is assigned the
+next free index starting from 1, in the order each one connects. A
+single-player game can ignore `playerIndex` entirely (it defaults to 0,
+which the first remote/controller used always gets). Pass `playerIndex`
+to `bindAction`/`bindAxis` to say which player's input a binding listens
+to:
 
 ```brighterscript
 game.controls.bindAction("p2fire", invalid, "b", 1)   ' player 1's button "b"
@@ -100,6 +105,24 @@ Reading an action or axis never takes a `playerIndex` - each name is bound
 to one player at bind time, so `isActionPressed("p2fire")`/`getAxis("p2move")`
 already know which controller they refer to. Give each player's actions
 their own names.
+
+## Simulator analog sticks
+
+The brs-engine simulator (not real Roku hardware) can report a connected
+game controller's analog stick, if the consuming app's own manifest sets
+`multi_controllers=1`:
+
+```
+#Channel Options
+multi_controllers=1
+```
+
+With that flag set, `bindAxis`'s `getAxis()` picks up a bound player's
+analog stick automatically - no code change needed beyond the manifest
+flag - falling back to the remote d-pad exactly as before when no analog
+data is available (real hardware, or the flag left unset). This is an
+**experimental**, simulator-only capability with no real-Roku equivalent;
+a real device always uses the digital d-pad path.
 
 ## Labels and the raw custom payload
 

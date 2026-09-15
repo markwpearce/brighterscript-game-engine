@@ -73,8 +73,11 @@ namespace BGE
     private paused = false
     sortedEntities as GameEntity[] = []
 
-    private buttonHeld = -1
-    private buttonHeldTimeMs = 0
+    ' Per-remote-id held-button tracking (playerIndex.ToStr() -> {buttonCode, timer}),
+    ' replacing a single global that could only track one remote's held button at
+    ' a time - two remotes each holding a different button now both repeat
+    ' correctly instead of one clobbering the other's state.
+    private remoteHeldButtons = {}
     private optional inputEntityId as string or dynamic = invalid
     private optional currentInputEntityId as string or dynamic = invalid
     ' Was the entity that set inputEntityId a UiContainer (isContainer())?
@@ -85,7 +88,6 @@ namespace BGE
     private fakeDT as float or dynamic = invalid
     private dtTimer as roTimespan = CreateObject("roTimespan")
     private pauseTimer as roTimespan = CreateObject("roTimespan")
-    private buttonHeldTimer as roTimespan = CreateObject("roTimespan")
     private garbageCollectionTimer as roTimespan = CreateObject("roTimespan")
     private currentID = 0
     private shouldUseIntegerMovement = false
@@ -353,11 +355,13 @@ namespace BGE
         while screenMsg <> invalid
           if type(screenMsg) = "roUniversalControlEvent" and screenMsg.GetInt() <> 11
             universalControlEvents.Push(screenMsg as roUniversalControlEvent)
+            remoteId = (screenMsg as roUniversalControlEvent).GetRemoteID()
             if screenMsg.GetInt() < 100
-              m.buttonHeld = screenMsg.GetInt()
-              m.buttonHeldTimer.Mark()
+              timer = CreateObject("roTimespan")
+              timer.Mark()
+              m.remoteHeldButtons[remoteId] = {buttonCode: screenMsg.GetInt(), timer: timer}
             else
-              m.buttonHeld = -1
+              m.remoteHeldButtons.Delete(remoteId)
               if m.enableAudioGuideSuppression
                 if screenMsg.GetInt() = 110
                   audio_guide_suppression_ticker++
@@ -373,68 +377,81 @@ namespace BGE
           end if
           screenMsg = m.screen_port.GetMessage()
         end while
-        m.buttonHeldTimeMs = m.buttonHeldTimer.TotalMilliseconds()
         musicMsg = m.musicPort.GetMessage() as roAudioPlayerEvent
 
         controllerInputs = m.drainControllerInput()
+
+        ' Computed once per frame (not per entity/call site) - remoteHeldGameInputs()
+        ' allocates a fresh array/GameInput per held remote, so calling it once and
+        ' threading the result through every consumer avoids a per-entity-per-frame
+        ' allocation on the input hot path, and gives every consumer this frame the
+        ' same held-duration snapshot instead of each call re-reading a live timer.
+        remoteHeldInputs = m.remoteHeldGameInputs()
 
         ' All ControlMap work is skipped entirely until a game binds something -
         ' a game that never calls bindAction/bindAxis pays nothing per frame.
         if m.controls.hasBindings()
           m.controls.beginFrame()
           for each msg in universalControlEvents
-            m.controls.onInput(new GameInput(msg.GetInt(), 0))
+            m.controls.onInput(m.gameInputForRemoteMsg(msg))
           end for
-          if m.buttonHeld <> -1
-            m.controls.onInput(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
-          end if
+          for each heldInput in remoteHeldInputs
+            m.controls.onInput(heldInput)
+          end for
           for each input in controllerInputs
             m.controls.onInput(input)
           end for
 
-          remoteDpadX = 0
-          remoteDpadY = 0
+          remoteDpad = {} ' playerIndex.ToStr() -> {x, y}
           for each msg in universalControlEvents
-            directionInput = new GameInput(msg.GetInt(), 0)
+            directionInput = m.gameInputForRemoteMsg(msg)
+            key = directionInput.playerIndex.ToStr()
+            entry = remoteDpad[key] ?? {x: 0.0, y: 0.0}
             if directionInput.press or directionInput.held
               if directionInput.x <> 0
-                remoteDpadX = directionInput.x
+                entry.x = directionInput.x
               end if
               if directionInput.y <> 0
-                remoteDpadY = directionInput.y
+                entry.y = directionInput.y
               end if
             else if directionInput.release
               if directionInput.isButton("left") or directionInput.isButton("right")
-                remoteDpadX = 0
+                entry.x = 0.0
               end if
               if directionInput.isButton("up") or directionInput.isButton("down")
-                remoteDpadY = 0
+                entry.y = 0.0
               end if
             end if
+            remoteDpad[key] = entry
           end for
-          if m.buttonHeld <> -1
-            heldDirectionInput = new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs)
-            if heldDirectionInput.x <> 0
-              remoteDpadX = heldDirectionInput.x
+          for each heldInput in remoteHeldInputs
+            key = heldInput.playerIndex.ToStr()
+            entry = remoteDpad[key] ?? {x: 0.0, y: 0.0}
+            if heldInput.x <> 0
+              entry.x = heldInput.x
             end if
-            if heldDirectionInput.y <> 0
-              remoteDpadY = heldDirectionInput.y
+            if heldInput.y <> 0
+              entry.y = heldInput.y
             end if
-          end if
-          m.controllerRegistry.setRemoteDpad(remoteDpadX, remoteDpadY)
+            remoteDpad[key] = entry
+          end for
+          for each key in remoteDpad
+            entry = remoteDpad[key]
+            m.controllerRegistry.setRemoteDpad(key.ToInt(), entry.x, entry.y)
+          end for
         end if
 
         ' ----------------------Process UI input first, so a widget that consumes-------------
         ' ----------------------an event (GameInput.consume()) can capture input before-------
         ' ----------------------regular entities are dispatched this same frame---------------
-        m.processUiInput(universalControlEvents, controllerInputs, musicMsg, ecpMsg, urlMsg)
+        m.processUiInput(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
         uiInputTime = 0
         if m.debugging.print_perf_stats
           uiInputTime = m.dtTimer.TotalMilliseconds()
         end if
 
         ' ----------------------Handle entity interactions (collisions, etc)--------------------
-        m.processEntitiesPreDraw(universalControlEvents, controllerInputs, musicMsg, ecpMsg, urlMsg)
+        m.processEntitiesPreDraw(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
         updateAndCollisionTime = 0
         if m.debugging.print_perf_stats
           updateAndCollisionTime = m.dtTimer.TotalMilliseconds() - uiInputTime
@@ -465,7 +482,7 @@ namespace BGE
         m.drawUI()
 
         ' ---------------------- Handle all Debug UI updates and draws -------------------------
-        m.processAndDrawDebugUI(universalControlEvents, musicMsg, ecpMsg, urlMsg)
+        m.processAndDrawDebugUI(universalControlEvents, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
 
         m.screen.drawScaledObject(m.uiCanvas.offset.x, m.uiCanvas.offset.y, m.uiCanvas.scale.x, m.uiCanvas.scale.y, m.uiCanvas.bitmap)
 
@@ -556,6 +573,34 @@ namespace BGE
       end for
     end sub
 
+    ' The one place a remote-sourced press/release GameInput gets built -
+    ' resolves this remote's shared playerIndex and caches the raw event
+    ' for later analog-stick reads (see ControllerRegistry.getRemoteAnalogStick).
+    '
+    ' @param {roUniversalControlEvent} msg
+    ' @return {GameInput}
+    private function gameInputForRemoteMsg(msg as roUniversalControlEvent) as GameInput
+      playerIndex = m.controllerRegistry.assignPlayerIndexForRemoteId(msg.GetRemoteID())
+      m.controllerRegistry.setRemoteEvent(playerIndex, msg)
+      return new GameInput(msg.GetInt(), 0, playerIndex)
+    end function
+
+    ' One synthesized held/repeat GameInput per remote currently holding a
+    ' button down, replacing the old single m.buttonHeld-driven check at
+    ' every call site that needs it.
+    '
+    ' @return {GameInput[]}
+    private function remoteHeldGameInputs() as GameInput[]
+      inputs = [] as GameInput[]
+      for each remoteId in m.remoteHeldButtons
+        entry = m.remoteHeldButtons[remoteId]
+        playerIndex = m.controllerRegistry.assignPlayerIndexForRemoteId(remoteId)
+        heldTimeMs = entry.timer.TotalMilliseconds()
+        inputs.Push(new GameInput(1000 + entry.buttonCode, heldTimeMs, playerIndex))
+      end for
+      return inputs
+    end function
+
     ' Drains ControllerServer socket events, updates ControllerRegistry, and
     ' returns the list of GameInput events (press/release for changed
     ' buttons, held for currently-held ones) synthesized this frame.
@@ -624,11 +669,12 @@ namespace BGE
     '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of any control events that happened since last frame
     ' @param {GameInput[]} controllerInputs - array of controller-originated GameInput events synthesized this frame
+    ' @param {GameInput[]} remoteHeldInputs - this frame's held-remote-button GameInputs, computed once by Play()
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
     ' @return {void}
-    private sub processEntitiesPreDraw(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+    private sub processEntitiesPreDraw(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], remoteHeldInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       startedPaused = m.paused
       ' Checked once per frame, not per entity - always false unless
       ' enableControllerInput() was called and a controller is connected.
@@ -648,7 +694,7 @@ namespace BGE
 
           ' --------------------First process the onInput() function--------------------
           if m.isValidEntity(entity)
-            m.processEntityOnInput(entity, universalControlEvents)
+            m.processEntityOnInput(entity, universalControlEvents, remoteHeldInputs)
           end if
 
           if hasControllerInputs and m.isValidEntity(entity)
@@ -872,14 +918,15 @@ namespace BGE
     '
     ' @param {GameEntity} entity - the entity to relay input to
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @param {GameInput[]} remoteHeldInputs - this frame's held-remote-button GameInputs (see remoteHeldGameInputs()), computed once per frame by Play() rather than per entity
     ' @return {boolean} true if this entity is still valid
-    private function processEntityOnInput(entity as GameEntity, universalControlEvents as roUniversalControlEvent[]) as boolean
+    private function processEntityOnInput(entity as GameEntity, universalControlEvents as roUniversalControlEvent[], remoteHeldInputs as GameInput[]) as boolean
       if not m.isValidEntity(entity)
         return false
       end if
 
       for each msg in universalControlEvents
-        if not m.dispatchOnInput(entity, new GameInput(msg.GetInt(), 0))
+        if not m.dispatchOnInput(entity, m.gameInputForRemoteMsg(msg))
           return false
         end if
 
@@ -890,13 +937,11 @@ namespace BGE
           end if
         end if
       end for
-      if m.buttonHeld <> -1
-        ' Button release codes are 100 plus the button press code
-        ' This shows a button held code as 1000 plus the button press code
-        if not m.dispatchOnInput(entity, new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
+      for each heldInput in remoteHeldInputs
+        if not m.dispatchOnInput(entity, heldInput)
           return false
         end if
-      end if
+      end for
       return true
     end function
 
@@ -1236,12 +1281,13 @@ namespace BGE
     '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
     ' @param {GameInput[]} controllerInputs - controller-web-originated events since last frame (see drainControllerInput())
+    ' @param {GameInput[]} remoteHeldInputs - this frame's held-remote-button GameInputs, computed once by Play()
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
-    private sub processUiInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
-      m.processUiUpdate(m.gameUi, universalControlEvents, musicMsg, ecpMsg, urlMsg)
-      m.processFocusManagerInput(universalControlEvents, controllerInputs)
+    private sub processUiInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], remoteHeldInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+      m.processUiUpdate(m.gameUi, universalControlEvents, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
+      m.processFocusManagerInput(universalControlEvents, controllerInputs, remoteHeldInputs)
       m.focusManager.updateAnalogCursor(m.controls, m.dt)
       m.focusManager.updateAnalogList(m.controls, m.dt)
     end sub
@@ -1265,14 +1311,15 @@ namespace BGE
     '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
     ' @param {GameInput[]} controllerInputs - controller-web-originated events since last frame
+    ' @param {GameInput[]} remoteHeldInputs - this frame's held-remote-button GameInputs, computed once by Play()
     ' @return {void}
-    private sub processFocusManagerInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[])
+    private sub processFocusManagerInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], remoteHeldInputs as GameInput[])
       for each msg in universalControlEvents
-        m.focusManager.update(new GameInput(msg.GetInt(), 0))
+        m.focusManager.update(m.gameInputForRemoteMsg(msg))
       end for
-      if m.buttonHeld <> -1
-        m.focusManager.update(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
-      end if
+      for each heldInput in remoteHeldInputs
+        m.focusManager.update(heldInput)
+      end for
       for each input in controllerInputs
         m.focusManager.update(input)
       end for
@@ -1297,13 +1344,14 @@ namespace BGE
     '
     ' @param {BGE.Ui.UiWidget} - widget to process
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @param {GameInput[]} remoteHeldInputs - this frame's held-remote-button GameInputs, computed once by Play()
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
-    private sub processUiUpdate(uiEntity as BGE.Ui.UiWidget, universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+    private sub processUiUpdate(uiEntity as BGE.Ui.UiWidget, universalControlEvents as roUniversalControlEvent[], remoteHeldInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       ' --------------------First process the onInput() function--------------------
       if m.isValidEntity(uiEntity)
-        m.processEntityOnInput(uiEntity, universalControlEvents)
+        m.processEntityOnInput(uiEntity, universalControlEvents, remoteHeldInputs)
       end if
 
       ' -------------------Then send the audioPlayer event msg if applicable-------------------
@@ -1425,11 +1473,12 @@ namespace BGE
     ' Function to handle all input and updates and draws for Debug UI layer
     '
     ' @param universalControlEvents - array of control events since last frame
+    ' @param remoteHeldInputs - this frame's held-remote-button GameInputs, computed once by Play()
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
-    private sub processAndDrawDebugUI(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
-      m.processUiUpdate(m.debugUi, universalControlEvents, musicMsg, ecpMsg, urlMsg)
+    private sub processAndDrawDebugUI(universalControlEvents as roUniversalControlEvent[], remoteHeldInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+      m.processUiUpdate(m.debugUi, universalControlEvents, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
 
       if m.debugging.show_debug_ui and m.isValidEntity(m.debugUi) and invalid <> m.debugUi.draw
         ' if m.debugging.draw_debugUi_to_screen and m.debugUi.canvas = invalid
