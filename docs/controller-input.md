@@ -32,14 +32,18 @@ your game code never has to know whether the remote or a connected
 controller produced the input.
 
 ```brighterscript
-game.controls.bindAction("jump", "ok", "a")   ' name, remoteButton, controllerButton
-game.controls.bindAxis("move")                ' defaults to the controller's stick "1"
+game.controls.bindAction("jump", "OK", "ok")   ' name, remoteButton, controllerButton
+game.controls.bindAxis("move")                 ' defaults to the controller's stick "1"
 ```
 
 `controllerButton`/the stick name are whatever the browser page sends - the built-in
-page (see below) uses `"a"`/`"b"` for its two buttons and `"1"`/`"2"` for its two
-sticks, but a custom page can send any name it likes (e.g. `"reload"`) and bind to
-it with no engine change.
+page (see below) uses `"ok"`/`"b"`/`"back"` for its three buttons and `"1"`/`"2"` for
+its two sticks, but a custom page can send any name it likes (e.g. `"reload"`) and
+bind to it with no engine change. When a real gamepad is connected, the built-in
+page also sends its standard-mapping face/menu buttons under these same names
+(alongside their raw numeric index, e.g. `"0"`), so a binding to `"ok"`/`"b"`/`"back"`
+works for a touch tap, a remote press, and a real controller button with no extra
+binding needed.
 
 The recommended way to read bound state each frame is `onControls()`, a
 `GameEntity` lifecycle hook called once per frame with the game's
@@ -86,7 +90,7 @@ to say which controller a binding listens to; a single-player game can
 ignore it entirely (it defaults to 0).
 
 ```brighterscript
-game.controls.bindAction("p2fire", invalid, "a", 1)   ' player 1's button "a"
+game.controls.bindAction("p2fire", invalid, "b", 1)   ' player 1's button "b"
 game.controls.bindAxis("p2move", "1", 1)              ' player 1's stick "1"
 
 if game.controls.isActionPressed("p2fire") then ...
@@ -105,7 +109,7 @@ number plus a name -> label map for every labeled binding), so a custom
 controller page can render meaningful text instead of raw names:
 
 ```brighterscript
-game.controls.bindAction("jump", "ok", "a", 0, "Jump")
+game.controls.bindAction("jump", "OK", "ok", 0, "Jump")
 ```
 
 A custom on-screen control that isn't button/stick shaped (a slider, a
