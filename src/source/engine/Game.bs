@@ -161,6 +161,12 @@ namespace BGE
     ' Default theme for all UI widgets, set in new()
     defaultTheme as BGE.UI.Theme
 
+    ' Default Game.loadSound() keys played by every BGE.UI.Button on focus/click (see
+    ' Button.onFocus()/onClick()) unless that button sets its own focusSoundKey/
+    ' clickSoundKey - "" (the default) plays nothing.
+    uiFocusSoundKey as string = ""
+    uiClickSoundKey as string = ""
+
     ' Unified remote+controller input mapping - see enableControllerInput()
     ' and BGE.Controller.ControlMap.
     controls as BGE.Controller.ControlMap = invalid
@@ -421,7 +427,7 @@ namespace BGE
         ' ----------------------Process UI input first, so a widget that consumes-------------
         ' ----------------------an event (GameInput.consume()) can capture input before-------
         ' ----------------------regular entities are dispatched this same frame---------------
-        m.processUiInput(universalControlEvents, musicMsg, ecpMsg, urlMsg)
+        m.processUiInput(universalControlEvents, controllerInputs, musicMsg, ecpMsg, urlMsg)
         uiInputTime = 0
         if m.debugging.print_perf_stats
           uiInputTime = m.dtTimer.TotalMilliseconds()
@@ -522,6 +528,34 @@ namespace BGE
       end while
     end sub
 
+    ' Sends every currently-connected controller-web client (see
+    ' controller-web/index.html) a fresh {playerIndex, labels, connectedCount}
+    ' message - unlike the old single sendMessage() this replaced (still
+    ' correct for the client that just opened, since it's the only one that
+    ' needs its own playerIndex/labels), a client already connected also
+    ' needs to hear about connectedCount changing when a *different* client
+    ' opens or closes, so the page can show "2 controllers connected" - it
+    ' has no other way to find that out. No-op if controller input was never
+    ' enabled. Left non-private (like processEntityOnControls/
+    ' ControllerServer.parseHttpRequest - see their own doc comments) so a
+    ' future spec has a seam to exercise this without standing up real
+    ' sockets end to end.
+    sub broadcastControllerConnectionInfo()
+      if m.controllerServer = invalid
+        return
+      end if
+      count = m.controllerConnectionPlayers.Count()
+      labels = m.controls.getLabels()
+      for each id in m.controllerConnectionPlayers.Keys()
+        ' Quoted keys, not bare identifiers ({playerIndex: ...}) - FormatJson()
+        ' lowercases a bare AA-literal key (a real, confirmed-on-device gotcha,
+        ' not a hypothetical), which silently broke the client's camelCase
+        ' info.playerIndex/info.connectedCount checks in controller-web/index.html.
+        info = {"playerIndex": m.controllerConnectionPlayers[id], "labels": labels, "connectedCount": count}
+        m.controllerServer.sendMessage(id, FormatJson(info))
+      end for
+    end sub
+
     ' Drains ControllerServer socket events, updates ControllerRegistry, and
     ' returns the list of GameInput events (press/release for changed
     ' buttons, held for currently-held ones) synthesized this frame.
@@ -537,13 +571,13 @@ namespace BGE
         if event.type = BGE.Controller.ControllerServerEventType.onOpen
           playerIndex = m.controllerRegistry.assignPlayerIndex()
           m.controllerConnectionPlayers[event.connectionId] = playerIndex
-          info = {playerIndex: playerIndex, labels: m.controls.getLabels()}
-          m.controllerServer.sendMessage(event.connectionId, FormatJson(info))
+          m.broadcastControllerConnectionInfo()
         else if event.type = BGE.Controller.ControllerServerEventType.onClose
           playerIndex = m.controllerConnectionPlayers[event.connectionId]
           if playerIndex <> invalid
             m.controllerRegistry.releasePlayerIndex(playerIndex)
             m.controllerConnectionPlayers.Delete(event.connectionId)
+            m.broadcastControllerConnectionInfo()
           end if
         else if event.type = BGE.Controller.ControllerServerEventType.onMessage
           playerIndex = m.controllerConnectionPlayers[event.connectionId]
@@ -1199,13 +1233,15 @@ namespace BGE
     ' also reaching GameEntity.onInput() for regular entities the same frame.
     '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @param {GameInput[]} controllerInputs - controller-web-originated events since last frame (see drainControllerInput())
     ' @param musicMsg - audio player event in last frame
     ' @param ecpMsg  - input event in last frame
     ' @param urlMsg - url event in last frame
-    private sub processUiInput(universalControlEvents as roUniversalControlEvent[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
+    private sub processUiInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], musicMsg as roAudioPlayerEvent, ecpMsg as roInputEvent, urlMsg as roUrlEvent)
       m.processUiUpdate(m.gameUi, universalControlEvents, musicMsg, ecpMsg, urlMsg)
-      m.processFocusManagerInput(universalControlEvents)
+      m.processFocusManagerInput(universalControlEvents, controllerInputs)
       m.focusManager.updateAnalogCursor(m.controls, m.dt)
+      m.focusManager.updateAnalogList(m.controls, m.dt)
     end sub
 
     ' Drives BGE.UI.FocusManager.update() exactly once per input event (same
@@ -1215,15 +1251,29 @@ namespace BGE
     ' otherwise trigger a second, redundant update() call for the very same
     ' event before the outer container gets its own turn.
     '
+    ' Also drives it for controller-web-originated events (a phone/browser
+    ' controller's own buttons) - previously these only ever reached regular
+    ' GameEntity.onControls()/onInput() dispatch (processEntityOnControllerInput()),
+    ' never the UI/focus system at all, so a controller-web button could never
+    ' click a menu Button no matter what it was named. A controller button
+    ' whose raw name is a canonical BGE button name (e.g. "ok", "back" - see
+    ' BGE.buttonNameFromCode()) now drives menus exactly like the matching
+    ' remote button would, in addition to whatever ControlMap action(s) a
+    ' game separately binds it to.
+    '
     ' @param {roUniversalControlEvent[]} universalControlEvents - array of control events since last frame
+    ' @param {GameInput[]} controllerInputs - controller-web-originated events since last frame
     ' @return {void}
-    private sub processFocusManagerInput(universalControlEvents as roUniversalControlEvent[])
+    private sub processFocusManagerInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[])
       for each msg in universalControlEvents
         m.focusManager.update(new GameInput(msg.GetInt(), 0))
       end for
       if m.buttonHeld <> -1
         m.focusManager.update(new GameInput(1000 + m.buttonHeld, m.buttonHeldTimeMs))
       end if
+      for each input in controllerInputs
+        m.focusManager.update(input)
+      end for
     end sub
 
     ' Draws gameUi to the UI canvas. Called after entity movement/collision/draw

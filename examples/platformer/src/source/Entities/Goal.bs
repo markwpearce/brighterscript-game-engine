@@ -1,7 +1,36 @@
+import "../LevelData.bs"
+import "Player.bs"
+
 class Goal extends BGE.GameEntity
 
   width = 48.0
   height = 96.0
+
+  ' Which level this Goal belongs to - set from onCreate()'s args (see MainRoom's
+  ' addEntity() call). Reaching this Goal advances to levelIndex + 1, or posts the
+  ' real "levelComplete" win event once there's no next level (see getLevelCount()).
+  levelIndex = 0
+
+  ' Guards against onCollision() firing more than once for the same overlap (e.g. if
+  ' the player's collider keeps overlapping this Goal for a frame or two after the
+  ' room-change is triggered but before it actually takes effect at end-of-frame -
+  ' same guard shape as Enemy.stomp()'s isDying check).
+  advancing = false
+
+  ' Counts down the celebration beat below - onCollision() starts it, onUpdate() acts
+  ' once it expires.
+  celebrationTimer = new BGE.CountdownTimer()
+  celebrationTime = 1.0
+
+  ' Set true right as onUpdate() performs the deferred room-change/event (see below) -
+  ' guards against firing it again on a later frame, since a CountdownTimer stays
+  ' "expired" (not isActive()) forever once it runs out, and the levelComplete branch
+  ' (unlike levelAdvanced) doesn't change rooms to naturally remove this entity.
+  triggered = false
+
+  confettiGold as BGE.DrawableParticles
+  confettiRed as BGE.DrawableParticles
+  confettiBlue as BGE.DrawableParticles
 
   sub new(game as BGE.Game)
     super(game)
@@ -9,18 +38,102 @@ class Goal extends BGE.GameEntity
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.addRectangle("body", m.width, m.height, {
-      offset: BGE.Math.VectorOps.create(-m.width / 2.0, m.height),
-      color: &h33AAFF
-    })
+    if invalid <> args.levelIndex
+      m.levelIndex = args.levelIndex as integer
+    end if
+
+    ' goal.png is a 60x96, 10-col x 1-row grid - one continuous waving-flag loop,
+    ' every frame facing right. Pretranslated so the pole's base sits at the
+    ' entity's own position, matching the rectangle collider's own anchor below.
+    sprite = m.addSprite("body", m.game.getBitmap("goal"), 60, 96)
+    sprite.applyPreTranslation(-30, -96)
+    sprite.addAnimation("wave", {startFrame: 0, frameCount: 10}, 10, BGE.SpritePlayMode.Loop)
+    sprite.playAnimation("wave")
+
     m.addRectangleCollider("body", m.width, m.height, -m.width / 2.0, m.height)
+
+    ' Three separately-colored emitters (one color pair per DrawableParticles) bursting
+    ' together read as multicolor confetti - offset near the top of the pole, with
+    ' gravity so it arcs down over the celebrationTime beat below rather than just
+    ' fading in place like the coin/dust/poof sparkle effects elsewhere in this example.
+    confettiOffset = BGE.Math.VectorOps.create(0, m.height - 10.0)
+    confettiGravity = BGE.Math.VectorOps.create(0, -500.0)
+    m.confettiGold = m.addParticles("confettiGold", BGE.ParticleShape.Rectangle, {
+      lifetime: m.celebrationTime,
+      lifetimeSpread: 0.2,
+      velocitySpreadMagnitude: 220.0,
+      acceleration: confettiGravity,
+      startColor: &hFFD700FF,
+      endColor: &hFFD700FF,
+      startAlpha: 255.0,
+      endAlpha: 0.0,
+      startSize: 7.0,
+      endSize: 3.0,
+      offset: confettiOffset
+    })
+    m.confettiRed = m.addParticles("confettiRed", BGE.ParticleShape.Rectangle, {
+      lifetime: m.celebrationTime,
+      lifetimeSpread: 0.2,
+      velocitySpreadMagnitude: 220.0,
+      acceleration: confettiGravity,
+      startColor: &hFF4040FF,
+      endColor: &hFF4040FF,
+      startAlpha: 255.0,
+      endAlpha: 0.0,
+      startSize: 7.0,
+      endSize: 3.0,
+      offset: confettiOffset
+    })
+    m.confettiBlue = m.addParticles("confettiBlue", BGE.ParticleShape.Rectangle, {
+      lifetime: m.celebrationTime,
+      lifetimeSpread: 0.2,
+      velocitySpreadMagnitude: 220.0,
+      acceleration: confettiGravity,
+      startColor: &h40A0FFFF,
+      endColor: &h40A0FFFF,
+      startAlpha: 255.0,
+      endAlpha: 0.0,
+      startSize: 7.0,
+      endSize: 3.0,
+      offset: confettiOffset
+    })
+  end sub
+
+  override sub onUpdate(dt as float)
+    if not m.advancing or m.triggered
+      return
+    end if
+
+    m.celebrationTimer.tick(dt)
+    if not m.celebrationTimer.isActive()
+      m.triggered = true
+      if m.levelIndex + 1 < getLevelCount()
+        m.game.postGameEvent("levelAdvanced", {levelIndex: m.levelIndex + 1})
+        m.game.changeRoom("MainRoom", {levelIndex: m.levelIndex + 1})
+      else
+        m.game.postGameEvent("levelComplete", {})
+      end if
+    end if
   end sub
 
   override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
-    if otherEntity.name <> "Player"
+    if otherEntity.name <> "Player" or m.advancing
       return
     end if
-    m.game.postGameEvent("levelComplete", {})
+    m.advancing = true
+    m.game.playSound("flag")
+
+    ' Not named `player` - BrighterScript identifiers are case-insensitive, so that
+    ' would collide with the Player class name itself (same gotcha as TitleRoom.bs's
+    ' `thisRoom`/`TitleRoom` local).
+    playerEntity = otherEntity as Player
+    playerEntity.freeze()
+
+    m.confettiGold.burst(18)
+    m.confettiRed.burst(18)
+    m.confettiBlue.burst(18)
+
+    m.celebrationTimer.start(m.celebrationTime)
   end sub
 
 end class

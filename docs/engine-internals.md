@@ -210,6 +210,27 @@ unaffected. When it is set, the same image is used regardless of hover/focus sta
 hovered/focused background image is a possible future follow-up, as is letting a `UiContainer` (not
 just an individual widget) back itself with a background image. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
 
+### Button focus/click sounds
+
+`BGE.UI.Button` can play a `Game.loadSound()`-loaded sound on focus and/or click, resolved with a
+game-wide default that any individual button can override:
+
+```brightscript
+' Loaded once, applied to every Button in the game unless a button sets its own key
+m.game.loadSound("uiFocus", "pkg:/sounds/ui_focus.wav")
+m.game.loadSound("uiClick", "pkg:/sounds/ui_click.wav")
+m.game.uiFocusSoundKey = "uiFocus"
+m.game.uiClickSoundKey = "uiClick"
+
+' Override just this one button - "" (the default) falls back to the Game-level key above
+myButton.focusSoundKey = "specialFocus"
+myButton.clickSoundKey = "specialClick"
+```
+
+`Button.onFocus()`/`onClick()` play the button's own key if it's set, else `Game.uiFocusSoundKey`/
+`uiClickSoundKey` - both default to `""` (no sound), so this is entirely opt-in. See
+`examples/platformer`'s `main.bs` for a full example wiring these game-wide.
+
 ### Widget overlay rendering and popup Select
 
 `UiWidget.drawOverlay(canvas as BGE.Canvas, theme as BGE.UI.Theme)` is a general-purpose hook that fires
