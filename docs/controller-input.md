@@ -37,13 +37,13 @@ game.controls.bindAxis("move")                 ' defaults to the controller's st
 ```
 
 `controllerButton`/the stick name are whatever the browser page sends - the built-in
-page (see below) uses `"ok"`/`"b"`/`"back"` for its three buttons and `"1"`/`"2"` for
-its two sticks, but a custom page can send any name it likes (e.g. `"reload"`) and
-bind to it with no engine change. When a real gamepad is connected, the built-in
-page also sends its standard-mapping face/menu buttons under these same names
-(alongside their raw numeric index, e.g. `"0"`), so a binding to `"ok"`/`"b"`/`"back"`
-works for a touch tap, a remote press, and a real controller button with no extra
-binding needed.
+page's three on-screen buttons send `"ok"`/`"b"`/`"back"` (not their on-screen "A"/"B"/
+"Back" labels) and its two sticks send `"1"`/`"2"`, but a custom page can send any name
+it likes (e.g. `"reload"`) and bind to it with no engine change. When a real gamepad is
+connected, the built-in page also sends its standard-mapping face/menu buttons under
+these same names (alongside their raw numeric index, e.g. `"0"`), so a binding to
+`"ok"`/`"b"`/`"back"` works for a touch tap, a remote press, and a real controller
+button with no extra binding needed - see "Simulator/physical gamepad buttons" below.
 
 The recommended way to read bound state each frame is `onControls()`, a
 `GameEntity` lifecycle hook called once per frame with the game's
@@ -84,10 +84,27 @@ sources automatically.
 
 ## Multiple controllers
 
-Each connected browser is assigned its own `playerIndex` (0, 1, 2, ...)
-in the order it connects. Pass `playerIndex` to `bindAction`/`bindAxis`
-to say which controller a binding listens to; a single-player game can
-ignore it entirely (it defaults to 0).
+`playerIndex` (0, 1, 2, ...) is shared across every input source - a
+physical Roku remote, a brs-engine simulator gamepad, and a connected
+browser all draw from the same pool. By default (`shareFirstControllerWithRemote`,
+see `enableControllerInput()`), the very first browser to connect *shares*
+index 0 with the first physical remote/gamepad, whichever of the two shows
+up first - so a single-player game can ignore `playerIndex` entirely (it
+defaults to 0) and its bindings respond to the remote and a connected phone
+interchangeably, with no code caring which one the player actually used.
+Only a second browser (or second remote/gamepad) gets its own index,
+starting from 1, in the order each one connects.
+
+For a genuinely multiplayer game where every input source should always get
+its own distinct index - including the very first browser, which would
+otherwise share player 0 with the remote - pass `false`:
+
+```brighterscript
+game.enableControllerInput(8888, false)   ' port, shareFirstControllerWithRemote
+```
+
+Pass `playerIndex` to `bindAction`/`bindAxis` to say which player's input a
+binding listens to:
 
 ```brighterscript
 game.controls.bindAction("p2fire", invalid, "b", 1)   ' player 1's button "b"
@@ -100,6 +117,50 @@ Reading an action or axis never takes a `playerIndex` - each name is bound
 to one player at bind time, so `isActionPressed("p2fire")`/`getAxis("p2move")`
 already know which controller they refer to. Give each player's actions
 their own names.
+
+## Simulator/physical gamepad buttons
+
+A brs-engine simulator gamepad, or a real controller paired to a Roku that
+supports `multi_controllers`, arrives through the same remote-event path as
+the Roku remote (not the browser-controller path above) - its face/shoulder
+buttons report as `"a"`, `"b"`, `"x"`, `"y"`, `"l1"`, `"r1"`, `"l2"`, `"r2"`
+(see `BGE.buttonNameFromCode`). `"a"`/`"b"` are aliased to `"ok"`/`"back"`
+(the conventional gamepad meaning - A confirms, B cancels), so no extra
+code is needed for a gamepad's A/B to drive menus (`BGE.UI.FocusManager`'s
+click handling) or any `isButton("back")` check a room already has - and a
+`bindAction("jump", "ok", ...)` binding fires for a gamepad's A press too,
+with no changes.
+
+`bindAction`'s `remoteButton`/`controllerButton` also accept an array of
+names instead of one, if you want a gamepad button that has *no* built-in
+alias (e.g. `"x"`) to trigger the same action as a remote button:
+
+```brighterscript
+game.controls.bindAction("jump", ["ok", "x"], "a")
+```
+
+A real gamepad plugged into the *browser* controller page is a separate,
+unrelated case - see "Mapping input" above: its standard-mapping face/menu
+buttons send the same `"ok"`/`"b"`/`"back"` names the on-screen buttons do,
+so a `bindAction` already bound to those needs no changes at all.
+
+## Simulator analog sticks
+
+The brs-engine simulator (not real Roku hardware) can report a connected
+game controller's analog stick, if the consuming app's own manifest sets
+`multi_controllers=1`:
+
+```
+#Channel Options
+multi_controllers=1
+```
+
+With that flag set, `bindAxis`'s `getAxis()` picks up a bound player's
+analog stick automatically - no code change needed beyond the manifest
+flag - falling back to the remote d-pad exactly as before when no analog
+data is available (real hardware, or the flag left unset). This is an
+**experimental**, simulator-only capability with no real-Roku equivalent;
+a real device always uses the digital d-pad path.
 
 ## Labels and the raw custom payload
 

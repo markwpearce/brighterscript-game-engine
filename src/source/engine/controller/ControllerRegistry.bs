@@ -3,6 +3,17 @@ import "../../roku_modules/rodash/rodash.d.bs"
 
 namespace BGE.Controller
 
+  ' Axis indexes for roUniversalControlEvent.GetValue(axis) - brs-engine's
+  ' AnalogAxis enum (simulator-only extension, PR lvcabral/brs-engine#1226).
+  const ANALOG_AXIS_LEFT_X = 0
+  const ANALOG_AXIS_LEFT_Y = 1
+
+  ' Below this magnitude, a real gamepad's resting-stick drift is treated as
+  ' neutral rather than a real deflection - otherwise it would permanently
+  ' preempt the remote d-pad fallback in ControlMap.getAxis(). Scoped to
+  ' controller input only; unrelated to BGE.UI.CURSOR_ANALOG_DEADZONE.
+  const ANALOG_DEADZONE = 0.15
+
   ' Internal per-connection controller state (buttons/sticks/held-timers/custom
   ' payload) plus the remote's own d-pad fallback state. Not part of the public
   ' API - a game uses BGE.Controller.ControlMap (game.controls) instead.
@@ -15,14 +26,28 @@ namespace BGE.Controller
 
   class ControllerRegistry
     private connections = {} ' playerIndex.ToStr() -> ControllerConnectionState
-    private remoteDpad as BGE.Math.Vector = BGE.Math.VectorOps.create()
+    private remoteIdToPlayerIndex = {} ' remoteId (GetRemoteID() string) -> playerIndex
+    private remoteDpad = {} ' playerIndex.ToStr() -> BGE.Math.Vector
+    private remoteEvents = {} ' playerIndex.ToStr() -> last-seen roUniversalControlEvent (dynamic)
+    private multiControllersSupported as dynamic = invalid ' cached HasFeature() check, invalid = not yet checked
 
-    ' Assigns the lowest player index not currently in use.
+    ' Default true - the first browser shares playerIndex 0 with the first
+    ' remote/gamepad, so a default bindAction(playerIndex=0) fires for
+    ' either. Set false to give every input source its own index instead
+    ' (see Game.enableControllerInput()).
+    shareFirstControllerWithRemote as boolean = true
+
+    ' Assigns the lowest free player index to a browser controller connection.
+    ' With shareFirstControllerWithRemote (default), the first browser claims
+    ' index 0, shared with the first remote/gamepad regardless of connection
+    ' order (see assignPlayerIndexForRemoteId); only a second browser onward
+    ' gets its own index starting at 1.
     function assignPlayerIndex() as integer
-      index = 0
-      while m.connections.DoesExist(index.ToStr())
-        index++
-      end while
+      if m.shareFirstControllerWithRemote and not m.connections.DoesExist("0")
+        index = 0
+      else
+        index = m.lowestFreeIndex(1)
+      end if
       m.connections[index.ToStr()] = new BGE.Controller.ControllerConnectionState()
       return index
     end function
@@ -35,6 +60,50 @@ namespace BGE.Controller
     sub releasePlayerIndex(playerIndex as integer)
       m.connections.Delete(playerIndex.ToStr())
     end sub
+
+    ' Looks up (or lazily assigns) a stable playerIndex for one physical
+    ' remote/gamepad, identified by roUniversalControlEvent.GetRemoteID()
+    ' (e.g. "30:1"). Never released - a physical remote has no disconnect
+    ' signal to key a release off, unlike a browser controller's WebSocket
+    ' close. With shareFirstControllerWithRemote (default), the first
+    ' remote/gamepad claims index 0 even if a browser already occupies it
+    ' too (see assignPlayerIndex).
+    '
+    ' @param {string} remoteId - the string from roUniversalControlEvent.GetRemoteID()
+    ' @return {integer} - this remote's playerIndex, stable for the run
+    function assignPlayerIndexForRemoteId(remoteId as string) as integer
+      existing = m.remoteIdToPlayerIndex[remoteId]
+      if existing <> invalid
+        return existing
+      end if
+      if m.shareFirstControllerWithRemote and not m.isRemoteIndex(0)
+        index = 0
+      else
+        index = m.lowestFreeIndex(0)
+      end if
+      m.remoteIdToPlayerIndex[remoteId] = index
+      return index
+    end function
+
+    ' @param {integer} startAt - lowest index to consider (0 for a physical
+    '   remote/gamepad scan, 1 for a browser-connection scan - see
+    '   assignPlayerIndex/assignPlayerIndexForRemoteId)
+    private function lowestFreeIndex(startAt as integer) as integer
+      index = startAt
+      while m.connections.DoesExist(index.ToStr()) or m.isRemoteIndex(index)
+        index++
+      end while
+      return index
+    end function
+
+    private function isRemoteIndex(index as integer) as boolean
+      for each remoteId in m.remoteIdToPlayerIndex
+        if m.remoteIdToPlayerIndex[remoteId] = index
+          return true
+        end if
+      end for
+      return false
+    end function
 
     ' Updates one connection's raw state from a decoded {buttons, sticks, custom}
     ' message. Returns the button names whose boolean flipped since the last
@@ -180,19 +249,63 @@ namespace BGE.Controller
       return state.custom
     end function
 
-    ' Records the remote control's own d-pad fallback state, used by
-    ' BGE.Controller.ControlMap.getAxis() when no controller is bound.
+    ' Records one physical remote/gamepad's current d-pad-derived {x, y},
+    ' used by BGE.Controller.ControlMap.getAxis() when no controller stick
+    ' is bound (or it's neutral) for this player.
     '
+    ' @param {integer} playerIndex
     ' @param {float} x - -1..1
     ' @param {float} y - -1..1
-    sub setRemoteDpad(x as float, y as float)
-      m.remoteDpad = BGE.Math.VectorOps.create(x, y)
+    sub setRemoteDpad(playerIndex as integer, x as float, y as float)
+      m.remoteDpad[playerIndex.ToStr()] = BGE.Math.VectorOps.create(x, y)
     end sub
 
-    ' @return {BGE.Math.Vector} - the remote d-pad's current {x, y}, as
-    '   last set by setRemoteDpad()
-    function getRemoteDpad() as BGE.Math.Vector
-      return m.remoteDpad
+    ' @param {integer} playerIndex
+    ' @return {BGE.Math.Vector} - this player's remote d-pad {x, y}, neutral if never set
+    function getRemoteDpad(playerIndex as integer) as BGE.Math.Vector
+      return m.remoteDpad[playerIndex.ToStr()] ?? BGE.Math.VectorOps.create()
+    end function
+
+    ' Caches the last roUniversalControlEvent seen for this player, so
+    ' getRemoteAnalogStick() can keep reading its live GetValue() every
+    ' frame even on a frame with no new event for this remote (a stick
+    ' held at a nonzero deflection produces no new roUniversalControlEvent
+    ' - see specs/2026-09-15-multi-controller-input-design.md).
+    '
+    ' @param {integer} playerIndex
+    ' @param {dynamic} event - the roUniversalControlEvent, passed as dynamic
+    '   since GetValue() isn't part of its typed interface
+    sub setRemoteEvent(playerIndex as integer, event as dynamic)
+      m.remoteEvents[playerIndex.ToStr()] = event
+    end sub
+
+    ' @param {integer} playerIndex
+    ' @return {BGE.Math.Vector} - this player's left analog stick, {0,0} if
+    '   no event cached yet or the running engine doesn't support
+    '   multi_controllers (always {0,0} on real Roku hardware)
+    function getRemoteAnalogStick(playerIndex as integer) as BGE.Math.Vector
+      if not m.isMultiControllersSupported()
+        return BGE.Math.VectorOps.create()
+      end if
+      event = m.remoteEvents[playerIndex.ToStr()]
+      if event = invalid
+        return BGE.Math.VectorOps.create()
+      end if
+      x = (event as object).GetValue(BGE.Controller.ANALOG_AXIS_LEFT_X)
+      ' GetValue()'s Y follows the raw Gamepad API convention (up = negative) - flip to BGE's world space (+y = up).
+      y = -(event as object).GetValue(BGE.Controller.ANALOG_AXIS_LEFT_Y)
+      if Sqr(x * x + y * y) < BGE.Controller.ANALOG_DEADZONE
+        return BGE.Math.VectorOps.create()
+      end if
+      return BGE.Math.VectorOps.create(x, y)
+    end function
+
+    private function isMultiControllersSupported() as boolean
+      if m.multiControllersSupported = invalid
+        remoteInfo = CreateObject("roRemoteInfo")
+        m.multiControllersSupported = remoteInfo.HasFeature("multi_controllers", 0)
+      end if
+      return m.multiControllersSupported
     end function
 
   end class
