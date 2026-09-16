@@ -32,15 +32,18 @@ your game code never has to know whether the remote or a connected
 controller produced the input.
 
 ```brighterscript
-game.controls.bindAction("jump", "ok", "ok")   ' name, remoteButton, controllerButton
+game.controls.bindAction("jump", "OK", "ok")   ' name, remoteButton, controllerButton
 game.controls.bindAxis("move")                 ' defaults to the controller's stick "1"
 ```
 
 `controllerButton`/the stick name are whatever the browser page sends - the built-in
-page's two on-screen buttons send `"ok"`/`"b"` (not their on-screen "A"/"B" labels) and
-its two sticks send `"1"`/`"2"`, but a custom page can send any name it likes (e.g.
-`"reload"`) and bind to it with no engine change. A real gamepad plugged into the
-built-in page is a separate case - see "Simulator/physical gamepad buttons" below.
+page's three on-screen buttons send `"ok"`/`"b"`/`"back"` (not their on-screen "A"/"B"/
+"Back" labels) and its two sticks send `"1"`/`"2"`, but a custom page can send any name
+it likes (e.g. `"reload"`) and bind to it with no engine change. When a real gamepad is
+connected, the built-in page also sends its standard-mapping face/menu buttons under
+these same names (alongside their raw numeric index, e.g. `"0"`), so a binding to
+`"ok"`/`"b"`/`"back"` works for a touch tap, a remote press, and a real controller
+button with no extra binding needed - see "Simulator/physical gamepad buttons" below.
 
 The recommended way to read bound state each frame is `onControls()`, a
 `GameEntity` lifecycle hook called once per frame with the game's
@@ -104,7 +107,7 @@ Pass `playerIndex` to `bindAction`/`bindAxis` to say which player's input a
 binding listens to:
 
 ```brighterscript
-game.controls.bindAction("p2fire", invalid, "a", 1)   ' player 1's button "a"
+game.controls.bindAction("p2fire", invalid, "b", 1)   ' player 1's button "b"
 game.controls.bindAxis("p2move", "1", 1)              ' player 1's stick "1"
 
 if game.controls.isActionPressed("p2fire") then ...
@@ -137,12 +140,9 @@ game.controls.bindAction("jump", ["ok", "x"], "a")
 ```
 
 A real gamepad plugged into the *browser* controller page is a separate,
-unrelated case: it sends its raw Gamepad API button index (`"0"`, `"1"`, ...)
-plus, for its two primary face buttons only, `"a"`/`"b"` (matching the names
-above). Since `controllerButton` matching is exact-string, not aliased, list
-`"a"`/`"b"` explicitly alongside `"ok"`/`"back"` for a gameplay `bindAction` to
-respond to it - menu navigation doesn't need this, since it goes through the
-aliased `isButton()` check either way.
+unrelated case - see "Mapping input" above: its standard-mapping face/menu
+buttons send the same `"ok"`/`"b"`/`"back"` names the on-screen buttons do,
+so a `bindAction` already bound to those needs no changes at all.
 
 ## Simulator analog sticks
 
@@ -170,7 +170,7 @@ number plus a name -> label map for every labeled binding), so a custom
 controller page can render meaningful text instead of raw names:
 
 ```brighterscript
-game.controls.bindAction("jump", "ok", "a", 0, "Jump")
+game.controls.bindAction("jump", "OK", "ok", 0, "Jump")
 ```
 
 A custom on-screen control that isn't button/stick shaped (a slider, a
