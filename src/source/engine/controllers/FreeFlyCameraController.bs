@@ -2,20 +2,30 @@ import "../../math/math.bs"
 import "../../math/plane.bs"
 import "../../math/vector.bs"
 import "../GameInput.bs"
+import "../controller/ControlMap.bs"
 import "../renderer/cameras/Camera3d.bs"
 
 namespace BGE
 
   ' A reusable free-fly camera control scheme: yaw/pitch relative to the camera's
-  ' current (roll-adjusted) orientation, forward/back drive, roll, and a ground-plane
-  ' clamp so driving forward can't cross the ground. Not a GameEntity - a Room (or any
-  ' owner) constructs one and forwards its own onInput/onUpdate calls to it. Extracted
-  ' from examples/terrain's original FreeFlyCameraController (issue #148); that example
-  ' now layers its own room-switching/debug-toggle/hint-text glue on top of this.
+  ' current (roll-adjusted) orientation, strafe/drive, roll, and a ground-plane clamp
+  ' so driving forward can't cross the ground. Not a GameEntity - a Room (or any owner)
+  ' constructs one and forwards its own onInput/onUpdate calls to it. Extracted from
+  ' examples/terrain's original FreeFlyCameraController (issue #148); that example now
+  ' layers its own room-switching/debug-toggle/hint-text glue on top of this.
+  '
+  ' Movement/look are read each frame from a BGE.Controller.ControlMap's move/look axes
+  ' (see update()), not from onInput() - a connected dual-stick controller drives full
+  ' strafe+drive / yaw+pitch, and with no real second stick, both axes fall back to the
+  ' same remote/simulator source, so the single physical d-pad turns and drives exactly
+  ' as it always has (see update()'s regime check).
   class FreeFlyCameraController
 
     camera as BGE.Camera3d
     groundPlane as BGE.Math.Plane
+    private controls as BGE.Controller.ControlMap
+    private moveAxisName as string
+    private lookAxisName as string
 
     turnSpeed = 2.0 ' radians/sec
     driveSpeed = 80 ' units/sec
@@ -48,26 +58,36 @@ namespace BGE
     '
     ' @param {BGE.Camera3d} camera the camera to drive
     ' @param {BGE.Math.Plane} groundPlane the plane clampAboveGround() keeps the camera above
-    sub new(camera as BGE.Camera3d, groundPlane as BGE.Math.Plane)
+    ' @param {BGE.Controller.ControlMap} controls read each update() for the move/look axes
+    ' @param {string} [moveAxis="move"] axis name bound (via controls.bindAxis()) to the left/drive stick
+    ' @param {string} [lookAxis="look"] axis name bound (via controls.bindAxis()) to the right/look stick
+    sub new(camera as BGE.Camera3d, groundPlane as BGE.Math.Plane, controls as BGE.Controller.ControlMap, moveAxis = "move" as string, lookAxis = "look" as string)
       m.camera = camera
       m.groundPlane = groundPlane
+      m.controls = controls
+      m.moveAxisName = moveAxis
+      m.lookAxisName = lookAxis
     end sub
 
-    ' Forward a Room/GameEntity's own onInput() call here. Tracks roll/pitch/drive
-    ' direction from the "replay"/"options" (roll), "rewind"/"fastforward" (pitch) and
-    ' directional (drive/turn) buttons, and resets roll/pitch to their initial values on
-    ' "play".
+    ' Forward a Room/GameEntity's own onInput() call here. Tracks roll/pitch
+    ' direction from the "replay"/"l1" (roll left), "options"/"r1" (roll right) and
+    ' "rewind"/"fastforward" (pitch) buttons, and resets roll/pitch to their initial
+    ' values on "play". Movement/turning is not read here - see update().
     '
     ' @param {BGE.GameInput} input
     sub onInput(input as BGE.GameInput)
       m.lastInput = input
       if input.isButton("replay") and not input.release
         m.rollDirection = -1
+      else if input.isButton("l1") and not input.release
+        m.rollDirection = -1
       else if input.isButton("options") and not input.release
         m.rollDirection = 1
-      else if input.isButton("replay") and input.release
+      else if input.isButton("r1") and not input.release
+        m.rollDirection = 1
+      else if (input.isButton("replay") or input.isButton("l1")) and input.release
         m.rollDirection = 0
-      else if input.isButton("options") and input.release
+      else if (input.isButton("options") or input.isButton("r1")) and input.release
         m.rollDirection = 0
       else if input.isButton("rewind") and not input.release
         m.pitchDirection = -1
@@ -85,34 +105,56 @@ namespace BGE
       end if
     end sub
 
-    ' Forward a Room/GameEntity's own onUpdate() call here. Applies yaw/drive from the
-    ' last onInput()'s directional input, plus any active roll/pitch, to the camera.
+    ' Forward a Room/GameEntity's own onUpdate() call here. Reads the move/look axes
+    ' (see class doc comment for the dual-stick-vs-fallback regime), applies
+    ' strafe/drive/yaw/pitch to the camera, plus any active roll and button-driven pitch.
     '
     ' @param {float} dt seconds since the last frame
     sub update(dt as float)
-      input = m.lastInput
+      moveRaw = m.controls.getRawAxis(m.moveAxisName)
+      lookRaw = m.controls.getRawAxis(m.lookAxisName)
 
-      if input <> invalid
-        if input.x <> 0
-          ' Negated: RotateVectorAroundPoint3d's Rodrigues-formula rotation around the up
-          ' axis turns the opposite direction from this codebase's established heading
-          ' convention (forward = (sin(heading), 0, -cos(heading))) for a positive angle,
-          ' so a positive angle here must be the negative of the input to turn the
-          ' intended way.
-          m.camera.orientation = BGE.Math.RotateVectorAroundPoint3d(m.camera.orientation, BGE.Math.VectorOps.create(), m.camera.getUpVector(), -input.x * dt * m.turnSpeed)
-        end if
-        if input.y <> 0
-          candidate = BGE.Math.VectorOps.add(m.camera.position, BGE.Math.VectorOps.scale(m.camera.orientation, input.y * dt * m.driveSpeed))
-          m.camera.position = m.clampAboveGround(candidate)
-        end if
+      if moveRaw.x <> 0 or moveRaw.y <> 0 or lookRaw.x <> 0 or lookRaw.y <> 0
+        strafeInput = moveRaw.x
+        driveInput = moveRaw.y
+        yawInput = lookRaw.x
+        ' Negated: stick-up (+y, "tilt up") must decrease pitchAccum, matching
+        ' pitchDirection = -1's ("rewind") sign convention below.
+        analogPitchInput = -lookRaw.y
+      else
+        ' Neither stick has real input (no dual-stick controller connected, or it's
+        ' momentarily centered) - fall back to a single physical source (remote analog
+        ' stick, then d-pad), reproducing the pre-dual-stick behavior exactly: x turns,
+        ' y drives, no strafe/analog-pitch (one d-pad can't drive both axes at once).
+        fallback = m.controls.getAxis(m.moveAxisName)
+        strafeInput = 0.0
+        driveInput = fallback.y
+        yawInput = fallback.x
+        analogPitchInput = 0.0
+      end if
+
+      if yawInput <> 0
+        ' Negated: RotateVectorAroundPoint3d's Rodrigues-formula rotation around the up
+        ' axis turns the opposite direction from this codebase's established heading
+        ' convention (forward = (sin(heading), 0, -cos(heading))) for a positive angle,
+        ' so a positive angle here must be the negative of the input to turn the
+        ' intended way.
+        m.camera.orientation = BGE.Math.RotateVectorAroundPoint3d(m.camera.orientation, BGE.Math.VectorOps.create(), m.camera.getUpVector(), -yawInput * dt * m.turnSpeed)
+      end if
+
+      if driveInput <> 0 or strafeInput <> 0
+        forwardOffset = BGE.Math.VectorOps.scale(m.camera.orientation, driveInput * dt * m.driveSpeed)
+        rightOffset = BGE.Math.VectorOps.scale(m.camera.getRightVector(), strafeInput * dt * m.driveSpeed)
+        candidate = BGE.Math.VectorOps.add(m.camera.position, BGE.Math.VectorOps.add(forwardOffset, rightOffset))
+        m.camera.position = m.clampAboveGround(candidate)
       end if
 
       if m.rollDirection <> 0
         m.camera.rollDegrees = m.camera.rollDegrees + m.rollDirection * m.rollSpeed * dt
       end if
 
-      if m.pitchDirection <> 0
-        delta = m.pitchDirection * m.pitchSpeed * dt
+      delta = (m.pitchDirection * m.pitchSpeed + analogPitchInput * m.pitchSpeed) * dt
+      if delta <> 0
         clampedAccum = BGE.Math.Clamp(m.pitchAccum + delta, -m.maxDownwardTilt, m.maxDownwardTilt)
         actualDelta = clampedAccum - m.pitchAccum
         m.pitchAccum = clampedAccum
