@@ -1,0 +1,130 @@
+import "../../math/vector.bs"
+import "../Game.bs"
+import "../GameEntity.bs"
+import "CircleCollider.bs"
+import "Collider.bs"
+import "Collision3d.bs"
+
+namespace BGE
+
+  ' A collider with the shape of a sphere centered at (offset.x, offset.y, offset.z) with
+  ' given radius, that detects a true 3D overlap - not just an XY-space projection.
+  '
+  ' Internally, this owns two ordinary CircleColliders for broad-phase: one tracking the
+  ' entity's real (x, y) - the same XY plane every other 2D Collider uses - and one
+  ' tracking a synthetic (y, z) "YZ plane", flagged with COLLIDER_3D_YZ_PLANE_FLAG so it
+  ' can only ever match another YZ-plane collider (both register against the same
+  ' roCompositor as ordinary 2D colliders, so without this flag a YZ-plane collider could
+  ' spuriously match an unrelated 2D collider at the same numeric (x, y) position). A pair
+  ' only becomes a broad-phase candidate when it overlaps on BOTH planes - and even then,
+  ' confirmCollision() runs a true sphere-sphere distance check before accepting it,
+  ' because two spheres can pass both plane checks while never actually touching in 3D (a
+  ' diagonal near-miss). See specs/2026-09-18-3d-collision-detection-design.md.
+  class SphereCollider3d extends Collider
+
+    ' Radius of the sphere
+    radius = 0.0
+
+    ' The most recent confirmCollision() result, readable from onCollision() to compute a
+    ' bounce response - result.normal points away from the other entity, toward this
+    ' collider's own entity. Set every time confirmCollision() runs, whether or not it
+    ' confirmed (check result.overlapping).
+    lastCollisionResult as Sphere3dCollisionResult = invalid
+
+    private xyCollider as CircleCollider
+    private yzCollider as CircleCollider
+
+    ' Create a new SphereCollider3d
+    '
+    ' @param {string} colliderName - name of this collider
+    ' @param [args={}] - additional properties (e.g {radius: 10})
+    sub new (colliderName as string, args = {} as roAssociativeArray)
+      super(colliderName, args)
+      m.colliderType = "sphere3d"
+      ' bs:disable-next-line: 1140
+      m.append(args)
+    end sub
+
+
+    override sub setupCompositor(gameEngine as Game, entityName as string, entityId as string, entityPosition as BGE.Math.Vector)
+      m.xyCollider = new CircleCollider(m.name + "__xyPlane", {
+        radius: m.radius,
+        offset: BGE.Math.VectorOps.create(m.offset.x, m.offset.y)
+      })
+      m.xyCollider.setupCompositor(gameEngine, entityName, entityId, entityPosition)
+      ' setupCompositor() alone leaves the underlying roSprite at its default member/
+      ' collidable flags (1) - adjustCompositorObject() is what actually pushes this
+      ' collider's own flags onto it. Without calling it here, this collider's compositor
+      ' object would keep flags=1 until its own checkCollisions()/adjustCompositorObject()
+      ' happens to run for the first time, which - for the YZ-plane collider below, whose
+      ' flags are deliberately non-default - would let it spuriously match an unrelated
+      ' collider still sitting at the default flags=1 in the meantime.
+      m.xyCollider.adjustCompositorObject(entityPosition)
+
+      m.yzCollider = new CircleCollider(m.name + "__yzPlane", {
+        radius: m.radius,
+        offset: BGE.Math.VectorOps.create(m.offset.y, m.offset.z ?? 0),
+        memberFlags: COLLIDER_3D_YZ_PLANE_FLAG,
+        collidableFlags: COLLIDER_3D_YZ_PLANE_FLAG
+      })
+      m.yzCollider.setupCompositor(gameEngine, entityName, entityId, m.toYZPosition(entityPosition))
+      m.yzCollider.adjustCompositorObject(m.toYZPosition(entityPosition))
+    end sub
+
+
+    override function checkCollisions(entityPosition as BGE.Math.Vector) as object[]
+      xyCandidates = m.xyCollider.checkCollisions(entityPosition)
+      yzCandidates = m.yzCollider.checkCollisions(m.toYZPosition(entityPosition))
+
+      yzKeys = {}
+      for each candidate in yzCandidates
+        yzKeys[candidate.entityId + ":" + m.stripPlaneSuffix(candidate.colliderName)] = true
+      end for
+
+      result = []
+      for each candidate in xyCandidates
+        baseName = m.stripPlaneSuffix(candidate.colliderName)
+        key = candidate.entityId + ":" + baseName
+        if yzKeys[key] = true
+          result.push({entityId: candidate.entityId, objectName: candidate.objectName, colliderName: baseName})
+        end if
+      end for
+      return result
+    end function
+
+
+    override function confirmCollision(myEntity as object, otherCollider as Collider, otherEntity as object) as boolean
+      if otherCollider = invalid or otherCollider.colliderType <> "sphere3d"
+        m.lastCollisionResult = new Sphere3dCollisionResult(false, BGE.Math.VectorOps.create(0, 1, 0), 0.0)
+        return false
+      end if
+      otherSphere = otherCollider as SphereCollider3d
+      myGameEntity = myEntity as GameEntity
+      otherGameEntity = otherEntity as GameEntity
+      myCenter = BGE.Math.VectorOps.add(myGameEntity.position, m.offset)
+      otherCenter = BGE.Math.VectorOps.add(otherGameEntity.position, otherSphere.offset)
+      m.lastCollisionResult = sphereOverlap(myCenter, m.radius, otherCenter, otherSphere.radius)
+      return m.lastCollisionResult.overlapping
+    end function
+
+
+    override sub disableCollisionChecking()
+      m.xyCollider.disableCollisionChecking()
+      m.yzCollider.disableCollisionChecking()
+    end sub
+
+
+    private function toYZPosition(entityPosition as BGE.Math.Vector) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(entityPosition.y, entityPosition.z ?? 0)
+    end function
+
+
+    private function stripPlaneSuffix(colliderName as string) as string
+      if Right(colliderName, 9) = "__xyPlane" or Right(colliderName, 9) = "__yzPlane"
+        return Left(colliderName, Len(colliderName) - 9)
+      end if
+      return colliderName
+    end function
+
+  end class
+end namespace
