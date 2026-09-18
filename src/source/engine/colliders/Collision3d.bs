@@ -1,0 +1,121 @@
+import "../../math/vector.bs"
+
+namespace BGE
+
+  ' Reserved member/collidable flag bit for SphereCollider3d/BoxCollider3d's internal "YZ
+  ' plane" broad-phase colliders. Both the XY-plane and YZ-plane internal colliders
+  ' register against the SAME shared roCompositor (Game.compositor) - without a dedicated
+  ' flag, a YZ-plane collider (whose MoveTo position is (entity.y, entity.z), not a real
+  ' screen position) could spuriously "collide" with an ordinary 2D collider whose real
+  ' (x, y) position happens to numerically coincide. Every YZ-plane collider's member AND
+  ' collidable flags are set to this bit, so it can only ever match another YZ-plane
+  ' collider. See specs/2026-09-18-3d-collision-detection-design.md.
+  const COLLIDER_3D_YZ_PLANE_FLAG = &h40000000
+
+  ' The result of sphereOverlap(): whether two spheres truly overlap in 3D, and if so, the
+  ' contact normal (points away from centerB, toward centerA) and how far they're
+  ' currently penetrating along that normal.
+  class Sphere3dCollisionResult
+    overlapping as boolean
+    normal as BGE.Math.Vector
+    penetrationDepth as float
+
+    sub new(overlapping as boolean, normal as BGE.Math.Vector, penetrationDepth as float)
+      m.overlapping = overlapping
+      m.normal = normal
+      m.penetrationDepth = penetrationDepth
+    end sub
+  end class
+
+  ' The result of aabbOverlap(): whether two axis-aligned boxes truly overlap, and if so,
+  ' the contact normal (along whichever axis has the least overlap, away from box B and
+  ' toward box A) and the penetration depth along that axis.
+  class Box3dCollisionResult
+    overlapping as boolean
+    normal as BGE.Math.Vector
+    penetrationDepth as float
+
+    sub new(overlapping as boolean, normal as BGE.Math.Vector, penetrationDepth as float)
+      m.overlapping = overlapping
+      m.normal = normal
+      m.penetrationDepth = penetrationDepth
+    end sub
+  end class
+
+
+  ' True 3D sphere-sphere overlap test - the narrow-phase check SphereCollider3d.
+  ' confirmCollision() runs after its two-plane broad-phase gate finds a candidate pair,
+  ' since two spheres can pass both plane checks while never actually touching in 3D (a
+  ' diagonal near-miss - see the design doc's spike findings). No precondition - safe to
+  ' call with any two centers/radii.
+  '
+  ' @param {BGE.Math.Vector} centerA
+  ' @param {float} radiusA
+  ' @param {BGE.Math.Vector} centerB
+  ' @param {float} radiusB
+  ' @return {BGE.Sphere3dCollisionResult}
+  function sphereOverlap(centerA as BGE.Math.Vector, radiusA as float, centerB as BGE.Math.Vector, radiusB as float) as BGE.Sphere3dCollisionResult
+    diff = BGE.Math.VectorOps.subtract(centerA, centerB)
+    dist = BGE.Math.VectorOps.length(diff)
+    radiusSum = radiusA + radiusB
+
+    if dist >= radiusSum
+      return new BGE.Sphere3dCollisionResult(false, BGE.Math.VectorOps.create(0, 1, 0), 0.0)
+    end if
+
+    if dist > 0.0
+      normal = BGE.Math.VectorOps.scale(diff, 1.0 / dist)
+    else
+      ' Centers exactly coincide - no meaningful direction, pick an arbitrary axis.
+      normal = BGE.Math.VectorOps.create(0, 1, 0)
+    end if
+
+    return new BGE.Sphere3dCollisionResult(true, normal, radiusSum - dist)
+  end function
+
+
+  ' True 3D AABB-vs-AABB overlap test. Unlike sphereOverlap(), a two-plane broad-phase
+  ' gate for boxes has no false-positive case - AABB overlap decomposes exactly per axis
+  ' (see the design doc). BoxCollider3d.confirmCollision() still calls this, but only to
+  ' compute the penetration/normal result, since the broad-phase result is already
+  ' correct. No precondition - safe to call with any two boxes.
+  '
+  ' @param {BGE.Math.Vector} minA
+  ' @param {BGE.Math.Vector} maxA
+  ' @param {BGE.Math.Vector} minB
+  ' @param {BGE.Math.Vector} maxB
+  ' @return {BGE.Box3dCollisionResult}
+  function aabbOverlap(minA as BGE.Math.Vector, maxA as BGE.Math.Vector, minB as BGE.Math.Vector, maxB as BGE.Math.Vector) as BGE.Box3dCollisionResult
+    overlapX = BGE.Math.Min(maxA.x, maxB.x) - BGE.Math.Max(minA.x, minB.x)
+    overlapY = BGE.Math.Min(maxA.y, maxB.y) - BGE.Math.Max(minA.y, minB.y)
+    overlapZ = BGE.Math.Min(maxA.z, maxB.z) - BGE.Math.Max(minA.z, minB.z)
+
+    if overlapX <= 0.0 or overlapY <= 0.0 or overlapZ <= 0.0
+      return new BGE.Box3dCollisionResult(false, BGE.Math.VectorOps.create(0, 1, 0), 0.0)
+    end if
+
+    centerA = BGE.Math.VectorOps.scale(BGE.Math.VectorOps.add(minA, maxA), 0.5)
+    centerB = BGE.Math.VectorOps.scale(BGE.Math.VectorOps.add(minB, maxB), 0.5)
+
+    if overlapX <= overlapY and overlapX <= overlapZ
+      sign = 1.0
+      if centerA.x < centerB.x
+        sign = -1.0
+      end if
+      return new BGE.Box3dCollisionResult(true, BGE.Math.VectorOps.create(sign, 0, 0), overlapX)
+    else if overlapY <= overlapZ
+      sign = 1.0
+      if centerA.y < centerB.y
+        sign = -1.0
+      end if
+      return new BGE.Box3dCollisionResult(true, BGE.Math.VectorOps.create(0, sign, 0), overlapY)
+    else
+      sign = 1.0
+      if centerA.z < centerB.z
+        sign = -1.0
+      end if
+      return new BGE.Box3dCollisionResult(true, BGE.Math.VectorOps.create(0, 0, sign), overlapZ)
+    end if
+  end function
+
+end namespace
