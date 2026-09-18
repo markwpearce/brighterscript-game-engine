@@ -119,6 +119,51 @@ namespace tests
       m.assertEqual(1, controllerIndex)
     end function
 
+    @describe("assignPlayerIndexForRemoteId - combineRemoteInputs = true")
+
+    @it("assigns every distinct remote id to index 0, regardless of connection order")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      registry.combineRemoteInputs = true
+      first = registry.assignPlayerIndexForRemoteId("30:1")
+      second = registry.assignPlayerIndexForRemoteId("30:2")
+      third = registry.assignPlayerIndexForRemoteId("WD:0")
+      m.assertEqual(0, first)
+      m.assertEqual(0, second)
+      m.assertEqual(0, third)
+    end function
+
+    @it("still returns the same cached index for a remote id seen again")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      registry.combineRemoteInputs = true
+      first = registry.assignPlayerIndexForRemoteId("30:1")
+      second = registry.assignPlayerIndexForRemoteId("30:1")
+      m.assertEqual(0, first)
+      m.assertEqual(0, second)
+    end function
+
+    @it("does not change browser-controller assignPlayerIndex() behavior (still shares index 0 by default)")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      registry.combineRemoteInputs = true
+      registry.assignPlayerIndexForRemoteId("30:1")
+      registry.assignPlayerIndexForRemoteId("30:2")
+      browserIndex = registry.assignPlayerIndex()
+      m.assertEqual(0, browserIndex)
+    end function
+
+    @it("does not change browser-controller assignPlayerIndex() behavior when sharing is also disabled")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      registry.combineRemoteInputs = true
+      registry.shareFirstControllerWithRemote = false
+      registry.assignPlayerIndexForRemoteId("30:1")
+      registry.assignPlayerIndexForRemoteId("30:2")
+      browserIndex = registry.assignPlayerIndex()
+      m.assertEqual(1, browserIndex)
+    end function
+
     @describe("updateFromMessage")
 
     @it("returns the names of buttons that changed since last update")
@@ -354,6 +399,9 @@ namespace tests
     function _()
       registry = new BGE.Controller.ControllerRegistry()
       fakeEvent = {
+        GetRemoteID: function() as string
+          return "BT:1" ' RemoteType.BT (Bluetooth gamepad) - see brs-engine's RemoteType enum
+        end function,
         GetValue: function(axis as integer) as float
           if axis = BGE.Controller.ANALOG_AXIS_LEFT_X
             return 0.75
@@ -371,10 +419,39 @@ namespace tests
       m.assertEqual(0.25, stick.y)
     end function
 
+    @it("reads GetValue(rightX/rightY) when stick 2 is requested, leaving the left stick's reading unused")
+    function _()
+      registry = new BGE.Controller.ControllerRegistry()
+      fakeEvent = {
+        GetRemoteID: function() as string
+          return "BT:1"
+        end function,
+        GetValue: function(axis as integer) as float
+          if axis = BGE.Controller.ANALOG_AXIS_LEFT_X or axis = BGE.Controller.ANALOG_AXIS_LEFT_Y
+            return 0.9 ' should never be read for a stick="2" request
+          end if
+          if axis = BGE.Controller.ANALOG_AXIS_RIGHT_X
+            return 0.4
+          end if
+          if axis = BGE.Controller.ANALOG_AXIS_RIGHT_Y
+            return -0.6
+          end if
+          return 0.0
+        end function
+      }
+      registry.setRemoteEvent(0, fakeEvent)
+      stick = registry.getRemoteAnalogStick(0, "2")
+      m.assertEqual(0.4, stick.x)
+      m.assertEqual(0.6, stick.y)
+    end function
+
     @it("returns neutral for a value within the resting-drift deadzone")
     function _()
       registry = new BGE.Controller.ControllerRegistry()
       fakeEvent = {
+        GetRemoteID: function() as string
+          return "BT:1"
+        end function,
         GetValue: function(axis as integer) as float
           if axis = BGE.Controller.ANALOG_AXIS_LEFT_X
             return 0.05
@@ -395,6 +472,9 @@ namespace tests
     function _()
       registry = new BGE.Controller.ControllerRegistry()
       fakeEvent = {
+        GetRemoteID: function() as string
+          return "BT:1"
+        end function,
         GetValue: function(axis as integer) as float
           return 0.5
         end function
@@ -403,6 +483,62 @@ namespace tests
       stick = registry.getRemoteAnalogStick(1)
       m.assertEqual(0.0, stick.x)
       m.assertEqual(0.0, stick.y)
+    end function
+
+    @it("is neutral for a non-Bluetooth remote (e.g. keyboard-sim) even though GetValue() returns nonzero")
+    function _()
+      ' brs-engine's GetValue() falls back to a non-directional 1.0/0.0
+      ' "is anything pressed" signal for any remote that isn't a tracked
+      ' Bluetooth gamepad (RoUniversalControlEvent.getFloatValue) - trusting
+      ' it here would make every keyboard-sim button press look like a
+      ' constant stick deflection, permanently overriding the d-pad
+      ' fallback (issue #220's simulator repro).
+      registry = new BGE.Controller.ControllerRegistry()
+      fakeEvent = {
+        GetRemoteID: function() as string
+          return "WD:0" ' RemoteType.WD (keyboard simulation)
+        end function,
+        GetValue: function(axis as integer) as float
+          return 1.0
+        end function
+      }
+      registry.setRemoteEvent(0, fakeEvent)
+      stick = registry.getRemoteAnalogStick(0)
+      m.assertEqual(0.0, stick.x)
+      m.assertEqual(0.0, stick.y)
+    end function
+
+    @it("does not let a later keyboard-sim event evict an already-cached gamepad event")
+    function _()
+      ' Under combineRemoteInputs, a keyboard and a gamepad share one
+      ' playerIndex. A held-but-unchanging analog stick produces no new
+      ' roUniversalControlEvent of its own, so if a keyboard press were
+      ' allowed to overwrite the cached gamepad event, the gamepad would
+      ' become permanently unreadable until it sent another discrete event.
+      registry = new BGE.Controller.ControllerRegistry()
+      gamepadEvent = {
+        GetRemoteID: function() as string
+          return "BT:1"
+        end function,
+        GetValue: function(axis as integer) as float
+          if axis = BGE.Controller.ANALOG_AXIS_LEFT_X
+            return 0.6
+          end if
+          return 0.0
+        end function
+      }
+      keyboardEvent = {
+        GetRemoteID: function() as string
+          return "WD:0"
+        end function,
+        GetValue: function(axis as integer) as float
+          return 1.0
+        end function
+      }
+      registry.setRemoteEvent(0, gamepadEvent)
+      registry.setRemoteEvent(0, keyboardEvent)
+      stick = registry.getRemoteAnalogStick(0)
+      m.assertEqual(0.6, stick.x)
     end function
 
   end class
