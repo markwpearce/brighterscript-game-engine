@@ -7,6 +7,19 @@ namespace BGE.Controller
   ' AnalogAxis enum (simulator-only extension, PR lvcabral/brs-engine#1226).
   const ANALOG_AXIS_LEFT_X = 0
   const ANALOG_AXIS_LEFT_Y = 1
+  const ANALOG_AXIS_RIGHT_X = 2
+  const ANALOG_AXIS_RIGHT_Y = 3
+
+  ' GetRemoteID() prefix for a brs-engine RemoteType.BT (Bluetooth gamepad)
+  ' remote - the only remote type GetValue() returns real per-axis analog
+  ' data for. GetRemoteID() returns the enum NAME, not its numeric value
+  ' (see brs-engine's BrsDevice.updateKeysBuffer(), `RemoteType[remoteType]`)
+  ' - "BT:1", not "30:1". Any other remote (e.g. "WD:0" keyboard-sim) gets a
+  ' non-directional 1.0/0.0 "is anything pressed" fallback from GetValue()
+  ' instead (RoUniversalControlEvent.getFloatValue in brs-engine), which
+  ' would otherwise be misread as real stick input and permanently override
+  ' the d-pad fallback the instant any button is held.
+  const BLUETOOTH_GAMEPAD_REMOTE_ID_PREFIX = "BT:"
 
   ' Below this magnitude, a real gamepad's resting-stick drift is treated as
   ' neutral rather than a real deflection - otherwise it would permanently
@@ -36,6 +49,13 @@ namespace BGE.Controller
     ' either. Set false to give every input source its own index instead
     ' (see Game.enableControllerInput()).
     shareFirstControllerWithRemote as boolean = true
+
+    ' Default false - each distinct remote/gamepad gets its own stable
+    ' index. Set true to force every one onto index 0 regardless of
+    ' connect/input order (see Game.setCombineRemoteInputs()). Independent
+    ' of shareFirstControllerWithRemote, which only affects browser
+    ' connections.
+    combineRemoteInputs as boolean = false
 
     ' Assigns the lowest free player index to a browser controller connection.
     ' With shareFirstControllerWithRemote (default), the first browser claims
@@ -67,7 +87,8 @@ namespace BGE.Controller
     ' signal to key a release off, unlike a browser controller's WebSocket
     ' close. With shareFirstControllerWithRemote (default), the first
     ' remote/gamepad claims index 0 even if a browser already occupies it
-    ' too (see assignPlayerIndex).
+    ' too (see assignPlayerIndex). With combineRemoteInputs, every remote/
+    ' gamepad is forced onto index 0 instead.
     '
     ' @param {string} remoteId - the string from roUniversalControlEvent.GetRemoteID()
     ' @return {integer} - this remote's playerIndex, stable for the run
@@ -76,7 +97,9 @@ namespace BGE.Controller
       if existing <> invalid
         return existing
       end if
-      if m.shareFirstControllerWithRemote and not m.isRemoteIndex(0)
+      if m.combineRemoteInputs
+        index = 0
+      else if m.shareFirstControllerWithRemote and not m.isRemoteIndex(0)
         index = 0
       else
         index = m.lowestFreeIndex(0)
@@ -266,24 +289,36 @@ namespace BGE.Controller
       return m.remoteDpad[playerIndex.ToStr()] ?? BGE.Math.VectorOps.create()
     end function
 
-    ' Caches the last roUniversalControlEvent seen for this player, so
-    ' getRemoteAnalogStick() can keep reading its live GetValue() every
-    ' frame even on a frame with no new event for this remote (a stick
-    ' held at a nonzero deflection produces no new roUniversalControlEvent
-    ' - see specs/2026-09-15-multi-controller-input-design.md).
+    ' Caches the last Bluetooth-gamepad roUniversalControlEvent seen for this
+    ' player, so getRemoteAnalogStick() can keep reading its live GetValue()
+    ' every frame even on a frame with no new event for this remote (a stick
+    ' held at a nonzero deflection produces no new roUniversalControlEvent -
+    ' see specs/2026-09-15-multi-controller-input-design.md). A non-gamepad
+    ' event (e.g. keyboard-sim) is ignored here rather than overwriting an
+    ' already-cached gamepad event - under combineRemoteInputs, where both
+    ' share one playerIndex, caching indiscriminately would let a keyboard
+    ' press evict the gamepad's slot, and a held-but-unchanging analog stick
+    ' has no later event of its own to reclaim it.
     '
     ' @param {integer} playerIndex
     ' @param {dynamic} event - the roUniversalControlEvent, passed as dynamic
     '   since GetValue() isn't part of its typed interface
     sub setRemoteEvent(playerIndex as integer, event as dynamic)
+      if not m.isBluetoothGamepadRemote((event as object).GetRemoteID())
+        return
+      end if
       m.remoteEvents[playerIndex.ToStr()] = event
     end sub
 
     ' @param {integer} playerIndex
-    ' @return {BGE.Math.Vector} - this player's left analog stick, {0,0} if
-    '   no event cached yet or the running engine doesn't support
-    '   multi_controllers (always {0,0} on real Roku hardware)
-    function getRemoteAnalogStick(playerIndex as integer) as BGE.Math.Vector
+    ' @param {string} [stick="1"] - "2" reads the right stick (RIGHT_X/RIGHT_Y);
+    '   any other value (including the default "1") reads the left stick -
+    '   matching bindAxis()'s own stick-name convention
+    ' @return {BGE.Math.Vector} - this player's analog stick, {0,0} if no
+    '   event cached yet, this player's remote isn't a Bluetooth gamepad, or
+    '   the running engine doesn't support multi_controllers (always {0,0}
+    '   on real Roku hardware)
+    function getRemoteAnalogStick(playerIndex as integer, stick = "1" as string) as BGE.Math.Vector
       if not m.isMultiControllersSupported()
         return BGE.Math.VectorOps.create()
       end if
@@ -291,9 +326,19 @@ namespace BGE.Controller
       if event = invalid
         return BGE.Math.VectorOps.create()
       end if
-      x = (event as object).GetValue(BGE.Controller.ANALOG_AXIS_LEFT_X)
+      if not m.isBluetoothGamepadRemote((event as object).GetRemoteID())
+        return BGE.Math.VectorOps.create()
+      end if
+      if stick = "2"
+        axisX = BGE.Controller.ANALOG_AXIS_RIGHT_X
+        axisY = BGE.Controller.ANALOG_AXIS_RIGHT_Y
+      else
+        axisX = BGE.Controller.ANALOG_AXIS_LEFT_X
+        axisY = BGE.Controller.ANALOG_AXIS_LEFT_Y
+      end if
+      x = (event as object).GetValue(axisX)
       ' GetValue()'s Y follows the raw Gamepad API convention (up = negative) - flip to BGE's world space (+y = up).
-      y = -(event as object).GetValue(BGE.Controller.ANALOG_AXIS_LEFT_Y)
+      y = -(event as object).GetValue(axisY)
       if Sqr(x * x + y * y) < BGE.Controller.ANALOG_DEADZONE
         return BGE.Math.VectorOps.create()
       end if
@@ -306,6 +351,10 @@ namespace BGE.Controller
         m.multiControllersSupported = remoteInfo.HasFeature("multi_controllers", 0)
       end if
       return m.multiControllersSupported
+    end function
+
+    private function isBluetoothGamepadRemote(remoteId as string) as boolean
+      return Left(remoteId, Len(BGE.Controller.BLUETOOTH_GAMEPAD_REMOTE_ID_PREFIX)) = BGE.Controller.BLUETOOTH_GAMEPAD_REMOTE_ID_PREFIX
     end function
 
   end class

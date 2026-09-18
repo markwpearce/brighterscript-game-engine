@@ -103,6 +103,21 @@ otherwise share player 0 with the remote - pass `false`:
 game.enableControllerInput(8888, false)   ' port, shareFirstControllerWithRemote
 ```
 
+For a single-player game where either the remote/keyboard *or* a gamepad
+should drive the same player - regardless of which one connects or sends
+input first - pass `true` instead:
+
+```brighterscript
+game.setCombineRemoteInputs(true)
+```
+
+This is independent of `enableControllerInput()`/browser controllers, and
+safe to call whether or not that's been used. Without it, whichever
+physical device sends input first permanently claims index 0 and any other
+device gets its own separate index - fine for genuinely distinct players,
+but surprising for a single-player game where a player might pick up either
+device at any time.
+
 Pass `playerIndex` to `bindAction`/`bindAxis` to say which player's input a
 binding listens to:
 
@@ -161,6 +176,21 @@ flag - falling back to the remote d-pad exactly as before when no analog
 data is available (real hardware, or the flag left unset). This is an
 **experimental**, simulator-only capability with no real-Roku equivalent;
 a real device always uses the digital d-pad path.
+
+A connected gamepad's second (right) stick works the same way - bind it
+with stick name `"2"`:
+
+```brighterscript
+game.controls.bindAxis("move", "1")   ' left stick - strafe/drive
+game.controls.bindAxis("look", "2")   ' right stick - yaw/pitch
+```
+
+`getRawAxis()` (unlike `getAxis()`) treats this real per-stick analog data
+the same way it treats a connected browser controller's stick - as
+genuine independent-axis data, never falling back to the d-pad - so it's
+the right call to use when deciding between a dual-stick scheme and a
+single-source fallback scheme (see `BGE.FreeFlyCameraController` for a
+worked example).
 
 ## Labels and the raw custom payload
 
