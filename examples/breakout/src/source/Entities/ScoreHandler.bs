@@ -1,13 +1,16 @@
-' Tracks score/lives, listens for the game events Brick/Ball post, and owns
-' the waiting/playing/gameOver/win state machine - since that's naturally
-' tied to the same events (a destroyed brick can trigger a win, a lost ball
-' can trigger game over or just a re-serve).
+' Tracks score/lives/level, listens for the game events Brick/Ball post, and
+' owns the waiting/playing/gameOver/levelComplete state machine - since that's
+' naturally tied to the same events (a destroyed brick can trigger a level
+' win, a lost ball can trigger game over or just a re-serve). There's no
+' fixed final level (see LevelGenerator.bs) - levelComplete always advances
+' to level + 1 rather than ending the game.
 class ScoreHandler extends BGE.GameEntity
 
   score = 0
   lives = 3
+  level = 1
   bricksRemaining = 0
-  gameState = "waiting" ' waiting | playing | gameOver | win
+  gameState = "waiting" ' waiting | playing | gameOver | levelComplete
 
   sub new(game as BGE.Game)
     super(game)
@@ -16,6 +19,9 @@ class ScoreHandler extends BGE.GameEntity
 
   override sub onCreate(args as roAssociativeArray)
     m.bricksRemaining = args.brickCount
+    m.level = args.level
+    m.score = args.score
+    m.lives = args.lives
   end sub
 
   override sub onGameEvent(eventName as string, data as roAssociativeArray)
@@ -23,43 +29,63 @@ class ScoreHandler extends BGE.GameEntity
       m.score += data.points
       m.bricksRemaining--
       if m.bricksRemaining <= 0
-        m.gameState = "win"
+        m.gameState = "levelComplete"
+        m.game.playSound("win")
       end if
     else if eventName = "ballLost"
-      if m.gameState = "gameOver"
+      ' Once the level is already won (or the game already over), a
+      ' still-falling ball/multiBall clone shouldn't cost a life - the room's
+      ' about to change (or already ended) regardless.
+      if m.gameState = "gameOver" or m.gameState = "levelComplete"
         return
       end if
       m.lives--
+      m.game.playSound("lose")
       if m.lives <= 0
         m.gameState = "gameOver"
       else
-        ballEntity = m.game.getEntityByName("Ball") as Ball
+        ' The ball that just posted this event destroys itself right after
+        ' (see Ball.onUpdate) - a fresh one replaces it rather than resetting
+        ' the dying instance, since a multiBall clone may also still be
+        ' mid-destruction this same frame.
         paddleEntity = m.game.getEntityByName("Paddle") as Paddle
-        if invalid <> ballEntity and invalid <> paddleEntity
-          ballEntity.resetOnPaddle(paddleEntity)
+        if invalid <> paddleEntity
+          newBall = new Ball(m.game)
+          m.game.addEntity(newBall)
+          newBall.resetOnPaddle(paddleEntity)
         end if
         m.gameState = "waiting"
       end if
     end if
   end sub
 
-  override sub onInput(input as BGE.GameInput)
-    if not input.press or not input.isButton("OK")
+  ' "launch" (bound in main.bs to remote OK / gamepad "ok") also doubles as the
+  ' level-complete/game-over confirm, same as the plain OK-button check this
+  ' replaced.
+  override sub onControls(controls as BGE.Controller.ControlMap)
+    if not controls.isActionPressed("launch")
       return
     end if
     if m.gameState = "waiting"
       ballEntity = m.game.getEntityByName("Ball") as Ball
-      if invalid <> ballEntity
-        ballEntity.launch()
+      paddleEntity = m.game.getEntityByName("Paddle") as Paddle
+      if invalid <> ballEntity and invalid <> paddleEntity
+        ballEntity.launch(paddleEntity.velocity.x)
         m.gameState = "playing"
+        m.game.playSound("launch")
       end if
-    else if m.gameState = "gameOver" or m.gameState = "win"
-      m.game.resetRoom()
+    else if m.gameState = "levelComplete"
+      m.game.changeRoom("MainRoom", {level: m.level + 1, score: m.score, lives: m.lives})
+    else if m.gameState = "gameOver"
+      ' A fresh run, not resetRoom() - resetRoom() would replay this same
+      ' level's args (score/lives/level) via Game.currentRoomArgs.
+      m.game.changeRoom("MainRoom", {level: 1})
     end if
   end sub
 
   override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
-    font = m.game.getFont("default")
+    font = m.game.getFont("hud")
+    headingFont = m.game.getFont("heading")
     canvasSize = uiRenderer.getCanvasSize()
 
     ' Text should stay within the "title safe" zone (~10% horizontal, ~5%
@@ -72,6 +98,7 @@ class ScoreHandler extends BGE.GameEntity
     safeMarginY = canvasSize.y * 0.05
 
     uiRenderer.drawText(`Score: ${m.score}`, safeMarginX, safeMarginY, BGE.Colors.White, font)
+    uiRenderer.drawText(`Level: ${m.level}`, canvasSize.x / 2, safeMarginY, BGE.Colors.White, font, "center")
     uiRenderer.drawText(`Lives: ${m.lives}`, canvasSize.x - safeMarginX, safeMarginY, BGE.Colors.White, font, "right")
 
     if m.gameState = "waiting"
@@ -79,11 +106,11 @@ class ScoreHandler extends BGE.GameEntity
       ' isn't hidden behind/right on top of it.
       uiRenderer.drawText("Press OK to launch", canvasSize.x / 2, canvasSize.y - 160, BGE.Colors.White, font, "center")
     else if m.gameState = "gameOver"
-      uiRenderer.drawText(`Game Over - Score: ${m.score}`, canvasSize.x / 2, canvasSize.y / 2, BGE.Colors.Red, font, "center")
-      uiRenderer.drawText("Press OK to play again", canvasSize.x / 2, canvasSize.y / 2 + 50, BGE.Colors.White, font, "center")
-    else if m.gameState = "win"
-      uiRenderer.drawText(`You Win! - Score: ${m.score}`, canvasSize.x / 2, canvasSize.y / 2, BGE.Colors.Lime, font, "center")
-      uiRenderer.drawText("Press OK to play again", canvasSize.x / 2, canvasSize.y / 2 + 50, BGE.Colors.White, font, "center")
+      uiRenderer.drawText(`Game Over - Score: ${m.score}`, canvasSize.x / 2, canvasSize.y / 2, BGE.Colors.Red, headingFont, "center")
+      uiRenderer.drawText("Press OK to play again", canvasSize.x / 2, canvasSize.y / 2 + 60, BGE.Colors.White, font, "center")
+    else if m.gameState = "levelComplete"
+      uiRenderer.drawText(`Level ${m.level} Complete!`, canvasSize.x / 2, canvasSize.y / 2, BGE.Colors.Lime, headingFont, "center")
+      uiRenderer.drawText("Press OK for the next level", canvasSize.x / 2, canvasSize.y / 2 + 60, BGE.Colors.White, font, "center")
     end if
   end sub
 

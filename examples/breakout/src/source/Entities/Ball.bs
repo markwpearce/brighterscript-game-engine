@@ -25,21 +25,38 @@ class Ball extends BGE.GameEntity
   baseSpeed = 480
   launched = false
 
+  ' "sticky" power-up: armed by PowerUpManager, consumed (false again) the
+  ' next time this ball touches the paddle - see onCollision.
+  stickyArmed = false
+  ' True while this ball is stuck to the paddle (see onCollision/onControls) -
+  ' distinct from the initial pre-launch wait so ScoreHandler's "launch"
+  ' handling (gated on its own gameState) doesn't also try to relaunch it.
+  stuck = false
+  ' One-shot: set when a stuck ball is relaunched, consumed on this ball's
+  ' very next brick hit to trigger a neighbor-destroying explosion (see
+  ' explodeNeighbors) instead of a normal single-brick hit.
+  explosiveNextHit = false
+  ' "passThrough" power-up: while active, a brick hit still destroys/scores
+  ' the brick but doesn't deflect this ball.
+  passThroughTimer = new BGE.CountdownTimer()
+
   sub new(game as BGE.Game)
     super(game)
     m.name = "Ball"
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    ' The ball is drawn centered on m.position, so - like the Paddle, and unlike
-    ' the top-left-anchored Brick - the drawable and collider are both offset by
-    ' half its size. See Paddle.bs for why the same offset works for both.
-    cornerOffset = BGE.Math.VectorOps.create(-m.size / 2, m.size / 2)
-    m.addRectangle("body", m.size, m.size, {
+    radius = m.size / 2
+    ' The ball is drawn centered on m.position. DrawableCircle.offset is its
+    ' bounding-square's top-left corner (so -radius/radius centers it), but
+    ' CircleCollider.offset is the literal circle center - so unlike the
+    ' Paddle/Brick's shared rectangle offset, this collider needs no offset at
+    ' all. See examples/platformer's Coin.bs for the same distinction.
+    m.addCircle("body", radius, {
       color: BGE.ColorsRGB.Yellow,
-      offset: cornerOffset
+      offset: BGE.Math.VectorOps.create(-radius, radius)
     })
-    m.addRectangleCollider("body", m.size, m.size, cornerOffset.x, cornerOffset.y)
+    m.addCircleCollider("body", radius)
   end sub
 
   sub resetOnPaddle(paddleEntity as Paddle)
@@ -49,12 +66,16 @@ class Ball extends BGE.GameEntity
     m.position.y = paddleEntity.getTopY() + m.size / 2
   end sub
 
-  sub launch()
+  ' paddleVelocityX carries over some of the paddle's own sideways motion at
+  ' launch, on top of the fixed base angle - so drifting the paddle while
+  ' waiting to launch (see onUpdate's pre-launch tracking above) actually
+  ' aims the shot, rather than every launch leaving at the same fixed angle.
+  sub launch(paddleVelocityX as float)
     if m.launched
       return
     end if
     m.launched = true
-    m.velocity = BGE.Math.VectorOps.create(m.baseSpeed * 0.3, m.baseSpeed)
+    m.velocity = BGE.Math.VectorOps.create(m.baseSpeed * 0.3 + paddleVelocityX * 0.5, m.baseSpeed)
   end sub
 
   ' Bounces off the paddle at an angle based on where it hit - dead center
@@ -75,16 +96,51 @@ class Ball extends BGE.GameEntity
       return
     end if
     if otherEntity.name = "Paddle"
-      m.bounceOffPaddle(otherEntity as Paddle)
+      if m.stickyArmed
+        m.stickyArmed = false
+        m.stuck = true
+        m.launched = false
+        m.velocity = BGE.Math.VectorOps.create()
+      else
+        m.bounceOffPaddle(otherEntity as Paddle)
+        m.game.playSound("bounce")
+      end if
     else if otherEntity.name = "Brick"
-      m.velocity.y = -m.velocity.y
+      if not m.passThroughTimer.isActive()
+        m.velocity.y = -m.velocity.y
+      end if
+      m.game.playSound("hit")
+      if m.explosiveNextHit
+        m.explosiveNextHit = false
+        (otherEntity as Brick).explodeNeighbors()
+      end if
     end if
   end sub
 
+  ' "sticky" power-up follow-up: while stuck, the launch action fires this
+  ' ball again (each stuck ball reacts independently, so this works the same
+  ' whether one or several balls are stuck at once).
+  override sub onControls(controls as BGE.Controller.ControlMap)
+    if not m.stuck or not controls.isActionPressed("launch")
+      return
+    end if
+    m.stuck = false
+    m.explosiveNextHit = true
+    paddleEntity = m.game.getEntityByName("Paddle") as Paddle
+    paddleVelocityX = 0.0
+    if invalid <> paddleEntity
+      paddleVelocityX = paddleEntity.velocity.x
+    end if
+    m.launch(paddleVelocityX)
+  end sub
+
   override sub onUpdate(dt as float)
+    m.passThroughTimer.tick(dt)
+
     if not m.launched
-      ' Track the paddle while waiting to launch, so moving the paddle to
-      ' aim (allowed, and authentic to the original game) doesn't leave the
+      ' Track the paddle while waiting to launch (the initial pre-launch wait,
+      ' or a "sticky" catch mid-play - see onCollision), so moving the paddle
+      ' to aim (allowed, and authentic to the original game) doesn't leave the
       ' ball behind.
       paddleEntity = m.game.getEntityByName("Paddle") as Paddle
       if invalid <> paddleEntity
@@ -101,19 +157,27 @@ class Ball extends BGE.GameEntity
     if m.position.x - halfSize <= 0
       m.position.x = halfSize
       m.velocity.x = abs(m.velocity.x)
+      m.game.playSound("bounce")
     else if m.position.x + halfSize >= canvasWidth
       m.position.x = canvasWidth - halfSize
       m.velocity.x = -abs(m.velocity.x)
+      m.game.playSound("bounce")
     end if
 
     ceiling = canvasHeight - m.topMargin
     if m.position.y + halfSize >= ceiling
       m.position.y = ceiling - halfSize
       m.velocity.y = -abs(m.velocity.y)
+      m.game.playSound("bounce")
     end if
 
     if m.position.y + halfSize < 0
-      m.game.postGameEvent("ballLost", {})
+      ' Only the last ball in play costs a life (see PowerUpManager's
+      ' multiBall clones) - an extra ball just quietly disappears.
+      if m.game.getAllEntities("Ball").count() <= 1
+        m.game.postGameEvent("ballLost", {})
+      end if
+      m.game.destroyEntity(m)
     end if
   end sub
 
