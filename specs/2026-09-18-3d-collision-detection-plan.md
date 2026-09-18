@@ -706,6 +706,17 @@ namespace BGE
     end sub
 
 
+    ' Game.adjustEntityCompositorObjectPostCollision() calls this directly on every
+    ' collider, every frame, right after processEntityOnCollision() - the base Collider
+    ' implementation touches m.compositorObject directly, which this class never sets on
+    ' itself (only m.xyCollider/m.yzCollider have real compositorObjects), so this MUST be
+    ' overridden or every frame crashes for any entity holding a SphereCollider3d.
+    override sub adjustCompositorObject(entityPosition as BGE.Math.Vector)
+      m.xyCollider.adjustCompositorObject(entityPosition)
+      m.yzCollider.adjustCompositorObject(m.toYZPosition(entityPosition))
+    end sub
+
+
     private function toYZPosition(entityPosition as BGE.Math.Vector) as BGE.Math.Vector
       return BGE.Math.VectorOps.create(entityPosition.y, entityPosition.z ?? 0)
     end function
@@ -1009,6 +1020,16 @@ namespace BGE
     override sub disableCollisionChecking()
       m.xyCollider.disableCollisionChecking()
       m.yzCollider.disableCollisionChecking()
+    end sub
+
+
+    ' Game.adjustEntityCompositorObjectPostCollision() calls this directly on every
+    ' collider, every frame - see SphereCollider3d's identical override for why this is
+    ' required, not optional (the base Collider implementation touches m.compositorObject
+    ' directly, which this class never sets on itself).
+    override sub adjustCompositorObject(entityPosition as BGE.Math.Vector)
+      m.xyCollider.adjustCompositorObject(entityPosition)
+      m.yzCollider.adjustCompositorObject(m.toYZPosition(entityPosition))
     end sub
 
 
