@@ -1,7 +1,6 @@
 class MainRoom extends BGE.Room
 
   cols = 10
-  rows = 5
   brickWidth = 112
   brickHeight = 30
   brickGap = 8
@@ -11,9 +10,16 @@ class MainRoom extends BGE.Room
   ' top-to-bottom row colors/points - harder-to-reach rows near the top are
   ' worth more, the classic Breakout convention. These are ColorsRGB (packed RGB,
   ' no alpha byte) because that's what Drawable.color takes - BGE.Colors is the
-  ' packed-RGBA variant the Renderer.draw* calls take.
+  ' packed-RGBA variant the Renderer.draw* calls take. Cycled with mod for
+  ' levels with more rows than colors (see LevelGenerator.getLevelRows).
   rowColors = [BGE.ColorsRGB.Red, BGE.ColorsRGB.Yellow, BGE.ColorsRGB.Lime, BGE.ColorsRGB.Cyan, BGE.ColorsRGB.Blue]
   rowPoints = [50, 40, 30, 20, 10]
+  powerUpTypes = ["multiBall", "longerPaddle", "passThrough", "sticky"]
+
+  ' 1-based - see LevelGenerator.bs for how this drives brick count/kind/
+  ' power-up density. Carried across changeRoom() calls via args (level
+  ' complete advances it, a fresh game-over restart resets it to 1).
+  level = 1
 
   sub new(game as BGE.Game)
     super(game)
@@ -21,35 +27,65 @@ class MainRoom extends BGE.Room
   end sub
 
   override sub onCreate(args as roAssociativeArray)
+    m.level = 1
+    if args.level <> invalid
+      m.level = args.level
+    end if
+
     paddleEntity = m.game.addEntity(new Paddle(m.game)) as Paddle
     ballEntity = m.game.addEntity(new Ball(m.game)) as Ball
     ballEntity.resetOnPaddle(paddleEntity)
 
     brickCount = m.addBricks()
 
-    m.game.addEntity(new ScoreHandler(m.game), {brickCount: brickCount})
+    m.game.addEntity(new ScoreHandler(m.game), {
+      brickCount: brickCount,
+      level: m.level,
+      score: args.score ?? 0,
+      lives: args.lives ?? 3
+    })
     m.game.addEntity(new PauseHandler(m.game))
+    m.game.addEntity(new PowerUpManager(m.game))
   end sub
 
   function addBricks() as integer
+    rows = getLevelRows(m.level)
     totalWidth = m.cols * m.brickWidth + (m.cols - 1) * m.brickGap
     marginX = (m.game.canvas.getWidth() - totalWidth) / 2
     ' World space is y-up with the origin at the bottom left of the canvas, so the
     ' top row of bricks has the *highest* y and each row below it steps y down.
     startY = m.game.canvas.getHeight() - m.topMargin
 
-    count = 0
-    for row = 0 to m.rows - 1
+    kindsGrid = []
+    for row = 0 to rows - 1
+      rowKinds = []
       for col = 0 to m.cols - 1
+        rowKinds.Push(getLevelBrickKind(m.level))
+      end for
+      kindsGrid.Push(rowKinds)
+    end for
+
+    powerUpTypeByCell = m.choosePowerUpCells(kindsGrid, rows)
+
+    count = 0
+    for row = 0 to rows - 1
+      for col = 0 to m.cols - 1
+        if kindsGrid[row][col] = "empty"
+          continue for
+        end if
         x = marginX + col * (m.brickWidth + m.brickGap)
         y = startY - row * (m.brickHeight + m.brickGap)
+        cellKey = row.toStr() + "," + col.toStr()
+        powerUpType = powerUpTypeByCell[cellKey] ?? ""
         m.game.addEntity(new Brick(m.game), {
           x: x,
           y: y,
           width: m.brickWidth,
           height: m.brickHeight,
-          color: m.rowColors[row],
-          points: m.rowPoints[row]
+          color: m.rowColors[row mod m.rowColors.count()],
+          points: m.rowPoints[row mod m.rowPoints.count()],
+          kind: kindsGrid[row][col],
+          powerUpType: powerUpType
         })
         count++
       end for
@@ -57,10 +93,35 @@ class MainRoom extends BGE.Room
     return count
   end function
 
-  override sub onInput(input as BGE.GameInput)
-    if input.isButton("back")
-      m.game.End()
+  ' Randomly marks getLevelPowerUpCount() "normal"-kind cells (never a
+  ' concrete/iron/explosive/moving one, so there's no sprite/outline conflict)
+  ' with a power-up type, cycling evenly through all 4 types.
+  '
+  ' @return {object} "row,col" -> power-up type
+  private function choosePowerUpCells(kindsGrid as object, rows as integer) as roAssociativeArray
+    eligibleCells = []
+    for row = 0 to rows - 1
+      for col = 0 to m.cols - 1
+        if kindsGrid[row][col] = "normal"
+          eligibleCells.Push({row: row, col: col})
+        end if
+      end for
+    end for
+
+    powerUpCount = getLevelPowerUpCount(m.level)
+    if powerUpCount > eligibleCells.count()
+      powerUpCount = eligibleCells.count()
     end if
-  end sub
+
+    result = {}
+    for i = 0 to powerUpCount - 1
+      pickIndex = Rnd(eligibleCells.count()) - 1
+      cell = eligibleCells[pickIndex]
+      eligibleCells.Delete(pickIndex)
+      cellKey = cell.row.toStr() + "," + cell.col.toStr()
+      result[cellKey] = m.powerUpTypes[i mod m.powerUpTypes.count()]
+    end for
+    return result
+  end function
 
 end class
