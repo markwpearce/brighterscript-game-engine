@@ -58,14 +58,21 @@ tree isn't meaningfully more expensive to build or walk.
 never change `position`/`rotation`/`scale` after its drawables register with a renderer.
 This is a documented usage contract, not compile-time enforced (see Misuse detection below).
 
-`isStatic` is also only meaningful for a drawable in an oriented draw mode (`oriented`,
-`orientedDrawBackFace`, `wireFrame`/`wireFrameDrawBackFace`, `solid`/`solidDrawBackFace`) -
-only those modes populate the `CornerPoints` (`worldPoints`) the static plane is built
-from (see `SceneObjectBillboard.updateWorldPosition()`). A static entity left in the
-default `matchCamera`/`directToCamera`/`directScaled` mode is detected at build time
+`isStatic` only lets a drawable *define a BSP plane* when it's in an oriented draw mode
+(`oriented`, `orientedDrawBackFace`, `wireFrame`/`wireFrameDrawBackFace`,
+`solid`/`solidDrawBackFace`) - only those modes populate the `CornerPoints`
+(`worldPoints`) the static plane is built from (see
+`SceneObjectBillboard.updateWorldPosition()`). A static entity left in a
+screen-aligned draw mode (`matchCamera`/`directToCamera`/`directScaled` - see
+`isScreenAlignedDrawMode()`) is detected at build time
 (`SceneObject.isReadyForStaticBspBuild()`), logged once, and excluded from the tree
-(drawn as a normal dynamic object instead) rather than building a degenerate
-all-zero plane that would silently collapse draw order.
+rather than building a degenerate all-zero plane that would silently collapse draw
+order. It is not dropped, though: it's still marked `isStatic` (never moves), so
+`Renderer.drawStaticAndDynamicSceneObjects()` classifies it every frame as a dynamic
+item against the tree's real planes, exactly like a genuinely moving object - the
+common case is a screen-aligned billboard (e.g. a tree that always faces the camera)
+that still needs correct draw order against real static plane geometry (e.g. a fence)
+in the same scene.
 
 ## Components
 
