@@ -76,7 +76,7 @@ This is a documented usage contract, not compile-time enforced (see Misuse detec
 Binary partition over static quads' world-space plane (a point + normal, from each quad's
 `BGE.Math.CornerPoints.getCenter()`/`getNormal()`): pick one remaining quad as a node, then
 classify every other remaining quad's center against that plane
-(`BGE.Math.VectorOps.distanceFromPlane`) into a front list and a back list, recurse on
+(`BGE.Math.distanceFromPlane`) into a front list and a back list, recurse on
 each. No clipping/splitting - a quad is always assigned whole to one node. Cost is paid
 once per room (or once per static-geometry change, which should be rare - level load, not
 per-frame).

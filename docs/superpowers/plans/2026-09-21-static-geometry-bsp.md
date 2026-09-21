@@ -480,7 +480,7 @@ namespace BGE.BSP
     back = []
     for i = 1 to items.count() - 1
       item = items[i]
-      side = BGE.Math.VectorOps.distanceFromPlane(pivot.planePoint, pivot.planeNormal, item.planePoint)
+      side = BGE.Math.distanceFromPlane(pivot.planePoint, pivot.planeNormal, item.planePoint)
       if side >= 0
         front.push(item)
       else
@@ -514,7 +514,7 @@ namespace BGE.BSP
     frontDynamic = []
     backDynamic = []
     for each dynItem in dynamicItems
-      side = BGE.Math.VectorOps.distanceFromPlane(node.item.planePoint, node.item.planeNormal, dynItem.position)
+      side = BGE.Math.distanceFromPlane(node.item.planePoint, node.item.planeNormal, dynItem.position)
       if side >= 0
         frontDynamic.push(dynItem)
       else
@@ -522,7 +522,7 @@ namespace BGE.BSP
       end if
     end for
 
-    cameraSide = BGE.Math.VectorOps.distanceFromPlane(node.item.planePoint, node.item.planeNormal, cameraPosition)
+    cameraSide = BGE.Math.distanceFromPlane(node.item.planePoint, node.item.planeNormal, cameraPosition)
     if cameraSide >= 0
       ' Camera is in front of this node's plane - the back subtree is farther away, so
       ' it draws first (back-to-front painter's order).
