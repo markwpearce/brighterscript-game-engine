@@ -1,0 +1,219 @@
+namespace tests
+
+  ' Split into its own file from Renderer.spec.bs - Rooibos v6 corrupts test-suite
+  ' metadata when two or more @suite classes live in the same file (see CLAUDE.md).
+  @suite("BGE.Renderer - static geometry BSP")
+  class RendererStaticGeometryTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.renderer = m.game.canvas.renderer
+    end function
+
+    @describe("registering static geometry")
+
+    @it("does not mark an entity's rectangle static when isStatic is false")
+    function _()
+      entity = new BGE.GameEntity(m.game, {name: "wall"})
+      drawable = entity.addRectangle("r", 10, 10)
+      sceneObj = drawable.getSceneObjects()[0]
+      m.assertFalse(sceneObj.isStatic)
+      m.assertFalse(m.renderer.hasStaticGeometryTree())
+    end function
+
+    @it("marks an eligible SceneObject static when its owning entity is isStatic")
+    function _()
+      entity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true})
+      drawable = entity.addRectangle("r", 10, 10)
+      sceneObj = drawable.getSceneObjects()[0]
+      m.assertTrue(sceneObj.isStatic)
+      m.assertTrue(m.renderer.hasStaticGeometryTree())
+    end function
+
+    @it("markStatic() works directly on a SceneObject with no owning GameEntity")
+    function _()
+      ' No owning GameEntity (owner = invalid) - matches examples/rendererTest's
+      ' SkyboxTest.bs. Constructing the SceneObject directly and registering it via
+      ' Renderer.addSceneObject() (rather than DrawableRectangle.addToScene()) avoids
+      ' Drawable.getSceneObjectName(), which unconditionally dereferences m.owner.name
+      ' and would crash with no owning entity.
+      drawable = new BGE.DrawableRectangle(invalid, 10, 10)
+      sceneObj = new BGE.SceneObjectRectangle("wallRect", drawable)
+      m.renderer.addSceneObject(sceneObj)
+      m.assertFalse(sceneObj.isStatic)
+      m.renderer.markStatic(sceneObj)
+      m.assertTrue(sceneObj.isStatic)
+      m.assertTrue(m.renderer.hasStaticGeometryTree())
+    end function
+
+    @it("markStatic() declines a type that doesn't support static BSP instead of crashing on a later rebuild")
+    function _()
+      ' Regression test for finding 2: markStatic() used to set isStatic unconditionally,
+      ' so calling it directly (the documented public entry point for an owner-less
+      ' SceneObject - see examples/rendererTest) on an ineligible type would crash the
+      ' next tree rebuild (buildStaticGeometryTree() calling getWorldPoints() - invalid
+      ' for this type - then .getCenter() on that invalid result).
+      entity = new BGE.GameEntity(m.game, {name: "circleThing"})
+      drawable = entity.addCircle("c", 10)
+      sceneObj = drawable.getSceneObjects()[0]
+      m.renderer.markStatic(sceneObj)
+      m.assertFalse(sceneObj.isStatic)
+      m.assertFalse(m.renderer.hasStaticGeometryTree())
+      m.renderer.drawScene()
+      m.assertTrue(entity.isValid())
+    end function
+
+    @describe("enabled/disabled static geometry")
+
+    @it("excludes a disabled static object from the tree and re-includes it once re-enabled")
+    function _()
+      ' Regression test for finding 4: the static tree is built from isEnabled()-filtered
+      ' objects and cached with no dirty-tracking for a later enabled-state flip - a
+      ' disabled-at-build-time object never drew again once re-enabled before the fix.
+      ' Positioned at the default camera's own target (canvas center - see
+      ' Camera.useDefaultCameraTarget()) with a small quad, matching
+      ' SceneObjectRectangle.spec.bs's proven "lands well inside the canvas" setup,
+      ' rather than reasoning about 3D frustum/near-far behavior under a Camera2d.
+      wallEntity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true, position: BGE.Math.VectorOps.create(160, 120, 0)})
+      wallEntity.addRectangle("wallRect", 40, 20, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      wallEntity.enabled = false
+
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawScene()
+      m.assertEqual(0, m.renderer.getDrawCallsLastFrame())
+
+      wallEntity.enabled = true
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawScene()
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+    end function
+
+    @it("stops drawing a static object once disabled, even without a tree rebuild")
+    function _()
+      ' Covers the drawStaticAndDynamicSceneObjects() draw-loop isEnabled() gate
+      ' directly (matching the legacy sorted path's own guard), separate from the
+      ' dirty-tracking test above.
+      wallEntity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true, position: BGE.Math.VectorOps.create(160, 120, 0)})
+      wallEntity.addRectangle("wallRect", 40, 20, {drawMode: BGE.SceneObjectDrawMode.oriented})
+
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawScene()
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > 0)
+
+      wallEntity.enabled = false
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawScene()
+      m.assertEqual(0, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @describe("static objects that fail isReadyForStaticBspBuild (screen-aligned draw modes)")
+
+    @it("still draws a static directScaled object alongside a real static wall, instead of vanishing")
+    function _()
+      ' Regression test for finding 7 (re-review): a static SceneObject in a
+      ' screen-aligned draw mode (directScaled here - e.g. a tree that always faces the
+      ' camera) can never define a BSP plane (see SceneObject.isReadyForStaticBspBuild()),
+      ' so it's excluded from the static tree. Before this fix, Renderer.
+      ' drawStaticAndDynamicSceneObjects()'s dynamicItems filter also excluded it purely
+      ' because sceneObj.isStatic was true - so it ended up in neither the tree nor the
+      ' dynamic-items list and never drew at all. It must now be threaded into the
+      ' dynamic-items list and draw every frame, classified against the tree's real
+      ' planes (the wall here) like a genuinely moving object.
+      ' Positioned at the default camera's own target (canvas center - see
+      ' Camera.useDefaultCameraTarget()), matching the "excludes a disabled static
+      ' object" test above - rather than overriding camera.position, which under the
+      ' default Camera2d needs care to keep both objects actually in view/in front.
+      wallEntity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true, position: BGE.Math.VectorOps.create(160, 120, 50)})
+      wallDrawable = wallEntity.addRectangle("wallRect", 40, 40, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      wallSceneObj = wallDrawable.getSceneObjects()[0]
+
+      treeEntity = new BGE.GameEntity(m.game, {name: "tree", isStatic: true, position: BGE.Math.VectorOps.create(160, 120, 0)})
+      treeDrawable = treeEntity.addRectangle("treeRect", 20, 20, {drawMode: BGE.SceneObjectDrawMode.directScaled})
+      treeSceneObj = treeDrawable.getSceneObjects()[0]
+
+      ' The wall (oriented) defines a plane and belongs in the tree; the tree (screen-
+      ' aligned) can't and is excluded from it - confirms both fixed code paths are
+      ' actually exercised by this scene, not just asserted separately.
+      m.assertTrue(wallSceneObj.isReadyForStaticBspBuild(m.renderer.camera))
+      m.assertFalse(treeSceneObj.isReadyForStaticBspBuild(m.renderer.camera))
+
+      ' Warm-up frame: the first drawScene() call after registration pays one-off costs
+      ' (tree build, etc.) that inflate its draw-call count independent of whether the
+      ' tree entity itself draws - comparing against it would mask the fix under test.
+      m.renderer.drawScene()
+
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawScene()
+      callsWithBoth = m.renderer.getDrawCallsLastFrame()
+
+      treeEntity.enabled = false
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawScene()
+      callsWallOnly = m.renderer.getDrawCallsLastFrame()
+
+      m.assertTrue(callsWallOnly > 0)
+      ' Before the fix, disabling the tree entity changed nothing - it never drew
+      ' either way, so this assertion is what distinguishes "drawn" from "vanished".
+      m.assertTrue(callsWithBoth > callsWallOnly)
+      m.assertTrue(wallEntity.isValid())
+      m.assertTrue(treeEntity.isValid())
+    end function
+
+    @it("orders a static directScaled object correctly against a static wall's real plane (tree-vs-fence)")
+    function _()
+      ' Builds the same BSP inputs Renderer.buildStaticGeometryTree()/
+      ' drawStaticAndDynamicSceneObjects() would (a real wall's plane from
+      ' getWorldPoints(), a real screen-aligned object's position from
+      ' getDepthPosition()/stableSortKey) to confirm the resulting draw order is
+      ' correct, not just that both objects draw. Camera at z=-200; wall (the "fence")
+      ' at z=100 is the farther of the two, tree at z=0 sits between the camera and the
+      ' wall, so back-to-front order must be [wall, tree].
+      wallEntity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true, position: BGE.Math.VectorOps.create(0, 0, 100)})
+      wallDrawable = wallEntity.addRectangle("wallRect", 200, 200, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      wallSceneObj = wallDrawable.getSceneObjects()[0]
+
+      treeEntity = new BGE.GameEntity(m.game, {name: "tree", isStatic: true, position: BGE.Math.VectorOps.create(0, 0, 0)})
+      treeDrawable = treeEntity.addRectangle("treeRect", 20, 20, {drawMode: BGE.SceneObjectDrawMode.directScaled})
+      treeSceneObj = treeDrawable.getSceneObjects()[0]
+
+      m.renderer.camera.position = BGE.Math.VectorOps.create(0, 0, -200)
+      wallSceneObj.update(m.renderer.camera)
+      treeSceneObj.update(m.renderer.camera)
+
+      wallPoints = wallSceneObj.getWorldPoints()
+      staticTree = BGE.BSP.buildTree([{
+        sceneObj: "wall",
+        planePoint: wallPoints.getCenter(),
+        planeNormal: wallPoints.getNormal()
+      }])
+      dynamicItem = {
+        sceneObj: "tree",
+        position: treeSceneObj.getDepthPosition(),
+        depthKey: treeSceneObj.stableSortKey
+      }
+
+      result = []
+      BGE.BSP.collectDrawOrder(staticTree, m.renderer.camera.position, [dynamicItem], result)
+      m.assertEqual(["wall", "tree"], result)
+    end function
+
+    @describe("drawScene with a mix of static and dynamic content")
+
+    @it("draws without error and both static and dynamic objects remain enabled")
+    function _()
+      wallEntity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true, position: BGE.Math.VectorOps.create(0, 0, 100)})
+      wallEntity.addRectangle("wallRect", 200, 200, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      ballEntity = new BGE.GameEntity(m.game, {name: "ball", position: BGE.Math.VectorOps.create(0, 0, 0)})
+      ballEntity.addRectangle("ballRect", 20, 20, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      m.renderer.camera.position = BGE.Math.VectorOps.create(0, 0, -200)
+      m.renderer.drawScene()
+      m.assertTrue(wallEntity.isValid())
+      m.assertTrue(ballEntity.isValid())
+    end function
+
+  end class
+
+end namespace

@@ -1,0 +1,174 @@
+' Times Renderer.drawScene()'s static-geometry BSP path (Renderer.markStatic(), issue
+' #107) against the plain per-object sorted path it replaces, using a small "room" of
+' static wall quads with dynamic "ball" quads moving between them each frame - the same
+' shape as examples/collisions3d, without needing BGE.Game/GameEntity for the *demo*
+' itself (see SkyboxTest.bs for the same owner-less construction pattern this demo
+' otherwise follows).
+'
+' Deviation from a literal `owner = invalid` on each DrawableRectangle: unlike
+' SkyboxTest.bs (which bypasses SceneObject.update() entirely via renderNow()), the
+' normal Renderer.drawScene() path this benchmark specifically measures calls
+' SceneObject.update() on every object, which unconditionally dereferences
+' m.drawable.owner.transformationMatrix/.movedLastFrame() - a real crash with an invalid
+' owner, not just a lint concern. A Drawable's `owner` field is also compile-time typed
+' `as GameEntity`, so nothing short of a real GameEntity satisfies it.
+'
+' A real `new BGE.GameEntity(...)` needs a real `BGE.Game` - but constructing one here
+' (`new BGE.Game(...)`) is NOT safe: its constructor always creates its own on-screen
+' `roScreen`, which - confirmed on real hardware while building this benchmark - silently
+' and permanently steals the physical display away from main.bs's own screen (the app
+' keeps running, drawScene() keeps executing, but the screen freezes on the channel splash
+' forever; recoverable only by not creating that second roScreen at all). So instead of a
+' real Game, `BenchmarkGameStub` below stands in for the tiny slice of Game's public
+' surface that GameEntity/SceneObjectBillboard's oriented-mode draw path actually touches
+' for a Drawable with no texture/UI dependencies (getNextGameEntityId(), log(),
+' getDebugValue()) - passed through a `dynamic`-typed local so bsc's static `as Game`
+' param check doesn't reject it (BrighterScript doesn't validate object-typed arguments at
+' runtime, only scalar float/int params coerce at the call boundary - see CLAUDE.md).
+' Since the owner's transformationMatrix stays identity throughout, each drawable's
+' absolute `offset` still resolves directly to world position, matching the brief's intent
+' unchanged.
+class BenchmarkGameStub
+
+  private nextEntityId = 0
+
+  function getNextGameEntityId() as string
+    id = m.nextEntityId.ToStr()
+    m.nextEntityId++
+    return id
+  end function
+
+  sub log(message as string, level = 0 as dynamic)
+    print "[benchmark owner] "; message
+  end sub
+
+  function getDebugValue(debugKey as string) as dynamic
+    return invalid
+  end function
+
+end class
+
+class StaticGeometryBspBenchmark extends RendererTest
+
+  private wallCount = 6
+  private ballCount = 10
+  private resultLines as string[] = []
+
+  private ownerGameStub as object
+  private owner as BGE.GameEntity
+
+  sub new()
+    super("Static Geometry BSP Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.ownerGameStub = new BenchmarkGameStub()
+    m.owner = new BGE.GameEntity((m.ownerGameStub as dynamic), {name: "BenchmarkOwner"})
+
+    renderer.camera = new BGE.Camera3d()
+    renderer.camera.position = BGE.Math.VectorOps.create(0, 0, -400)
+    renderer.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+
+    m.buildWalls(renderer, true)
+    m.buildBalls(renderer)
+    staticMs = m.timeDrawScene(renderer, 60)
+    m.resetScene(renderer)
+
+    ' Phase 2 needs a genuinely separate Renderer, not the shared one above -
+    ' Renderer.hasStaticGeometry is a one-way latch (markStatic() sets it true and
+    ' nothing ever clears it), so re-registering walls on the SAME renderer without
+    ' markStatic() would still take drawScene()'s `if m.hasStaticGeometry` branch and
+    ' never reach the real plain-sorted `else` branch this phase is supposed to
+    ' measure. A plain roBitmap surface (no on-screen roScreen - see DrawableParallaxLayer.spec.bs/
+    ' Drawable.spec.bs for the same pattern) is enough; this renderer is only driven
+    ' long enough to time it and is then discarded.
+    plainRenderer = new BGE.Renderer(CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true}))
+    plainRenderer.camera = new BGE.Camera3d()
+    plainRenderer.camera.position = BGE.Math.VectorOps.create(0, 0, -400)
+    plainRenderer.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+    m.buildWalls(plainRenderer, false)
+    m.buildBalls(plainRenderer)
+    plainMs = m.timeDrawScene(plainRenderer, 60)
+
+    m.resultLines = [
+      `Static BSP path:   ${staticMs} ms / 60 frames`
+      `Plain sorted path: ${plainMs} ms / 60 frames`
+    ]
+
+    print "=== Static Geometry BSP Benchmark ==="
+    for each line in m.resultLines
+      print line
+    end for
+    print "=== end ==="
+
+    ' Leave the shared renderer (the one main.bs keeps using for this demo's own
+    ' draw() calls and every subsequent demo) clean - no leftover scene objects from
+    ' either phase.
+    m.resetScene(renderer)
+  end sub
+
+  private sub resetScene(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+  end sub
+
+  private sub buildWalls(renderer as BGE.Renderer, markAsStatic as boolean)
+    positions = [
+      BGE.Math.VectorOps.create(0, 0, 150), BGE.Math.VectorOps.create(0, 0, -150),
+      BGE.Math.VectorOps.create(150, 0, 0), BGE.Math.VectorOps.create(-150, 0, 0),
+      BGE.Math.VectorOps.create(0, 150, 0), BGE.Math.VectorOps.create(0, -150, 0)
+    ]
+    for i = 0 to m.wallCount - 1
+      drawable = new BGE.DrawableRectangle(m.owner, 300, 300, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      drawable.offset = positions[i]
+      sceneObj = drawable.addToScene(renderer)
+      if markAsStatic
+        renderer.markStatic(sceneObj)
+      end if
+    end for
+  end sub
+
+  private sub buildBalls(renderer as BGE.Renderer)
+    for i = 0 to m.ballCount - 1
+      drawable = new BGE.DrawableRectangle(m.owner, 20, 20, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      angle = (2 * BGE.Math.PI) * (i / m.ballCount)
+      drawable.offset = BGE.Math.VectorOps.create(cos(angle) * 80, sin(angle) * 80, sin(angle * 2) * 80)
+      drawable.addToScene(renderer)
+    end for
+  end sub
+
+  private function timeDrawScene(renderer as BGE.Renderer, frames as integer) as integer
+    timer = CreateObject("roTimespan")
+    for i = 0 to frames - 1
+      ' Mirrors the real per-frame call order (Game.drawEntities()) - drawScene()
+      ' itself does not call this; every spec test that exercises drawScene() calls
+      ' it first too (e.g. SceneObjectImage.spec.bs). Skipping it leaves the
+      ' camera's frustum normals uninitialized (invalid), crashing the first
+      ' SceneObject.update()'s distanceFromCameraFront() call.
+      renderer.setupCameraForFrame()
+      ' The shared dummy owner's MotionChecker.movedLastFrame starts (and stays)
+      ' true until something calls updateTransformationMatrix() on it - normally
+      ' Game's per-frame entity loop (Game.bs:963). Without this, every wall's
+      ' Drawable.movedLastFrame(true) reads back true forever (owner OR'd in),
+      ' which both crashes the isStatic-moved warning (m.owner.name is unset on
+      ' this bare owner) and would force a static-tree rebuild every single frame -
+      ' defeating the entire point of the static-path benchmark.
+      m.owner.updateTransformationMatrix()
+      renderer.drawScene()
+    end for
+    return timer.TotalMilliseconds()
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    ' Starts below main.bs's own centered title header (drawn at y=20) so the two
+    ' don't overlap - see QuadFillBenchmark.bs, which starts at the same y=80 for
+    ' the same reason.
+    y = 80
+    for each line in m.resultLines
+      renderer.drawText(line, 20, y, BGE.Colors.White)
+      y += 28
+    end for
+  end sub
+
+end class

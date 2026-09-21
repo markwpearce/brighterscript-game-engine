@@ -9,6 +9,7 @@ import "../../utils/tweens.bs"
 import "../../utils/utils.bs"
 import "../Game.bs"
 import "../interfaces.bs"
+import "bsp/StaticGeometryBSP.bs"
 import "cameras/Camera.bs"
 import "cameras/Camera2d.bs"
 import "DepthSortHelpers.bs"
@@ -58,6 +59,19 @@ namespace BGE
 
     private sceneObjects as SceneObject[] = []
     private needsDepthSort as boolean = true
+
+    ' The static geometry BSP tree (see BGE.BSP), or invalid if no static SceneObject has
+    ' ever registered with this renderer. Staying invalid is what makes drawScene() take
+    ' today's exact code path for a renderer with no static geometry - see hasStaticGeometry.
+    private staticTree as object = invalid
+    private needsStaticTreeRebuild as boolean = false
+
+    ' Whether any SceneObject has ever been marked static on this renderer. Distinct from
+    ' `staticTree <> invalid` so that removing every static object still routes through
+    ' the (now-empty, harmless) BSP draw path rather than silently reverting to the plain
+    ' sorted path mid-room - see buildStaticGeometryTree().
+    private hasStaticGeometry as boolean = false
+
     private lastFrameDidSort as boolean = false
     private overlapClusters as BGE.SceneObject[][] = []
     ' Last frame's overlap-cluster sort order (by SceneObject.id) - fed back into
@@ -317,6 +331,38 @@ namespace BGE
       ' at the same time are ordered by their addition order even before the first sort.
       sceneObj.setLastSortIndex(m.sceneObjects.count() - 1)
       m.needsDepthSort = true
+
+      owner = sceneObj.drawable.owner
+      if owner <> invalid and owner.isStatic
+        m.markStatic(sceneObj)
+      end if
+    end sub
+
+    ' Marks a SceneObject as static geometry and schedules a tree rebuild. Called
+    ' automatically by addSceneObject() when the object's owning GameEntity is isStatic -
+    ' exposed publicly so a SceneObject with no owning GameEntity (e.g.
+    ' examples/rendererTest, which builds scene objects directly - see SkyboxTest.bs)
+    ' can still opt in directly.
+    '
+    ' Self-guards on isEligibleForStaticBsp(): a type that doesn't support static BSP
+    ' (v1 supports SceneObjectImage/SceneObjectRectangle only) is declined rather than
+    ' flagged isStatic, since buildStaticGeometryTree() would otherwise call
+    ' getWorldPoints() on it (base-class default `invalid`) and crash on the next
+    ' rebuild. This guard lives here rather than only at addSceneObject()'s call site so
+    ' a direct call to this public method gets the same protection.
+    '
+    ' @param {SceneObject} sceneObj
+    sub markStatic(sceneObj as SceneObject)
+      if not sceneObj.isEligibleForStaticBsp()
+        owner = sceneObj.drawable.owner
+        if owner <> invalid
+          owner.game.log("GameEntity '" + owner.name + "' is marked isStatic but its " + sceneObj.type.toStr() + " scene object type doesn't support static geometry yet (v1 supports SceneObjectImage/SceneObjectRectangle only) - it will draw using the normal sorted order instead", BGE.Debug.LogLevel.warning)
+        end if
+        return
+      end if
+      sceneObj.isStatic = true
+      m.hasStaticGeometry = true
+      m.needsStaticTreeRebuild = true
     end sub
 
     ' Registers a SceneObject as deferred to the end-of-frame interleaved cluster draw
@@ -340,6 +386,9 @@ namespace BGE
       if indexToDelete >= 0
         m.sceneObjects.delete(indexToDelete)
         m.needsDepthSort = true
+        if sceneObjToRemove.isStatic
+          m.needsStaticTreeRebuild = true
+        end if
       end if
       sceneObjToRemove.id = ""
     end sub
@@ -368,10 +417,19 @@ namespace BGE
 
     private sub updateSceneObjects()
       for each sceneObj in m.sceneObjects
+        ' Checked unconditionally (not just while enabled) - a disabled object never
+        ' reaches update() below, so this is the only place a static object *becoming*
+        ' disabled is ever detected. See checkStaticEnabledStateChanged()'s doc comment.
+        if sceneObj.checkStaticEnabledStateChanged()
+          m.needsStaticTreeRebuild = true
+        end if
         if sceneObj.isEnabled()
           sceneObj.update(m.camera)
           if sceneObj.depthChangedThisFrame
             m.needsDepthSort = true
+          end if
+          if sceneObj.staticGeometryMovedThisFrame
+            m.needsStaticTreeRebuild = true
           end if
         end if
       end for
@@ -405,6 +463,95 @@ namespace BGE
     ' design (not a silent one) - a real fix would mean drawing each cluster at its
     ' farthest member's normal sorted position instead of always at the end, which is a
     ' larger architectural change deliberately left out of this fix round.
+
+    ' Rebuilds the static geometry BSP tree from every currently-registered static
+    ' SceneObject's world-space plane. Called lazily from drawScene() only when
+    ' needsStaticTreeRebuild is set (registration, removal, or a static object that
+    ' moved - see SceneObject.update()'s misuse detection) - not every frame.
+    private sub buildStaticGeometryTree()
+      items = []
+      for each sceneObj in m.sceneObjects
+        if sceneObj.isStatic and sceneObj.isEnabled() and sceneObj.isReadyForStaticBspBuild(m.camera)
+          worldPoints = sceneObj.getWorldPoints()
+          items.push({
+            sceneObj: sceneObj,
+            planePoint: worldPoints.getCenter(),
+            planeNormal: worldPoints.getNormal()
+          })
+        end if
+      end for
+      m.staticTree = BGE.BSP.buildTree(items)
+      m.needsStaticTreeRebuild = false
+    end sub
+
+    ' The static+dynamic draw path used once any SceneObject has ever been marked static
+    ' on this renderer (see hasStaticGeometry) - replaces the plain per-object sorted
+    ' loop for every non-plane, non-skybox object. Static objects that define a BSP
+    ' plane draw via the tree walk; every other enabled, in-front-of-camera object -
+    ' genuinely dynamic objects, AND a static object that failed
+    ' isReadyForStaticBspBuild() (e.g. a screen-aligned static billboard that can't
+    ' define a plane - see that method's doc comment) - is threaded into that same walk
+    ' as a dynamic item (see BGE.BSP.collectDrawOrder) instead of being drawn in a
+    ' separate pass, so a dynamic object between two static quads' depths draws in the
+    ' correct interleaved position, and a plane-ineligible static object still draws,
+    ' classified against the tree's real planes every frame instead of vanishing.
+    private sub drawStaticAndDynamicSceneObjects()
+      if m.needsStaticTreeRebuild
+        m.buildStaticGeometryTree()
+      end if
+
+      dynamicItems = []
+      for each sceneObj in m.sceneObjects
+        if sceneObj.isEnabled() and sceneObj.type <> SceneObjectType.Plane and sceneObj.type <> SceneObjectType.Skybox and sceneObj.negDistanceFromCamera < 0 and (not sceneObj.isStatic or not sceneObj.isReadyForStaticBspBuild(m.camera))
+          dynamicItems.push({
+            sceneObj: sceneObj,
+            position: sceneObj.getDepthPosition(),
+            ' The same stable, tie-break-aware key drawScene()'s legacy sorted path
+            ' uses (see the needsDepthSort block above) - not the raw
+            ' negDistanceFromCamera float, which would reintroduce the frame-to-frame
+            ' order flicker #59 fixed for near-tied depths landing in the same leaf.
+            ' It's kept current here because Renderer.updateSceneObjects() sets
+            ' needsDepthSort whenever any object's depth changes, and that block
+            ' recomputes stableSortKey for every SceneObject (not just the ones that
+            ' moved) - so a value from a stale (no-op) frame is still valid to compare.
+            depthKey: sceneObj.stableSortKey
+          })
+        end if
+      end for
+
+      drawOrder = []
+      BGE.BSP.collectDrawOrder(m.staticTree, m.camera.position, dynamicItems, drawOrder)
+      for each sceneObj in drawOrder
+        ' A static item's isEnabled() was already true when the (cached) tree was
+        ' built, but may have changed since - the tree itself doesn't get rebuilt for
+        ' every enable/disable toggle mid-frame-sequence the instant it happens (only
+        ' on the next needsStaticTreeRebuild pass - see checkStaticEnabledStateChanged()),
+        ' so this check (matching the legacy sorted path's own isEnabled() gate) is
+        ' what keeps a disabled object from drawing out of a stale tree in the meantime.
+        if sceneObj.isEnabled()
+          sceneObj.draw(m)
+        end if
+      end for
+    end sub
+
+    ' Whether any static geometry has ever been registered on this renderer - true even
+    ' if every static object has since been removed (see hasStaticGeometry's own doc
+    ' comment). Exposed for tests/diagnostics, not meant for game logic.
+    '
+    ' @return {boolean}
+    function hasStaticGeometryTree() as boolean
+      return m.hasStaticGeometry
+    end function
+
+    ' A shallow copy of every currently-registered SceneObject - for diagnostics/tests
+    ' (see Task 6's rendererTest benchmark) that need to enumerate them without a direct
+    ' reference to the live internal array.
+    '
+    ' @return {BGE.SceneObject[]}
+    function getSceneObjectsCopy() as BGE.SceneObject[]
+      return m.sceneObjects.slice()
+    end function
+
     private sub drawPendingClusterPrimitives()
       primitiveEntries = []
       for each sceneObj in m.pendingClusterDraws
@@ -511,15 +658,24 @@ namespace BGE
       end for
 
 
-      ' draw sceneObjects in sorted order
-      ' ignore any that are too far away (TBD) or behind camera
-      for each sceneObj in m.sceneObjects
-        if sceneObj.isEnabled() and sceneObj.type <> SceneObjectType.Plane and sceneObj.type <> SceneObjectType.Skybox
-          if sceneObj.negDistanceFromCamera < 0 'and sceneObj.normnegDistanceFromCamera < 10000
-            sceneObj.draw(m)
+      ' draw sceneObjects in sorted order - the static-geometry BSP walk (see
+      ' drawStaticAndDynamicSceneObjects) once anything has ever been marked static on
+      ' this renderer, otherwise exactly the plain per-object painter's sort from before
+      ' this feature existed. hasStaticGeometry starting (and staying, once true) false
+      ' for any renderer that never registers static geometry is what guarantees the
+      ' zero-static case sees byte-identical draw order to before.
+      if m.hasStaticGeometry
+        m.drawStaticAndDynamicSceneObjects()
+      else
+        ' ignore any that are too far away (TBD) or behind camera
+        for each sceneObj in m.sceneObjects
+          if sceneObj.isEnabled() and sceneObj.type <> SceneObjectType.Plane and sceneObj.type <> SceneObjectType.Skybox
+            if sceneObj.negDistanceFromCamera < 0
+              sceneObj.draw(m)
+            end if
           end if
-        end if
-      end for
+        end for
+      end if
 
       m.drawPendingClusterPrimitives()
 
