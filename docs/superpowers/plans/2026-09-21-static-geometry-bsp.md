@@ -130,13 +130,8 @@ namespace tests
 
     @describe("getWorldPoints")
 
-    @it("returns invalid on a SceneObject type that doesn't override it")
+    @it("returns non-invalid CornerPoints for a SceneObjectRectangle (SceneObjectBillboard override)")
     function _()
-      ' SceneObjectLine never extends SceneObjectBillboard, so the base default applies.
-      m.entity.addLine("plainLine", BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create(10, 0, 0))
-      renderer = m.game.canvas.renderer
-      lineSceneObj = renderer.getSceneObjectIndexById
-      ' Simpler: directly assert via a rectangle instead, since SceneObjectRectangle overrides it.
       rectDrawable = m.entity.addRectangle("plainRect2", 10, 10)
       rectSceneObj = rectDrawable.getSceneObjects()[0]
       m.assertNotInvalid(rectSceneObj.getWorldPoints())
@@ -186,17 +181,6 @@ namespace tests
   end class
 
 end namespace
-```
-
-Trim the `getWorldPoints` line-drawing test to just the rectangle assertion (the `addLine`/`getSceneObjectIndexById` lines above are dead ends - remove them; only the final `assertNotInvalid` matters). Corrected version of that one test:
-
-```brightscript
-    @it("returns non-invalid CornerPoints for a SceneObjectRectangle (SceneObjectBillboard override)")
-    function _()
-      rectDrawable = m.entity.addRectangle("plainRect2", 10, 10)
-      rectSceneObj = rectDrawable.getSceneObjects()[0]
-      m.assertNotInvalid(rectSceneObj.getWorldPoints())
-    end function
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
