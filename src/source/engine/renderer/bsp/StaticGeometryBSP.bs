@@ -1,0 +1,107 @@
+import "../../../math/vector.bs"
+
+namespace BGE.BSP
+
+  ' One static quad's plane, in world space - planePoint/planeNormal come from the
+  ' quad's own BGE.Math.CornerPoints.getCenter()/getNormal(). sceneObj is an opaque
+  ' payload this module never inspects - the caller gets it back unchanged in
+  ' collectDrawOrder()'s result.
+  interface StaticItem
+    sceneObj as dynamic
+    planePoint as BGE.Math.Vector
+    planeNormal as BGE.Math.Vector
+  end interface
+
+  ' One dynamic (non-static) object being threaded into the BSP walk. depthKey mirrors
+  ' BGE.SceneObject.negDistanceFromCamera's convention (ascending = farthest from the
+  ' camera first) - used only to order objects that land in the same leaf, where no more
+  ' static geometry disambiguates them further.
+  interface DynamicItem
+    sceneObj as dynamic
+    position as BGE.Math.Vector
+    depthKey as float
+  end interface
+
+  ' Builds a classification-only BSP tree over static quads - no polygon splitting (see
+  ' the design spec for why). Picks the first item as each node's splitting plane and
+  ' partitions every other remaining item to front/back by which side of that plane its
+  ' center falls on.
+  '
+  ' @param {BGE.BSP.StaticItem[]} items
+  ' @return {object} `invalid` for an empty list, else `{item, front, back}`
+  function buildTree(items as BGE.BSP.StaticItem[]) as object
+    if items.count() = 0
+      return invalid
+    end if
+    pivot = items[0]
+    front = []
+    back = []
+    for i = 1 to items.count() - 1
+      item = items[i]
+      side = BGE.Math.distanceFromPlane(pivot.planePoint, pivot.planeNormal, item.planePoint)
+      if side >= 0
+        front.push(item)
+      else
+        back.push(item)
+      end if
+    end for
+    return {
+      item: pivot,
+      front: buildTree(front),
+      back: buildTree(back)
+    }
+  end function
+
+  ' Walks the tree back-to-front relative to cameraPosition, appending each static
+  ' item's sceneObj payload to result in the correct draw position, with dynamicItems
+  ' classified against each node's plane and interleaved at the matching point instead
+  ' of being split. A leaf (node = invalid) appends its remaining dynamicItems sorted by
+  ' depthKey ascending.
+  '
+  ' @param {object} node result of buildTree(), or invalid
+  ' @param {BGE.Math.Vector} cameraPosition
+  ' @param {BGE.BSP.DynamicItem[]} dynamicItems
+  ' @param {dynamic[]} result appended to in draw order - not returned, so a caller can
+  '   reuse one array across a partial traversal if ever needed
+  sub collectDrawOrder(node as object, cameraPosition as BGE.Math.Vector, dynamicItems as BGE.BSP.DynamicItem[], result as dynamic[])
+    if node = invalid
+      appendLeafDynamicItems(dynamicItems, result)
+      return
+    end if
+
+    frontDynamic = []
+    backDynamic = []
+    for each dynItem in dynamicItems
+      side = BGE.Math.distanceFromPlane(node.item.planePoint, node.item.planeNormal, dynItem.position)
+      if side >= 0
+        frontDynamic.push(dynItem)
+      else
+        backDynamic.push(dynItem)
+      end if
+    end for
+
+    cameraSide = BGE.Math.distanceFromPlane(node.item.planePoint, node.item.planeNormal, cameraPosition)
+    if cameraSide >= 0
+      ' Camera is in front of this node's plane - the back subtree is farther away, so
+      ' it draws first (back-to-front painter's order).
+      collectDrawOrder(node.back, cameraPosition, backDynamic, result)
+      result.push(node.item.sceneObj)
+      collectDrawOrder(node.front, cameraPosition, frontDynamic, result)
+    else
+      collectDrawOrder(node.front, cameraPosition, frontDynamic, result)
+      result.push(node.item.sceneObj)
+      collectDrawOrder(node.back, cameraPosition, backDynamic, result)
+    end if
+  end sub
+
+  function appendLeafDynamicItems(dynamicItems as BGE.BSP.DynamicItem[], result as dynamic[]) as void
+    ' roArray.SortBy sorts numeric fields descending by default on this engine's brs
+    ' runtime (confirmed empirically) - "r" flips it to the ascending/farthest-first
+    ' order this module wants.
+    dynamicItems.sortBy("depthKey", "r")
+    for each dynItem in dynamicItems
+      result.push(dynItem.sceneObj)
+    end for
+  end function
+
+end namespace
