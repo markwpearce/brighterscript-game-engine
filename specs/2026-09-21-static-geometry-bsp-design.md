@@ -58,6 +58,15 @@ tree isn't meaningfully more expensive to build or walk.
 never change `position`/`rotation`/`scale` after its drawables register with a renderer.
 This is a documented usage contract, not compile-time enforced (see Misuse detection below).
 
+`isStatic` is also only meaningful for a drawable in an oriented draw mode (`oriented`,
+`orientedDrawBackFace`, `wireFrame`/`wireFrameDrawBackFace`, `solid`/`solidDrawBackFace`) -
+only those modes populate the `CornerPoints` (`worldPoints`) the static plane is built
+from (see `SceneObjectBillboard.updateWorldPosition()`). A static entity left in the
+default `matchCamera`/`directToCamera`/`directScaled` mode is detected at build time
+(`SceneObject.isReadyForStaticBspBuild()`), logged once, and excluded from the tree
+(drawn as a normal dynamic object instead) rather than building a degenerate
+all-zero plane that would silently collapse draw order.
+
 ## Components
 
 - `BGE.BSP.StaticGeometryTree` (new, `renderer/bsp/`) - owns the tree: build, traversal,
@@ -88,11 +97,19 @@ node's plane (same `distanceFromPlane` helper) to decide which child subtree is 
 visit it first, draw this node's static quad, then visit the near subtree. Dynamic
 (non-static) scene objects are partitioned against the current node's plane the same way and
 carried down into the matching child call, so they're drawn at the correct point in the walk;
+classification uses each dynamic object's `SceneObject.getDepthPosition()` (the same
+oriented-mode-aware anchor point `negDistanceFromCamera` sorts by - a quad's center, not a
+corner - see `SceneObject.depthPosition`), not the raw `worldPosition`, since for an
+oriented-mode billboard the latter is a corner and would misclassify the object against a
+node's plane by up to half its width/height;
 a leaf with no more static geometry to disambiguate against sorts its remaining dynamic
-objects by their existing `negDistanceFromCamera` scalar (today's painter's-algorithm key)
-before appending them. No `new`/class instantiation inside this path - plain arrays/AAs
-only, consistent with how clustering (`DepthSort.bs`) already avoids per-frame allocation
-of anything beyond arrays.
+objects by their existing `stableSortKey` scalar (the same stable, tie-break-aware key
+`Renderer.drawScene()`'s legacy sorted path uses - quantized depth plus the previous
+frame's sort position, see issue #59) before appending them; the raw `negDistanceFromCamera`
+float was tried first but reintroduces #59's frame-to-frame order flicker for near-tied
+depths landing in the same leaf, since it has no tie-breaking of its own. No `new`/class
+instantiation inside this path - plain arrays/AAs only, consistent with how clustering
+(`DepthSort.bs`) already avoids per-frame allocation of anything beyond arrays.
 
 **Zero-static fallback**: if `Renderer.staticTree` is `invalid`, `drawScene()` takes exactly
 today's code path, unchanged. This guarantees existing 2D examples and any 3D example that
