@@ -1,0 +1,180 @@
+namespace tests
+
+  ' Constructs real BGE.Game/GameEntity/roCompositor, same pattern as
+  ' CircleCollider.spec.bs - proven to work headlessly under brs-cli.
+  @suite("BGE.SphereCollider3d")
+  class SphereCollider3dTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+    end function
+
+    @describe("new")
+
+    @it("sets colliderType to 'sphere3d' and stores the given radius")
+    function _()
+      entity = new BGE.GameEntity(m.game, {name: "A"})
+      collider = entity.addSphereCollider3d("body", 15.0)
+      m.assertEqual("sphere3d", collider.colliderType)
+      m.assertEqual(15.0, collider.radius)
+    end function
+
+    @describe("checkCollisions / confirmCollision - broad-phase + narrow-phase together")
+
+    @it("finds no broad-phase candidate when spheres are far apart on every axis")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(500, 500, 500)
+      entityB.addSphereCollider3d("body", 5.0)
+
+      candidates = colliderA.checkCollisions(entityA.position)
+      m.assertEqual(0, candidates.count())
+    end function
+
+    @it("finds a broad-phase candidate AND confirms it for a genuine 3D overlap")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(3, 0, 3)
+      colliderB = entityB.addSphereCollider3d("body", 5.0)
+
+      candidates = colliderA.checkCollisions(entityA.position)
+      m.assertEqual(1, candidates.count())
+      m.assertEqual("body", candidates[0].colliderName)
+
+      m.assertTrue(colliderA.confirmCollision(entityA, colliderB, entityB))
+      m.assertTrue(colliderA.lastCollisionResult.overlapping)
+    end function
+
+    @it("finds a broad-phase candidate but REJECTS it on the diagonal near-miss (the false positive the two-plane trick alone would produce)")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(8, 0, 8)
+      colliderB = entityB.addSphereCollider3d("body", 5.0)
+
+      ' Both planes overlap (broad-phase finds a candidate)...
+      candidates = colliderA.checkCollisions(entityA.position)
+      m.assertEqual(1, candidates.count())
+
+      ' ...but the true 3D distance (~11.31) exceeds the radius sum (10), so
+      ' confirmCollision() must reject it.
+      m.assertFalse(colliderA.confirmCollision(entityA, colliderB, entityB))
+      m.assertFalse(colliderA.lastCollisionResult.overlapping)
+    end function
+
+    @it("does not treat an ordinary CircleCollider at the same numeric position as a YZ-plane match")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 5)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      ' An ordinary 2D CircleCollider on another entity, positioned at (5, 0) - the same
+      ' (x, y) SphereCollider3d's synthetic YZ-plane collider would compute from
+      ' entityA's own (y=0, z=5). Without COLLIDER_3D_YZ_PLANE_FLAG segregation, this
+      ' could spuriously satisfy the YZ half of the two-plane gate.
+      entityC = new BGE.GameEntity(m.game, {name: "C"})
+      entityC.position = BGE.Math.VectorOps.create(5, 0, 0)
+      entityC.addCircleCollider("body", 5.0)
+
+      candidates = colliderA.checkCollisions(entityA.position)
+      m.assertEqual(0, candidates.count())
+    end function
+
+    @describe("adjustCompositorObject")
+
+    @it("does not crash when called directly, as Game.adjustEntityCompositorObjectPostCollision() does every frame for every collider")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(3, 0, 3)
+      colliderB = entityB.addSphereCollider3d("body", 5.0)
+
+      colliderA.adjustCompositorObject(entityA.position)
+      colliderB.adjustCompositorObject(entityB.position)
+
+      ' If adjustCompositorObject() crashed (e.g. by touching the base class's unset
+      ' m.compositorObject), execution would never reach this assertion.
+      m.assertTrue(true)
+    end function
+
+    @it("keeps a disabled collider's internal colliders disabled after adjustCompositorObject() runs (regression: adjustCompositorObject() used to always re-enable them, even when m.enabled was false)")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(3, 0, 3)
+      entityB.addSphereCollider3d("body", 5.0)
+
+      ' Sanity: the two spheres genuinely overlap, seen from B's side.
+      m.assertEqual(1, entityB.colliders["body"].checkCollisions(entityB.position).count())
+
+      ' Mirror Game.processEntityOnCollision()'s exact per-frame sequence for a disabled
+      ' collider: disableCollisionChecking(), then (later in the same frame, via
+      ' adjustEntityCompositorObjectPostCollision()) adjustCompositorObject().
+      colliderA.enabled = false
+      colliderA.disableCollisionChecking()
+      colliderA.adjustCompositorObject(entityA.position)
+
+      m.assertEqual(0, entityB.colliders["body"].checkCollisions(entityB.position).count())
+    end function
+
+    @describe("confirmCollision - cross-shape (sphere vs box)")
+
+    @it("confirms and resolves a genuine overlap against a BoxCollider3d")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(13, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderB = entityB.addBoxCollider3d("body", 20.0, 20.0, 20.0)
+
+      m.assertTrue(colliderA.confirmCollision(entityA, colliderB, entityB))
+      m.assertTrue(colliderA.lastCollisionResult.overlapping)
+      m.assertTrue(Abs(colliderA.lastCollisionResult.normal.x - 1.0) < 0.0001)
+    end function
+
+    @it("rejects a sphere that's clearly outside the box")
+    function _()
+      entityA = new BGE.GameEntity(m.game, {name: "A"})
+      entityA.position = BGE.Math.VectorOps.create(500, 0, 0)
+      colliderA = entityA.addSphereCollider3d("body", 5.0)
+
+      entityB = new BGE.GameEntity(m.game, {name: "B"})
+      entityB.position = BGE.Math.VectorOps.create(0, 0, 0)
+      colliderB = entityB.addBoxCollider3d("body", 20.0, 20.0, 20.0)
+
+      m.assertFalse(colliderA.confirmCollision(entityA, colliderB, entityB))
+    end function
+
+    @describe("debugDraw")
+
+    @it("does not error against a real Renderer")
+    function _()
+      entity = new BGE.GameEntity(m.game, {name: "A"})
+      collider = entity.addSphereCollider3d("body", 15.0)
+      collider.debugDraw(m.game.canvas.renderer, entity.position)
+    end function
+
+  end class
+
+end namespace
