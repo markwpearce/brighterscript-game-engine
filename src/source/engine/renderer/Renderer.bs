@@ -334,22 +334,32 @@ namespace BGE
 
       owner = sceneObj.drawable.owner
       if owner <> invalid and owner.isStatic
-        if sceneObj.isEligibleForStaticBsp()
-          m.markStatic(sceneObj)
-        else
-          owner.game.log("GameEntity '" + owner.name + "' is marked isStatic but its " + sceneObj.type.toStr() + " scene object type doesn't support static geometry yet (v1 supports SceneObjectImage/SceneObjectRectangle only) - it will draw using the normal sorted order instead", BGE.Debug.LogLevel.warning)
-        end if
+        m.markStatic(sceneObj)
       end if
     end sub
 
     ' Marks a SceneObject as static geometry and schedules a tree rebuild. Called
-    ' automatically by addSceneObject() when the object's owning GameEntity is isStatic
-    ' and its type is eligible (isEligibleForStaticBsp()) - exposed publicly so a
-    ' SceneObject with no owning GameEntity (e.g. examples/rendererTest, which builds
-    ' scene objects directly - see SkyboxTest.bs) can still opt in.
+    ' automatically by addSceneObject() when the object's owning GameEntity is isStatic -
+    ' exposed publicly so a SceneObject with no owning GameEntity (e.g.
+    ' examples/rendererTest, which builds scene objects directly - see SkyboxTest.bs)
+    ' can still opt in directly.
+    '
+    ' Self-guards on isEligibleForStaticBsp(): a type that doesn't support static BSP
+    ' (v1 supports SceneObjectImage/SceneObjectRectangle only) is declined rather than
+    ' flagged isStatic, since buildStaticGeometryTree() would otherwise call
+    ' getWorldPoints() on it (base-class default `invalid`) and crash on the next
+    ' rebuild. This guard lives here rather than only at addSceneObject()'s call site so
+    ' a direct call to this public method gets the same protection.
     '
     ' @param {SceneObject} sceneObj
     sub markStatic(sceneObj as SceneObject)
+      if not sceneObj.isEligibleForStaticBsp()
+        owner = sceneObj.drawable.owner
+        if owner <> invalid
+          owner.game.log("GameEntity '" + owner.name + "' is marked isStatic but its " + sceneObj.type.toStr() + " scene object type doesn't support static geometry yet (v1 supports SceneObjectImage/SceneObjectRectangle only) - it will draw using the normal sorted order instead", BGE.Debug.LogLevel.warning)
+        end if
+        return
+      end if
       sceneObj.isStatic = true
       m.hasStaticGeometry = true
       m.needsStaticTreeRebuild = true
@@ -407,6 +417,12 @@ namespace BGE
 
     private sub updateSceneObjects()
       for each sceneObj in m.sceneObjects
+        ' Checked unconditionally (not just while enabled) - a disabled object never
+        ' reaches update() below, so this is the only place a static object *becoming*
+        ' disabled is ever detected. See checkStaticEnabledStateChanged()'s doc comment.
+        if sceneObj.checkStaticEnabledStateChanged()
+          m.needsStaticTreeRebuild = true
+        end if
         if sceneObj.isEnabled()
           sceneObj.update(m.camera)
           if sceneObj.depthChangedThisFrame
@@ -455,7 +471,7 @@ namespace BGE
     private sub buildStaticGeometryTree()
       items = []
       for each sceneObj in m.sceneObjects
-        if sceneObj.isStatic and sceneObj.isEnabled()
+        if sceneObj.isStatic and sceneObj.isEnabled() and sceneObj.isReadyForStaticBspBuild(m.camera)
           worldPoints = sceneObj.getWorldPoints()
           items.push({
             sceneObj: sceneObj,
@@ -485,8 +501,16 @@ namespace BGE
         if sceneObj.isEnabled() and not sceneObj.isStatic and sceneObj.type <> SceneObjectType.Plane and sceneObj.type <> SceneObjectType.Skybox and sceneObj.negDistanceFromCamera < 0
           dynamicItems.push({
             sceneObj: sceneObj,
-            position: sceneObj.worldPosition,
-            depthKey: sceneObj.negDistanceFromCamera
+            position: sceneObj.getDepthPosition(),
+            ' The same stable, tie-break-aware key drawScene()'s legacy sorted path
+            ' uses (see the needsDepthSort block above) - not the raw
+            ' negDistanceFromCamera float, which would reintroduce the frame-to-frame
+            ' order flicker #59 fixed for near-tied depths landing in the same leaf.
+            ' It's kept current here because Renderer.updateSceneObjects() sets
+            ' needsDepthSort whenever any object's depth changes, and that block
+            ' recomputes stableSortKey for every SceneObject (not just the ones that
+            ' moved) - so a value from a stale (no-op) frame is still valid to compare.
+            depthKey: sceneObj.stableSortKey
           })
         end if
       end for
@@ -494,7 +518,15 @@ namespace BGE
       drawOrder = []
       BGE.BSP.collectDrawOrder(m.staticTree, m.camera.position, dynamicItems, drawOrder)
       for each sceneObj in drawOrder
-        sceneObj.draw(m)
+        ' A static item's isEnabled() was already true when the (cached) tree was
+        ' built, but may have changed since - the tree itself doesn't get rebuilt for
+        ' every enable/disable toggle mid-frame-sequence the instant it happens (only
+        ' on the next needsStaticTreeRebuild pass - see checkStaticEnabledStateChanged()),
+        ' so this check (matching the legacy sorted path's own isEnabled() gate) is
+        ' what keeps a disabled object from drawing out of a stale tree in the meantime.
+        if sceneObj.isEnabled()
+          sceneObj.draw(m)
+        end if
       end for
     end sub
 

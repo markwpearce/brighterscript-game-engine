@@ -157,6 +157,15 @@ namespace BGE
 
     worldPosition = BGE.Math.VectorOps.create()
 
+    ' This object's position as used for depth classification (BGE.BSP's dynamic-item
+    ' plane checks) - getPositionForCameraDistance()'s point, cached at the same time as
+    ' negDistanceFromCamera (see update()). For an oriented-mode billboard this is its
+    ' quad's *center* (worldPoints.getCenter()), not worldPosition (a corner for that
+    ' mode - see SceneObjectBillboard.updateWorldPosition()); using worldPosition
+    ' directly for classification would offset an oriented dynamic object by half its
+    ' width/height, putting it on the wrong side of a static plane. See getDepthPosition().
+    protected depthPosition = BGE.Math.VectorOps.create()
+
     ' The Current Transformation Matrix
     transformationMatrix = BGE.Math.getFloat44Identity()
 
@@ -235,6 +244,18 @@ namespace BGE
     ' spamming the log.
     protected staticWarningLogged as boolean = false
 
+    ' Whether the one-time "static but not in an oriented draw mode" warning has
+    ' already been logged for this object - see isReadyForStaticBspBuild().
+    protected staticDrawModeWarningLogged as boolean = false
+
+    ' This object's isEnabled() as of the last checkStaticEnabledStateChanged() call -
+    ' tracked separately from wasEnabledLastFrame/isFirstFrameSinceEnabled above because
+    ' those are only updated inside update(), which Renderer.updateSceneObjects() skips
+    ' entirely for a disabled object - so they can't detect a static object *becoming*
+    ' disabled, only becoming re-enabled (and even then, staled by however long it was
+    ' disabled). Defaults true since every object is enabled at construction.
+    protected wasStaticEnabledState as boolean = true
+
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       m.name = name
       m.drawable = drawableObj
@@ -297,10 +318,20 @@ namespace BGE
       end if
       m.depthChangedThisFrame = cameraObj.movedLastFrame() or objMovedLastFrame or drawModeChanged
       if m.depthChangedThisFrame
-        m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.getPositionForCameraDistance(sceneObjDrawMode))
+        m.depthPosition = m.getPositionForCameraDistance(sceneObjDrawMode)
+        m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.depthPosition)
       end if
       m.wasEnabledLastFrame = m.isEnabled()
     end sub
+
+    ' This object's cached depth-classification position - see depthPosition's own doc
+    ' comment. Exposed for Renderer's static-geometry BSP path (drawStaticAndDynamicSceneObjects()),
+    ' which needs the same anchor point used for depth sorting, not the raw worldPosition.
+    '
+    ' @return {BGE.Math.Vector}
+    function getDepthPosition() as BGE.Math.Vector
+      return m.depthPosition
+    end function
 
     ' Get the position of the object for the camera distance calculation
     ' Override this function in subclasses to provide specific behavior
@@ -598,9 +629,16 @@ namespace BGE
     ' examples/3d's TreesRoom, each tree a bundle of DrawableLine branches), which
     ' would otherwise dominate the cluster-candidate count for zero possible benefit.
     '
+    ' A static object (isStatic - see GameEntity.isStatic/Renderer.markStatic()) also
+    ' returns false here regardless of type: the static geometry BSP tree already gives
+    ' it correct draw order against every dynamic object, so clustering it too would be
+    ' redundant at best - and at worst, a cluster with clusterMemberCount > 1 defers the
+    ' object to Renderer.drawPendingClusterPrimitives(), which runs after the entire BSP
+    ' pass and would silently discard that ordering for it.
+    '
     ' @return {boolean}
     function participatesInOverlapDetection() as boolean
-      return true
+      return not m.isStatic
     end function
 
     ' Whether this concrete SceneObject type's geometry can be represented as a single
@@ -614,6 +652,51 @@ namespace BGE
     ' @return {boolean}
     function isEligibleForStaticBsp() as boolean
       return false
+    end function
+
+    ' Whether this object should actually be included in this build of the static
+    ' geometry BSP tree (see Renderer.buildStaticGeometryTree()) - combines
+    ' isEligibleForStaticBsp() (concrete type support) with a runtime check that the
+    ' object is actually in an oriented draw mode. A static entity left in the default
+    ' matchCamera/directToCamera/directScaled draw mode never populates worldPoints
+    ' (see SceneObjectBillboard.updateWorldPosition()'s screen-aligned branch), so
+    ' getWorldPoints() would still be the constructor's all-zero CornerPoints - building
+    ' a plane from that classifies every dynamic object to the same side, silently
+    ' collapsing draw order to registration order. Warns once (matching the
+    ' staticWarningLogged misuse-detection pattern) and returns false instead, so the
+    ' object simply draws as a normal dynamic object rather than corrupting the tree.
+    '
+    ' @param {Camera} cam
+    ' @return {boolean}
+    function isReadyForStaticBspBuild(cam as Camera) as boolean
+      if not m.isEligibleForStaticBsp()
+        return false
+      end if
+      if isOrientedDrawMode(m.getActualDrawMode(cam))
+        return true
+      end if
+      if not m.staticDrawModeWarningLogged and m.drawable.owner <> invalid
+        m.drawable.owner.game.log("GameEntity '" + m.drawable.owner.name + "' is marked isStatic but its scene object isn't in an oriented draw mode (oriented/orientedDrawBackFace/wireFrame*/solid* - see GameEntity.isStatic) - it will draw using the normal sorted order instead", BGE.Debug.LogLevel.warning)
+        m.staticDrawModeWarningLogged = true
+      end if
+      return false
+    end function
+
+    ' Detects a static object's enabled/disabled transition even on a frame update()
+    ' itself never runs (a disabled object never reaches update() - see
+    ' Renderer.updateSceneObjects()). Called once per frame for every SceneObject
+    ' (cheap; a no-op state update for a non-static object) so Renderer can mark the
+    ' static geometry tree dirty exactly once per transition, in either direction,
+    ' instead of drawing a disabled object from a stale tree or never re-drawing one
+    ' that was disabled when the tree was last built.
+    '
+    ' @return {boolean} true exactly on the frame this object's (isStatic and) enabled
+    '   state changed since the last call
+    function checkStaticEnabledStateChanged() as boolean
+      isEnabledNow = m.isEnabled()
+      changed = m.isStatic and (isEnabledNow <> m.wasStaticEnabledState)
+      m.wasStaticEnabledState = isEnabledNow
+      return changed
     end function
 
     ' This object's world-space quad corners, if it has any - invalid for a type that
