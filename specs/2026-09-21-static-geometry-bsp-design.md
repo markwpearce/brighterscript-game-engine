@@ -25,17 +25,32 @@ that path is currently wrong. Folding it into BSP is a separate, larger change t
 
 ## Approach
 
-Real BSP tree, built once over static geometry, with dynamic objects inserted into the
-traversal rather than split against it - the classic technique (Doom-style): only static
-geometry needs a tree/splitting; a moving object is just classified against each node's
-plane as the walk reaches it.
+BSP tree, built once over static geometry, with dynamic objects inserted into the
+traversal by classification rather than split against it - the classic technique
+(Doom-style): a moving object is just classified against each node's plane (which side of
+the wall's plane is the ball/cat on?) as the walk reaches it, no geometry cutting involved.
 
-Considered and rejected: a heuristic depth-*range* key per static quad (no real tree, much
-less code) that forces a dynamic object inside a static quad's near/far range to draw after
-it. Rejected because it's only correct for simple axis-aligned rooms, not general level
-geometry (angled walls, multiple overlapping static quads) - given performance is priority
-#1 but correctness ranks above code simplicity, a heuristic that's "correct for box rooms"
-isn't good enough for what #107 is actually for (foundation for real level geometry, #62/#63).
+**v1 does not do true polygon splitting between two static quads.** The motivating cases
+(a ball resting on a static table/floor quad, a cat passing behind one wall segment and in
+front of another, `collisions3d`'s ball-inside-a-box) are all *dynamic-object-vs-static-plane*
+classification - none of them require cutting one static quad against another, since real
+level geometry (walls, floors) shares edges rather than crossing through each other's
+interior. True splitting only matters for two *static* quads that genuinely interpenetrate,
+which has no concrete case in this codebase today and would require partial-texture/UV-clipped
+draws to render a cut fragment correctly - a materially larger feature for a hypothetical
+case. Classification-only build is a simple binary partition: pick a quad as the node,
+sort every other static quad to front/back by its center's sign relative to that plane,
+recurse. Two static quads that do truly interpenetrate remain a known, documented v1
+limitation (see Out of scope).
+
+Considered and rejected: a heuristic depth-*range* key per static quad (no tree at all,
+even less code) that forces a dynamic object inside a static quad's near/far range to draw
+after it. Rejected in favor of the classification tree because the heuristic is only
+correct for simple axis-aligned rooms, not general level geometry (angled walls, multiple
+overlapping static quads) - given performance is priority #1 but correctness ranks above
+code simplicity, a heuristic that's "correct for box rooms" isn't good enough for what
+#107 is actually for (foundation for real level geometry, #62/#63), and the classification
+tree isn't meaningfully more expensive to build or walk.
 
 ## Marking static geometry
 
@@ -58,22 +73,24 @@ This is a documented usage contract, not compile-time enforced (see Misuse detec
 
 ## Build (once, on dirty)
 
-Classic BSP construction over static quads' world-space corner planes: pick a partition
-quad from the remaining list, clip every other remaining quad front/back against its plane
-(Sutherland-Hodgman-style), recurse on each side; coplanar quads stay together in the same
-node. For the realistic case (a room's wall faces, which share edges but don't interpenetrate
-each other) this rarely needs to actually split anything - the clipping code exists for
-general level geometry (per #107's own scope questions) but only costs anything at build
-time, which happens once per room (or once per static-geometry change, which should be rare
-- level load, not per-frame).
+Binary partition over static quads' world-space plane (a point + normal, from each quad's
+`BGE.Math.CornerPoints.getCenter()`/`getNormal()`): pick one remaining quad as a node, then
+classify every other remaining quad's center against that plane
+(`BGE.Math.VectorOps.distanceFromPlane`) into a front list and a back list, recurse on
+each. No clipping/splitting - a quad is always assigned whole to one node. Cost is paid
+once per room (or once per static-geometry change, which should be rare - level load, not
+per-frame).
 
 ## Per-frame traversal
 
 Standard back-to-front BSP walk: at each node, compare the camera's position against the
-node's plane to decide which child subtree is farther, visit it first, draw this node's
-static quad(s), then visit the near subtree. Dynamic (non-static) scene objects are
-classified against the current node's plane and drawn at the matching point in the walk
-instead of being split. No `new`/class instantiation inside this path - plain arrays/AAs
+node's plane (same `distanceFromPlane` helper) to decide which child subtree is farther,
+visit it first, draw this node's static quad, then visit the near subtree. Dynamic
+(non-static) scene objects are partitioned against the current node's plane the same way and
+carried down into the matching child call, so they're drawn at the correct point in the walk;
+a leaf with no more static geometry to disambiguate against sorts its remaining dynamic
+objects by their existing `negDistanceFromCamera` scalar (today's painter's-algorithm key)
+before appending them. No `new`/class instantiation inside this path - plain arrays/AAs
 only, consistent with how clustering (`DepthSort.bs`) already avoids per-frame allocation
 of anything beyond arrays.
 
@@ -110,7 +127,12 @@ check - if that existing check reports real movement on a `SceneObject` flagged 
 
 ## Out of scope for this pass
 
-- `SceneObjectPlane` participation in BSP.
+- `SceneObjectPlane` participation in BSP. A flat surface that needs correct ordering
+  against dynamic objects (a table, a room floor) should be built as a static
+  `SceneObjectRectangle`/`SceneObjectImage` quad, not the Mode-7 ground-plane system, to
+  get BSP's classification.
+- True polygon splitting between two static quads that genuinely interpenetrate (see
+  Approach) - a known, documented limitation, not silently wrong-but-unnoticed.
 - Full `SceneObjectModel` mesh splitting (only flat quads for v1).
 - Compile-time/structural enforcement that a static entity never moves (warning + rebuild
   only).
