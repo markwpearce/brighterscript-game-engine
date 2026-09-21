@@ -214,6 +214,27 @@ namespace BGE
     stableSortKey as float = 0
     private lastSortIndex as integer = 0
 
+    ' Set by Renderer when this object's owning entity is marked GameEntity.isStatic and
+    ' this object's concrete type supports static BSP (isEligibleForStaticBsp()). Not
+    ' meant to be set directly by game code - see Renderer.markStatic().
+    isStatic as boolean = false
+
+    ' True for exactly the frame Renderer.updateSceneObjects() should mark the static
+    ' geometry tree dirty because a static-flagged object's transform changed after
+    ' registration - see update()'s misuse-detection block.
+    staticGeometryMovedThisFrame as boolean = false
+
+    ' Whether update() has completed at least one prior frame for this object - guards
+    ' the misuse check below from firing on the object's very first update, where
+    ' MotionChecker always reports "moved" simply because it has no previous transform
+    ' to compare against yet (see MotionChecker.check()'s invalid-previousTransform case).
+    protected staticCheckArmed as boolean = false
+
+    ' Whether the one-time misuse warning has already been logged for this object -
+    ' keeps a static entity that's actually moving every frame (fully broken usage) from
+    ' spamming the log.
+    protected staticWarningLogged as boolean = false
+
     sub new(name as string, drawableObj as Drawable, objType as SceneObjectType)
       m.name = name
       m.drawable = drawableObj
@@ -256,6 +277,15 @@ namespace BGE
     ' @param {Camera} cameraObj
     sub update(cameraObj as Camera)
       objMovedLastFrame = m.drawable.movedLastFrame(true)
+      m.staticGeometryMovedThisFrame = false
+      if m.isStatic and objMovedLastFrame and m.staticCheckArmed
+        m.staticGeometryMovedThisFrame = true
+        if not m.staticWarningLogged and m.drawable.owner <> invalid
+          m.drawable.owner.game.log("GameEntity '" + m.drawable.owner.name + "' is marked isStatic but its position/rotation/scale changed after its drawables were registered - the static geometry tree will be rebuilt, but isStatic entities should never move after registration", BGE.Debug.LogLevel.warning)
+          m.staticWarningLogged = true
+        end if
+      end if
+      m.staticCheckArmed = true
       m.isFirstFrameSinceEnabled = (m.isEnabled() and not m.wasEnabledLastFrame)
       sceneObjDrawMode = m.getActualDrawMode(cameraObj)
       drawModeChanged = m.drawModeChanged(sceneObjDrawMode)
@@ -571,6 +601,28 @@ namespace BGE
     ' @return {boolean}
     function participatesInOverlapDetection() as boolean
       return true
+    end function
+
+    ' Whether this concrete SceneObject type's geometry can be represented as a single
+    ' flat quad usable by the static geometry BSP tree (see BGE.BSP and
+    ' Renderer.buildStaticGeometryTree()). False by default - override true only for a
+    ' type whose getWorldPoints() exactly matches its drawn fill geometry (currently
+    ' SceneObjectImage and SceneObjectRectangle; not SceneObjectModel/SceneObjectCircle/
+    ' SceneObjectPolygon/SceneObjectText, whose world corners are a bounding proxy, not
+    ' their actual silhouette).
+    '
+    ' @return {boolean}
+    function isEligibleForStaticBsp() as boolean
+      return false
+    end function
+
+    ' This object's world-space quad corners, if it has any - invalid for a type that
+    ' isn't built from a single flat quad. Overridden on SceneObjectBillboard (the shared
+    ' base for every quad-shaped SceneObject) to return its computed worldPoints.
+    '
+    ' @return {BGE.Math.CornerPoints}
+    function getWorldPoints() as BGE.Math.CornerPoints
+      return invalid
     end function
 
     ' Whether performDraw() just returning false is a failure that will keep happening
