@@ -1,0 +1,166 @@
+import "../../roku_modules/rodash/rodash.d.bs"
+import "../debug/LogLevel.bs"
+import "../GameEntity.bs"
+import "../renderer/cameras/Camera.bs"
+import "../renderer/cameras/Camera3d.bs"
+import "../../math/math.bs"
+import "../../math/vector.bs"
+import "Sprite.bs"
+
+namespace BGE
+
+  ' One resolved angle/elevation bucket: either real art (its own registered Sprite
+  ' animation) or a mirror of another bucket's art (same animation, flipped via scale.x).
+  class OrientedSpriteBucket
+    animationName as string
+    isMirror as boolean = false
+  end class
+
+  ' A Sprite that swaps which named animation is active based on the angle between the
+  ' camera and this entity - the classic Doom/Duke3D "billboard sprite" technique for
+  ' faking full 3D orientation with pre-rendered 2D views. See
+  ' docs/drawables-and-scene-objects.md for a full walkthrough and
+  ' specs/2026-09-22-oriented-sprite-billboards-design.md for the design.
+  class DrawableOrientedSprite extends Sprite
+
+    ' Number of horizontal (azimuth) view buckets around the entity. Bucket 0 is the
+    ' entity's front facing the camera; buckets increase clockwise (viewed from above).
+    numAngles as integer = 8
+
+    ' Number of vertical (elevation) view bands, from the camera looking up at the
+    ' entity (band 0) to looking down on it (band numElevationBands - 1). The default
+    ' of 1 means no vertical distinction at all - every elevation resolves to band 0.
+    numElevationBands as integer = 1
+
+    ' baseName -> (numElevationBands x numAngles) array of OrientedSpriteBucket
+    private orientedAnimations as roAssociativeArray = {}
+    private activeBaseAnimationName as string = ""
+    private currentElevationBand as integer = -1
+    private currentAngleBucket as integer = -1
+    private baseScaleX as float = 1.0
+
+    sub new(owner as GameEntity, spriteSheet as ifDraw2d, cellWidth as integer, cellHeight as integer, numAngles = 8 as integer, numElevationBands = 1 as integer, args = {} as roAssociativeArray)
+      super(owner, spriteSheet, cellWidth, cellHeight, args)
+      m.numAngles = numAngles
+      m.numElevationBands = numElevationBands
+      m.baseScaleX = m.scale.x
+    end sub
+
+    ' Registers one animation per angle bucket under `baseName` (e.g. "walk"), for the
+    ' single elevation band case (the common one - a sheet with no distinct top-down/
+    ' bottom-up art). Sugar for addElevationOrientedAnimation with a single-band wrapper;
+    ' errors (via addElevationOrientedAnimation's own validation) if numElevationBands
+    ' isn't actually 1.
+    '
+    ' @param {string} baseName
+    ' @param angleFrames - array of exactly numAngles entries, each either an integer[]
+    '   of frame indexes, or {mirrorOf: {elevation: E, angle: A}} to reuse another
+    '   bucket's frames flipped horizontally.
+    ' @param {integer} frameRate
+    ' @param [playMode="loop"]
+    function addOrientedAnimation(baseName as string, angleFrames as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
+      m.addElevationOrientedAnimation(baseName, [angleFrames], frameRate, playMode)
+    end function
+
+    ' Registers the full elevation x angle grid under `baseName`. See
+    ' specs/2026-09-22-oriented-sprite-billboards-design.md for the full bucket-index
+    ' semantics.
+    '
+    ' @param {string} baseName
+    ' @param elevationBands - array of exactly numElevationBands entries; each entry is
+    '   itself an angleFrames array in the same shape addOrientedAnimation takes.
+    ' @param {integer} frameRate
+    ' @param [playMode="loop"]
+    function addElevationOrientedAnimation(baseName as string, elevationBands as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
+      if elevationBands.Count() <> m.numElevationBands
+        m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' expected ${m.numElevationBands.toStr()} elevation band(s), got ${elevationBands.Count().toStr()}`, BGE.Debug.LogLevel.error)
+        m.orientedAnimations.Delete(baseName)
+        return
+      end if
+
+      grid = []
+      for e = 0 to m.numElevationBands - 1
+        angleFrames = elevationBands[e]
+        if angleFrames.Count() <> m.numAngles
+          m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} expected ${m.numAngles.toStr()} angle bucket(s), got ${angleFrames.Count().toStr()}`, BGE.Debug.LogLevel.error)
+          m.orientedAnimations.Delete(baseName)
+          return
+        end if
+        grid.push([invalid, invalid, invalid, invalid, invalid, invalid, invalid, invalid].Slice(0, m.numAngles))
+      end for
+
+      ' First pass: register real (non-mirrored) buckets as actual Sprite animations.
+      for e = 0 to m.numElevationBands - 1
+        angleFrames = elevationBands[e]
+        for a = 0 to m.numAngles - 1
+          bucketEntry = angleFrames[a]
+          if rodash.isArray(bucketEntry)
+            animName = m.internalAnimationName(baseName, e, a)
+            m.addAnimation(animName, bucketEntry, frameRate, playMode)
+            grid[e][a] = new OrientedSpriteBucket()
+            grid[e][a].animationName = animName
+            grid[e][a].isMirror = false
+          end if
+        end for
+      end for
+
+      ' Second pass: resolve mirrorOf entries against the real buckets just registered.
+      for e = 0 to m.numElevationBands - 1
+        angleFrames = elevationBands[e]
+        for a = 0 to m.numAngles - 1
+          bucketEntry = angleFrames[a]
+          if not rodash.isArray(bucketEntry)
+            if invalid = bucketEntry or invalid = bucketEntry.mirrorOf
+              m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} angle bucket ${a.toStr()} is neither a frame list nor a {mirrorOf} entry`, BGE.Debug.LogLevel.error)
+              m.orientedAnimations.Delete(baseName)
+              return
+            end if
+            targetElevation = bucketEntry.mirrorOf.elevation
+            targetAngle = bucketEntry.mirrorOf.angle
+            validTarget = targetElevation >= 0 and targetElevation < m.numElevationBands and targetAngle >= 0 and targetAngle < m.numAngles
+            if validTarget
+              target = grid[targetElevation][targetAngle]
+              validTarget = invalid <> target and not target.isMirror
+            end if
+            if not validTarget
+              m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} angle bucket ${a.toStr()} has a mirrorOf target that isn't a real registered bucket`, BGE.Debug.LogLevel.error)
+              m.orientedAnimations.Delete(baseName)
+              return
+            end if
+            grid[e][a] = new OrientedSpriteBucket()
+            grid[e][a].animationName = grid[targetElevation][targetAngle].animationName
+            grid[e][a].isMirror = true
+          end if
+        end for
+      end for
+
+      m.orientedAnimations[baseName] = grid
+    end function
+
+    private function internalAnimationName(baseName as string, elevationBand as integer, angleBucket as integer) as string
+      return baseName + "_e" + elevationBand.toStr() + "_a" + angleBucket.toStr()
+    end function
+
+    ' For tests only - the real underlying Sprite animation name a bucket resolves to
+    ' (following a mirror to its source). Mirrors Sprite's own "for tests only"
+    ' accessor convention (see rawAnimationClockMsForTests()).
+    '
+    ' @param {string} baseName
+    ' @param {integer} elevationBand
+    ' @param {integer} angleBucket
+    ' @return {string}
+    function registeredAnimationNameForTests(baseName as string, elevationBand as integer, angleBucket as integer) as string
+      grid = m.orientedAnimations[baseName]
+      if invalid = grid
+        return ""
+      end if
+      bucket = grid[elevationBand][angleBucket]
+      if invalid = bucket
+        return ""
+      end if
+      return bucket.animationName
+    end function
+
+  end class
+
+end namespace
