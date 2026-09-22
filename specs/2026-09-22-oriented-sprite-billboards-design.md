@@ -197,28 +197,28 @@ into this spec before the plan is written.
     covered by unit tests instead (see Testing).
   - `addOrientedAnimation("walk", ...)` sourced from the sheet's bottom 8x8 grid (sheet rows
     8-15; row r's 8 frames are its walk cycle for one facing).
-  - `addOrientedAnimation("idle", ...)` reuses frame 0 of each of those same 8 rows (single-frame
-    "idle" per bucket) rather than the sheet's separate, ambiguous top block (see Appendix) —
-    sidesteps having to resolve that block's semantics at all.
+  - `addOrientedAnimation("idle", ...)` uses the sheet's top single-frame-per-row block (sheet
+    rows 0-7, see Appendix) rather than reusing a walk-cycle frame — each block shares the same
+    per-row compass order, so idle bucket N and walk bucket N are just the corresponding row in
+    each block.
   - `drawMode: BGE.SceneObjectDrawMode.directScaled` (matches the existing tree convention for a
     billboard that scales with camera distance) with `banksWithCameraRoll: true` to match.
-  - The exact row-to-compass-direction mapping (which of the 8 rows is "front" vs "front-left"
-    etc.) and whether any bucket needs `mirrorOf` will be determined empirically by loading the
-    sheet in the example and visually comparing against known camera angles (via
-    `rokubot-examples`), not guessed up front — the engine feature's design doesn't depend on
-    getting this mapping right, only the demo's content does.
+  - The row-to-compass-direction mapping is documented by the asset itself (see Appendix) — no
+    `mirrorOf` buckets are needed, since both blocks have real art for all 8 directions.
 
 ## Appendix: Helix spritesheet geometry (for implementation reference)
 
-`helix_full_sheet.png`, 640x1024 RGBA, sliced as an 8-column x 16-row grid of 80x64 cells
-(confirmed via direct pixel inspection, not the asset's own documentation):
+`helix_full_sheet.png`, 640x1024 RGBA, sliced as an 8-column x 16-row grid of 80x64 cells.
+Per the asset's own documentation, both row blocks share the same per-block compass order,
+starting at the block's first row: SW, S, SE, E, NE, N, NW, W.
 
-- Sheet rows 0-7 (pixel y 0-511): a single-frame-per-row block whose semantics are ambiguous —
-  sampling showed 3 near-identical "front" frames, 1 right-profile frame, 3 near-identical
-  "back" frames, then another right-profile frame that visually matched the first one (not a
-  mirrored left profile as might be expected of an 8-direction pack). Likely idle-animation
-  breathing frames for only 4 true cardinal-ish views, not 8 evenly-spaced compass directions.
-  **Not used** by this design (see Non-goals) — deliberately avoided rather than resolved.
-- Sheet rows 8-15 (pixel y 512-1023): an 8-direction x 8-frame walk cycle grid, one direction
-  per row, one animation frame per column. This is what the terrain demo uses for both its
-  "walk" and (via frame 0) "idle" oriented animations.
+- Sheet rows 0-7 (pixel y 0-511): a single-frame-per-row idle-pose block, one direction per row
+  (row 0 = SW, row 1 = S, ... row 7 = W).
+- Sheet rows 8-15 (pixel y 512-1023): an 8-direction x 8-frame walk cycle grid, one direction per
+  row (row 8 = SW, row 9 = S, ... row 15 = W), one animation frame per column.
+
+An earlier direct-pixel-inspection pass judged the top block "ambiguous" (several rows looked
+near-identical) and avoided it, reusing walk-frame-0 as a stand-in idle pose instead. That read
+was wrong — subtle diagonal-facing idle poses (SW/S/SE, or NW/N/NE) legitimately look very
+similar to a quick visual scan, but the block is a real, complete 8-direction idle set matching
+the walk block's own row order. The terrain demo now uses it directly.
