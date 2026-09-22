@@ -30,7 +30,7 @@
 - Test: `src/source/engine/colliders/RayCircleIntersection.spec.bs`
 
 **Interfaces:**
-- Produces: `BGE.RaycastHit` class (`entity as object`, `collider as object`, `point as BGE.Math.Vector`, `distance as float`, `normal as BGE.Math.Vector`, constructor `new(entity as object, collider as object, point as BGE.Math.Vector, distance as float, normal as BGE.Math.Vector)`). `entity`/`collider` are typed `as object` (not `as GameEntity`/`as Collider`) specifically to avoid a circular import between `RaycastResult.bs` and `Collider.bs`/`GameEntity.bs` — callers cast when consuming, the same pattern `SphereCollider3d.confirmCollision()`'s `otherCollider as object` param already uses for the same reason.
+- Produces: `BGE.RaycastHit` interface (`entity as GameEntity`, `collider as Collider`, `point as BGE.Math.Vector`, `distance as float`, `normal as BGE.Math.Vector`) — pure data, so an `interface` rather than a `class` (no instantiation cost). `entity`/`collider` are typed as their real classes, not `as object`: BrighterScript's documented same-file self-reference bsc bug (see Global Constraints) does not apply to a plain cross-file import cycle — confirmed empirically (`npm run validate`/`test:ci` both clean with `RaycastResult.bs` ↔ `Collider.bs` ↔ `GameEntity.bs` importing each other). Since it's an interface, a caller builds one as an AA literal (`{entity: invalid, collider: invalid, point: point, distance: t, normal: normal}`) rather than `new BGE.RaycastHit(...)`; a later caller (`Game.raycastAll()`, Task 5) fills `entity`/`collider` in via plain field assignment (`hit.entity = entity`).
 - Produces: `BGE.intersectRaySphere(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance as float, center as BGE.Math.Vector, radius as float) as BGE.RaycastHit` — direction must already be a unit vector (callers normalize before calling in).
 - Produces: `BGE.intersectRayCircle(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance as float, center as BGE.Math.Vector, radius as float) as BGE.RaycastHit` — 2D case, delegates to `intersectRaySphere` with z flattened to 0.
 
@@ -164,29 +164,20 @@ Create `src/source/engine/colliders/RaycastResult.bs`:
 
 ```brightscript
 import "../../math/vector.bs"
+import "../GameEntity.bs"
+import "Collider.bs"
 
 namespace BGE
 
-  ' The result of a raycast hitting a collider - see Game.raycast()/raycastAll(). `entity`/
-  ' `collider` are typed `as object` (cast to GameEntity/Collider when consuming) rather than
-  ' their real types, to avoid a circular import between this file and Collider.bs/
-  ' GameEntity.bs (the same reason SphereCollider3d.confirmCollision()'s otherCollider param
-  ' is typed `as object`).
-  class RaycastHit
-    entity as object
-    collider as object
+  ' The result of a raycast hitting a collider - see Game.raycast()/raycastAll(). Pure data,
+  ' so it's an interface rather than a class (no instantiation cost).
+  interface RaycastHit
+    entity as GameEntity
+    collider as Collider
     point as BGE.Math.Vector
     distance as float
     normal as BGE.Math.Vector
-
-    sub new(entity as object, collider as object, point as BGE.Math.Vector, distance as float, normal as BGE.Math.Vector)
-      m.entity = entity
-      m.collider = collider
-      m.point = point
-      m.distance = distance
-      m.normal = normal
-    end sub
-  end class
+  end interface
 
 end namespace
 ```
@@ -238,7 +229,7 @@ namespace BGE
 
     point = BGE.Math.VectorOps.add(origin, BGE.Math.VectorOps.scale(direction, t))
     normal = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.subtract(point, center))
-    return new BGE.RaycastHit(invalid, invalid, point, t, normal)
+    return {entity: invalid, collider: invalid, point: point, distance: t, normal: normal}
   end function
 
 
@@ -496,7 +487,7 @@ Append to `src/source/engine/colliders/Raycast.bs`, inside the `namespace BGE` b
     end if
 
     point = BGE.Math.VectorOps.add(origin, BGE.Math.VectorOps.scale(direction, tMin))
-    return new BGE.RaycastHit(invalid, invalid, point, tMin, normal)
+    return {entity: invalid, collider: invalid, point: point, distance: tMin, normal: normal}
   end function
 
 

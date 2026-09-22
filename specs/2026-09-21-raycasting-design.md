@@ -54,14 +54,26 @@ origin/direction, richer result, optional 3D support, optional filtering).
 New file: `src/source/engine/colliders/RaycastResult.bs`.
 
 ```
-class RaycastHit
-  entity as object     ' as GameEntity
-  collider as object   ' as Collider
+interface RaycastHit
+  entity as GameEntity
+  collider as Collider
   point as BGE.Math.Vector
   distance as float
   normal as BGE.Math.Vector
-end class
+end interface
 ```
+
+`RaycastHit` is pure data, so it's an `interface` rather than a `class` —
+no instantiation cost, and a caller builds one as a plain AA literal.
+`entity`/`collider` are typed as their real classes rather than `as
+object`: BrighterScript's documented same-file self-reference bsc bug (see
+below) is specifically about a class and the function/method that returns
+or accepts it living in the *same file* — it does not apply to an ordinary
+cross-file import cycle, confirmed empirically (`RaycastResult.bs` imports
+both `Collider.bs` and `GameEntity.bs`, `Collider.bs` imports
+`RaycastResult.bs`, and `GameEntity.bs` already imports `Collider.bs` —
+`npm run validate`/`test:ci` both pass cleanly with this triangle in
+place).
 
 This lives in its own file, separate from the free functions that
 construct it, for the same reason `Sphere3dCollisionResult`/
@@ -70,7 +82,7 @@ construct it, for the same reason `Sphere3dCollisionResult`/
 self-references a class defined in the *same* file can corrupt bsc's
 symbol resolution for unrelated code earlier in that file (documented in
 CLAUDE.md, confirmed by bisection during the #107/#131 work). Keeping the
-result class in its own file sidesteps this entirely.
+result type in its own file sidesteps this entirely.
 
 ## Pure intersection math — `colliders/Raycast.bs`
 
