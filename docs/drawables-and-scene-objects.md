@@ -194,8 +194,6 @@ included) is used exactly as given. `examples/3d`'s CirclesRoom puts a ring of a
 `CirclePanel`/`SpherePanel` entities side by side, so orbiting the camera shows the difference
 directly: the circles turn edge-on and thin out, the spheres next to them don't move at all.
 
-## Oriented Sprites (`DrawableOrientedSprite`)
-
 `DrawableOrientedSprite` is a `Sprite` that fakes full 3D orientation the way classic
 Doom/Duke3D monster sprites do: instead of one animation per action, it registers one
 animation per (elevation band, angle bucket) via `addOrientedAnimation()`/
