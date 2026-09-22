@@ -13,9 +13,12 @@ texture selection instead.
 ## Goals
 
 - A new drawable, `DrawableOrientedSprite`, that composes with `Sprite`'s existing named
-  animations (walk, idle, etc.) by adding a second axis: which of N angle buckets is active,
+  animations (walk, idle, etc.) by adding an axis: which of N angle buckets is active,
   recomputed every frame from the camera-to-entity angle.
 - Configurable bucket count (`numAngles`, default 8 — the classic Doom count), not hard-coded.
+- Configurable vertical/elevation bucketing (`numElevationBands`, default 1 — no vertical
+  distinction, fully backward compatible), so a sheet can optionally provide a different sprite
+  for "camera looking down on this" / "camera looking up at this" in addition to azimuth.
 - Zero changes to `SceneObjectImage`/`SceneObject` — the whole feature lives in the `Drawable`
   layer by reusing `Sprite.addAnimation`/`playAnimation` and `AnimatedImage`'s existing
   time-based frame indexing unmodified.
@@ -26,8 +29,9 @@ texture selection instead.
 
 ## Non-goals
 
-- Pitch/elevation-based bucketing (only yaw/horizontal angle is considered — matches every
-  real-world sprite sheet of this style, including the supplied one).
+- Non-linear elevation band boundaries (e.g. a wider "level" band than the extremes) — bands
+  are equal-sized slices of the -90°..+90° pitch range. Can be revisited if a real sheet needs
+  it; nothing about the design below forecloses it later.
 - Any change to `Image`/`AnimatedImage`/`Sprite`/`SceneObjectImage` themselves; this is purely
   additive.
 - Resolving the Helix sheet's ambiguous top "idle" block (see Appendix) — the demo uses frame 0
@@ -37,37 +41,52 @@ texture selection instead.
 
 ### `DrawableOrientedSprite` (`src/source/engine/drawables/DrawableOrientedSprite.bs`)
 
-Extends `BGE.Sprite`. Constructor signature matches `Sprite`'s with one extra param:
+Extends `BGE.Sprite`. Constructor signature matches `Sprite`'s with two extra params:
 
 ```
-sub new(owner as GameEntity, spriteSheet as ifDraw2d, cellWidth as integer, cellHeight as integer, numAngles = 8 as integer, args = {} as roAssociativeArray)
+sub new(owner as GameEntity, spriteSheet as ifDraw2d, cellWidth as integer, cellHeight as integer, numAngles = 8 as integer, numElevationBands = 1 as integer, args = {} as roAssociativeArray)
 ```
 
 Public API:
 
 ```
-' Registers one animation per angle bucket under `baseName` (e.g. "walk"). `angleFrames` must
-' have exactly `numAngles` entries, ordered starting at bucket 0 = the entity's front (camera
-' looking directly at the entity's forward side) and proceeding clockwise (viewed from above)
-' through the remaining buckets. Each entry is either:
+' Registers one animation per angle bucket under `baseName` (e.g. "walk"), for the single
+' elevation band (numElevationBands = 1, the default/common case — no vertical distinction).
+' Sugar for addElevationOrientedAnimation(baseName, [angleFrames], frameRate, playMode).
+' `angleFrames` must have exactly `numAngles` entries, ordered starting at bucket 0 = the
+' entity's front (camera looking directly at the entity's forward side) and proceeding
+' clockwise (viewed from above) through the remaining buckets. Each entry is either:
 '   - an integer[] of frame indexes (this bucket's own art), or
-'   - {mirrorOf: N} - reuse bucket N's frames, flipped horizontally, for buckets whose sheet
-'     doesn't draw a distinct view (e.g. only a right profile is drawn; the left profile bucket
-'     mirrors it).
-' Throws a clear error if angleFrames.Count() <> numAngles, or if a mirrorOf target is not an
-' earlier, non-mirrored bucket registered in this same call.
+'   - {mirrorOf: {elevation: E, angle: A}} - reuse another bucket's frames, flipped
+'     horizontally, for buckets whose sheet doesn't draw a distinct view (e.g. only a right
+'     profile is drawn; the left profile bucket mirrors it).
+' Throws a clear error if angleFrames.Count() <> numAngles, or if a mirrorOf target is not a
+' real (non-mirrored) bucket registered in this same call.
 function addOrientedAnimation(baseName as string, angleFrames as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
 
+' Registers the full elevation x angle grid under `baseName`. `elevationBands` must have
+' exactly `numElevationBands` entries; each entry is itself an `angleFrames` array in the same
+' shape addOrientedAnimation takes (numAngles entries, each an integer[] or a mirrorOf tuple).
+' Elevation band 0 = steepest "camera below the entity, looking up at it"; band
+' numElevationBands - 1 = steepest "camera above the entity, looking down on it"; bands split
+' the -90..+90 degree pitch range into equal slices (see Non-goals).
+' Validates every band's angleFrames the same way addOrientedAnimation does, plus that every
+' mirrorOf tuple's `elevation` is a valid band index.
+function addElevationOrientedAnimation(baseName as string, elevationBands as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
+
 ' Selects which base animation is currently playing (analogous to Sprite.playAnimation, but
-' picks among the numAngles per-bucket animations registered for this baseName). Errors if
-' baseName was never registered via addOrientedAnimation.
+' picks among the (numElevationBands x numAngles) per-bucket animations registered for this
+' baseName). Errors if baseName was never registered via addOrientedAnimation /
+' addElevationOrientedAnimation.
 sub playOrientedAnimation(baseName as string)
 ```
 
-Internal state: `orientedAnimations` (baseName -> {buckets: numAngles-length array of either a
-real internal animation name or `{mirrorOf: N}`}), `activeBaseAnimationName`, `currentAngleBucket`
-(starts invalid so the first `update()` always resolves a real bucket), `baseScaleX` (the scale
-magnitude to restore/negate — captured once, on construction, from the drawable's own `scale.x`).
+Internal state: `orientedAnimations` (baseName -> a `numElevationBands`-length array of
+`numAngles`-length arrays, each cell either a real internal animation name or
+`{mirrorOf: {elevation, angle}}`), `activeBaseAnimationName`, `currentElevationBand`/
+`currentAngleBucket` (both start invalid so the first `update()` always resolves a real
+bucket), `baseScaleX` (the scale magnitude to restore/negate — captured once, on construction,
+from the drawable's own `scale.x`).
 
 `override sub update()`:
 
@@ -75,10 +94,12 @@ magnitude to restore/negate — captured once, on construction, from the drawabl
 override sub update()
   if m.activeBaseAnimationName <> ""
     camera = m.owner.game.canvas.renderer.camera
-    bucket = m.computeAngleBucket(camera)
-    if bucket <> m.currentAngleBucket
-      m.currentAngleBucket = bucket
-      entry = m.resolveBucket(m.activeBaseAnimationName, bucket)  ' follows a mirrorOf to its source bucket
+    elevationBand = m.computeElevationBand(camera)
+    angleBucket = m.computeAngleBucket(camera)
+    if elevationBand <> m.currentElevationBand or angleBucket <> m.currentAngleBucket
+      m.currentElevationBand = elevationBand
+      m.currentAngleBucket = angleBucket
+      entry = m.resolveBucket(m.activeBaseAnimationName, elevationBand, angleBucket)  ' follows a mirrorOf to its source bucket
       super.playAnimation(entry.animationName)
       m.scale.x = entry.isMirrored ? -m.baseScaleX : m.baseScaleX
     end if
@@ -100,6 +121,15 @@ end sub
   4. `bucketSize = 2π / numAngles`; `bucket = Floor((relative + bucketSize / 2) / bucketSize) mod numAngles`
      (the `+ bucketSize / 2` centers bucket 0 on "camera exactly at 0°" rather than starting a
      bucket boundary there).
+
+`computeElevationBand(camera as BGE.Camera) as integer`:
+
+- If `camera` is not a `Camera3d`, or `numElevationBands = 1`, returns `0` unconditionally (no
+  vertical distinction requested/possible).
+- Otherwise:
+  1. `deltaY = camera.position.y - m.owner.position.y`; `horizontalDistance = length of toCamera's XZ component` (reusing the same `toCamera` vector `computeAngleBucket` derives).
+  2. `pitch = Atan2(deltaY, horizontalDistance)`, in `[-90°, +90°]` — no wraparound, unlike azimuth.
+  3. `bandSize = 180° / numElevationBands`; `band = clamp(Floor((pitch + 90°) / bandSize), 0, numElevationBands - 1)`.
 
 This mirrors the constructor+hook customization pattern `DrawableSphere` uses (force behavior
 in the `Drawable` subclass's constructor/override, no new `SceneObject` subclass) — here the
@@ -127,24 +157,29 @@ into this spec before the plan is written.
 
 ### Error handling
 
-- `addOrientedAnimation`: wrong `angleFrames.Count()`, or a `mirrorOf` target that doesn't point
-  at an earlier non-mirrored bucket registered in the same call, are both hard runtime errors
-  with a message naming the offending bucket/baseName (matching this codebase's existing
-  fail-fast validation style rather than silently clamping/ignoring bad input).
+- `addOrientedAnimation`/`addElevationOrientedAnimation`: a wrong `angleFrames.Count()` (or
+  wrong `elevationBands.Count()`), or a `mirrorOf` target that doesn't point at a real
+  non-mirrored bucket registered in the same call (including an out-of-range `elevation`
+  index), are all hard runtime errors with a message naming the offending
+  bucket/band/baseName (matching this codebase's existing fail-fast validation style rather
+  than silently clamping/ignoring bad input).
 - `playOrientedAnimation` with an unregistered `baseName`: hard runtime error, matching the
   above rather than silently doing nothing.
-- `computeAngleBucket` with a non-`Camera3d` camera: not an error — always resolves to bucket 0.
+- `computeAngleBucket`/`computeElevationBand` with a non-`Camera3d` camera: not an error —
+  always resolves to bucket/band 0.
 
 ### Testing
 
-- Rooibos unit tests for the pure angle→bucket math (`computeAngleBucket`'s core calculation,
-  refactored into a small pure/testable function) using synthetic camera/entity positions and
-  rotations — no `Game` required for this part.
+- Rooibos unit tests for the pure angle→bucket and pitch→band math (`computeAngleBucket`/
+  `computeElevationBand`'s core calculations, refactored into small pure/testable functions)
+  using synthetic camera/entity positions and rotations — no `Game` required for this part.
+  Covers `numElevationBands = 1` (always band 0) alongside multi-band cases.
 - A `Game`-backed Rooibos test (matching `Sprite.spec.bs`'s existing pattern of a real `Game` +
-  `GameEntity` + a small synthetic `ifDraw2D` sheet) covering: `addOrientedAnimation` validation
-  errors (bad count, bad `mirrorOf` target), and that `playOrientedAnimation` combined with a
-  moved/rotated synthetic camera swaps which underlying `SpriteAnimation` is active, including a
-  mirrored bucket case (confirms `scale.x` flips sign, not the mirror's exact pixels).
+  `GameEntity` + a small synthetic `ifDraw2D` sheet) covering: `addOrientedAnimation`/
+  `addElevationOrientedAnimation` validation errors (bad count, bad `mirrorOf` target/elevation
+  index), and that `playOrientedAnimation` combined with a moved/rotated synthetic camera swaps
+  which underlying `SpriteAnimation` is active across both axes, including a mirrored bucket
+  case (confirms `scale.x` flips sign, not the mirror's exact pixels).
 - Manual verification: the `examples/terrain` character (see below), confirmed via
   `rokubot-examples` by orbiting the free-fly camera around it and screenshotting each expected
   facing change — required per this repo's convention that example/runtime behavior isn't
@@ -157,7 +192,9 @@ into this spec before the plan is written.
   `BGE.GameEntity`, built via a placement-args `onCreate`, added to `WorldRoom` via a new
   `addCharacters()`-style method mirroring `addTrees()`/`addLowWalls()`.
   - Uses `DrawableOrientedSprite` with the Helix sheet (640x1024, 80x64 cells, 8 cols x 16 rows)
-    and `numAngles: 8`.
+    and `numAngles: 8`, `numElevationBands: 1` (default) — the Helix sheet has no distinct
+    top-down/bottom-up art, so this demo exercises the azimuth axis only; the elevation axis is
+    covered by unit tests instead (see Testing).
   - `addOrientedAnimation("walk", ...)` sourced from the sheet's bottom 8x8 grid (sheet rows
     8-15; row r's 8 frames are its walk cycle for one facing).
   - `addOrientedAnimation("idle", ...)` reuses frame 0 of each of those same 8 rows (single-frame
