@@ -1,0 +1,199 @@
+import "../../math/vector.bs"
+import "RaycastResult.bs"
+
+namespace BGE
+
+  ' Below this magnitude, a ray's direction component along an axis is treated as exactly
+  ' zero (parallel to that axis' slab) rather than risking a division by a near-zero value
+  ' in intersectRayAabb3d()'s slab test.
+  const RAY_EPSILON = 0.000001
+
+  ' Ray-vs-sphere intersection (the true 3D case; intersectRayCircle() is the 2D
+  ' specialization below). Returns the nearest intersection point along the ray within
+  ' [0, maxDistance], or `invalid` if the ray misses, points away from the sphere, or the
+  ' sphere is entirely beyond maxDistance. `direction` must already be a unit vector - the
+  ' returned `distance` is only meaningful in the same units as `direction`'s magnitude.
+  ' If `origin` is already inside the sphere, returns a hit at `distance: 0`/`point: origin`
+  ' (an arbitrary normal, since there's no entry face) rather than `invalid` or the far exit
+  ' point - same convention as intersectRayAabb3d().
+  '
+  ' @param {BGE.Math.Vector} origin
+  ' @param {BGE.Math.Vector} direction - must be a unit vector
+  ' @param {float} maxDistance
+  ' @param {BGE.Math.Vector} center
+  ' @param {float} radius
+  ' @return {BGE.RaycastHit}
+  function intersectRaySphere(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance as float, center as BGE.Math.Vector, radius as float) as BGE.RaycastHit
+    oc = BGE.Math.VectorOps.subtract(origin, center)
+    b = BGE.Math.VectorOps.dotProduct(oc, direction)
+    c = BGE.Math.VectorOps.dotProduct(oc, oc) - radius * radius
+    discriminant = b * b - c
+    if discriminant < 0.0
+      return invalid
+    end if
+
+    if c < 0.0
+      ' Origin is already inside the sphere - per the raycasting spec, this is a hit at
+      ' t=0 (not the far exit point), matching intersectRayAabb3d()'s same-situation
+      ' behavior. There's no meaningful "entry face" to derive a normal from here, so a
+      ' sensible default is used, same as intersectRayAabb3d()'s own default.
+      return {entity: invalid, collider: invalid, point: BGE.Math.VectorOps.copy(origin), distance: 0.0, normal: BGE.Math.VectorOps.create(0, 1, 0)}
+    end if
+
+    sqrtDiscriminant = Sqr(discriminant)
+    t = -b - sqrtDiscriminant
+    if t < 0.0 or t > maxDistance
+      return invalid
+    end if
+
+    point = BGE.Math.VectorOps.add(origin, BGE.Math.VectorOps.scale(direction, t))
+    normal = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.subtract(point, center))
+    return {entity: invalid, collider: invalid, point: point, distance: t, normal: normal}
+  end function
+
+
+  ' Ray-vs-circle intersection in the XY plane - z is ignored entirely on both the ray and
+  ' the circle, by flattening both to z=0 and delegating to intersectRaySphere().
+  '
+  ' intersectRaySphere()'s math assumes a unit-length direction. Simply zeroing out z (as
+  ' this used to do) leaves the flattened direction shorter than 1 whenever the original
+  ' direction had a nonzero z component, silently breaking that assumption. So this
+  ' renormalizes the flattened direction and rescales maxDistance/distance to compensate:
+  ' letting len = the flattened direction's own length, a step of `t` along the *original*
+  ' unit direction covers `t * len` of flat (XY-only) distance, so the flat search runs out
+  ' to `maxDistance * len` and the flat hit's distance is converted back with `/ len`.
+  '
+  ' @param {BGE.Math.Vector} origin
+  ' @param {BGE.Math.Vector} direction - must be a unit vector
+  ' @param {float} maxDistance
+  ' @param {BGE.Math.Vector} center
+  ' @param {float} radius
+  ' @return {BGE.RaycastHit}
+  function intersectRayCircle(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance as float, center as BGE.Math.Vector, radius as float) as BGE.RaycastHit
+    flatLength = Sqr(direction.x * direction.x + direction.y * direction.y)
+    if flatLength < RAY_EPSILON
+      ' Direction is purely along z - the ray never moves in the XY plane at all, so it
+      ' can never newly enter/exit an XY-plane circle. Treated as a miss rather than
+      ' special-cased for the "origin already inside" case, since that's a genuine edge
+      ' case unlikely to matter for a 2D collider in practice.
+      return invalid
+    end if
+    flatOrigin = BGE.Math.VectorOps.create(origin.x, origin.y, 0.0)
+    normalizedFlatDirection = BGE.Math.VectorOps.create(direction.x / flatLength, direction.y / flatLength, 0.0)
+    flatCenter = BGE.Math.VectorOps.create(center.x, center.y, 0.0)
+    hit = intersectRaySphere(flatOrigin, normalizedFlatDirection, maxDistance * flatLength, flatCenter, radius)
+    if invalid = hit
+      return invalid
+    end if
+    hit.distance = hit.distance / flatLength
+    hit.point = BGE.Math.VectorOps.add(origin, BGE.Math.VectorOps.scale(direction, hit.distance))
+    return hit
+  end function
+
+
+  ' Ray-vs-axis-aligned-box intersection via the classic slab method (Kay/Kajiya): each axis
+  ' narrows [tMin, tMax] to the interval where the ray is within that axis' [lo, hi] slab;
+  ' if the interval ever becomes empty, the ray misses. The entry face's outward normal is
+  ' tracked as whichever axis last raised tMin.
+  '
+  ' @param {BGE.Math.Vector} origin
+  ' @param {BGE.Math.Vector} direction - must be a unit vector
+  ' @param {float} maxDistance
+  ' @param {BGE.Math.Vector} minPoint
+  ' @param {BGE.Math.Vector} maxPoint
+  ' @return {BGE.RaycastHit}
+  function intersectRayAabb3d(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance as float, minPoint as BGE.Math.Vector, maxPoint as BGE.Math.Vector) as BGE.RaycastHit
+    tMin = 0.0
+    tMax = maxDistance
+    normal = BGE.Math.VectorOps.create(0, 0, 0)
+
+    axisOrigins = [origin.x, origin.y, origin.z ?? 0.0]
+    axisDirections = [direction.x, direction.y, direction.z ?? 0.0]
+    axisMins = [minPoint.x, minPoint.y, minPoint.z ?? 0.0]
+    axisMaxes = [maxPoint.x, maxPoint.y, maxPoint.z ?? 0.0]
+    axisNormals = [
+      BGE.Math.VectorOps.create(1, 0, 0),
+      BGE.Math.VectorOps.create(0, 1, 0),
+      BGE.Math.VectorOps.create(0, 0, 1)
+    ]
+
+    for axisIndex = 0 to 2
+      axisOrigin = axisOrigins[axisIndex]
+      axisDirection = axisDirections[axisIndex]
+      lo = axisMins[axisIndex]
+      hi = axisMaxes[axisIndex]
+
+      if Abs(axisDirection) < RAY_EPSILON
+        if axisOrigin < lo or axisOrigin > hi
+          return invalid
+        end if
+      else
+        invDirection = 1.0 / axisDirection
+        t1 = (lo - axisOrigin) * invDirection
+        t2 = (hi - axisOrigin) * invDirection
+        entryNormal = BGE.Math.VectorOps.scale(axisNormals[axisIndex], -1.0)
+        if t1 > t2
+          swapT = t1
+          t1 = t2
+          t2 = swapT
+          entryNormal = axisNormals[axisIndex]
+        end if
+        if t1 > tMin
+          tMin = t1
+          normal = entryNormal
+        end if
+        if t2 < tMax
+          tMax = t2
+        end if
+        if tMin > tMax
+          return invalid
+        end if
+      end if
+    end for
+
+    if BGE.Math.VectorOps.isZero(normal)
+      ' Ray origin started inside the box - no entry face was actually crossed.
+      normal = BGE.Math.VectorOps.create(0, 1, 0)
+    end if
+
+    point = BGE.Math.VectorOps.add(origin, BGE.Math.VectorOps.scale(direction, tMin))
+    return {entity: invalid, collider: invalid, point: point, distance: tMin, normal: normal}
+  end function
+
+
+  ' Ray-vs-axis-aligned-rectangle intersection in the XY plane - z is ignored entirely, by
+  ' flattening the ray to z=0 and widening the box's z-range so the z-axis slab test in
+  ' intersectRayAabb3d() never constrains the result.
+  '
+  ' See intersectRayCircle()'s doc comment for why the flattened direction must be
+  ' renormalized (and maxDistance/distance rescaled to compensate) rather than just
+  ' zeroing z - the same reasoning applies here.
+  '
+  ' @param {BGE.Math.Vector} origin
+  ' @param {BGE.Math.Vector} direction - must be a unit vector
+  ' @param {float} maxDistance
+  ' @param {BGE.Math.Vector} minPoint
+  ' @param {BGE.Math.Vector} maxPoint
+  ' @return {BGE.RaycastHit}
+  function intersectRayAabb2d(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance as float, minPoint as BGE.Math.Vector, maxPoint as BGE.Math.Vector) as BGE.RaycastHit
+    flatLength = Sqr(direction.x * direction.x + direction.y * direction.y)
+    if flatLength < RAY_EPSILON
+      ' Direction is purely along z - the ray never moves in the XY plane at all, so it
+      ' can never newly enter/exit an XY-plane rectangle. Treated as a miss, same
+      ' reasoning as intersectRayCircle()'s equivalent guard.
+      return invalid
+    end if
+    flatOrigin = BGE.Math.VectorOps.create(origin.x, origin.y, 0.0)
+    normalizedFlatDirection = BGE.Math.VectorOps.create(direction.x / flatLength, direction.y / flatLength, 0.0)
+    widenedMin = BGE.Math.VectorOps.create(minPoint.x, minPoint.y, -999999999.0)
+    widenedMax = BGE.Math.VectorOps.create(maxPoint.x, maxPoint.y, 999999999.0)
+    hit = intersectRayAabb3d(flatOrigin, normalizedFlatDirection, maxDistance * flatLength, widenedMin, widenedMax)
+    if invalid = hit
+      return invalid
+    end if
+    hit.distance = hit.distance / flatLength
+    hit.point = BGE.Math.VectorOps.add(origin, BGE.Math.VectorOps.scale(direction, hit.distance))
+    return hit
+  end function
+
+end namespace

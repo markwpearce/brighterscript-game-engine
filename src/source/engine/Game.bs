@@ -6,6 +6,7 @@ import "../utils/parsers/STLParser.bs"
 import "../utils/utils.bs"
 import "Canvas.bs"
 import "colliders/Collider.bs"
+import "colliders/RaycastResult.bs"
 import "controller/ControllerRegistry.bs"
 import "controller/ControllerServer.bs"
 import "controller/ControlMap.bs"
@@ -1709,28 +1710,81 @@ namespace BGE
     ' --------------------------------Begin Raycast Functions----------------------------------------
 
 
-    ' Performs a raycast from a certain location along a vector to find any colliders on that line
+    ' Casts a ray from origin in direction and returns the nearest collider it intersects -
+    ' 2D (CircleCollider/RectangleCollider) and 3D (SphereCollider3d/BoxCollider3d) alike.
+    ' Useful for line-of-sight checks, hitscan weapons, ground/wall detection, AI vision
+    ' cones, and mouse/cursor picking.
     '
-    ' @param {float} sourceX x position of ray start
-    ' @param {float} sourceY y position of ray start
-    ' @param {float} vectorX x value of vector
-    ' @param {float} vectorY y value of vector
-    ' @return {object} {collider: collider, entity: entity} of first collider along the vector, or invalid if no collisions
-    function raycastVector(sourceX as float, sourceY as float, vectorX as float, vectorY as float) as object
-
-      ' TODO Do Raycasts!
-      return invalid
+    ' @param {BGE.Math.Vector} origin - world-space point the ray starts from
+    ' @param {BGE.Math.Vector} direction - world-space direction of the ray (does not need to be pre-normalized)
+    ' @param {float} [maxDistance=10000.0] - the ray stops testing past this distance
+    ' @param {integer} [collidableFlags=&hFFFFFFFF] - only colliders whose memberFlags overlap this mask are tested (see Collider.memberFlags)
+    ' @return {BGE.RaycastHit} the nearest hit, or `invalid` if the ray hit nothing
+    function raycast(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance = 10000.0 as float, collidableFlags = &hFFFFFFFF as integer) as BGE.RaycastHit
+      hits = m.raycastAll(origin, direction, maxDistance, collidableFlags)
+      if hits.count() = 0
+        return invalid
+      end if
+      return hits[0]
     end function
 
-    ' Performs a raycast from a certain location along a n angle to find any colliders on that line
+
+    ' Casts a ray from origin in direction and returns every collider it intersects, sorted
+    ' by ascending distance from origin. See raycast() for the single-nearest-hit variant.
     '
-    ' @param {float} sourceX x position of ray start
-    ' @param {float} sourceY y position of ray start
-    ' @param {float} angle angle of ray
-    ' @return {object} {collider: collider, entity: entity} of first collider along the angle, or invalid if no collisions
-    function raycastAngle(sourceX as float, sourceY as float, angle as float) as object
-      ' TODO Do Raycasts!
-      return invalid
+    ' @param {BGE.Math.Vector} origin - world-space point the ray starts from
+    ' @param {BGE.Math.Vector} direction - world-space direction of the ray (does not need to be pre-normalized)
+    ' @param {float} [maxDistance=10000.0] - the ray stops testing past this distance
+    ' @param {integer} [collidableFlags=&hFFFFFFFF] - only colliders whose memberFlags overlap this mask are tested (see Collider.memberFlags)
+    ' @return {BGE.RaycastHit[]} every hit along the ray, nearest first (empty array if none)
+    function raycastAll(origin as BGE.Math.Vector, direction as BGE.Math.Vector, maxDistance = 10000.0 as float, collidableFlags = &hFFFFFFFF as integer) as BGE.RaycastHit[]
+      normalizedDirection = BGE.Math.VectorOps.getNormalizedCopy(direction)
+      hits = []
+      if BGE.Math.VectorOps.isZero(normalizedDirection)
+        ' A zero-length direction has no well-defined ray - bail out before the entity
+        ' walk rather than let a degenerate direction reach each Collider.raycastCheck().
+        return hits
+      end if
+
+      for i = m.sortedEntities.Count() to 0 step -1
+        entity = invalid as BGE.GameEntity
+        if i = m.sortedEntities.Count()
+          ' magic to process current room first
+          entity = m.currentRoom
+        else
+          entity = m.sortedEntities[i]
+        end if
+        if m.isValidEntity(entity) and entity.enabled
+          for each colliderKey in entity.colliders
+            myCollider = entity.colliders[colliderKey] as Collider
+            if invalid <> myCollider and myCollider.enabled and (myCollider.memberFlags and collidableFlags) <> 0
+              hit = myCollider.raycastCheck(entity.position, origin, normalizedDirection, maxDistance)
+              if invalid <> hit
+                hit.entity = entity
+                hit.collider = myCollider
+                hits.Push(hit)
+              end if
+            end if
+          end for
+        end if
+      end for
+
+      ' Insertion sort by ascending distance. roArray.SortBy() is deliberately not used
+      ' here - it has a confirmed descending-instead-of-ascending numeric sort bug in the
+      ' pinned brs-node@2.6.0 binary this project's `npm run test:ci` runs against (see
+      ' issue #230 and StaticGeometryBSP.spec.bs's own note on the same bug), which would
+      ' make this method's own "nearest first" guarantee untestable under CI.
+      for i = 1 to hits.count() - 1
+        current = hits[i]
+        j = i - 1
+        while j >= 0 and hits[j].distance > current.distance
+          hits[j + 1] = hits[j]
+          j = j - 1
+        end while
+        hits[j + 1] = current
+      end for
+
+      return hits
     end function
 
     ' --------------------------------Begin Object Functions----------------------------------------
