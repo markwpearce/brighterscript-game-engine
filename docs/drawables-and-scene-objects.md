@@ -30,6 +30,7 @@ the `SceneObject` side.
 | `DrawableRectangle`   | `SceneObjectRectangle`   | A filled and/or outlined rectangle.                                         |
 | `DrawableCircle`      | `SceneObjectCircle`      | A filled and/or outlined circle - foreshortens into an ellipse when oriented in 3D. |
 | `DrawableSphere`      | `SceneObjectCircle`      | A `DrawableCircle` that always renders as an undistorted circle, regardless of camera angle. |
+| `DrawableOrientedSprite` | `SceneObjectImage`   | A `Sprite` that swaps its active animation based on the camera's angle to the entity, faking a Doom-style billboard sprite. |
 | `DrawablePolygon`     | `SceneObjectPolygon`     | An arbitrary filled or outlined polygon.                                    |
 | `DrawableLine`        | `SceneObjectLine`        | A single line segment between two points.                                   |
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
@@ -192,6 +193,23 @@ resolves the `matchCamera` default through the camera, so any other explicit `dr
 included) is used exactly as given. `examples/3d`'s CirclesRoom puts a ring of alternating
 `CirclePanel`/`SpherePanel` entities side by side, so orbiting the camera shows the difference
 directly: the circles turn edge-on and thin out, the spheres next to them don't move at all.
+
+## Oriented Sprites (`DrawableOrientedSprite`)
+
+`DrawableOrientedSprite` is a `Sprite` that fakes full 3D orientation the way classic
+Doom/Duke3D monster sprites do: instead of one animation per action, it registers one
+animation per (elevation band, angle bucket) via `addOrientedAnimation()`/
+`addElevationOrientedAnimation()`, and every frame swaps which one is actually playing
+based on the angle between the camera and the entity - `GameEntity.addOrientedSprite`
+builds one. Bucket 0 (of `numAngles`, default 8) is the entity's front facing the
+camera, and buckets increase clockwise as viewed from above; `numElevationBands`
+(default 1, meaning no vertical distinction) optionally adds a second axis for a sheet
+that also draws a distinct top-down or bottom-up view. A bucket's frames can instead be
+declared `{mirrorOf: {elevation, angle}}` to reuse another bucket's art flipped
+horizontally (via a negated `scale.x`, the same mechanism a billboard's mirroring
+already uses) - handy for a sheet that only draws one side profile. See
+`examples/terrain`'s `Guard` entity for a runnable demo, and
+`specs/2026-09-22-oriented-sprite-billboards-design.md` for the full design.
 
 ## SceneObjectDrawMode
 
