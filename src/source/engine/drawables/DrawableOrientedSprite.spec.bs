@@ -1,0 +1,223 @@
+import "../renderer/cameras/Camera2d.bs"
+
+namespace tests
+
+  @suite("BGE.DrawableOrientedSprite")
+  class DrawableOrientedSpriteTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    entity as BGE.GameEntity
+    spriteSheet as roBitmap
+    orientedSprite as BGE.DrawableOrientedSprite
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.entity = new BGE.GameEntity(m.game, {name: "TestEntity"})
+      ' 8 columns (one per angle bucket) x 1 row, 10x10 cells - enough to slice 8
+      ' single-frame walk "animations" for a numAngles=8, numElevationBands=1 sprite.
+      m.spriteSheet = CreateObject("roBitmap", {width: 80, height: 10, alphaEnable: true})
+      m.orientedSprite = new BGE.DrawableOrientedSprite(m.entity, m.spriteSheet, 10, 10)
+    end function
+
+    @describe("addOrientedAnimation")
+
+    @it("registers one real Sprite animation per angle bucket")
+    function _()
+      m.orientedSprite.addOrientedAnimation("walk", [[0], [1], [2], [3], [4], [5], [6], [7]], 10, BGE.SpritePlayMode.Loop)
+      for bucket = 0 to 7
+        name = m.orientedSprite.registeredAnimationNameForTests("walk", 0, bucket)
+        m.assertTrue(invalid <> m.orientedSprite.animations[name], "expected a real Sprite animation registered for bucket " + bucket.toStr())
+      end for
+    end function
+
+    @describe("addOrientedAnimation validation")
+
+    @it("does not register anything if angleFrames.Count() doesn't match numAngles")
+    function _()
+      m.orientedSprite.addOrientedAnimation("walk", [[0], [1]], 10)
+      m.assertEqual("", m.orientedSprite.registeredAnimationNameForTests("walk", 0, 0))
+    end function
+
+    @it("does not register anything if a bucket entry isn't an integer[]")
+    function _()
+      angleFrames = [invalid, [1], [2], [3], [4], [5], [6], [7]]
+      m.orientedSprite.addOrientedAnimation("walk", angleFrames, 10)
+      m.assertEqual("", m.orientedSprite.registeredAnimationNameForTests("walk", 0, 1))
+    end function
+
+    @it("registers every bucket for a numAngles other than the default 8")
+    function _()
+      sheet = CreateObject("roBitmap", {width: 160, height: 10, alphaEnable: true})
+      sprite16 = new BGE.DrawableOrientedSprite(m.entity, sheet, 10, 10, 16)
+      angleFrames = []
+      for i = 0 to 15
+        angleFrames.push([i])
+      end for
+      sprite16.addOrientedAnimation("walk", angleFrames, 10)
+      for bucket = 0 to 15
+        name = sprite16.registeredAnimationNameForTests("walk", 0, bucket)
+        m.assertTrue(invalid <> sprite16.animations[name], "expected a real Sprite animation registered for bucket " + bucket.toStr())
+      end for
+    end function
+
+    @describe("addElevationOrientedAnimation")
+
+    @it("registers a real Sprite animation for every elevation band x angle bucket cell")
+    function _()
+      sheet = CreateObject("roBitmap", {width: 80, height: 30, alphaEnable: true})
+      sprite3Bands = new BGE.DrawableOrientedSprite(m.entity, sheet, 10, 10, 8, 3)
+      elevationBands = [
+        [[0], [1], [2], [3], [4], [5], [6], [7]]
+        [[8], [9], [10], [11], [12], [13], [14], [15]]
+        [[16], [17], [18], [19], [20], [21], [22], [23]]
+      ]
+      sprite3Bands.addElevationOrientedAnimation("walk", elevationBands, 10)
+      for band = 0 to 2
+        for bucket = 0 to 7
+          name = sprite3Bands.registeredAnimationNameForTests("walk", band, bucket)
+          m.assertTrue(invalid <> sprite3Bands.animations[name], "expected a real Sprite animation registered for band " + band.toStr() + " bucket " + bucket.toStr())
+        end for
+      end for
+    end function
+
+    @it("does not register anything if elevationBands.Count() doesn't match numElevationBands")
+    function _()
+      sheet = CreateObject("roBitmap", {width: 80, height: 20, alphaEnable: true})
+      sprite3Bands = new BGE.DrawableOrientedSprite(m.entity, sheet, 10, 10, 8, 3)
+      elevationBands = [
+        [[0], [1], [2], [3], [4], [5], [6], [7]]
+        [[8], [9], [10], [11], [12], [13], [14], [15]]
+      ]
+      sprite3Bands.addElevationOrientedAnimation("walk", elevationBands, 10)
+      m.assertEqual("", sprite3Bands.registeredAnimationNameForTests("walk", 0, 0))
+    end function
+
+    @describe("computeAngleBucket")
+
+    @it("is bucket 0 when the camera is directly in front of the entity's facing")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.entity.rotation.y = 0
+      camera = new BGE.Camera3d()
+      ' Entity facing (yaw=0) is (0,0,-1) (see Camera3d.rotate's convention) - so
+      ' "directly in front" is the camera positioned further along -Z from the entity.
+      camera.position = BGE.Math.VectorOps.create(0, 0, -100)
+      m.assertEqual(0, m.orientedSprite.computeAngleBucket(camera))
+    end function
+
+    @it("moves to the next bucket as the camera orbits by one bucket's worth of angle")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.entity.rotation.y = 0
+      camera = new BGE.Camera3d()
+      bucketAngle = (2 * BGE.Math.PI) / 8
+      ' Orbit 1.2 buckets clockwise from "directly in front" (camera at -Z) - well inside
+      ' bucket 1's range (22.5-67.5 degrees), not near either boundary, so this isn't
+      ' sensitive to floating-point rounding at a boundary.
+      angle = 1.2 * bucketAngle
+      camera.position = BGE.Math.VectorOps.create(100 * sin(angle), 0, -100 * cos(angle))
+      m.assertEqual(1, m.orientedSprite.computeAngleBucket(camera))
+    end function
+
+    @it("wraps back to bucket 0 for a camera almost a full turn around")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.entity.rotation.y = 0
+      camera = new BGE.Camera3d()
+      bucketAngle = (2 * BGE.Math.PI) / 8
+      angle = -0.4 * bucketAngle ' just short of a full turn back the other way
+      camera.position = BGE.Math.VectorOps.create(100 * sin(angle), 0, -100 * cos(angle))
+      m.assertEqual(0, m.orientedSprite.computeAngleBucket(camera))
+    end function
+
+    @it("always resolves to bucket 0 for a non-Camera3d camera")
+    function _()
+      camera = new BGE.Camera2d()
+      m.assertEqual(0, m.orientedSprite.computeAngleBucket(camera))
+    end function
+
+    @describe("computeElevationBand")
+
+    @it("always resolves to band 0 when numElevationBands is 1 (the default)")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      camera = new BGE.Camera3d()
+      camera.position = BGE.Math.VectorOps.create(0, 500, 0) ' directly overhead
+      m.assertEqual(0, m.orientedSprite.computeElevationBand(camera))
+    end function
+
+    @it("resolves to the top band when the camera is directly overhead, with 3 bands")
+    function _()
+      m.orientedSprite.numElevationBands = 3
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      camera = new BGE.Camera3d()
+      camera.position = BGE.Math.VectorOps.create(0, 500, 0)
+      m.assertEqual(2, m.orientedSprite.computeElevationBand(camera))
+    end function
+
+    @it("resolves to the bottom band when the camera is directly below, with 3 bands")
+    function _()
+      m.orientedSprite.numElevationBands = 3
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      camera = new BGE.Camera3d()
+      camera.position = BGE.Math.VectorOps.create(0, -500, 0)
+      m.assertEqual(0, m.orientedSprite.computeElevationBand(camera))
+    end function
+
+    @it("resolves to the middle band when the camera is level with the entity, with 3 bands")
+    function _()
+      m.orientedSprite.numElevationBands = 3
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      camera = new BGE.Camera3d()
+      camera.position = BGE.Math.VectorOps.create(0, 0, -500)
+      m.assertEqual(1, m.orientedSprite.computeElevationBand(camera))
+    end function
+
+    @describe("playOrientedAnimation")
+
+    @it("logs an error and does not set an active animation for an unregistered baseName")
+    function _()
+      m.orientedSprite.playOrientedAnimation("nonexistent")
+      m.assertInvalid(m.orientedSprite.activeAnimation)
+    end function
+
+    @it("plays the bucket 0 animation immediately when the camera is directly in front")
+    function _()
+      m.game.canvas.renderer.setCamera(new BGE.Camera3d())
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.entity.rotation.y = 0
+      m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(0, 0, -100)
+
+      m.orientedSprite.addOrientedAnimation("walk", [[0], [1], [2], [3], [4], [5], [6], [7]], 10)
+      m.orientedSprite.playOrientedAnimation("walk")
+      m.orientedSprite.update()
+
+      expected = m.orientedSprite.registeredAnimationNameForTests("walk", 0, 0)
+      m.assertEqual(expected, m.orientedSprite.activeAnimation.name)
+    end function
+
+    @it("switches to the new bucket's animation as the camera moves to a different bucket")
+    function _()
+      m.game.canvas.renderer.setCamera(new BGE.Camera3d())
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.entity.rotation.y = 0
+      m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(0, 0, -100)
+
+      m.orientedSprite.addOrientedAnimation("walk", [[0], [1], [2], [3], [4], [5], [6], [7]], 10)
+      m.orientedSprite.playOrientedAnimation("walk")
+      m.orientedSprite.update()
+
+      bucketAngle = (2 * BGE.Math.PI) / 8
+      ' 1.2 buckets, not 1.5 - 1.5 lands exactly on the bucket 1/2 boundary (ambiguous
+      ' under floating-point rounding), while 1.2 is well inside bucket 1's range.
+      angle = 1.2 * bucketAngle
+      m.game.canvas.renderer.camera.position = BGE.Math.VectorOps.create(100 * sin(angle), 0, -100 * cos(angle))
+      m.orientedSprite.update()
+
+      expected = m.orientedSprite.registeredAnimationNameForTests("walk", 0, 1)
+      m.assertEqual(expected, m.orientedSprite.activeAnimation.name)
+    end function
+
+  end class
+
+end namespace

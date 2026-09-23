@@ -1,0 +1,358 @@
+import "../../roku_modules/rodash/rodash.d.bs"
+import "../debug/LogLevel.bs"
+import "../GameEntity.bs"
+import "../renderer/cameras/Camera.bs"
+import "../renderer/cameras/Camera3d.bs"
+import "../../math/math.bs"
+import "../../math/vector.bs"
+import "Sprite.bs"
+
+namespace BGE
+
+  ' One resolved angle/elevation bucket: its own registered Sprite animation name.
+  class OrientedSpriteBucket
+    animationName as string
+  end class
+
+  ' A Sprite that swaps which named animation is active based on the angle between the
+  ' camera and this entity - the classic Doom/Duke3D "billboard sprite" technique for
+  ' faking full 3D orientation with pre-rendered 2D views. See
+  ' docs/drawables-and-scene-objects.md for a full walkthrough and
+  ' specs/2026-09-22-oriented-sprite-billboards-design.md for the design.
+  class DrawableOrientedSprite extends Sprite
+
+    ' Number of horizontal (azimuth) view buckets around the entity. Bucket 0 is the
+    ' entity's front facing the camera; buckets increase clockwise (viewed from above).
+    numAngles as integer = 8
+
+    ' Number of vertical (elevation) view bands, from the camera looking up at the
+    ' entity (band 0) to looking down on it (band numElevationBands - 1). The default
+    ' of 1 means no vertical distinction at all - every elevation resolves to band 0.
+    numElevationBands as integer = 1
+
+    ' baseName -> (numElevationBands x numAngles) array of OrientedSpriteBucket
+    private orientedAnimations as roAssociativeArray = {}
+    private activeBaseAnimationName as string = ""
+    private currentElevationBand as integer = -1
+    private currentAngleBucket as integer = -1
+
+    sub new(owner as GameEntity, spriteSheet as ifDraw2d, cellWidth as integer, cellHeight as integer, numAngles = 8 as integer, numElevationBands = 1 as integer, args = {} as roAssociativeArray)
+      super(owner, spriteSheet, cellWidth, cellHeight, args)
+      m.numAngles = numAngles
+      m.numElevationBands = numElevationBands
+    end sub
+
+    ' Registers one animation per angle bucket under `baseName` (e.g. "walk"), for the
+    ' single elevation band case (the common one - a sheet with no distinct top-down/
+    ' bottom-up art). Sugar for addElevationOrientedAnimation with a single-band wrapper;
+    ' errors (via addElevationOrientedAnimation's own validation) if numElevationBands
+    ' isn't actually 1.
+    '
+    ' @param {string} baseName
+    ' @param angleFrames - array of exactly numAngles entries, each an integer[] of
+    '   frame indexes for that bucket's own art. Every bucket needs its own real art -
+    '   there is no mirroring/flipping support (see issue #104's design notes for why).
+    ' @param {integer} frameRate
+    ' @param [playMode="loop"]
+    function addOrientedAnimation(baseName as string, angleFrames as integer[][], frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
+      m.addElevationOrientedAnimation(baseName, [angleFrames], frameRate, playMode)
+    end function
+
+    ' Registers the full elevation x angle grid under `baseName`. See
+    ' specs/2026-09-22-oriented-sprite-billboards-design.md for the full bucket-index
+    ' semantics.
+    '
+    ' @param {string} baseName
+    ' @param elevationBands - array of exactly numElevationBands entries; each entry is
+    '   itself an angleFrames array in the same shape addOrientedAnimation takes.
+    ' @param {integer} frameRate
+    ' @param [playMode="loop"]
+    function addElevationOrientedAnimation(baseName as string, elevationBands as integer[][][], frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
+      ' Re-registering an already-registered baseName (e.g. reloading a skin) replaces it
+      ' cleanly: frees up its previously registered internal Sprite animation names (so
+      ' addAnimation below doesn't fail on a duplicate name) and stops it from being the
+      ' active animation, rather than leaving activeBaseAnimationName dangling on a grid
+      ' entry this call is about to delete.
+      m.removeOrientedAnimation(baseName)
+
+      if elevationBands.Count() <> m.numElevationBands
+        m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' expected ${m.numElevationBands.toStr()} elevation band(s), got ${elevationBands.Count().toStr()}`, BGE.Debug.LogLevel.error)
+        return
+      end if
+
+      grid = []
+      for e = 0 to m.numElevationBands - 1
+        angleFrames = elevationBands[e]
+        if angleFrames.Count() <> m.numAngles
+          m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} expected ${m.numAngles.toStr()} angle bucket(s), got ${angleFrames.Count().toStr()}`, BGE.Debug.LogLevel.error)
+          return
+        end if
+        grid.push([])
+      end for
+
+      ' Track animation names added during this call so we can clean them up if registration fails
+      addedAnimationNames = []
+
+      for e = 0 to m.numElevationBands - 1
+        angleFrames = elevationBands[e]
+        for a = 0 to m.numAngles - 1
+          bucketEntry = angleFrames[a]
+          if not rodash.isArray(bucketEntry)
+            m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} angle bucket ${a.toStr()} must be an integer[] of frame indexes`, BGE.Debug.LogLevel.error)
+            m.cleanupAddedAnimations(addedAnimationNames)
+            return
+          end if
+          animName = m.internalAnimationName(baseName, e, a)
+          result = m.addAnimation(animName, bucketEntry, frameRate, playMode)
+          if invalid = result
+            ' addAnimation failed (name already exists) - clean up and bail
+            m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' failed to add animation '${animName}' (name may already exist)`, BGE.Debug.LogLevel.error)
+            m.cleanupAddedAnimations(addedAnimationNames)
+            return
+          end if
+          addedAnimationNames.push(animName)
+          bucket = new OrientedSpriteBucket()
+          bucket.animationName = animName
+          grid[e].push(bucket)
+        end for
+      end for
+
+      m.orientedAnimations[baseName] = grid
+    end function
+
+    ' Removes a previously registered baseName's internal Sprite animations and grid
+    ' entry, if any, and clears it as the active animation if it was playing.
+    private sub removeOrientedAnimation(baseName as string)
+      grid = m.orientedAnimations[baseName]
+      if invalid <> grid
+        for each row in grid
+          for each bucket in row
+            if invalid <> bucket
+              m.animations.Delete(bucket.animationName)
+            end if
+          end for
+        end for
+        m.orientedAnimations.Delete(baseName)
+      end if
+      if m.activeBaseAnimationName = baseName
+        m.activeBaseAnimationName = ""
+        m.currentElevationBand = -1
+        m.currentAngleBucket = -1
+      end if
+    end sub
+
+    private sub cleanupAddedAnimations(addedAnimationNames as string[])
+      for each animName in addedAnimationNames
+        m.animations.Delete(animName)
+      end for
+    end sub
+
+    private function internalAnimationName(baseName as string, elevationBand as integer, angleBucket as integer) as string
+      return baseName + "_e" + elevationBand.toStr() + "_a" + angleBucket.toStr()
+    end function
+
+    ' For tests only - the underlying Sprite animation name a bucket resolves to. Mirrors
+    ' Sprite's own "for tests only" accessor convention (see rawAnimationClockMsForTests()).
+    '
+    ' @param {string} baseName
+    ' @param {integer} elevationBand
+    ' @param {integer} angleBucket
+    ' @return {string}
+    function registeredAnimationNameForTests(baseName as string, elevationBand as integer, angleBucket as integer) as string
+      grid = m.orientedAnimations[baseName]
+      if invalid = grid
+        return ""
+      end if
+      bucket = grid[elevationBand][angleBucket]
+      if invalid = bucket
+        return ""
+      end if
+      return bucket.animationName
+    end function
+
+    ' Debug helper - like Sprite.getAnimationsDebugInfo(), but grouped by baseName and
+    ' (elevationBand, angleBucket) instead of raw internal Sprite animation names (e.g.
+    ' "walk_e0_a3") - much easier to check "is the SE bucket for 'walk' really pointing
+    ' at the sheet region I expect" than wading through synthesized names by hand. See
+    ' logOrientedAnimationsDebugInfo() to print this as JSON instead of inspecting it
+    ' directly.
+    '
+    ' @return {roAssociativeArray}
+    function getOrientedAnimationsDebugInfo() as roAssociativeArray
+      baseNamesDump = {}
+      for each baseName in m.orientedAnimations
+        grid = m.orientedAnimations[baseName]
+        bandsDump = []
+        for e = 0 to grid.Count() - 1
+          row = grid[e]
+          bucketsDump = []
+          for a = 0 to row.Count() - 1
+            bucket = row[a]
+            anim = m.animations[bucket.animationName]
+            framesDump = []
+            for each frameIndex in anim.frameList
+              framesDump.push(m.getFrameRegionDebugInfo(frameIndex))
+            end for
+            bucketsDump.push({
+              angleBucket: a,
+              animationName: bucket.animationName,
+              frameRate: anim.frameRate,
+              playMode: anim.playMode,
+              frames: framesDump
+            })
+          end for
+          bandsDump.push({elevationBand: e, angleBuckets: bucketsDump})
+        end for
+        baseNamesDump[baseName] = bandsDump
+      end for
+      return {
+        numAngles: m.numAngles,
+        numElevationBands: m.numElevationBands,
+        spriteSheetWidth: m.spriteSheet.GetWidth(),
+        spriteSheetHeight: m.spriteSheet.GetHeight(),
+        cellWidth: m.cellWidth,
+        cellHeight: m.cellHeight,
+        animations: baseNamesDump
+      }
+    end function
+
+    ' Prints getOrientedAnimationsDebugInfo() as JSON via this sprite's owner Game.log().
+    sub logOrientedAnimationsDebugInfo()
+      m.owner.game.log(FormatJson(m.getOrientedAnimationsDebugInfo()), BGE.Debug.LogLevel.info)
+    end sub
+
+    ' Computes which of numAngles horizontal view buckets is currently visible, from the
+    ' angle between this entity's facing (rotation.y) and the direction from this entity
+    ' to the camera. Bucket 0 = the entity's front is facing the camera; buckets increase
+    ' clockwise as viewed from above. Always 0 for a camera that isn't a Camera3d (a 2D
+    ' camera has no facing/orbit concept).
+    '
+    ' @param {BGE.Camera} camera
+    ' @param [toCamera] - the vector from the camera to this entity, if already computed
+    '   this frame (e.g. by update()) - avoids recomputing it when both this and
+    '   computeElevationBand() are called for the same camera/frame. Computed internally
+    '   from `camera` when omitted.
+    ' @return {integer}
+    function computeAngleBucket(camera as BGE.Camera, toCamera = invalid as BGE.Math.Vector) as integer
+      if invalid = toCamera
+        toCamera = m.computeToCamera(camera)
+      end if
+      if invalid = toCamera
+        return 0
+      end if
+      ' Matches Camera3d.rotate()'s own yaw convention: a yaw of `theta` points the
+      ' default forward vector (0,0,-1) at (sin(theta), 0, -cos(theta)), so the inverse
+      ' (a direction -> yaw) is Atan2(x, -z).
+      angleToCamera = BGE.Math.Atan2(toCamera.x, -toCamera.z)
+      relative = BGE.Math.constrainAngle(angleToCamera - m.owner.rotation.y)
+      bucketSize = (2 * BGE.Math.PI) / m.numAngles
+      bucket = Int((relative + bucketSize / 2) / bucketSize) mod m.numAngles
+      return Int(bucket)
+    end function
+
+    ' Computes which of numElevationBands vertical view bands is currently visible, from
+    ' the camera's pitch relative to this entity - band 0 is the camera below the entity
+    ' looking up at it, band numElevationBands - 1 is the camera above looking down.
+    ' Always 0 if numElevationBands is 1 (no vertical distinction requested) or the
+    ' camera isn't a Camera3d.
+    '
+    ' @param {BGE.Camera} camera
+    ' @param [toCamera] - the vector from the camera to this entity, if already computed
+    '   this frame (e.g. by update()) - avoids recomputing it when both this and
+    '   computeAngleBucket() are called for the same camera/frame. Computed internally
+    '   from `camera` when omitted.
+    ' @return {integer}
+    function computeElevationBand(camera as BGE.Camera, toCamera = invalid as BGE.Math.Vector) as integer
+      if m.numElevationBands = 1
+        return 0
+      end if
+      if invalid = toCamera
+        toCamera = m.computeToCamera(camera)
+      end if
+      if invalid = toCamera
+        return 0
+      end if
+      horizontalDistance = Sqr(toCamera.x * toCamera.x + toCamera.z * toCamera.z)
+      pitch = BGE.Math.Atan2(toCamera.y, horizontalDistance)
+      bandSize = BGE.Math.PI / m.numElevationBands
+      band = Int((pitch + BGE.Math.HALF_PI) / bandSize)
+      if band < 0
+        band = 0
+      else if band > m.numElevationBands - 1
+        band = m.numElevationBands - 1
+      end if
+      return band
+    end function
+
+    ' Selects which base animation is currently playing, analogous to Sprite.
+    ' playAnimation - but this picks among the (numElevationBands x numAngles)
+    ' per-bucket animations registered for baseName via addOrientedAnimation /
+    ' addElevationOrientedAnimation, resolving which one to actually play every
+    ' update() from the camera's angle to this entity.
+    '
+    ' @param {string} baseName
+    sub playOrientedAnimation(baseName as string)
+      if invalid = m.orientedAnimations[baseName]
+        m.owner.game.log(`DrawableOrientedSprite.playOrientedAnimation() - No oriented animation named '${baseName}' exists`, BGE.Debug.LogLevel.error)
+        return
+      end if
+      m.activeBaseAnimationName = baseName
+      ' Force the next update() to resolve and apply a bucket even if the camera hasn't
+      ' moved since the last call - switching baseName should always take effect
+      ' immediately, matching Sprite.playAnimation()'s applies-right-away contract.
+      m.currentElevationBand = -1
+      m.currentAngleBucket = -1
+    end sub
+
+    ' The vector from the camera to this entity, or invalid if `camera` isn't a Camera3d
+    ' (a 2D camera has no facing/orbit concept). Shared by computeAngleBucket() and
+    ' computeElevationBand() so update() only computes it once per frame.
+    private function computeToCamera(camera as BGE.Camera) as BGE.Math.Vector
+      if camera.name <> "Camera3d"
+        return invalid
+      end if
+      camera3d = camera as BGE.Camera3d
+      return BGE.Math.VectorOps.subtract(camera3d.position, m.owner.position)
+    end function
+
+    override sub update()
+      ' Guard against invalid, not just "": AnimatedImage.new() calls m.update() during
+      ' construction, before this class's own field initializers (activeBaseAnimationName
+      ' = "") have run, so m.activeBaseAnimationName is still unset (invalid) at that
+      ' point - comparing invalid <> "" directly would crash.
+      if invalid <> m.activeBaseAnimationName and m.activeBaseAnimationName <> ""
+        grid = m.orientedAnimations[m.activeBaseAnimationName]
+        if invalid <> grid
+          camera = m.owner.game.canvas.renderer.camera
+          toCamera = m.computeToCamera(camera)
+          elevationBand = m.computeElevationBand(camera, toCamera)
+          angleBucket = m.computeAngleBucket(camera, toCamera)
+          if elevationBand <> m.currentElevationBand or angleBucket <> m.currentAngleBucket
+            m.currentElevationBand = elevationBand
+            m.currentAngleBucket = angleBucket
+            ' Clamp to the grid's own bounds rather than trusting numAngles/
+            ' numElevationBands still match it - either can be changed after this
+            ' baseName was registered, which would otherwise index out of bounds.
+            clampedElevationBand = elevationBand
+            if clampedElevationBand > grid.Count() - 1
+              clampedElevationBand = grid.Count() - 1
+            end if
+            row = grid[clampedElevationBand]
+            clampedAngleBucket = angleBucket
+            if clampedAngleBucket > row.Count() - 1
+              clampedAngleBucket = row.Count() - 1
+            end if
+            bucket = row[clampedAngleBucket]
+            ' Not `super.playAnimation` - this class doesn't override playAnimation, so
+            ' there's no ancestor call to make; the inherited Sprite.playAnimation is just
+            ' a normal method here.
+            m.playAnimation(bucket.animationName)
+          end if
+        end if
+      end if
+      super.update()
+    end sub
+
+  end class
+
+end namespace

@@ -1,0 +1,131 @@
+' A Doom-style oriented-sprite character built from the Helix character spritesheet
+' (helix_full_sheet.png, 640x1024, 10 cols x 16 rows of 64x64 cells - NOT 8 cols of
+' 80x64 as the sheet's own dimensions might suggest at a glance; only the first 8 of
+' each row's 10 columns hold real art, the last 2 are blank padding. Confirmed by
+' cropping the sheet at both cell sizes: 80px-wide crops split frames across their
+' true 64px boundary, cutting each character in half) - demonstrates
+' DrawableOrientedSprite (issue #104). Sheet rows 0-7 are a single-frame-per-row idle
+' pose block, rows 8-15 an 8-frame-per-row walk cycle block; both blocks use the same
+' per-row compass order (row 0 of each block = SW, then S, SE, E, NE, N, NW, W), per
+' the asset's own documentation. No mirroring is needed - all 8 directions have real
+' art in both blocks.
+class Guard extends BGE.GameEntity
+
+  sprite as BGE.DrawableOrientedSprite
+
+  ' Patrol state - only set up when onCreate() is given a `patrolTo` arg (see
+  ' GuardPlacements.bs). invalid patrolEnd means "not patrolling, stand idle".
+  private patrolStart as BGE.Math.Vector
+  private patrolEnd as BGE.Math.Vector
+  private patrolSpeed as float = 0
+  private patrolForward as boolean = true
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Guard"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.position = BGE.Math.VectorOps.create(args.x, 0, args.z)
+    m.rotation = BGE.Math.VectorOps.create(0, BGE.Math.DegreesToRadians(args.rotY), 0)
+
+    sheet = m.game.getBitmap("guardSheet")
+    ' Row-major cell index for sheet row r, column c - the sheet is actually 10 columns
+    ' wide per row (64px cells), even though only the first 8 columns hold real
+    ' animation frames (see the class doc comment above), so the stride is 10, not 8.
+    walkRow = function(r as integer) as integer[]
+      frames = []
+      for c = 0 to 7
+        frames.push(r * 10 + c)
+      end for
+      return frames
+    end function
+
+    ' Bucket 0 = front (facing the camera, i.e. facing south), proceeding clockwise
+    ' viewed from above - front, front-right, right, back-right, back, back-left, left,
+    ' front-left. Each block's rows are ordered SW,S,SE,E,NE,N,NW,W starting at its own
+    ' first row, so "front" (S) is the block's row + 1 and "front-left" (SW) wraps back
+    ' to the block's own first row.
+    walkAngleFrames = [
+      walkRow(9) ' S  (front)
+      walkRow(10) ' SE (front-right)
+      walkRow(11) ' E  (right)
+      walkRow(12) ' NE (back-right)
+      walkRow(13) ' N  (back)
+      walkRow(14) ' NW (back-left)
+      walkRow(15) ' W  (left)
+      walkRow(8) ' SW (front-left)
+    ]
+    ' Each idle pose is the single frame at column 0 of the matching walk row.
+    idleAngleFrames = [
+      [walkRow(1)[0]] ' S  (front)
+      [walkRow(2)[0]] ' SE (front-right)
+      [walkRow(3)[0]] ' E  (right)
+      [walkRow(4)[0]] ' NE (back-right)
+      [walkRow(5)[0]] ' N  (back)
+      [walkRow(6)[0]] ' NW (back-left)
+      [walkRow(7)[0]] ' W  (left)
+      [walkRow(0)[0]] ' SW (front-left)
+    ]
+
+    m.sprite = m.addOrientedSprite("visual", sheet, 64, 64, 8, 1, {
+      drawMode: BGE.SceneObjectDrawMode.directScaled,
+      banksWithCameraRoll: true
+    })
+    m.sprite.setAnchor(0.5, 1.0)
+    m.sprite.addOrientedAnimation("walk", walkAngleFrames, 8, BGE.SpritePlayMode.Loop)
+    m.sprite.addOrientedAnimation("idle", idleAngleFrames, 1, BGE.SpritePlayMode.Loop)
+
+    if invalid <> args.patrolTo
+      m.patrolStart = BGE.Math.VectorOps.copy(m.position)
+      m.patrolEnd = BGE.Math.VectorOps.create(args.patrolTo.x, 0, args.patrolTo.z)
+      m.patrolSpeed = args.patrolSpeed
+      m.faceTowards(m.patrolEnd)
+      m.sprite.playOrientedAnimation("walk")
+      m.sprite.logOrientedAnimationsDebugInfo()
+    else
+      m.sprite.playOrientedAnimation("idle")
+    end if
+
+
+  end sub
+
+  override sub onUpdate(dt as float)
+    if invalid = m.patrolEnd
+      return
+    end if
+
+    target = m.patrolTarget()
+    toTarget = BGE.Math.VectorOps.subtract(target, m.position)
+    distanceRemaining = BGE.Math.VectorOps.length(toTarget)
+    moveDistance = m.patrolSpeed * dt
+
+    if moveDistance >= distanceRemaining
+      ' Reached this leg's end - snap to it exactly (rather than overshooting) and
+      ' turn around to walk the other leg.
+      m.position = BGE.Math.VectorOps.copy(target)
+      m.patrolForward = not m.patrolForward
+      m.faceTowards(m.patrolTarget())
+    else
+      direction = BGE.Math.VectorOps.scale(toTarget, 1.0 / distanceRemaining)
+      m.position = BGE.Math.VectorOps.add(m.position, BGE.Math.VectorOps.scale(direction, moveDistance))
+    end if
+  end sub
+
+  private function patrolTarget() as BGE.Math.Vector
+    if m.patrolForward
+      return m.patrolEnd
+    end if
+    return m.patrolStart
+  end function
+
+  ' Faces the direction of travel, matching the yaw convention
+  ' DrawableOrientedSprite.computeAngleBucket() uses to resolve the camera's own
+  ' direction (forward = (sin(yaw), 0, -cos(yaw)), so a direction -> yaw is
+  ' Atan2(x, -z)).
+  private sub faceTowards(target as BGE.Math.Vector)
+    direction = BGE.Math.VectorOps.subtract(target, m.position)
+    m.rotation.y = BGE.Math.Atan2(direction.x, -direction.z)
+  end sub
+
+end class
