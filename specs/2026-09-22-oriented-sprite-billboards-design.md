@@ -22,8 +22,6 @@ texture selection instead.
 - Zero changes to `SceneObjectImage`/`SceneObject` — the whole feature lives in the `Drawable`
   layer by reusing `Sprite.addAnimation`/`playAnimation` and `AnimatedImage`'s existing
   time-based frame indexing unmodified.
-- Optional mirroring: one angle bucket's art can be declared "the mirror of" another bucket's,
-  so a sheet that only draws (say) a right-side profile doesn't also need a left-side profile.
 - A runnable demo: a character entity in `examples/terrain`'s `WorldRoom`, built from the
   supplied Helix spritesheet, that visibly swaps facing as the free-fly camera orbits it.
 
@@ -34,8 +32,18 @@ texture selection instead.
   it; nothing about the design below forecloses it later.
 - Any change to `Image`/`AnimatedImage`/`Sprite`/`SceneObjectImage` themselves; this is purely
   additive.
-- Resolving the Helix sheet's ambiguous top "idle" block (see Appendix) — the demo uses frame 0
-  of each walk-direction row as that direction's idle pose instead.
+- Mirroring one angle bucket's art to serve as another's. This was originally a goal (a sheet
+  that only draws, say, a right-side profile wouldn't also need a left-side profile), gated on
+  confirming that a negative `Drawable.scale.x` actually produces a horizontal flip through
+  `SceneObjectBillboard`'s `directScaled` blit path. That confirmation never happened during
+  implementation, and a final-review code read found it does **not** work as hoped:
+  `drawRegionAsRotatedQuad()` derives its blit scale/rotation from `BGE.Math.CornerPoints`
+  magnitude helpers (`getAvgWidth()`, `getAvgRotation()`), which discard the sign a negative
+  `scale.x` would carry through the quad's world-space corners — the result is a
+  180°-rotated-and-mislocated render, not a horizontal mirror. Per this goal's own fallback,
+  `mirrorOf` was removed from the public API rather than shipped broken; every angle/elevation
+  bucket needs its own real art. A real fix belongs in `SceneObjectBillboard` (out of scope for
+  this feature, and not verifiable without on-device testing) — filed as issue #237.
 
 ## Design
 
@@ -55,23 +63,20 @@ Public API:
 ' Sugar for addElevationOrientedAnimation(baseName, [angleFrames], frameRate, playMode).
 ' `angleFrames` must have exactly `numAngles` entries, ordered starting at bucket 0 = the
 ' entity's front (camera looking directly at the entity's forward side) and proceeding
-' clockwise (viewed from above) through the remaining buckets. Each entry is either:
-'   - an integer[] of frame indexes (this bucket's own art), or
-'   - {mirrorOf: {elevation: E, angle: A}} - reuse another bucket's frames, flipped
-'     horizontally, for buckets whose sheet doesn't draw a distinct view (e.g. only a right
-'     profile is drawn; the left profile bucket mirrors it).
-' Throws a clear error if angleFrames.Count() <> numAngles, or if a mirrorOf target is not a
-' real (non-mirrored) bucket registered in this same call.
+' clockwise (viewed from above) through the remaining buckets. Each entry is an integer[] of
+' frame indexes - that bucket's own art. Every bucket needs real art; there is no mirroring
+' (see Non-goals).
+' Logs an error and registers nothing if angleFrames.Count() <> numAngles, or if any entry
+' isn't an integer[].
 function addOrientedAnimation(baseName as string, angleFrames as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
 
 ' Registers the full elevation x angle grid under `baseName`. `elevationBands` must have
 ' exactly `numElevationBands` entries; each entry is itself an `angleFrames` array in the same
-' shape addOrientedAnimation takes (numAngles entries, each an integer[] or a mirrorOf tuple).
+' shape addOrientedAnimation takes (numAngles entries, each an integer[]).
 ' Elevation band 0 = steepest "camera below the entity, looking up at it"; band
 ' numElevationBands - 1 = steepest "camera above the entity, looking down on it"; bands split
 ' the -90..+90 degree pitch range into equal slices (see Non-goals).
-' Validates every band's angleFrames the same way addOrientedAnimation does, plus that every
-' mirrorOf tuple's `elevation` is a valid band index.
+' Validates every band's angleFrames the same way addOrientedAnimation does.
 function addElevationOrientedAnimation(baseName as string, elevationBands as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
 
 ' Selects which base animation is currently playing (analogous to Sprite.playAnimation, but
@@ -82,11 +87,9 @@ sub playOrientedAnimation(baseName as string)
 ```
 
 Internal state: `orientedAnimations` (baseName -> a `numElevationBands`-length array of
-`numAngles`-length arrays, each cell either a real internal animation name or
-`{mirrorOf: {elevation, angle}}`), `activeBaseAnimationName`, `currentElevationBand`/
-`currentAngleBucket` (both start invalid so the first `update()` always resolves a real
-bucket), `baseScaleX` (the scale magnitude to restore/negate — captured once, on construction,
-from the drawable's own `scale.x`).
+`numAngles`-length arrays, each cell a real internal animation name), `activeBaseAnimationName`,
+`currentElevationBand`/`currentAngleBucket` (both start invalid so the first `update()` always
+resolves a real bucket).
 
 `override sub update()`:
 
@@ -99,9 +102,8 @@ override sub update()
     if elevationBand <> m.currentElevationBand or angleBucket <> m.currentAngleBucket
       m.currentElevationBand = elevationBand
       m.currentAngleBucket = angleBucket
-      entry = m.resolveBucket(m.activeBaseAnimationName, elevationBand, angleBucket)  ' follows a mirrorOf to its source bucket
-      super.playAnimation(entry.animationName)
-      m.scale.x = entry.isMirrored ? -m.baseScaleX : m.baseScaleX
+      bucket = m.orientedAnimations[m.activeBaseAnimationName][elevationBand][angleBucket]
+      m.playAnimation(bucket.animationName)
     end if
   end if
   super.update()
@@ -145,41 +147,32 @@ delegating to the existing `Sprite`/`AnimatedImage` update logic, that existing 
 does the right thing unmodified — a bucket change looks exactly like any other animation switch
 already supported today.
 
-Mirroring reuses the engine's existing negative-`scale.x`-flips-a-billboard behavior (already
-threaded through `SceneObjectBillboard`'s direct/`directScaled` draw path via
-`m.drawable.scale.x`), so no new draw-time code is needed for it either. This will be confirmed
-against a real `directScaled` billboard during implementation (TDD) since the existing code
-paths that reference `drawable.scale.x` were written for scaling, not explicitly documented as
-a flip mechanism — if `DrawTransformedObject` doesn't already treat a negative scale as a
-horizontal flip on this engine's supported Roku targets, mirroring falls back to requiring
-distinct art per bucket (i.e. `mirrorOf` becomes unavailable) and that finding gets folded back
-into this spec before the plan is written.
+Mirroring was originally planned to reuse the engine's negative-`scale.x`-flips-a-billboard
+behavior threaded through `SceneObjectBillboard`'s `directScaled` draw path — see Non-goals for
+why that turned out not to work and was dropped rather than shipped broken.
 
 ### Error handling
 
 - `addOrientedAnimation`/`addElevationOrientedAnimation`: a wrong `angleFrames.Count()` (or
-  wrong `elevationBands.Count()`), or a `mirrorOf` target that doesn't point at a real
-  non-mirrored bucket registered in the same call (including an out-of-range `elevation`
-  index), are all hard runtime errors with a message naming the offending
-  bucket/band/baseName (matching this codebase's existing fail-fast validation style rather
-  than silently clamping/ignoring bad input).
-- `playOrientedAnimation` with an unregistered `baseName`: hard runtime error, matching the
-  above rather than silently doing nothing.
+  wrong `elevationBands.Count()`), or a bucket entry that isn't an `integer[]`, log an error
+  (via `m.owner.game.log(..., BGE.Debug.LogLevel.error)`, this codebase's existing convention —
+  not a `throw`) naming the offending bucket/band/baseName and register nothing for that call.
+- `playOrientedAnimation` with an unregistered `baseName`: same log-and-no-op convention.
 - `computeAngleBucket`/`computeElevationBand` with a non-`Camera3d` camera: not an error —
   always resolves to bucket/band 0.
 
 ### Testing
 
 - Rooibos unit tests for the pure angle→bucket and pitch→band math (`computeAngleBucket`/
-  `computeElevationBand`'s core calculations, refactored into small pure/testable functions)
-  using synthetic camera/entity positions and rotations — no `Game` required for this part.
-  Covers `numElevationBands = 1` (always band 0) alongside multi-band cases.
+  `computeElevationBand`) using synthetic camera/entity positions and rotations — no `Game`
+  required for this part. Covers `numElevationBands = 1` (always band 0) alongside multi-band
+  cases.
 - A `Game`-backed Rooibos test (matching `Sprite.spec.bs`'s existing pattern of a real `Game` +
   `GameEntity` + a small synthetic `ifDraw2D` sheet) covering: `addOrientedAnimation`/
-  `addElevationOrientedAnimation` validation errors (bad count, bad `mirrorOf` target/elevation
-  index), and that `playOrientedAnimation` combined with a moved/rotated synthetic camera swaps
-  which underlying `SpriteAnimation` is active across both axes, including a mirrored bucket
-  case (confirms `scale.x` flips sign, not the mirror's exact pixels).
+  `addElevationOrientedAnimation` validation errors (bad count, a non-array bucket entry), a
+  `numAngles` other than the default 8, direct multi-band `addElevationOrientedAnimation`
+  registration, and that `playOrientedAnimation` combined with a moved/rotated synthetic camera
+  swaps which underlying `SpriteAnimation` is active across both axes.
 - Manual verification: the `examples/terrain` character (see below), confirmed via
   `rokubot-examples` by orbiting the free-fly camera around it and screenshotting each expected
   facing change — required per this repo's convention that example/runtime behavior isn't

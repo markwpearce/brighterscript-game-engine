@@ -9,11 +9,9 @@ import "Sprite.bs"
 
 namespace BGE
 
-  ' One resolved angle/elevation bucket: either real art (its own registered Sprite
-  ' animation) or a mirror of another bucket's art (same animation, flipped via scale.x).
+  ' One resolved angle/elevation bucket: its own registered Sprite animation name.
   class OrientedSpriteBucket
     animationName as string
-    isMirror as boolean = false
   end class
 
   ' A Sprite that swaps which named animation is active based on the angle between the
@@ -37,13 +35,11 @@ namespace BGE
     private activeBaseAnimationName as string = ""
     private currentElevationBand as integer = -1
     private currentAngleBucket as integer = -1
-    private baseScaleX as float = 1.0
 
     sub new(owner as GameEntity, spriteSheet as ifDraw2d, cellWidth as integer, cellHeight as integer, numAngles = 8 as integer, numElevationBands = 1 as integer, args = {} as roAssociativeArray)
       super(owner, spriteSheet, cellWidth, cellHeight, args)
       m.numAngles = numAngles
       m.numElevationBands = numElevationBands
-      m.baseScaleX = m.scale.x
     end sub
 
     ' Registers one animation per angle bucket under `baseName` (e.g. "walk"), for the
@@ -53,9 +49,9 @@ namespace BGE
     ' isn't actually 1.
     '
     ' @param {string} baseName
-    ' @param angleFrames - array of exactly numAngles entries, each either an integer[]
-    '   of frame indexes, or {mirrorOf: {elevation: E, angle: A}} to reuse another
-    '   bucket's frames flipped horizontally.
+    ' @param angleFrames - array of exactly numAngles entries, each an integer[] of
+    '   frame indexes for that bucket's own art. Every bucket needs its own real art -
+    '   there is no mirroring/flipping support (see issue #104's design notes for why).
     ' @param {integer} frameRate
     ' @param [playMode="loop"]
     function addOrientedAnimation(baseName as string, angleFrames as object, frameRate as integer, playMode = SpritePlayMode.Loop as SpritePlayMode) as void
@@ -97,58 +93,28 @@ namespace BGE
       ' Track animation names added during this call so we can clean them up if registration fails
       addedAnimationNames = []
 
-      ' First pass: register real (non-mirrored) buckets as actual Sprite animations.
-      for e = 0 to m.numElevationBands - 1
-        angleFrames = elevationBands[e]
-        for a = 0 to m.numAngles - 1
-          bucketEntry = angleFrames[a]
-          if rodash.isArray(bucketEntry)
-            animName = m.internalAnimationName(baseName, e, a)
-            result = m.addAnimation(animName, bucketEntry, frameRate, playMode)
-            if invalid = result
-              ' addAnimation failed (name already exists) - clean up and bail
-              m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' failed to add animation '${animName}' (name may already exist)`, BGE.Debug.LogLevel.error)
-              m.cleanupAddedAnimations(addedAnimationNames)
-              m.orientedAnimations.Delete(baseName)
-              return
-            end if
-            addedAnimationNames.push(animName)
-            grid[e][a] = new OrientedSpriteBucket()
-            grid[e][a].animationName = animName
-            grid[e][a].isMirror = false
-          end if
-        end for
-      end for
-
-      ' Second pass: resolve mirrorOf entries against the real buckets just registered.
       for e = 0 to m.numElevationBands - 1
         angleFrames = elevationBands[e]
         for a = 0 to m.numAngles - 1
           bucketEntry = angleFrames[a]
           if not rodash.isArray(bucketEntry)
-            if invalid = bucketEntry or invalid = bucketEntry.mirrorOf
-              m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} angle bucket ${a.toStr()} is neither a frame list nor a {mirrorOf} entry`, BGE.Debug.LogLevel.error)
-              m.cleanupAddedAnimations(addedAnimationNames)
-              m.orientedAnimations.Delete(baseName)
-              return
-            end if
-            targetElevation = bucketEntry.mirrorOf.elevation
-            targetAngle = bucketEntry.mirrorOf.angle
-            validTarget = targetElevation >= 0 and targetElevation < m.numElevationBands and targetAngle >= 0 and targetAngle < m.numAngles
-            if validTarget
-              target = grid[targetElevation][targetAngle]
-              validTarget = invalid <> target and not target.isMirror
-            end if
-            if not validTarget
-              m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} angle bucket ${a.toStr()} has a mirrorOf target that isn't a real registered bucket`, BGE.Debug.LogLevel.error)
-              m.cleanupAddedAnimations(addedAnimationNames)
-              m.orientedAnimations.Delete(baseName)
-              return
-            end if
-            grid[e][a] = new OrientedSpriteBucket()
-            grid[e][a].animationName = grid[targetElevation][targetAngle].animationName
-            grid[e][a].isMirror = true
+            m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' elevation band ${e.toStr()} angle bucket ${a.toStr()} must be an integer[] of frame indexes`, BGE.Debug.LogLevel.error)
+            m.cleanupAddedAnimations(addedAnimationNames)
+            m.orientedAnimations.Delete(baseName)
+            return
           end if
+          animName = m.internalAnimationName(baseName, e, a)
+          result = m.addAnimation(animName, bucketEntry, frameRate, playMode)
+          if invalid = result
+            ' addAnimation failed (name already exists) - clean up and bail
+            m.owner.game.log(`DrawableOrientedSprite.addElevationOrientedAnimation() - '${baseName}' failed to add animation '${animName}' (name may already exist)`, BGE.Debug.LogLevel.error)
+            m.cleanupAddedAnimations(addedAnimationNames)
+            m.orientedAnimations.Delete(baseName)
+            return
+          end if
+          addedAnimationNames.push(animName)
+          grid[e][a] = new OrientedSpriteBucket()
+          grid[e][a].animationName = animName
         end for
       end for
 
@@ -165,9 +131,8 @@ namespace BGE
       return baseName + "_e" + elevationBand.toStr() + "_a" + angleBucket.toStr()
     end function
 
-    ' For tests only - the real underlying Sprite animation name a bucket resolves to
-    ' (following a mirror to its source). Mirrors Sprite's own "for tests only"
-    ' accessor convention (see rawAnimationClockMsForTests()).
+    ' For tests only - the underlying Sprite animation name a bucket resolves to. Mirrors
+    ' Sprite's own "for tests only" accessor convention (see rawAnimationClockMsForTests()).
     '
     ' @param {string} baseName
     ' @param {integer} elevationBand
@@ -272,11 +237,6 @@ namespace BGE
           ' there's no ancestor call to make; the inherited Sprite.playAnimation is just
           ' a normal method here.
           m.playAnimation(bucket.animationName)
-          if bucket.isMirror
-            m.scale.x = -m.baseScaleX
-          else
-            m.scale.x = m.baseScaleX
-          end if
         end if
       end if
       super.update()

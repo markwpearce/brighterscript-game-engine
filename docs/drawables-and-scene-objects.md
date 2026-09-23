@@ -202,10 +202,9 @@ based on the angle between the camera and the entity - `GameEntity.addOrientedSp
 builds one. Bucket 0 (of `numAngles`, default 8) is the entity's front facing the
 camera, and buckets increase clockwise as viewed from above; `numElevationBands`
 (default 1, meaning no vertical distinction) optionally adds a second axis for a sheet
-that also draws a distinct top-down or bottom-up view. A bucket's frames can instead be
-declared `{mirrorOf: {elevation, angle}}` to reuse another bucket's art flipped
-horizontally (via a negated `scale.x`, the same mechanism a billboard's mirroring
-already uses) - handy for a sheet that only draws one side profile. See
+that also draws a distinct top-down or bottom-up view. Every bucket needs its own real
+art - there's no mirroring support (a negated-`scale.x` flip was tried and found not to
+render correctly through `directScaled`'s blit path; see the spec's Non-goals). See
 `examples/terrain`'s `Guard` entity for a runnable demo, and
 `specs/2026-09-22-oriented-sprite-billboards-design.md` for the full design.
 
