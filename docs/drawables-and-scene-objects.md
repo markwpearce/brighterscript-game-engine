@@ -20,6 +20,21 @@ own transformation matrix from `offset`/`rotation`/`scale` (see `Drawable.comput
 but the actual per-frame draw call, camera-relative positioning, and draw-mode handling all live on
 the `SceneObject` side.
 
+A `Drawable` doesn't strictly need a `GameEntity` - pass `invalid` as its owner to draw it straight
+through a standalone `Renderer`, with no `Game` at all:
+
+```brighterscript
+renderer = new BGE.Renderer(myBitmap)
+box = new BGE.DrawableRectangle(invalid, 40, 20, {offset: BGE.Math.VectorOps.create(100, 50, 0)})
+box.addToScene(renderer)
+renderer.drawScene()
+```
+
+It then behaves as if owned by an entity at the world origin with no rotation and a scale of 1, so
+its `offset` is its world position. Anything that needs a `Game` quietly does nothing instead:
+logging, pausing an animation while the game is paused, and a `DrawableOrientedSprite` picking its
+facing from the game camera. A `DrawableText` with no font uses the system default font.
+
 ## Every Drawable / SceneObject pair
 
 | Drawable             | SceneObject             | What it draws                                                              |
