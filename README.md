@@ -7,7 +7,7 @@
 
 An object-oriented game engine **and 2D/3D drawing library** for Roku, written in [BrighterScript](https://github.com/rokucommunity/brighterscript).
 
-Build a full game with entities, rooms, collisions, input, and UI - or just pull in the renderer to draw sprites, shapes, billboards, and wireframe/solid 3D models on top of your own Roku app. Same engine, use as much or as little of it as you need.
+Build a full game with entities, scenes, collisions, input, and UI - or just pull in the renderer to draw sprites, shapes, billboards, and wireframe/solid 3D models on top of your own Roku app. Same engine, use as much or as little of it as you need.
 
 <figure>
   <img src="assets/screenshots/asteroids.jpg" alt="A red rocket ship flying through a starry blue nebula, dodging gray asteroids, with a score of 5 shown at the top">
@@ -31,7 +31,7 @@ Build a full game with entities, rooms, collisions, input, and UI - or just pull
 
 ## Why BrighterScript Game Engine?
 
-- **Object-oriented, like the engines you already know.** `GameEntity`, `Room`, and lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, ...) give you the same shape as Phaser, HaxeFlixel, GameMaker, or Unity - minus the visual editor.
+- **Object-oriented, like the engines you already know.** `GameEntity`, `Scene`, and lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, ...) give you the same shape as Phaser, HaxeFlixel, GameMaker, or Unity - minus the visual editor.
 - **A real 2D/3D renderer, not just sprite blitting.** Draw images, sprites, animations, shapes, text, and billboards, or render actual 3D models (loaded from `.stl`) with wireframe, solid, and shaded draw modes - all built on Roku's `roCompositor`/`Draw2D`, so it runs on real hardware.
 - **Built-in collisions, input, UI, and debug tooling.** Circle/rectangle colliders, a retained-mode UI widget tree, and debug overlays (FPS, colliders, memory, GC stats) come standard, so you're not rebuilding the basics for every project.
 - **Use only what you need.** The `Renderer`/`Canvas` layer works standalone if you just want a capable drawing library for an existing Roku app, without adopting the full game loop.
@@ -45,20 +45,20 @@ sub main()
   game.fitCanvasToScreen()
   game.loadBitmap("player", "pkg:/sprites/player.png")
 
-  room = new MainRoom(game)
-  game.defineRoom(room)
-  game.changeRoom(room.name)
+  scene = new MainScene(game)
+  game.defineScene(scene)
+  game.changeScene(scene.name)
 
   game.play()
 end sub
 ```
 
 ```brightscript
-class MainRoom extends BGE.Room
+class MainScene extends BGE.Scene
 
   sub new(game as BGE.Game)
     super(game)
-    m.name = "MainRoom"
+    m.name = "MainScene"
   end sub
 
   override sub onCreate(args as roAssociativeArray)
@@ -104,18 +104,18 @@ The `examples/` directory has full Roku channels you can build and run:
 
 | Example | What it shows |
 | --- | --- |
-| [`quickstart`](examples/quickstart) | The minimal `MainRoom`/`Player` example from above, as a runnable app |
+| [`quickstart`](examples/quickstart) | The minimal `MainScene`/`Player` example from above, as a runnable app |
 | [`asteroids`](examples/asteroids) | A complete 2D game - player movement, bullets, collisions, particle-style explosions, sound |
 | [`pong`](examples/pong) | Classic 2D Pong, playable in both 2D and 3D camera modes |
 | [`snake`](examples/snake) | Grid-based movement and growing collision shapes, in 2D and 3D |
 | [`platformer`](examples/platformer) | A side-scrolling, multi-level platformer demonstrating gravity, jumping, and collision *resolution* built on top of the engine's detection-only collider system - plus sound, particle effects, and a full `BGE.UI` menu/HUD |
 | [`3d`](examples/3d) | Loading and rendering `.stl` 3D models with the pseudo-3D renderer |
-| [`pixels`](examples/pixels) | A tour of drawables - polygons, rectangles, sprites, and more, one room per shape |
+| [`pixels`](examples/pixels) | A tour of drawables - polygons, rectangles, sprites, and more, one scene per shape |
 | [`canvas`](examples/canvas) | Using the engine's canvas/renderer as a standalone drawing surface |
 | [`hybrid`](examples/hybrid) | Mixing this engine's Draw2D-based rendering with a SceneGraph app |
 | [`rendererTest`](examples/rendererTest) | A manual test harness used while developing the renderer itself |
 
-Scaffold a new example (manifest, icons/splash, `package.json`, a minimal `MainRoom`) with:
+Scaffold a new example (manifest, icons/splash, `package.json`, a minimal `MainScene`) with:
 
 ```
 npm run create-example -- <name> ["Display Title"]
@@ -204,9 +204,9 @@ Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` -
 }
 ```
 
-### Known limitation: subclassing `BGE.Room`/`BGE.GameEntity`
+### Known limitation: subclassing `BGE.Scene`/`BGE.GameEntity`
 
-Subclassing one of the engine's own classes and passing an instance back into an engine method (e.g. `game.defineRoom(new MainRoom(game))`, or calling `super(game)` in your subclass's constructor) currently trips a real upstream `brighterscript` bug ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758)): the generated type declarations reference the class's internal compiled name instead of its real type, so `bsc --validate` reports an `argument-type-mismatch` for this - completely ordinary and expected - pattern. The `roku_modules` filter above doesn't cover this, since the error is reported against **your own file**, not a `roku_modules` one.
+Subclassing one of the engine's own classes and passing an instance back into an engine method (e.g. `game.defineScene(new MainScene(game))`, or calling `super(game)` in your subclass's constructor) currently trips a real upstream `brighterscript` bug ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758)): the generated type declarations reference the class's internal compiled name instead of its real type, so `bsc --validate` reports an `argument-type-mismatch` for this - completely ordinary and expected - pattern. The `roku_modules` filter above doesn't cover this, since the error is reported against **your own file**, not a `roku_modules` one.
 
 This is a static type-checker false positive only - type annotations aren't enforced at runtime, so your game still runs correctly regardless. If your own CI gates on `bsc --validate` reporting zero errors, you'll need to account for this until it's fixed upstream.
 

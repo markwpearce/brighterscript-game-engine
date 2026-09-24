@@ -59,7 +59,7 @@ account for camera rotation/perspective every frame), but it means:
 ### Case study: `examples/snake`
 
 `examples/snake` hit exactly this. `GridEntity.drawRectangleOnGrid()` (used by both `Snake` and
-`Apple`) called `renderObj.worldPointToCanvasPoint()` before drawing, while `MainRoom.drawWalls()`
+`Apple`) called `renderObj.worldPointToCanvasPoint()` before drawing, while `MainScene.drawWalls()`
 drew its wall rectangles directly with raw coordinates - and every collider in the scene (walls,
 snake head, apple) was built from raw `entity.position`, with no camera involved. The example's
 `main.bs` also had a `Camera3d` wired up (`use3d = true`, a leftover from an earlier "does this
@@ -88,12 +88,12 @@ coordinate-space mismatches worth understanding structurally rather than pattern
 
 ## Renderer, SceneObjects, and draw modes
 
-A `Renderer` doesn't draw `Drawable`s directly - a `Drawable.addToScene(renderer)` call registers a
+A `Renderer` doesn't draw `Drawable`s directly - a `Drawable.addToRenderer(renderer)` call registers a
 `SceneObject` subclass, and the `Renderer` iterates those each frame, sorted back-to-front and
 dispatched through a `SceneObjectDrawMode` that controls how each one reacts to camera
 rotation/perspective (this is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard
 capability - see `examples/3d`). See [Drawables and SceneObjects](/drawables-and-scene-objects) for
-the full per-type reference, the draw-mode table, a walkthrough of exactly how `Renderer.drawScene()`
+the full per-type reference, the draw-mode table, a walkthrough of exactly how `Renderer.render()`
 processes a frame, and a deep dive on `SceneObjectPlane` (the ground-plane renderer used by
 `examples/terrain`).
 
@@ -107,7 +107,7 @@ to drive hover/focus).
 Focus is normally seeded lazily: `FocusManager.update()` only focuses the first registered widget
 on its *next* call, which is driven by an actual input event (a button press/held, or, in `pointer`
 mode, `updateAnalogCursor()`). Until the player's first press, nothing is focused and no widget
-shows its focus ring. Call `game.focusManager.ensureFocusSeeded()` once, right after adding a room's
+shows its focus ring. Call `game.focusManager.ensureFocusSeeded()` once, right after adding a scene's
 focusable widgets (e.g. at the end of `onCreate()`), to focus the first one immediately instead:
 
 ```brightscript
@@ -119,7 +119,7 @@ end sub
 ```
 
 It's safe to call with nothing registered yet, and a no-op once focus has already been seeded by
-some other path. See `examples/ui`'s rooms for this in every demo room.
+some other path. See `examples/ui`'s scenes for this in every demo scene.
 
 In `pointer` mode, the cursor can also be driven continuously by a connected controller's analog
 stick:
@@ -128,7 +128,7 @@ stick:
 ' once, at startup (see examples/ui/src/source/main.bs)
 game.enableControllerInput()
 
-' in the room that wants a cursor
+' in the scene that wants a cursor
 game.controls.bindAxis("cursor", "1", 0) ' player 0's stick "1"
 game.focusManager.navigationMode = BGE.UI.FocusNavigationMode.pointer
 game.focusManager.analogAxisName = "cursor"
@@ -208,7 +208,7 @@ Use this for a background that's meant to stretch uniformly rather than keep uns
 `backgroundImage` is purely additive: it defaults to `invalid`, so existing flat-color `Theme`s are
 unaffected. When it is set, the same image is used regardless of hover/focus state - a themeable
 hovered/focused background image is a possible future follow-up, as is letting a `UiContainer` (not
-just an individual widget) back itself with a background image. See `examples/ui/src/source/Rooms/NinePatchRoom.bs` for a working demo.
+just an individual widget) back itself with a background image. See `examples/ui/src/source/Scenes/NinePatchScene.bs` for a working demo.
 
 ### Button focus/click sounds
 
@@ -271,7 +271,7 @@ field (`BGE.UI.SelectStyle`):
 The popup list is an explicit non-goal: every option draws unclipped/unscrolled, and a list long enough to
 overflow the canvas bottom (e.g., 100 options on a 720-pixel display) extends past the visible canvas. This
 is a deliberate trade-off to keep the implementation simple and leave scrolling/virtualization as a
-follow-up. See `examples/ui/src/source/Rooms/PopupSelectRoom.bs` for a working demo.
+follow-up. See `examples/ui/src/source/Scenes/PopupSelectScene.bs` for a working demo.
 
 ### Text entry via ECP keyboard
 
@@ -323,7 +323,7 @@ Note that `TextInput` neither clips nor scrolls text wider than the widget — t
 simply draws past its right edge, a known limitation. Set `maxLength` to a value that fits for any field
 with a known reasonable size.
 
-See `examples/ui/src/source/Rooms/TextInputRoom.bs` for a working demo. ECP-delivered characters — as sent
+See `examples/ui/src/source/Scenes/TextInputScene.bs` for a working demo. ECP-delivered characters — as sent
 by any client speaking the ECP protocol, including a real connected controller or companion app — are
 verified end-to-end on real hardware by automated testing; the specific behavior of a real mobile app's
 on-screen-keyboard backspace key has not been separately confirmed.

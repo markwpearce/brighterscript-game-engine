@@ -14,7 +14,7 @@ if you haven't - this guide assumes you already know how a `Drawable` attaches t
 ## The pipeline, in one sentence
 
 A `Drawable` doesn't draw itself. `GameEntity.addDrawable(name, drawable)` attaches it, and once per
-frame `Drawable.addToScene(rendererObj)` registers a matching `SceneObject` with the `Renderer` -
+frame `Drawable.addToRenderer(rendererObj)` registers a matching `SceneObject` with the `Renderer` -
 from then on, the `Renderer` owns drawing it, not the `Drawable`. The `Drawable` still computes its
 own transformation matrix from `offset`/`rotation`/`scale` (see `Drawable.computeTransformationMatrix`),
 but the actual per-frame draw call, camera-relative positioning, and draw-mode handling all live on
@@ -26,8 +26,8 @@ through a standalone `Renderer`, with no `Game` at all:
 ```brighterscript
 renderer = new BGE.Renderer(myBitmap)
 box = new BGE.DrawableRectangle(invalid, 40, 20, {offset: BGE.Math.VectorOps.create(100, 50, 0)})
-box.addToScene(renderer)
-renderer.drawScene()
+box.addToRenderer(renderer)
+renderer.render()
 ```
 
 It then behaves as if owned by an entity at the world origin with no rotation and a scale of 1, so
@@ -57,7 +57,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 
 Every `SceneObject` subclass lives under `src/source/engine/renderer/sceneObjects/`. If you're
 adding a new visual primitive, the pair goes together: a `Drawable` subclass that computes its own
-geometry/transform, and a `SceneObject` subclass whose `addToScene` call the `Drawable` invokes.
+geometry/transform, and a `SceneObject` subclass whose `addToRenderer` call the `Drawable` invokes.
 
 ## Rectangles
 
@@ -135,7 +135,7 @@ is set, which is why they look the same as they always did.
 ### How a rectangle is drawn, and why it's a billboard
 
 `SceneObjectRectangle` extends `SceneObjectBillboard`, so a rectangle orients and foreshortens in 3D
-just like an image (see `examples/3d`'s RectanglesRoom, which cycles a ring of panels through every
+just like an image (see `examples/3d`'s RectanglesScene, which cycles a ring of panels through every
 draw mode). But unlike an image it has no texture to sample - it's one flat color - so it never uses
 the inherited **pinned-corners** path: filling the projected quad produces identical pixels for far
 less work, and `DrawableRectangle` never has to hold a bitmap of its own. That's how
@@ -144,7 +144,7 @@ less work, and `DrawableRectangle` never has to hold a bitmap of its own. That's
 It does still cache that fill into a **temp bitmap** in the oriented draw modes, exactly like a
 polygon does. Filling a rotated quad means rasterizing two triangles through scratch bitmaps, which
 is far too expensive to repeat every frame for something that hasn't moved - skipping the cache here
-cost `examples/3d`'s RectanglesRoom about two thirds of its frame rate (22 FPS vs 63) before it was
+cost `examples/3d`'s RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was
 put back. Whether a `SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which
 `SceneObjectRectangle` overrides to also require `filled` - an outline-only rectangle has no fill
 worth caching.
@@ -205,7 +205,7 @@ its own constructor, so it renders identically in every way except one: it never
 direction and never foreshortens into an ellipse, because a sphere looks the same from every angle.
 No separate `SceneObjectSphere` class exists for this - `SceneObject.getActualDrawMode()` only
 resolves the `matchCamera` default through the camera, so any other explicit `drawMode` (this one
-included) is used exactly as given. `examples/3d`'s CirclesRoom puts a ring of alternating
+included) is used exactly as given. `examples/3d`'s CirclesScene puts a ring of alternating
 `CirclePanel`/`SpherePanel` entities side by side, so orbiting the camera shows the difference
 directly: the circles turn edge-on and thin out, the spheres next to them don't move at all.
 
@@ -250,11 +250,11 @@ the object's own projected quad - measuring the latter would fold the object's o
 its size, so a sprite turned edge-on would squash. For the same reason a screen-aligned object is
 never backface culled: it has no face to turn away.
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
-lets you cycle through them (`examples/3d`'s BaseRoom displays it on screen).
+lets you cycle through them (`examples/3d`'s BaseScene displays it on screen).
 
-## How `Renderer.drawScene()` actually draws a frame
+## How `Renderer.render()` actually draws a frame
 
-`Renderer.drawScene()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a
+`Renderer.render()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a
 separate `Renderer` for the game canvas and the UI canvas). It does three things, in order:
 
 1. **`updateSceneObjects()`** - recomputes world positions and camera-distance for every registered
@@ -364,11 +364,11 @@ the narrow phase's minimum of 3 hull points, so both were always going to fail c
 regardless. The override just skips paying the broad-phase setup cost (screen-bounds projection,
 hull construction, sort/sweep bookkeeping) for a check that was guaranteed to reject them anyway -
 this matters in practice for a scene built from many line segments (e.g. `examples/3d`'s
-`TreesRoom`, each tree a bundle of `DrawableLine` branches), which would otherwise dominate the
+`TreesScene`, each tree a bundle of `DrawableLine` branches), which would otherwise dominate the
 cluster-candidate count for zero possible benefit.
 
 See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `examples/depthsort`'s
-`ClusterVisualizerRoom` for a runnable demo of interleaved draw order taking visible effect.
+`ClusterVisualizerScene` for a runnable demo of interleaved draw order taking visible effect.
 
 ## Textured 3D models (`Model3d` / `OBJParser`)
 
@@ -378,11 +378,11 @@ the underlying primitive, `Renderer.drawBitmapTriangle(To)`). Two ways to get a 
 
 - **Standard convention**: the `.obj` references a `mtllib <file>.mtl`, and that file has a
   `map_Kd <image>` line - both resolved relative to the `.obj`'s own directory. `examples/3d`'s
-  `D20Room` uses this path with no explicit override at all.
+  `D20Scene` uses this path with no explicit override at all.
 - **Explicit override**: pass `{texturePath: "pkg:/..."}` as the third argument to
   `Game.load3dModel(modelName, modelPath, options)` - this always wins over anything the `.obj`/
   `.mtl` files reference. Needed for a model that carries UV data but no `mtllib` at all (a common
-  case for exported assets that ship their texture separately) - `examples/3d`'s `CarRoom` is this
+  case for exported assets that ship their texture separately) - `examples/3d`'s `CarScene` is this
   case.
 
 ```brighterscript
@@ -399,9 +399,9 @@ missing file, a `mtllib` with no `map_Kd`): a warning is logged and the whole mo
 flat-shaded rather than the load failing. v1 supports exactly one texture per model - `usemtl`/
 multi-material meshes aren't parsed into separate textures.
 
-![A textured car model rendered by examples/3d's CarRoom, showing windshield glass and tire tread detail - loaded via an explicit texturePath override](images/textured-obj-car.jpg)
+![A textured car model rendered by examples/3d's CarScene, showing windshield glass and tire tread detail - loaded via an explicit texturePath override](images/textured-obj-car.jpg)
 
-![A textured D20 model rendered by examples/3d's D20Room, showing distinct colored/numbered faces - loaded via mtllib/map_Kd auto-resolution, no override](images/textured-obj-d20.jpg)
+![A textured D20 model rendered by examples/3d's D20Scene, showing distinct colored/numbered faces - loaded via mtllib/map_Kd auto-resolution, no override](images/textured-obj-d20.jpg)
 
 ## Deep dive: `SceneObjectPlane` (`DrawablePlane`)
 
@@ -542,7 +542,7 @@ for the full design.
   the way a driver's/person's head turns - `setTarget` points the camera *at* that fixed point,
   which orbits the camera around it as its own position changes, rather than rotating the camera's
   own view. Set `camera.orientation` directly from your desired look direction instead (see
-  `examples/terrain/src/source/Rooms/MainRoom.bs`'s `updateCameraOrientation`).
+  `examples/terrain/src/source/Scenes/MainScene.bs`'s `updateCameraOrientation`).
 
 ## Skybox (`DrawableSkybox` / `SceneObjectSkybox`)
 
@@ -568,7 +568,7 @@ The constructor takes an optional `args` object with two configurable fields:
 - **`verticalDegreesCovered`** (default `90.0`): how many degrees of vertical view angle the texture's
   full height represents. This controls how much of the sky above and below the horizon the texture fills.
 
-`SceneObjectSkybox` renders in its own dedicated pass in `Renderer.drawScene()`, before all other objects
+`SceneObjectSkybox` renders in its own dedicated pass in `Renderer.render()`, before all other objects
 (including planes). This ensures the skybox always draws behind everything else. A skybox never
 participates in depth-sort or overlap-cluster detection—it's always drawn as a background layer.
 
@@ -613,7 +613,7 @@ owner.addDrawable("mountains", new BGE.DrawableParallaxLayer(owner, region, {
 ```
 
 `examples/parallax` is a small, playable demo with several stacked background/foreground
-layers and a camera that follows the player (`examples/parallax/src/source/Rooms/MainRoom.bs`).
+layers and a camera that follows the player (`examples/parallax/src/source/Scenes/MainScene.bs`).
 
 `SceneObjectParallaxLayer` overrides three `SceneObject` methods to make this work:
 `findCanvasPosition()` does the actual parallax math and tile enumeration - the base
@@ -632,7 +632,7 @@ position is far outside the frustum.
 
 Draw order relies entirely on the ordinary distance-from-camera sort - give a background
 layer's owning entity a suitably negative Z (or positive, for a foreground layer) so it
-falls out of `Renderer.drawScene()`'s existing sort with no renderer changes.
+falls out of `Renderer.render()`'s existing sort with no renderer changes.
 
 ## Particles (`DrawableParticles`)
 
@@ -659,7 +659,7 @@ emitter = m.fireworks.addParticles("fireworks", BGE.ParticleShape.Rectangle, {
 
 Nothing spawns until you call `start()` (continuous emission at `spawnRate` particles/second)
 or `burst(count)` (spawns `count` particles immediately, regardless of `start()`/`stop()`
-state - see `examples/particles`'s `BurstRoom`, which fires 50 at a time on a button press).
+state - see `examples/particles`'s `BurstScene`, which fires 50 at a time on a button press).
 `stop()` halts continuous emission, but particles already alive keep simulating and drawing
 until they expire naturally:
 
@@ -713,7 +713,7 @@ emitter.start()
 existing `BGE.ParticleShape.Image` emitters are unaffected unless you opt in. `getFrameRegions()` slices
 `image` into its grid lazily on first use and caches the result, so a fade-style sheet
 (bright frame to a transparent one) reproduces its own fade with no extra frame-rate
-configuration - see `examples/particles`'s `AnimatedImageParticlesRoom`.
+configuration - see `examples/particles`'s `AnimatedImageParticlesScene`.
 
 Every particle from one emitter draws through a single `SceneObjectParticle` - the emitter's
 own `performDraw` loop issues one `drawLine`/`drawRectangle`/`drawRegion` call per live
@@ -721,7 +721,7 @@ particle directly, rather than each particle getting its own `SceneObject`. That
 deliberate departure from every other pair in this guide's table, made specifically so that
 spawning and expiring particles every frame (the normal case for continuous emission) never
 touches `Renderer.addSceneObject`/`removeSceneObject`, which would otherwise defeat the
-depth-sort skip-optimization (see "How `Renderer.drawScene()` actually draws a frame" above)
+depth-sort skip-optimization (see "How `Renderer.render()` actually draws a frame" above)
 for the whole renderer, not just this emitter. See `specs/2026-08-18-particle-system-design.md`
 for the full reasoning, including the tradeoffs this accepts (particles from one emitter
 draw as a single atomic unit against the rest of the scene, and aren't depth-sorted against

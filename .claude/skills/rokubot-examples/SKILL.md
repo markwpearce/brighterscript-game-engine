@@ -81,22 +81,22 @@ next, so don't skip ahead to blind probing if a cheaper signal is available:
    so it *looks* like nothing happened. Similarly, movement systems built on holding a direction
    (velocity set per-frame while held) will show nothing from one `press`/`keypress` tap — retry
    with a `keydown`...`keyup` hold before concluding a direction is unmapped.
-5. **When there's a multi-room/multi-scene app, map the whole navigation graph before trusting
-   one screenshot.** Grepping a single room's `onInput` (or watching one button press produce "no
+5. **When there's a multi-scene app, map the whole navigation graph before trusting
+   one screenshot.** Grepping a single scene's `onInput` (or watching one button press produce "no
    change") isn't enough evidence that a scene-change control is broken — the button might have
-   landed you on a room whose default camera/framing just doesn't look different at a glance, or
-   the navigation might not be a simple cycle. Grep every room file for `changeRoom(` calls and
+   landed you on a scene whose default camera/framing just doesn't look different at a glance, or
+   the navigation might not be a simple cycle. Grep every scene file for `changeScene(` calls and
    build the actual graph:
    ```
-   grep -n "changeRoom" examples/<name>/src/source/Rooms/*.bs
+   grep -n "changeScene" examples/<name>/src/source/Scenes/*.bs
    ```
    This repo's `pixels` example is a good example of why this matters: it looked like it should
-   cycle through 4 rooms, but the real graph (before this was fixed) was
-   `GhostRoom → RectangleRoom → PolygonRoom → SpriteRoom → PolygonRoom` (looped there) — and since
-   the app's actual start room was `PolygonRoom`, `GhostRoom` and `RectangleRoom` were unreachable
+   cycle through 4 scenes, but the real graph (before this was fixed) was
+   `GhostScene → RectangleScene → PolygonScene → SpriteScene → PolygonScene` (looped there) — and since
+   the app's actual start scene was `PolygonScene`, `GhostScene` and `RectangleScene` were unreachable
    from the running app via any button at all. That would only ever have been found by reading
-   every room's `changeRoom` calls, not by pressing buttons and hoping — it's fixed now (see the
-   `pixels` row below), but the lesson generalizes to any new multi-room app you're exploring.
+   every scene's `changeScene` calls, not by pressing buttons and hoping — it's fixed now (see the
+   `pixels` row below), but the lesson generalizes to any new multi-scene app you're exploring.
 6. **Write down what you learn as you go**, even mid-exploration — rokubot's own README describes
    this same screenshot→act→screenshot loop as a way to build up a `SKILL.md` for whatever app
    you're driving (`rokubot skill init` scaffolds one). Future you (or another agent) shouldn't
@@ -168,7 +168,7 @@ again, not just `launch` alone.
 Two crashes seen so far, for reference:
 - `asteroids` on brs-desktop (the BrightScript Simulator): background bitmap is a `.jpg`
   (`spacebackground.jpg`) and fails to decode (`loadBitmap()` logs "Bitmap not created"), which
-  then null-derefs in `MainRoom.onCreate`. Looked simulator-specific (JPEG decode support), not
+  then null-derefs in `MainScene.onCreate`. Looked simulator-specific (JPEG decode support), not
   an engine or rokubot bug — untested on real hardware.
 - `terrain` on brs-desktop: a ground plane's internal scratch bitmap (used by `SceneObjectPlane`'s
   rotate-then-scale texture-warp pipeline, sized off `Camera3d.maxDrawDistance`) used to render
@@ -190,14 +190,14 @@ channel back to Home).
 
 | Example | What it is | Controls (BGE name → rokubot key) |
 | --- | --- | --- |
-| `pong` | Playable 2-paddle pong vs. a same-speed, zero-latency CPU. Ball always spawns dead-center; `MainRoom`/`Ball.bs`/`Computer.bs` are short reads. | `up`/`down` move paddle, `select` (OK) at title screen starts, `back` quits, `info` (options) toggles debug overlay |
+| `pong` | Playable 2-paddle pong vs. a same-speed, zero-latency CPU. Ball always spawns dead-center; `MainScene`/`Ball.bs`/`Computer.bs` are short reads. | `up`/`down` move paddle, `select` (OK) at title screen starts, `back` quits, `info` (options) toggles debug overlay |
 | `asteroids` | Ship-vs-asteroids splash + gameplay. Crashes on brs-desktop (see above) — background JPEG fails to load. | untested past splash on simulator |
 | `snake` | Real playable snake: red = food, green segments = snake, score counter. Title screen is "Press OK To Play". | `select` starts, `up`/`down`/`left`/`right` steer, `play` pauses (`PauseHandler`), `back` quits, `info` toggles debug |
-| `3d` | Multi-room 3D renderer showcase — `ImagesRoom` (start), `TextRoom`, `ModelRoom`, `CubesRoom`, `RectanglesRoom`, `PolyRoom`, `TreesRoom`, cycled in that fixed order (`getRoomNames()` in `main.bs`) and wrapping around. Self-documents its own controls on screen, including the current draw mode's name. Confirmed live: `fwd` does advance rooms — a single press from `ImagesRoom` lands on `TextRoom`, whose default camera framing just doesn't show anything eye-catching, which can look like "nothing happened" if you only check one press. | `select` (OK) = per-entity rotation toggle, `info` (`*`) = change rotation axis / regenerate the room's shapes, arrows = move/rotate camera, `rev`/`fwd` (`<`/`>`) = prev/next room, `instantreplay` = toggle debug info, `play` = cycle `SceneObjectDrawMode` for every entity (9 modes, wrapping; the name of the current one is drawn on screen) |
+| `3d` | Multi-scene 3D renderer showcase — `ImagesScene` (start), `TextScene`, `ModelScene`, `CubesScene`, `RectanglesScene`, `PolyScene`, `TreesScene`, cycled in that fixed order (`getSceneNames()` in `main.bs`) and wrapping around. Self-documents its own controls on screen, including the current draw mode's name. Confirmed live: `fwd` does advance scenes — a single press from `ImagesScene` lands on `TextScene`, whose default camera framing just doesn't show anything eye-catching, which can look like "nothing happened" if you only check one press. | `select` (OK) = per-entity rotation toggle, `info` (`*`) = change rotation axis / regenerate the scene's shapes, arrows = move/rotate camera, `rev`/`fwd` (`<`/`>`) = prev/next scene, `instantreplay` = toggle debug info, `play` = cycle `SceneObjectDrawMode` for every entity (9 modes, wrapping; the name of the current one is drawn on screen) |
 | `breakout` | Playable Breakout clone: 10x5 grid of colored bricks with white bevel outlines, a paddle, and a ball that launches off the paddle. Score/lives HUD along the top. Everything is drawn with `BGE.DrawableRectangle`, and positions are in the engine's world space (y-up, origin bottom left) rather than canvas space. | `left`/`right` move the paddle, `select` (OK) launches the ball and restarts after a win/game over, `play` pauses, `info` (options) toggles the debug overlay, `back` quits |
-| `pixels` | Multi-room draw-mode/sprite showcase. Room graph was fixed (was previously a broken 2-cycle orphaning 2 of the 4 rooms — see git history) to match `3d`'s pattern: `getRoomNames()`/`goToNextRoom()` in `main.bs`, cycling `PolygonRoom → RectangleRoom → SpriteRoom → GhostRoom → PolygonRoom`, confirmed live in both directions. | From any room: `fwd`/`rev` = next/previous room. `PolygonRoom`: `select` (OK) = regenerate shapes, `info` (options) = cycle `SceneObjectDrawMode` 1-7, `up`/`down` = change shape count. `RectangleRoom`: `select` = regenerate, `info` = recolor, `up`/`down` = change grid size. `SpriteRoom`/`GhostRoom`: `select` = add more sprites/ghosts |
+| `pixels` | Multi-scene draw-mode/sprite showcase. Scene graph was fixed (was previously a broken 2-cycle orphaning 2 of the 4 scenes — see git history) to match `3d`'s pattern: `getSceneNames()`/`goToNextScene()` in `main.bs`, cycling `PolygonScene → RectangleScene → SpriteScene → GhostScene → PolygonScene`, confirmed live in both directions. | From any scene: `fwd`/`rev` = next/previous scene. `PolygonScene`: `select` (OK) = regenerate shapes, `info` (options) = cycle `SceneObjectDrawMode` 1-7, `up`/`down` = change shape count. `RectangleScene`: `select` = regenerate, `info` = recolor, `up`/`down` = change grid size. `SpriteScene`/`GhostScene`: `select` = add more sprites/ghosts |
 | `canvas` | Demonstrates panning/scaling the whole game **canvas** (offset/scale), not an on-screen entity. On-screen text/rectangle are drawn on the separate UI layer, so the pan/scale effect isn't visible in a screenshot even though it's working — don't mistake that for a bug. | arrows = pan canvas, `info`/`instantreplay` = scale up/down, `play` = re-center |
 | `quickstart` | Minimal scaffold-template app: one white square, moves freely. Good smoke-test for "is the toolchain working." | arrows (any direction, free movement via `input.x`/`input.y`) |
-| `rendererTest` | Categorized, menu-driven suite of `BGE.Renderer` demos - deliberately **not** built on `BGE.Game`/`Room` (see `CLAUDE.md`'s "Manually exercising the Renderer" note for the architecture and how to add a new demo). Grouped by category on an on-screen menu. Every demo shows an automatic timing line (fps / frame ms / update ms / draw ms / draw calls), so this is the place to *measure* a draw-cost question rather than reason about it - the `quad-fill-benchmark` demo times two fill approaches head to head in one run. | `up`/`down` = select in menu, `select` (OK) = run selected demo / demo-specific action, `back` = return to menu. Can also skip the menu entirely via a launch param: `rokubot launch dev --param demo=<id>` (see `DemoList.bs` for valid ids) |
+| `rendererTest` | Categorized, menu-driven suite of `BGE.Renderer` demos - deliberately **not** built on `BGE.Game`/`Scene` (see `CLAUDE.md`'s "Manually exercising the Renderer" note for the architecture and how to add a new demo). Grouped by category on an on-screen menu. Every demo shows an automatic timing line (fps / frame ms / update ms / draw ms / draw calls), so this is the place to *measure* a draw-cost question rather than reason about it - the `quad-fill-benchmark` demo times two fill approaches head to head in one run. | `up`/`down` = select in menu, `select` (OK) = run selected demo / demo-specific action, `back` = return to menu. Can also skip the menu entirely via a launch param: `rokubot launch dev --param demo=<id>` (see `DemoList.bs` for valid ids) |
 | `hybrid` | Fixed (was previously broken — stale `getImage` call). Now: SceneGraph side plays a sample video; roScreen/BGE side is a ball-to-target minigame that switches back to SceneGraph on collision. | Ball game: arrows move the ball, reaching the green target switches to video. `back` (either side) toggles/quits |
 | `terrain` | Demonstrates `BGE.DrawablePlane`/`SceneObjectPlane` (a Mode-7-style textured ground plane) — no vehicle/kart entity, just a camera driving around above the plane. Camera starts centered directly above the plane's origin. | `left`/`right` steer (yaw about world y), `up`/`down` drive forward/back along the current heading, `select` (OK) toggles the ground texture between the Mario Kart track image and a plain checkerboard, `options` (`*`) toggles the debug entity-details overlay, `back` quits |

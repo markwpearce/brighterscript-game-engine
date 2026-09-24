@@ -9,7 +9,7 @@ order: 4
 BGE ships four SceneGraph components under `components/Shapes/` - `RoundedRectangle`,
 `Circle`, `Triangle`, `Polygon` - that render shapes SceneGraph has no native node for, using
 `BGE.Renderer` internally. Drop one in your scene and get a rendered shape with no
-offscreen-bitmap plumbing of your own: no `BGE.Game`, no `Room`, no `roScreen`. See
+offscreen-bitmap plumbing of your own: no `BGE.Game`, no `Scene`, no `roScreen`. See
 `examples/scenegraph` for a runnable demo of all four.
 
 Internally each component is a `Group` wrapping a child `Poster` and a shared render `Task`,
