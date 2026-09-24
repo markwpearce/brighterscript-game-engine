@@ -1,0 +1,240 @@
+class MainScene extends BGE.GameScene
+
+  game_started = false
+
+  player = invalid
+  rocks = []
+  timeSinceLastRock = 0
+  timeBetweenRocks = 6
+
+  debugLevel = 0
+  backgroundImage as BGE.Image
+  maxBackgroundOffset = 100
+  backgroundScale = 1.0
+
+  ' Restart-in-place prompt (after death, without leaving to TitleScene) - a
+  ' single multi-line BGE.UI.Label rather than a raw Renderer.DrawText() call
+  ' in onDrawEnd(), so the text is rasterized once (and cached - see
+  ' DrawableText.getTextImage()) instead of every single frame. A per-frame
+  ' raw DrawText() with this example's custom font visibly flickered on real
+  ' hardware; the cached Label path doesn't. Centered via horizAlign/
+  ' vertAlign (the engine's own layout - see UiWidget.getWorldPosition()),
+  ' not manual customX/Y math - that only works with customPosition left
+  ' false, positioning this Label relative to its parent (gameUi).
+  promptLabel as BGE.UI.Label
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainScene"
+    m.promptLabel = new BGE.UI.Label(m.game)
+    m.promptLabel.horizAlign = "center"
+    m.promptLabel.vertAlign = "center"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    ' gameUi persists across a scene change (unlike entities) - clear
+    ' TitleScene's heading/hint/Start button before adding this scene's own
+    ' promptLabel/score HUD, same pattern examples/platformer's
+    ' GameStateManager uses when arriving at its own MainScene.
+    m.game.gameUi.clearChildren()
+
+    m.game.addEntity(new PauseHandler(m.game))
+    m.game.addEntity(new ScoreHandler(m.game))
+    screenWidth = m.game.canvas.getWidth()
+    screenHeight = m.game.canvas.getHeight()
+    backgroundBmp = m.game.getBitmap("background")
+    region = CreateObject("roRegion", backgroundBmp, 0, 0, backgroundBmp.getWidth(), backgroundBmp.getHeight())
+    region.SetScaleMode(1)
+    region.SetPreTranslation(-backgroundBmp.getWidth() / 2, -backgroundBmp.getHeight() / 2)
+    m.backgroundImage = m.addImage("background", region)
+
+    m.backgroundImage.offset.x = screenWidth / 2
+    m.backgroundImage.offset.y = screenHeight / 2
+    m.backgroundImage.offset.z = -10
+    m.backgroundScale = screenHeight / backgroundBmp.getHeight()
+    m.backgroundImage.scale = BGE.Math.createScaleVector(m.backgroundScale)
+    m.updateBackground(BGE.Math.VectorOps.create(screenWidth / 2, screenHeight / 2))
+    m.timeSinceLastRock = m.timeBetweenRocks
+
+    m.game.gameUi.addChild(m.promptLabel)
+
+    ' Starting is now handled by TitleScene's own Start button - entering
+    ' MainScene always begins play immediately. game_started still flips back
+    ' to false on death (see onGameEvent's "game_over" branch below) so the
+    ' player can restart in place with "fire" without leaving to the title
+    ' screen - see onControls() and updateStartScreenLabels().
+    m.game_started = true
+    m.game.postGameEvent("game_start")
+    m.player = m.game.addEntity(new Player(m.game))
+    m.addNewRock(BGE.Math.VectorOps.create(300, 300))
+    m.updateStartScreenLabels()
+  end sub
+
+  override sub onUpdate(dt as float)
+    if m.game_started and not BGE.isValidEntity(m.player)
+      m.player = m.game.addEntity(new Player(m.game))
+      m.addNewRock(BGE.Math.VectorOps.create(300, 300))
+    end if
+    if m.game_started
+      if not m.player.dead
+        m.timeSinceLastRock += dt
+        if m.timeSinceLastRock >= m.timeBetweenRocks
+          m.timeSinceLastRock = 0
+          m.addNewRock()
+        end if
+      end if
+      m.updateBackground(m.player.position)
+    end if
+    m.updateStartScreenLabels()
+  end sub
+
+  ' Keeps the restart prompt in sync with game_started/player state via
+  ' setText() (a no-op once the string already matches - see
+  ' DrawableText.getTextImage()'s dirty check).
+  sub updateStartScreenLabels()
+    if m.game_started
+      m.promptLabel.setText("")
+      return
+    end if
+    lines = []
+    if invalid <> m.player
+      lines.push("Game Over!")
+    end if
+    lines.push("Press OK To Play")
+    lines.push("Move: Arrows | Shoot: OK")
+    m.promptLabel.setText(lines.join(Chr(10)))
+  end sub
+
+  sub updateBackground(point as BGE.Math.vector)
+    playerDistFromCenter = BGE.Math.VectorOps.length(BGE.Math.VectorOps.subtract(m.game.canvas.renderer.getCanvasCenter(), point))
+    maxDist = m.game.canvas.getHeight() / 2
+    playerDistFromCenter = BGE.Math.Clamp(playerDistFromCenter, 0, maxDist)
+    newScale = BGE.Tweens.CubicTween(1.2 * m.backgroundScale, m.backgroundScale, playerDistFromCenter, maxDist)
+    m.backgroundImage.scale = BGE.Math.createScaleVector(newScale)
+  end sub
+
+
+  ' Debug-overlay cycling stays remote-only raw input (no gamepad equivalent),
+  ' matching examples/breakout/platformer's convention of leaving this kind of
+  ' meta toggle off the bound action set.
+  override sub onInput(input as BGE.GameInput)
+    if input.press and input.isButton("options")
+      m.debugLevel = (m.debugLevel + 1) mod 4
+      m.game.debugShowUi(m.debugLevel > 0)
+      m.game.debugDrawEntityDetails(m.debugLevel > 1)
+      m.game.debugDrawColliders(m.debugLevel > 2)
+    end if
+  end sub
+
+  ' "fire" (bound in main.bs to remote OK / gamepad "ok") also doubles as the
+  ' start-game confirm, same as the plain OK-button check this replaced.
+  override sub onControls(controls as BGE.Controller.ControlMap)
+    if not m.game_started and controls.isActionPressed("fire")
+      m.game_started = true
+      m.game.postGameEvent("game_start")
+    end if
+  end sub
+
+
+  sub clearEntities()
+    if invalid <> m.player
+      m.game.destroyEntity(m.player)
+    end if
+    for each rockOld in m.rocks
+      m.game.destroyEntity(rockOld)
+
+    end for
+    m.rocks = []
+  end sub
+
+  sub addNewRock(position = invalid as BGE.Math.Vector, level = 1 as integer, rotationalThrust = 0 as integer, parentRotation = invalid as BGE.Math.Vector)
+    height = m.game.getCanvas().GetHeight()
+    width = m.game.getCanvas().GetWidth()
+    repositionable = true
+    rockPosition = BGE.Math.VectorOps.create()
+    zRot = -BGE.Math.HALF_PI / 2 ' about 45 degrees
+
+
+    if position = invalid
+      repositionable = false
+      ' generate a position outside the screen
+      q = rnd(2)
+      fudge = 200
+      randomY = rnd(height)
+
+      rockPosition.x -= fudge
+      rockPosition.y = randomY
+
+      if q = 2
+        rockPosition.x = width + fudge
+        rockPosition.y = randomY
+        zRot = -1 * (3 * BGE.Math.PI / 4)' 115 degrees
+      end if
+      if randomY < (height / 2)
+        ' Rock is in lower part of screen, switch rotation so it goes up
+        zRot = -zRot
+      end if
+    else
+      rockPosition = BGE.Math.VectorOps.copy(position)
+    end if
+    rockRotation = BGE.Math.VectorOps.create(0, 0, zRot)' + rnd(0.1) - 0.05)
+
+    if parentRotation <> invalid
+      rockRotation = BGE.Math.VectorOps.copy(parentRotation)
+      rockRotation.z += (BGE.Math.PI / 4) * rotationalThrust
+    end if
+
+    m.rocks.push(m.game.addEntity(new Rock(m.game), {
+      position: rockPosition,
+      level: level,
+      rotationalThrust: rotationalThrust,
+      rotation: rockRotation,
+      repositionable: repositionable
+    }))
+  end sub
+
+  private sub addExplosion(rockToDie as object, imageScale = 1 as float, soundName = "" as string)
+    m.game.addEntity(new Explosion(m.game), {
+      position: rockToDie.position,
+      imageScale: imageScale,
+      rotation: rockToDie.rotation,
+      soundName: soundName
+    })
+  end sub
+
+  override sub onGameEvent(event as string, data as object)
+    if event = "game_over"
+      m.game_started = false
+      m.addExplosion(m.player, 5, "die")
+
+    end if
+    if event = "game_start"
+      m.clearEntities()
+    end if
+
+    if event = "rock_hit"
+      rockToDie = data.rock
+      nextLevel = rockToDie.level + 1
+      if nextLevel < 4
+        m.addNewRock(rockToDie.position, nextLevel, 1, rockToDie.rotation)
+        m.addNewRock(rockToDie.position, nextLevel, -1, rockToDie.rotation)
+      end if
+      m.addExplosion(rockToDie, 3 / rockToDie.level)
+      i = 0
+      indexOfRockToDie = -1
+      for each rockEntity in m.rocks
+        if rockEntity.id = rockToDie.id
+          indexOfRockToDie = i
+          exit for
+        end if
+        i++
+      end for
+      if indexOfRockToDie <> -1
+        m.rocks.delete(indexOfRockToDie)
+      end if
+      m.game.destroyEntity(rockToDie)
+      m.game.destroyEntity(data.bullet)
+    end if
+  end sub
+
+end class

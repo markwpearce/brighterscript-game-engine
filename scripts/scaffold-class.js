@@ -1,4 +1,4 @@
-// Shared scaffolding logic for scripts/create-entity.js and scripts/create-room.js -
+// Shared scaffolding logic for scripts/create-entity.js and scripts/create-scene.js -
 // both generate a single class file under examples/<example>/src/source/<kind>/<ClassName>.bs
 // from a __CLASS_NAME__ template, following the same pure-Node approach as create-example.js
 // so it runs the same on Windows as macOS/Linux.
@@ -40,9 +40,9 @@ async function promptForMissingArgs(exampleName, className, { classKind }) {
 }
 
 // opts:
-//   subDir   - subdirectory under src/source, e.g. "Entities" or "Rooms"
+//   subDir   - subdirectory under src/source, e.g. "Entities" or "Scenes"
 //   templatePath - absolute path to the __CLASS_NAME__.bs template
-//   classKind - "Entity" or "Room", used in prompts/messages
+//   classKind - "Entity" or "Scene", used in prompts/messages
 //   printNextSteps(filePath, className) - called with the created file's path
 function scaffoldClass(exampleName, className, opts) {
   assertValidClassName(className);

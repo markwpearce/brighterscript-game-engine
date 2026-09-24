@@ -142,7 +142,7 @@ buttons report as `"a"`, `"b"`, `"x"`, `"y"`, `"l1"`, `"r1"`, `"l2"`, `"r2"`
 (see `BGE.buttonNameFromCode`). `"a"`/`"b"` are aliased to `"ok"`/`"back"`
 (the conventional gamepad meaning - A confirms, B cancels), so no extra
 code is needed for a gamepad's A/B to drive menus (`BGE.UI.FocusManager`'s
-click handling) or any `isButton("back")` check a room already has - and a
+click handling) or any `isButton("back")` check a scene already has - and a
 `bindAction("jump", "ok", ...)` binding fires for a gamepad's A press too,
 with no changes.
 

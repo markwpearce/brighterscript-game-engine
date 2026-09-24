@@ -30,7 +30,7 @@ BGE.QrCode.draw(renderer, x, y, code, width, BGE.Colors.White, BGE.Colors.Black)
 
 ## Drawing one every frame
 
-A `GameEntity`/`Room`'s `onDrawEnd(gameRenderer, uiRenderer)` hook runs once
+A `GameEntity`/`GameScene`'s `onDrawEnd(gameRenderer, uiRenderer)` hook runs once
 per frame after the normal scene draw - the natural place to draw a QR code
 alongside the rest of your UI. The UI renderer stays crisp regardless of game
 canvas scaling, so it's usually the right target for something like this.
@@ -71,6 +71,6 @@ isDark = qr.getModule(x, y) ' x, y in [0, qr.size)
 level survives more damage/obstruction before becoming unreadable, at the
 cost of a denser (sometimes larger) code for the same text.
 
-See `examples/controller`'s `MainRoom` for a runnable example (drawing the
+See `examples/controller`'s `MainScene` for a runnable example (drawing the
 controller connection URL as a QR code instead of - or alongside - plain
 text).

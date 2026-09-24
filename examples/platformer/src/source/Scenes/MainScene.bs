@@ -1,0 +1,157 @@
+import "../LevelData.bs"
+import "../Entities/Level.bs"
+import "../Entities/Player.bs"
+import "../Entities/Coin.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/Goal.bs"
+import "../Entities/GameStateManager.bs"
+import "../Entities/PauseMenu.bs"
+
+class MainScene extends BGE.GameScene
+
+  showingDebug = false
+
+  ' Which level is currently loaded - see LevelData.getLevelRows(). Read back by
+  ' onUpdate()'s camera-clamp math below, and forwarded (along with score/lives
+  ' carried in via args) to every entity that needs it.
+  currentLevelIndex = 0
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainScene"
+  end sub
+
+  ' @param {integer} [args.levelIndex=0] - which level to load, per LevelData.getLevelRows().
+  ' @param {integer} [args.score] @param {integer} [args.lives] - forwarded to
+  '   GameStateManager (see its own onCreate() doc comment) so a level-to-level
+  '   advance (Goal.onCollision) carries the running score/lives forward instead
+  '   of resetting them; omitted (nil) on the very first level load.
+  override sub onCreate(args as roAssociativeArray)
+    if invalid <> args.levelIndex
+      m.currentLevelIndex = args.levelIndex as integer
+    end if
+    ' Added first so it draws behind everything else added afterward this frame
+    ' (draw order follows insertion order - there's no settable zIndex on a
+    ' Drawable/Image to reorder it explicitly).
+    '
+    ' Three DrawableParallaxLayers (not a plain Image scaled to the whole level) - a single
+    ' giant Image anchored at one corner gets frustum-culled wholesale once the camera
+    ' scrolls far enough from that anchor (SceneObjectBillboard's screen-aligned frustum
+    ' check tests only that one anchor point, not the image's full extent). A tiling
+    ' parallax layer's SceneObjectParallaxLayer never runs that check at all when
+    ' repeatX/repeatY are set - it always reports on-screen and re-tiles to cover the
+    ' canvas regardless of camera position, so it can't go missing mid-level.
+    '
+    ' Back-to-front draw order, increasing parallaxFactor per layer (examples/parallax's
+    ' multi-layer pattern): bg_back (flat, very-distant bright-green hint) drifts least,
+    ' bg_far (a full dark-forest silhouette scene) drifts a bit more, bg_middle (one large
+    ' close-up tree) drifts the most of the three.
+    '
+    ' All three share the same owner (m, this GameScene, sitting at the default (0,0,0)
+    ' position) as their parallax reference point, and their factors are all close to 1 -
+    ' with no offset compensation (unlike examples/parallax's newLayer(), which always
+    ' applies one), every layer's own tile-repeat boundary landed at nearly the same
+    ' on-canvas position for as long as the camera sits at its initial rest position (which
+    ' is also where it stays clamped for the level's whole opening stretch, until the
+    ' player runs far enough right to unclamp it) - three overlapping, reinforcing
+    ' boundaries read as one obvious seam, worse than any single layer's own repeat would
+    ' be alone. newBackgroundLayer()'s targetX staggers each layer's boundary to a
+    ' different on-canvas position instead so they don't reinforce each other, and its Y
+    ' offset pins every layer's vertical tile boundary to the very top edge permanently
+    ' (this GameScene's camera.y target never changes - see onUpdate() - so this isn't just a
+    ' best-effort anchor, it's an exact, permanent fix on that axis).
+    m.addDrawable("bgBack", m.newBackgroundLayer("bgBack", 0.02, 0))
+    m.addDrawable("bgFar", m.newBackgroundLayer("bgFar", 0.05, 96))
+    m.addDrawable("bgMiddle", m.newBackgroundLayer("bgMiddle", 0.1, 192))
+
+    levelArgs = {levelIndex: m.currentLevelIndex}
+    gameStateArgs = {levelIndex: m.currentLevelIndex}
+    if invalid <> args.score
+      gameStateArgs.score = args.score
+    end if
+    if invalid <> args.lives
+      gameStateArgs.lives = args.lives
+    end if
+
+    m.game.addEntity(new Level(m.game), levelArgs)
+    m.game.addEntity(new GameStateManager(m.game), gameStateArgs)
+    m.game.addEntity(new PauseMenu(m.game))
+
+    rows = getLevelRows(m.currentLevelIndex)
+    for r = 0 to rows.count() - 1
+      row = rows[r]
+      for c = 0 to row.len() - 1
+        if row.mid(c, 1) = "P"
+          playerEntity = m.game.addEntity(new Player(m.game), levelArgs) as Player
+          playerEntity.position.x = c * TileSize + TileSize / 2.0
+          playerEntity.position.y = (NumRows - r) * TileSize
+        else if row.mid(c, 1) = "o"
+          coinEntity = m.game.addEntity(new Coin(m.game)) as Coin
+          coinEntity.position.x = c * TileSize + TileSize / 2.0
+          coinEntity.position.y = (NumRows - r) * TileSize - TileSize / 2.0
+        else if row.mid(c, 1) = "e"
+          enemyEntity = m.game.addEntity(new Enemy(m.game)) as Enemy
+          enemyEntity.position.x = c * TileSize + TileSize / 2.0
+          ' Unlike Player, Enemy has no gravity (see Enemy.bs) - it never falls
+          ' into place, so its spawn Y must land it directly on the ground
+          ' tile's top edge (one row below the "e" marker's own grid row),
+          ' not the marker row's height like Player's fall-then-land formula.
+          enemyEntity.position.y = (NumRows - r - 1) * TileSize
+        else if row.mid(c, 1) = "G"
+          goalEntity = m.game.addEntity(new Goal(m.game), levelArgs) as Goal
+          goalEntity.position.x = c * TileSize + TileSize / 2.0
+          ' Unlike Player, Goal has no gravity - it never falls into place, so its
+          ' spawn Y must land it directly on the ground tile's top edge (one row
+          ' below the "G" marker's own grid row), not the marker row's height like
+          ' Player's fall-then-land formula.
+          goalEntity.position.y = (NumRows - r - 1) * TileSize
+        end if
+      end for
+    end for
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    ' Back is the "pause" action (main.bs), handled by PauseMenu.onControls() - not a quit here.
+    if input.press and input.isButton("options")
+      m.showingDebug = not m.showingDebug
+      m.game.debugShowUi(m.showingDebug, true)
+      m.game.debugDrawColliders(m.showingDebug)
+    end if
+  end sub
+
+  override sub onUpdate(dt as float)
+    playerEntity = m.game.getEntityByName("Player") as Player
+    if invalid = playerEntity
+      return
+    end if
+
+    camera = m.game.canvas.renderer.camera
+    halfViewWidth = camera.frameSize.x / 2.0
+    levelWidth = getLevelNumCols(m.currentLevelIndex) * TileSize
+
+    targetX = playerEntity.position.x
+    minX = halfViewWidth
+    maxX = levelWidth - halfViewWidth
+    if targetX < minX
+      targetX = minX
+    else if targetX > maxX
+      targetX = maxX
+    end if
+
+    ' TODO: allow camera to move up & Down?
+
+    camera.setTarget(BGE.Math.VectorOps.create(targetX, camera.frameSize.y / 2.0))
+  end sub
+
+  ' Builds one repeating, canvas-height-filling background layer from an already-loaded
+  ' bitmap, via BGE.newFullHeightParallaxLayer - see that function's doc comment for the
+  ' targetX/offset derivation this wraps. Callers pass a different targetX per layer so
+  ' the three layers' seams land at different on-canvas spots instead of all landing near
+  ' the same one (see onCreate()'s comment above on why that matters).
+  private function newBackgroundLayer(bitmapName as string, factor as float, targetX as float) as BGE.DrawableParallaxLayer
+    bmp = m.game.getBitmap(bitmapName)
+    region = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
+    return BGE.newFullHeightParallaxLayer(m, region, m.game.canvas.getWidth(), m.game.canvas.getHeight(), factor, targetX, 0.0)
+  end function
+
+end class

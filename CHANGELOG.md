@@ -4,6 +4,26 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+`BGE.Room` is now `BGE.GameScene` ([#227](https://github.com/markwpearce/brighterscript-game-engine/issues/227)). "Room" never described what it is - the current state of your game, whether that's a title screen, a menu, or a level. The renderer's own "scene" methods were renamed at the same time so the word only means one thing. This is a clean break with no deprecated aliases; the next release is 0.7.0. The class is `GameScene`, matching `GameEntity`/`GameInput`; the methods, fields and folders that refer to it just say "scene".
+
+| Old | New |
+|---|---|
+| `BGE.Room` | `BGE.GameScene` |
+| `Room.persistDrawablesAcrossRoomChange` | `GameScene.persistDrawablesAcrossSceneChange` |
+| `GameEntity.onChangeRoom(newRoom)` | `GameEntity.onChangeScene(newScene)` |
+| `Game.defineRoom()` / `changeRoom()` / `resetRoom()` | `Game.defineScene()` / `changeScene()` / `resetScene()` |
+| `Game.getRoom()` / `getRoomNames()` / `isRoomChanging()` | `Game.getScene()` / `getSceneNames()` / `isSceneChanging()` |
+| `Game.currentRoom` / `currentRoomArgs` / `Rooms` | `Game.currentScene` / `currentSceneArgs` / `Scenes` |
+| `Renderer.drawScene()` | `Renderer.render()` |
+| `Drawable.addToScene(renderer)` / `removeFromScene(renderer)` | `Drawable.addToRenderer(renderer)` / `removeFromRenderer(renderer)` |
+| `npm run create-room` | `npm run create-scene` (writes to `Scenes/`) |
+
+Most leftover uses of the old names fail to compile. The exception: an `override sub onChangeRoom(...)`, `override function addToScene(...)` or `override sub removeFromScene(...)` in your own classes **still compiles but is never called**. Search your project for those three names and rename them.
+
+`SceneObject` and `Renderer.addSceneObject()`/`removeSceneObject()`/`getSceneObjects()` are unchanged.
+
 ### Added
 
 - `BGE.UI.Button` can play a `Game.loadSound()` key on focus/click (`Button.focusSoundKey`/`clickSoundKey`), falling back to a new game-wide default (`Game.uiFocusSoundKey`/`uiClickSoundKey`) when unset - see `docs/engine-internals.md`.

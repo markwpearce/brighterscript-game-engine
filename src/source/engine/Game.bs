@@ -22,7 +22,7 @@ import "GameEntity.bs"
 import "GameInput.bs"
 import "interfaces.bs"
 import "renderer/cameras/Camera.bs"
-import "Room.bs"
+import "GameScene.bs"
 import "TweenManager.bs"
 import "ui/FocusManager.bs"
 import "ui/Style.bs"
@@ -119,23 +119,23 @@ namespace BGE
     private lastGarbageCollection as GarbageCollectionInfo = invalid
     ' Timer backing debugPrintPerfStats()'s independent print cadence - see Play().
     private perfStatsTimer as roTimespan = CreateObject("roTimespan")
-    private roomChangedThisFrame as boolean = false
-    private roomChangeDetails as RoomChangeInfo = invalid
+    private sceneChangedThisFrame as boolean = false
+    private sceneChangeDetails as SceneChangeInfo = invalid
 
     ' ****END - For Internal Use, Do Not Manually Alter****
 
 
-    ' Reference to the current room in play
-    currentRoom as Room = invalid
-    ' Any special arguments for the current room
-    currentRoomArgs = {}
+    ' The scene currently in play
+    currentScene as GameScene = invalid
+    ' The args passed to changeScene() for the current scene
+    currentSceneArgs = {}
 
-    ' All of the GameEntities by room <roomName> => <entityName> => GameEntity
+    ' All of the GameEntities by name <entityName> => <entityId> => GameEntity
     Entities = {}
     ' All static variables for a given object type
     Statics = {}
-    ' The room definitions by name (the room creation functions)
-    Rooms = {}
+    ' The scene definitions by name (see defineScene())
+    Scenes = {}
     ' The interface definitions by name
     Interfaces = {}
     ' The loaded bitmaps by name
@@ -336,7 +336,7 @@ namespace BGE
       m.running = true
 
       while m.running
-        m.roomChangedThisFrame = false
+        m.sceneChangedThisFrame = false
 
         m.clearStaleInputCapture()
         m.compositor.draw() ' For some reason this has to be called or the colliders don't remove themselves from the compositor ¯\(°_°)/¯
@@ -539,8 +539,8 @@ namespace BGE
           m.garbageCollectionTimer.mark()
         end if
 
-        if m.roomChangedThisFrame
-          m.handleRoomChange()
+        if m.sceneChangedThisFrame
+          m.handleSceneChange()
         end if
 
       end while
@@ -684,8 +684,8 @@ namespace BGE
       for i = m.sortedEntities.Count() to 0 step -1
         entity = invalid as BGE.GameEntity
         if i = m.sortedEntities.Count()
-          ' magic to process current room first
-          entity = m.currentRoom
+          ' magic to process current scene first
+          entity = m.currentScene
         else
           entity = m.sortedEntities[i]
         end if
@@ -753,8 +753,8 @@ namespace BGE
       for i = m.sortedEntities.Count() to 0 step -1
 
         if i = m.sortedEntities.Count()
-          ' magic to process current room first
-          entity = m.currentRoom
+          ' magic to process current scene first
+          entity = m.currentScene
         else
           entity = m.sortedEntities[i]
         end if
@@ -987,9 +987,9 @@ namespace BGE
                   otherEntity as GameEntity = invalid
                   if invalid <> m.Entities[otherColliderData.objectName][otherColliderData.entityId]
                     otherEntity = m.Entities[otherColliderData.objectName][otherColliderData.entityId] as GameEntity
-                  else if invalid <> m.currentRoom and otherColliderData.objectName = m.currentRoom.name
-                    ' Or is it the current room?
-                    otherEntity = m.currentRoom as GameEntity
+                  else if invalid <> m.currentScene and otherColliderData.objectName = m.currentScene.name
+                    ' Or is it the current scene?
+                    otherEntity = m.currentScene as GameEntity
                   end if
                   if invalid <> otherEntity and otherEntity.id <> entity.id
                     otherColliderObj = otherEntity.colliders[otherColliderData.colliderName]
@@ -1050,23 +1050,23 @@ namespace BGE
 
 
 
-    ' Draws the Renderer's scene, bookended by calling PreDraw and PostDraw functions on teh active room and entities
+    ' Draws the game canvas, bookended by calling PreDraw and PostDraw functions on the current scene and entities
     '
     ' @return {void}
     private sub drawEntities()
       m.canvas.renderer.setupCameraForFrame()
 
-      if invalid <> m.currentRoom
-        m.processEntityPreDraw(m.currentRoom)
+      if invalid <> m.currentScene
+        m.processEntityPreDraw(m.currentScene)
       end if
       for each entity in m.sortedEntities
         m.processEntityPreDraw(entity)
       end for
 
-      m.canvas.renderer.drawScene()
+      m.canvas.renderer.render()
 
-      if invalid <> m.currentRoom
-        m.processEntityPostDraw(m.currentRoom)
+      if invalid <> m.currentScene
+        m.processEntityPostDraw(m.currentScene)
       end if
       for each entity in m.sortedEntities
         m.processEntityPostDraw(entity)
@@ -1199,11 +1199,11 @@ namespace BGE
       return m.totalRunTime
     end function
 
-    ' Gets the current Room/Level the game is using
+    ' Gets the scene the game is currently in
     '
-    ' @return {Room}
-    function getRoom() as Room
-      return m.currentRoom
+    ' @return {GameScene}
+    function getScene() as GameScene
+      return m.currentScene
     end function
 
 
@@ -1517,7 +1517,7 @@ namespace BGE
       anyEntityDebugs = m.debugging.draw_colliders or m.debugging.draw_entity_axes or m.debugging.draw_entity_names
 
       if anyEntityDebugs
-        m.drawDebugForEntity(m.currentRoom)
+        m.drawDebugForEntity(m.currentScene)
         for each entity in m.sortedEntities
           m.drawDebugForEntity(entity)
         end for
@@ -1749,8 +1749,8 @@ namespace BGE
       for i = m.sortedEntities.Count() to 0 step -1
         entity = invalid as BGE.GameEntity
         if i = m.sortedEntities.Count()
-          ' magic to process current room first
-          entity = m.currentRoom
+          ' magic to process current scene first
+          entity = m.currentScene
         else
           entity = m.sortedEntities[i]
         end if
@@ -1878,7 +1878,7 @@ namespace BGE
     end function
 
 
-    ' Gets all entities tagged with the given tag (via GameEntity.tagsList), across every room
+    ' Gets all entities tagged with the given tag (via GameEntity.tagsList), across every scene
     '
     ' @param {string} tag - the tag to look for (case insensitive, see BGE.TagList)
     ' @return {GameEntity[]} an array of entities with the given tag
@@ -1930,7 +1930,7 @@ namespace BGE
         if invalid <> entity.onDestroy and callOnDestroy
           entity.onDestroy()
         end if
-        if invalid <> entity.name and invalid <> entityId and invalid <> m.Entities[entityName][entityId] ' This redundancy is here because if somebody would try to change rooms within the onDestroy() method the game would break.
+        if invalid <> entity.name and invalid <> entityId and invalid <> m.Entities[entityName][entityId] ' This redundancy is here because if somebody would try to change scenes within the onDestroy() method the game would break.
           m.Entities[entityName].Delete(entityId)
         end if
         if invalid <> entity.invalidate
@@ -1970,79 +1970,79 @@ namespace BGE
 
 
 
-    ' --------------------------------Begin Room Functions----------------------------------------
+    ' --------------------------------Begin Scene Functions----------------------------------------
 
 
 
-    ' Defines a room (like a level) in the game
-    ' TODO: work on rooms
+    ' Registers a scene so it can later be switched to by name with `changeScene()`.
     '
-    ' @param {Room} room
-    ' @return {void}
-    sub defineRoom(newRoom as Room)
-      roomName = newRoom.name
-      m.Rooms[roomName] = newRoom
-      m.Entities[roomName] = {}
-      m.Statics[roomName] = {}
+    ' @param {GameScene} newScene - The scene to register; its `name` is the key `changeScene()` uses
+    sub defineScene(newScene as GameScene)
+      sceneName = newScene.name
+      m.Scenes[sceneName] = newScene
+      m.Entities[sceneName] = {}
+      m.Statics[sceneName] = {}
     end sub
 
 
-    function isRoomChanging() as boolean
-      return m.roomChangedThisFrame
+    ' Whether a scene change was requested this frame and hasn't been applied yet.
+    '
+    ' @return {boolean}
+    function isSceneChanging() as boolean
+      return m.sceneChangedThisFrame
     end function
 
 
-    ' Changes the active room to the one with the given name
-    ' Calls the room's onCreate() method with the args given
-    ' TODO: work on rooms
+    ' Changes to the scene registered under the given name, then calls its `onCreate(args)`.
+    ' While the game is running, the change is applied at the end of the current frame.
     '
-    ' @param {string} roomName
-    ' @param [args={}]
-    ' @return {boolean} true if room change was successful
-    function changeRoom(roomName as string, args = {} as roAssociativeArray) as boolean
-      if m.Rooms[roomName] <> invalid
+    ' @param {string} sceneName - The name of a scene registered with `defineScene()`
+    ' @param {object} [args={}] - Passed to the scene's `onCreate()`
+    ' @return {boolean} true if a scene with that name exists
+    function changeScene(sceneName as string, args = {} as roAssociativeArray) as boolean
+      if m.Scenes[sceneName] <> invalid
 
-        m.roomChangedThisFrame = true
-        m.roomChangeDetails = {room: m.Rooms[roomName] as Room, args: args}
-        if invalid = m.currentRoom or not m.running
-          m.handleRoomChange()
+        m.sceneChangedThisFrame = true
+        m.sceneChangeDetails = {scene: m.Scenes[sceneName] as GameScene, args: args}
+        if invalid = m.currentScene or not m.running
+          m.handleSceneChange()
         end if
         return true
       else
-        m.log("Game.changeRoom() - A room named " + roomName + " hasn't been defined", BGE.Debug.LogLevel.error)
+        m.log("Game.changeScene() - A scene named " + sceneName + " hasn't been defined", BGE.Debug.LogLevel.error)
         return false
       end if
     end function
 
-    private sub handleRoomChange()
-      if m.roomChangedThisFrame and m.roomChangeDetails <> invalid and m.roomChangeDetails.room <> invalid
-        thisRoom = m.roomChangeDetails.room
+    private sub handleSceneChange()
+      if m.sceneChangedThisFrame and m.sceneChangeDetails <> invalid and m.sceneChangeDetails.scene <> invalid
+        thisScene = m.sceneChangeDetails.scene
         args = {}
-        if m.roomChangeDetails.args <> invalid
-          args = m.roomChangeDetails.args
+        if m.sceneChangeDetails.args <> invalid
+          args = m.sceneChangeDetails.args
         end if
 
         for i = 0 to m.sortedEntities.Count() - 1
           entity = m.sortedEntities[i]
-          if m.isValidEntity(entity) and entity.onChangeRoom <> invalid
-            entity.onChangeRoom(thisRoom)
+          if m.isValidEntity(entity) and entity.onChangeScene <> invalid
+            entity.onChangeScene(thisScene)
           end if
         end for
         for i = 0 to m.sortedEntities.Count() - 1
           entity = m.sortedEntities[i]
-          if m.isValidEntity(entity) and not entity.persistent and entity.name <> m.currentRoom.name
+          if m.isValidEntity(entity) and not entity.persistent and entity.name <> m.currentScene.name
             m.destroyEntity(entity, false)
           end if
         end for
 
-        if m.isValidEntity(m.currentRoom) and m.currentRoom.onChangeRoom <> invalid
-          m.currentRoom.onChangeRoom(thisRoom)
+        if m.isValidEntity(m.currentScene) and m.currentScene.onChangeScene <> invalid
+          m.currentScene.onChangeScene(thisScene)
         end if
 
-        m.currentRoom = thisRoom
-        m.currentRoomArgs = args
-        m.currentRoom.onCreate(args)
-        m.roomChangedThisFrame = false
+        m.currentScene = thisScene
+        m.currentSceneArgs = args
+        m.currentScene.onCreate(args)
+        m.sceneChangedThisFrame = false
 
         m.lastGarbageCollection = runGarbageCollector()
         m.garbageCollectionTimer.mark()
@@ -2051,15 +2051,18 @@ namespace BGE
 
 
 
-    ' Resets the current room to its state at when it was first created
+    ' Restarts the current scene by changing to it again with the same args.
     '
     ' @return {void}
-    sub resetRoom()
-      m.changeRoom(m.currentRoom.name, m.currentRoomArgs)
+    sub resetScene()
+      m.changeScene(m.currentScene.name, m.currentSceneArgs)
     end sub
 
-    function getRoomNames() as string[]
-      return m.Rooms.Keys() as string[]
+    ' The names of every scene registered with `defineScene()`.
+    '
+    ' @return {string[]}
+    function getSceneNames() as string[]
+      return m.Scenes.Keys() as string[]
     end function
 
 
@@ -2455,8 +2458,8 @@ namespace BGE
           entity.onGameEvent(eventName, data)
         end if
       end for
-      if invalid <> m.currentRoom
-        m.currentRoom.onGameEvent(eventName, data)
+      if invalid <> m.currentScene
+        m.currentScene.onGameEvent(eventName, data)
       end if
 
       if invalid <> m.gameUi

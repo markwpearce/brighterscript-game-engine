@@ -21,7 +21,7 @@ if (require.main === module) {
       console.log(`Created ${relativePath}`);
       console.log('');
       console.log('Next steps:');
-      console.log(`  # add it to a room, e.g. in a Room's onCreate(): m.game.addEntity(new ${className}(m.game))`);
+      console.log(`  # add it to a scene, e.g. in a GameScene's onCreate(): m.game.addEntity(new ${className}(m.game))`);
     },
   });
 }
