@@ -49,7 +49,7 @@ function printNextSteps(exampleDir) {
   console.log('');
   console.log('Next steps:');
   console.log(`  cd ${relativeDir} && npm install`);
-  console.log('  # add entities under src/source/Entities, rooms under src/source/Rooms');
+  console.log('  # add entities under src/source/Entities, scenes under src/source/Scenes');
   console.log('  # add sprites/sounds/models under src/sprites, src/sounds, src/models');
   console.log('  npm run build');
 }
