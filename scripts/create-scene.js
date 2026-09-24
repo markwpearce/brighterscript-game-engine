@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Scaffolds a new BGE.Scene subclass under examples/<example>/src/source/Scenes
+// Scaffolds a new BGE.GameScene subclass under examples/<example>/src/source/Scenes
 // from scripts/templates/sceneTemplate.bs.
 //
 // Usage: node scripts/create-scene.js [example] [SceneName]

@@ -31,7 +31,7 @@ Build a full game with entities, scenes, collisions, input, and UI - or just pul
 
 ## Why BrighterScript Game Engine?
 
-- **Object-oriented, like the engines you already know.** `GameEntity`, `Scene`, and lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, ...) give you the same shape as Phaser, HaxeFlixel, GameMaker, or Unity - minus the visual editor.
+- **Object-oriented, like the engines you already know.** `GameEntity`, `GameScene`, and lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, ...) give you the same shape as Phaser, HaxeFlixel, GameMaker, or Unity - minus the visual editor.
 - **A real 2D/3D renderer, not just sprite blitting.** Draw images, sprites, animations, shapes, text, and billboards, or render actual 3D models (loaded from `.stl`) with wireframe, solid, and shaded draw modes - all built on Roku's `roCompositor`/`Draw2D`, so it runs on real hardware.
 - **Built-in collisions, input, UI, and debug tooling.** Circle/rectangle colliders, a retained-mode UI widget tree, and debug overlays (FPS, colliders, memory, GC stats) come standard, so you're not rebuilding the basics for every project.
 - **Use only what you need.** The `Renderer`/`Canvas` layer works standalone if you just want a capable drawing library for an existing Roku app, without adopting the full game loop.
@@ -54,7 +54,7 @@ end sub
 ```
 
 ```brightscript
-class MainScene extends BGE.Scene
+class MainScene extends BGE.GameScene
 
   sub new(game as BGE.Game)
     super(game)
@@ -204,7 +204,7 @@ Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` -
 }
 ```
 
-### Known limitation: subclassing `BGE.Scene`/`BGE.GameEntity`
+### Known limitation: subclassing `BGE.GameScene`/`BGE.GameEntity`
 
 Subclassing one of the engine's own classes and passing an instance back into an engine method (e.g. `game.defineScene(new MainScene(game))`, or calling `super(game)` in your subclass's constructor) currently trips a real upstream `brighterscript` bug ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758)): the generated type declarations reference the class's internal compiled name instead of its real type, so `bsc --validate` reports an `argument-type-mismatch` for this - completely ordinary and expected - pattern. The `roku_modules` filter above doesn't cover this, since the error is reported against **your own file**, not a `roku_modules` one.
 

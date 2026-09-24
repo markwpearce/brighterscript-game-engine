@@ -129,3 +129,7 @@ All must pass before opening the PR:
 - Deprecated aliases or runtime migration warnings.
 - Rewriting historical specs/plans.
 - The pre-existing leak of `docs/superpowers/plans/` into the published docs site (separate issue).
+
+## Revision (2026-09-24, after implementation)
+
+The engine class is `BGE.GameScene` (file `engine/GameScene.bs`), not `BGE.Scene`, to match the engine's existing `GameEntity`/`GameInput`/`GameTimer` naming and to read unambiguously next to `SceneObject` and SceneGraph's `Scene` node. Everything else that refers to it keeps saying "scene": `Game.defineScene()`/`changeScene()`/`resetScene()`/`getScene()`/`getSceneNames()`/`isSceneChanging()`, `currentScene`/`currentSceneArgs`/`Scenes`, `onChangeScene()`, `persistDrawablesAcrossSceneChange`, `SceneChangeInfo`, `Scenes/` folders, `npm run create-scene`. This was a readability/consistency choice, not a name-conflict fix: the class is namespaced (`BGE_GameScene`), so neither name could collide with consumer code. `examples/hybrid`'s own scene class became `BallGameScene` so it doesn't read as `GameScene extends BGE.GameScene`.

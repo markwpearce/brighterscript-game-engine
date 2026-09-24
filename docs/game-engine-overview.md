@@ -7,7 +7,7 @@ order: 1
 # Building a Game with BrighterScript Game Engine
 
 This guide is for developers building a game *with* BGE - it walks through the pieces you'll
-actually touch (`Game`, `Scene`, `GameEntity`, `Drawable`, `Collider`) and how to put them together:
+actually touch (`Game`, `GameScene`, `GameEntity`, `Drawable`, `Collider`) and how to put them together:
 setting up a game, adding a sprite, moving it, and detecting collisions. For a deeper look at how
 the engine implements these pieces internally, see [Engine Internals](/engine-internals).
 
@@ -22,12 +22,12 @@ the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `pl
 
 ## Architecture at a glance
 
-![Architecture overview: Game owns the current Scene and sortedEntities; each entity's drawables feed a Renderer/Canvas pipeline that ends at roScreen, its colliders feed a roCompositor/onCollision pipeline, and a separate UiContainer tree draws to its own UI canvas](images/architecture-overview.svg)
+![Architecture overview: Game owns the current GameScene and sortedEntities; each entity's drawables feed a Renderer/Canvas pipeline that ends at roScreen, its colliders feed a roCompositor/onCollision pipeline, and a separate UiContainer tree draws to its own UI canvas](images/architecture-overview.svg)
 
 | Piece | What it is |
 | --- | --- |
-| `Game` | The top-level engine object - one per app. Owns the main loop (`Play()`), the current `Scene`, every other `GameEntity`, both canvases, and the asset registries (`Bitmaps`, `Sounds`, `Fonts`, `Models`, `Scenes`, `Interfaces`, `Statics`). |
-| `Scene` | A `GameEntity` subclass that represents one state of your game - a title screen, a menu, a level. Only one is current at a time; switching scenes via `Game.changeScene()` destroys non-`persistent` entities. |
+| `Game` | The top-level engine object - one per app. Owns the main loop (`Play()`), the current `GameScene`, every other `GameEntity`, both canvases, and the asset registries (`Bitmaps`, `Sounds`, `Fonts`, `Models`, `Scenes`, `Interfaces`, `Statics`). |
+| `GameScene` | A `GameEntity` subclass that represents one state of your game - a title screen, a menu, a level. Only one is current at a time; switching scenes via `Game.changeScene()` destroys non-`persistent` entities. |
 | `GameEntity` | The base class for anything in your game world - a player, an enemy, a bullet. Exposes lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, `onInput`, …) meant to be overridden, plus `position`/`velocity`/`rotation`/`scale`. |
 | `Drawable` | **The recommended way to put anything on screen** - see below. A visual attachment on a `GameEntity` (`Image`, `Sprite`, `AnimatedImage`, `DrawableRectangle`, `DrawableLine`, `DrawablePolygon`, `DrawableText`, `Model3d`) that moves/rotates/scales with the entity automatically. |
 | `Collider` | A `CircleCollider` or `RectangleCollider` attached to a `GameEntity`, wrapping a `roCompositor`/`roSprite` region. Collision checks run through the compositor, not manual math. |
@@ -35,7 +35,7 @@ the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `pl
 | `Canvas` | Pairs a bitmap with a `Renderer` and scale/offset. `Game` composites the game canvas and UI canvas to the physical `roScreen` independently each frame, so UI can stay crisp regardless of game-canvas scaling. |
 | `UiContainer` / `UiWidget` | A small retained-mode widget tree (`Label`, `Slider`, `Style`, `Alignment`) drawn to its own canvas layer above the game world. `Game.gameUi` and `Game.debugUi` are the two top-level containers. |
 
-> **Three different "scenes."** `BGE.Scene` is the current state of your game (a title screen, a menu, a level) and is what this guide means by "scene." The renderer's `SceneObject`s are the individual things it draws each frame, one or more per `Drawable`. Roku's SceneGraph `Scene` node is unrelated to both; it only matters if you mix the engine into a SceneGraph app (see [SceneGraph Shapes](/scenegraph-shapes)).
+> **Three different "scenes."** `BGE.GameScene` is the current state of your game (a title screen, a menu, a level) and is what this guide means by "scene." The renderer's `SceneObject`s are the individual things it draws each frame, one or more per `Drawable`. Roku's SceneGraph `GameScene` node is unrelated to both; it only matters if you mix the engine into a SceneGraph app (see [SceneGraph Shapes](/scenegraph-shapes)).
 
 **Always draw through a `Drawable`, not by calling `Renderer.Draw*()` yourself.**
 `examples/asteroids` is worth reading end to end as a reference for doing this consistently -
@@ -48,7 +48,7 @@ you're curious about the mechanism.
 
 ## Setting up a game
 
-Every BGE app follows the same shape: create a `Game`, define at least one `Scene`, switch to it,
+Every BGE app follows the same shape: create a `Game`, define at least one `GameScene`, switch to it,
 then start the main loop.
 
 ```
@@ -65,11 +65,11 @@ sub Main()
 end sub
 ```
 
-`Scene` is just a `GameEntity` subclass - a natural place to spawn your initial entities in
+`GameScene` is just a `GameEntity` subclass - a natural place to spawn your initial entities in
 `onCreate` and to route global input (pause, quit) in `onInput`:
 
 ```
-class MainScene extends BGE.Scene
+class MainScene extends BGE.GameScene
   sub new(game as BGE.Game)
     super(game)
     m.name = "MainScene"
@@ -250,7 +250,7 @@ top of the same detection-only colliders described above. Read `Player.onCollisi
 
 A few things fall out of this that matter in practice:
 
-- **Entity order**: the current `Scene` is always processed first and last; everything else
+- **Entity order**: the current `GameScene` is always processed first and last; everything else
   (`sortedEntities`) runs in `zIndex` (insertion) order in between.
 - **Callbacks can invalidate their own entity.** A callback might call `Delete()` on itself, or
   trigger a scene change. That's why the engine re-checks `isValidEntity()` before every single
@@ -272,7 +272,7 @@ A few things fall out of this that matter in practice:
   defaulting to `info`) that's both printed and kept in a short history `BGE.Debug.LogDisplay`
   reads from - prefer it over a raw `print` in your own game code so failures are visible
   on-screen, not just over telnet.
-- `examples/rendererTest` is a menu-driven suite of `Renderer` demos built *without* `Game`/`Scene`
+- `examples/rendererTest` is a menu-driven suite of `Renderer` demos built *without* `Game`/`GameScene`
   at all - useful for trying out a specific rendering capability (draw modes, triangle warping,
   camera projection) in isolation before wiring it into a real game.
 

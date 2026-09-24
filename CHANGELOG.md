@@ -6,12 +6,12 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ### Changed (breaking)
 
-`Room` is now `Scene` ([#227](https://github.com/markwpearce/brighterscript-game-engine/issues/227)). "Room" never described what it is - the current state of your game, whether that's a title screen, a menu, or a level. The renderer's own "scene" methods were renamed at the same time so the word only means one thing. This is a clean break with no deprecated aliases; the next release is 0.7.0.
+`BGE.Room` is now `BGE.GameScene` ([#227](https://github.com/markwpearce/brighterscript-game-engine/issues/227)). "Room" never described what it is - the current state of your game, whether that's a title screen, a menu, or a level. The renderer's own "scene" methods were renamed at the same time so the word only means one thing. This is a clean break with no deprecated aliases; the next release is 0.7.0. The class is `GameScene`, matching `GameEntity`/`GameInput`; the methods, fields and folders that refer to it just say "scene".
 
 | Old | New |
 |---|---|
-| `BGE.Room` | `BGE.Scene` |
-| `Room.persistDrawablesAcrossRoomChange` | `Scene.persistDrawablesAcrossSceneChange` |
+| `BGE.Room` | `BGE.GameScene` |
+| `Room.persistDrawablesAcrossRoomChange` | `GameScene.persistDrawablesAcrossSceneChange` |
 | `GameEntity.onChangeRoom(newRoom)` | `GameEntity.onChangeScene(newScene)` |
 | `Game.defineRoom()` / `changeRoom()` / `resetRoom()` | `Game.defineScene()` / `changeScene()` / `resetScene()` |
 | `Game.getRoom()` / `getRoomNames()` / `isRoomChanging()` | `Game.getScene()` / `getSceneNames()` / `isSceneChanging()` |
