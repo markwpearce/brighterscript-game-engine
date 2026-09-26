@@ -1,0 +1,118 @@
+namespace tests
+
+  @suite("BGE.QualityController")
+  class QualityControllerTests extends rooibos.BaseTestSuite
+
+    ' Feeds `seconds` worth of frames at `fps` and returns the level after each change,
+    ' calling notifyLevelChanged() like RenderQualityManager does.
+    private function simulate(controller as BGE.QualityController, level as integer, fps as float, seconds as float) as integer
+      dt = 1.0 / fps
+      frames = cint(seconds * fps)
+      for i = 1 to frames
+        newLevel = controller.update(dt, level)
+        if newLevel <> level
+          level = newLevel
+          controller.notifyLevelChanged()
+        end if
+      end for
+      return level
+    end function
+
+    @describe("stepping down")
+
+    @it("steps down when well below target")
+    function _()
+      c = new BGE.QualityController()
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.high, 20, 1.5))
+    end function
+
+    @it("waits the cooldown before stepping down again")
+    function _()
+      c = new BGE.QualityController()
+      ' first step at 1.0s (half window); the average is low again by 2.5s (0.5s settle +
+      ' 1.0s half window) but the 2s cooldown blocks a second step until 3.0s
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.ultra, 20, 2.8))
+    end function
+
+    @it("never goes below minLevel")
+    function _()
+      c = new BGE.QualityController({minLevel: BGE.RenderQualityLevel.low})
+      m.assertEqual(BGE.RenderQualityLevel.low, m.simulate(c, BGE.RenderQualityLevel.medium, 10, 30))
+    end function
+
+    @describe("dead zone")
+
+    @it("holds when at target")
+    function _()
+      c = new BGE.QualityController()
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 30, 20))
+    end function
+
+    @describe("stepping up")
+
+    @it("steps up only after sustained headroom")
+    function _()
+      c = new BGE.QualityController()
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 4))
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 3))
+    end function
+
+    @it("never goes above maxLevel")
+    function _()
+      c = new BGE.QualityController({maxLevel: BGE.RenderQualityLevel.high})
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 60))
+    end function
+
+    @it("probes up at a 60fps target when holding 60fps")
+    function _()
+      c = new BGE.QualityController({targetFps: 60})
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 7))
+    end function
+
+    @describe("ignored frames")
+
+    @it("ignores a single huge frame")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulate(c, BGE.RenderQualityLevel.medium, 30, 3)
+      level = c.update(1.5, level)
+      level = m.simulate(c, level, 30, 1)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+    end function
+
+    @it("ignores slow frames during the settle period after a scene change")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulate(c, BGE.RenderQualityLevel.medium, 30, 3)
+      c.notifySceneChanged()
+      ' 0.4s of 10fps inside the 0.5s settle, then back to target
+      level = m.simulate(c, level, 10, 0.4)
+      level = m.simulate(c, level, 30, 2)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+    end function
+
+    @describe("probe backoff")
+
+    @it("doesn't retry a level that just failed")
+    function _()
+      c = new BGE.QualityController()
+      ' headroom -> probe medium->high
+      level = m.simulate(c, BGE.RenderQualityLevel.medium, 60, 7)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+      ' high is too slow -> back to medium within the fail window (the 2s window still
+      ' holds some 60fps frames, so the average crosses 27fps ~1.7s in)
+      level = m.simulate(c, level, 20, 2.0)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      ' plenty of headroom again, but high is in a 30s backoff
+      level = m.simulate(c, level, 60, 15)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      ' after the backoff it probes again (backoff clears ~14.65s in, so this window
+      ' has to be long enough to reach high but not so long that a second sustained
+      ' 6.5s of headroom lands it on ultra too - 18s leaves margin on both sides)
+      level = m.simulate(c, level, 60, 18)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+    end function
+
+  end class
+
+end namespace
