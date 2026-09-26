@@ -12,7 +12,7 @@ Let the engine pick draw-quality values (draw distance, plane slice count, trian
 - **Device-seeded by default**: every `Game` starts at a level chosen from the device (model table + inference). No opt-in needed for seeding.
 - **Adaptive tuning is opt-in**: `game.enableAdaptiveQuality(options)`. Without it the seeded level never changes.
 - **Games can customize**: per-field overrides of any level's preset, plus an `onQualityChanged(level)` hook on entities/scenes for game-owned knobs (particle counts, effects, enemy density).
-- **Medium = today's values exactly.** A renderer at Medium behaves identically to the pre-feature engine.
+- **Where today's value sits depends on the knob.** For a knob whose current value is already the best visual quality (plane slice count, fast-draw tolerances), today's value is **Ultra** and the lower levels step down gradually from it. For a knob that can go either way (draw distance, triangle thresholds), today's value is **Medium**. So Medium is no longer identical to the pre-feature engine: devices seeded below Ultra draw fewer plane slices and take the fast-draw path more often.
 - **Draw distance is a multiplier** on the game's own `Camera3d.maxDrawDistance`, because sensible draw distance is game-specific.
 - **`computeOverlapClusters` is not a quality setting** - its value depends on scene content (interpenetrating models), not device power. It stays the game's explicit choice.
 - **Extensible**: any future constant that trades visual quality for speed goes into `RenderQualitySettings`, enforced by a completeness test.
@@ -25,21 +25,21 @@ Let the engine pick draw-quality values (draw distance, plane slice count, trian
 |---|---|---|---|---|---|---|
 | `drawDistanceScale` | - (new) | 0.4 | 0.6 | **1.0** | 1.5 | 2.0 |
 | `maxDrawDistance` | - (new, optional absolute override; `invalid` = use scale) | invalid | invalid | **invalid** | invalid | invalid |
-| `planeSliceCount` | `SCENE_OBJECT_PLANE_SLICE_COUNT` (50) | 20 | 30 | **50** | 70 | 100 |
+| `planeSliceCount` | `SCENE_OBJECT_PLANE_SLICE_COUNT` (50) | 20 | 28 | 36 | 44 | **50** |
 | `triangleSkipSize` | `TriangleDrawThreshold` (4) | 8 | 6 | **4** | 3 | 2 |
 | `triangleQuickDrawThreshold` | `TriangleQuickDrawThreshold` (64) | 128 | 96 | **64** | 48 | 32 |
 | `triangleQuickDrawStep` | `levelOfDetail = 2` in `drawQuickTriangleTo` | 4 | 3 | **2** | 2 | 1 |
-| `fastDrawParallelogramTolerance` | `isApproximatelyRotatedRectangle` default 0.03 | 0.10 | 0.06 | **0.03** | 0.02 | 0.01 |
-| `fastDrawPerpendicularityTolerance` | `isApproximatelyRotatedRectangle` default 0.05 | 0.15 | 0.10 | **0.05** | 0.03 | 0.02 |
+| `fastDrawParallelogramTolerance` | `isApproximatelyRotatedRectangle` default 0.03 | 0.10 | 0.08 | 0.06 | 0.045 | **0.03** |
+| `fastDrawPerpendicularityTolerance` | `isApproximatelyRotatedRectangle` default 0.05 | 0.15 | 0.13 | 0.10 | 0.075 | **0.05** |
 
-These non-Medium values are **initial guesses, not measurements**. Per-operation Roku draw costs are not predictable from code; the presets must be tuned on real hardware with the `quality-levels` rendererTest demo (below) before this ships.
+Bold marks today's value for each knob. Every other value is **initial guesses, not measurements**. Per-operation Roku draw costs are not predictable from code; the presets must be tuned on real hardware with the `quality-levels` rendererTest demo (below) before this ships.
 
-**Simulator adjustment** stays separate from presets: today's simulator branch (`TriangleQuickDrawThresholdForSimulator = 32`, `levelOfDetail = 4`) encodes the simulator's cost model (line drawing is slow there), not a quality choice. On the simulator, the renderer applies `min(preset threshold, 32)` and `max(preset step, 4)`, so at Medium the simulator behaves exactly as today.
+**Simulator adjustment** stays separate from presets: today's simulator branch (`TriangleQuickDrawThresholdForSimulator = 32`, `levelOfDetail = 4`) encodes the simulator's cost model (line drawing is slow there), not a quality choice. On the simulator, the renderer applies `min(preset threshold, 32)` and `max(preset step, 4)`, so the simulator's triangle drawing at Medium is exactly as today.
 
 ### Adding a new quality setting
 
 1. Add the field to `RenderQualitySettings`.
-2. Give it a value in all five presets in `RenderQualityPresets.bs` - Medium must be the current hard-coded value, so nothing changes by default.
+2. Give it a value in all five presets in `RenderQualityPresets.bs`. The current hard-coded value goes at **Ultra** if it's already the best visual quality, with lower levels stepping down gradually from it; otherwise it goes at **Medium**, with lower levels trading quality for speed and higher levels the reverse.
 3. Replace the constant's read with `rendererObj.qualitySettings.<field>` (or the camera equivalent).
 4. The preset-completeness spec fails CI if any level is missing the field.
 
@@ -83,7 +83,7 @@ The table only picks the starting level; when adaptive tuning is on, the control
 
 ## Runtime ownership
 
-- `BGE.Renderer` gains `qualitySettings as RenderQualitySettings`, defaulting to the Medium preset, and `setQualitySettings(settings)`, which also pushes `drawDistanceScale`/`drawDistanceOverride` onto its camera (and re-pushes them in `setCamera()`). A standalone `Renderer` (no `Game`, e.g. `rendererTest`) therefore behaves exactly as today.
+- `BGE.Renderer` gains `qualitySettings as RenderQualitySettings`, defaulting to the Medium preset, and `setQualitySettings(settings)`, which also pushes `drawDistanceScale`/`drawDistanceOverride` onto its camera (and re-pushes them in `setCamera()`). A standalone `Renderer` (no `Game`, e.g. `rendererTest`) is not device-seeded; it uses Medium unless the caller sets something else.
 - `BGE.RenderQualityManager` (`engine/quality/RenderQualityManager.bs`), owned by `Game` as `game.renderQuality`:
   - `getLevel()`, `setLevel(level)` (applies the level immediately at the next frame boundary)
   - `overridePreset(level, partialSettings)` - shallow per-field merge onto that level's engine preset; fields not named keep engine defaults, so a setting added later still gets its default under an existing override.
@@ -133,7 +133,7 @@ All thresholds are options with these defaults, so they can be tuned on hardware
 
 Rooibos specs (one `@suite` per file):
 
-- Preset completeness: every level defines every field Medium defines; Medium equals the legacy constants.
+- Preset completeness: every level defines every field Medium defines; each legacy constant appears at its documented level (Ultra for plane slices and fast-draw tolerances, Medium for everything else); each knob changes monotonically from Basic to Ultra.
 - `overridePreset`: per-field merge, other levels untouched, and unnamed fields keep defaults.
 - Device seeding: known models, suffix stripping, family and TV-letter inference, the no-GPU / 720p clamps, simulator, and the Medium fallback.
 - Controller with synthetic `dt` sequences: steps down, steps up only after sustain, dead zone, cooldown, settle, outlier exclusion, min/max bounds, probe backoff and its doubling.
