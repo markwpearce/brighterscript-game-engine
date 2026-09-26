@@ -1,0 +1,122 @@
+import "../renderer/Renderer.bs"
+import "QualityController.bs"
+import "RenderQualityLevel.bs"
+import "RenderQualityPresets.bs"
+import "RenderQualitySettings.bs"
+
+namespace BGE
+
+  ' Owns the game's current render quality level. Reach it through
+  ' `game.renderQuality`; most games only need `Game.setQualityLevel()` or
+  ' `Game.enableAdaptiveQuality()`.
+  class RenderQualityManager
+
+    private renderer as BGE.Renderer
+    private level as integer = RenderQualityLevel.medium
+    ' level (as string) -> roAssociativeArray of overridden fields
+    private overrides as roAssociativeArray = {}
+    private controller as BGE.QualityController = invalid
+
+    ' @param {BGE.Renderer} renderer - the renderer to apply settings to (the game canvas)
+    ' @param {integer} initialLevel - a `BGE.RenderQualityLevel` value
+    sub new(renderer as BGE.Renderer, initialLevel as integer)
+      m.renderer = renderer
+      m.level = clampRenderQualityLevel(initialLevel)
+      m.applyCurrentLevel()
+    end sub
+
+    ' @return {integer} the current `BGE.RenderQualityLevel`
+    function getLevel() as integer
+      return m.level
+    end function
+
+    ' Switches to a level (clamped). Does not change whether adaptive tuning is on -
+    ' use `Game.setQualityLevel()` to pin a level.
+    '
+    ' @param {integer} level - a `BGE.RenderQualityLevel` value
+    ' @return {boolean} true if the level changed
+    function setLevel(level as integer) as boolean
+      level = clampRenderQualityLevel(level)
+      if level = m.level
+        return false
+      end if
+      m.level = level
+      m.applyCurrentLevel()
+      if invalid <> m.controller
+        m.controller.notifyLevelChanged()
+      end if
+      return true
+    end function
+
+    ' Replaces individual settings for one level, keeping the engine defaults for
+    ' everything else. Repeated calls accumulate.
+    '
+    ' @param {integer} level - a `BGE.RenderQualityLevel` value
+    ' @param {roAssociativeArray} fields - e.g. {planeSliceCount: 80, drawDistanceScale: 1.2}
+    sub overridePreset(level as integer, fields as roAssociativeArray)
+      key = clampRenderQualityLevel(level).toStr()
+      existing = m.overrides[key]
+      if invalid = existing
+        existing = {}
+      end if
+      for each field in fields
+        existing[field] = fields[field]
+      end for
+      m.overrides[key] = existing
+      if clampRenderQualityLevel(level) = m.level
+        m.applyCurrentLevel()
+      end if
+    end sub
+
+    ' The settings a level uses: the engine preset plus any overrides.
+    '
+    ' @param {integer} level - a `BGE.RenderQualityLevel` value
+    ' @return {BGE.RenderQualitySettings}
+    function getSettings(level as integer) as BGE.RenderQualitySettings
+      level = clampRenderQualityLevel(level)
+      return mergeRenderQualitySettings(getRenderQualityPreset(level), m.overrides[level.toStr()])
+    end function
+
+    ' Starts adjusting the level automatically to hold a frame rate.
+    '
+    ' @param {BGE.AdaptiveQualityOptions} [options={}]
+    sub enableAdaptive(options = {} as roAssociativeArray)
+      controller = new BGE.QualityController(options)
+      m.controller = controller
+      m.controller.notifyLevelChanged()
+    end sub
+
+    sub disableAdaptive()
+      m.controller = invalid
+    end sub
+
+    ' @return {boolean} whether the level is being adjusted automatically
+    function isAdaptive() as boolean
+      return invalid <> m.controller
+    end function
+
+    ' `Game` calls this once per frame with the full frame time.
+    '
+    ' @param {float} dt
+    ' @return {boolean} true if the level changed this frame
+    function update(dt as float) as boolean
+      if invalid = m.controller
+        return false
+      end if
+      return m.setLevel(m.controller.update(dt, m.level))
+    end function
+
+    ' `Game` calls this after a scene change.
+    sub notifySceneChanged()
+      if invalid <> m.controller
+        m.controller.notifySceneChanged()
+      end if
+    end sub
+
+    private sub applyCurrentLevel()
+      m.renderer.setQualitySettings(m.getSettings(m.level))
+    end sub
+
+  end class
+
+end namespace
