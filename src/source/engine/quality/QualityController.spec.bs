@@ -18,6 +18,20 @@ namespace tests
       return level
     end function
 
+    ' Like simulate(), but stops right after the first level change.
+    private function simulateUntilChange(controller as BGE.QualityController, level as integer, fps as float, maxSeconds as float) as integer
+      dt = 1.0 / fps
+      frames = cint(maxSeconds * fps)
+      for i = 1 to frames
+        newLevel = controller.update(dt, level)
+        if newLevel <> level
+          controller.notifyLevelChanged()
+          return newLevel
+        end if
+      end for
+      return level
+    end function
+
     @describe("stepping down")
 
     @it("steps down when well below target")
@@ -110,6 +124,43 @@ namespace tests
       ' has to be long enough to reach high but not so long that a second sustained
       ' 6.5s of headroom lands it on ultra too - 18s leaves margin on both sides)
       level = m.simulate(c, level, 60, 18)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+    end function
+
+    @it("marks a probe failed even when the rebuild frame after the step up is huge")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulateUntilChange(c, BGE.RenderQualityLevel.medium, 60, 10)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+      ' the level change's one-off rebuild is the very next frame, inside the settle period
+      level = c.update(3.5, level)
+      level = m.simulate(c, level, 20, 2.0)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      ' high failed its probe, so it's in backoff despite the headroom
+      level = m.simulate(c, level, 60, 15)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+    end function
+
+    @it("doubles the backoff each time a level fails its probe")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulate(c, BGE.RenderQualityLevel.medium, 60, 7)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+      ' first failure: steps down ~1.5s in (0.5s settle + 1.0s half window), so this
+      ' segment ends ~0.5s into the 30s backoff
+      level = m.simulate(c, level, 20, 2.0)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      level = m.simulate(c, level, 60, 28)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      ' backoff ends ~1.5s into this segment; the headroom is already sustained
+      level = m.simulate(c, level, 60, 3)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+      ' second failure: 60s backoff
+      level = m.simulate(c, level, 20, 2.0)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      level = m.simulate(c, level, 60, 58)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      level = m.simulate(c, level, 60, 3)
       m.assertEqual(BGE.RenderQualityLevel.high, level)
     end function
 

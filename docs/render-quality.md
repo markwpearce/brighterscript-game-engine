@@ -14,8 +14,8 @@ use a cheaper draw call.
 ## Default: chosen for the device
 
 You don't need to do anything. When your `Game` is created, the engine picks a
-starting level from the Roku model it's running on - a Roku Ultra starts at Ultra,
-a Roku Express at Low, the simulator at Medium. A model the engine doesn't know is
+starting level from the Roku model it's running on - the newest Roku Ultra models
+start at Ultra (older Ultras at High or Medium), a Roku Express at Low, the simulator at Medium. A model the engine doesn't know is
 guessed from its model number, falling back to Medium.
 
 ## Hold a frame rate automatically
@@ -54,7 +54,7 @@ This also turns adaptive tuning off - handy for testing, or for a settings menu.
 ## Draw distance
 
 A level scales your camera's `maxDrawDistance` rather than replacing it: Basic
-draws 0.4x as far, Medium exactly what you set, Ultra 2x. Set `maxDrawDistance` to
+draws 0.4x as far, Medium exactly what you set, Ultra 1.5x. Set `maxDrawDistance` to
 what suits your game at Medium. The distance actually used is
 `camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
 running out of memory.
@@ -84,9 +84,11 @@ end sub
 ## A level change isn't free
 
 Changing the level re-applies every draw-quality setting immediately, including
-draw distance. If a `DrawablePlane` in `tiledImage` fill mode is on screen, a
-distance change forces it to rebuild its cached "supertexture" bitmap at the new
-size - a real one-off cost, not free like the other settings. The adaptive
+draw distance. Every textured `DrawablePlane` on screen keeps a scratch bitmap
+sized off the draw distance, and a `tiledImage` plane also caches a "supertexture"
+bitmap sized the same way - a distance change rebuilds both at the new size. That's
+a real one-off cost, not free like the other settings, and a longer draw distance
+means bigger bitmaps and more memory (they grow with the square of the distance). The adaptive
 controller already accounts for this: it ignores frame times for a short settle
 period right after any level change, so that one rebuild doesn't itself trigger
 another step down.

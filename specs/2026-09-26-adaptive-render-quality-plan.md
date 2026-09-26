@@ -27,7 +27,7 @@
 
 | Field | Basic | Low | Medium | High | Ultra |
 |---|---|---|---|---|---|
-| `drawDistanceScale` | 0.4 | 0.6 | **1.0** | 1.5 | 2.0 |
+| `drawDistanceScale` | 0.4 | 0.6 | **1.0** | 1.25 | 1.5 |
 | `drawDistanceOverride` | 0.0 | 0.0 | **0.0** | 0.0 | 0.0 |
 | `planeSliceCount` | 20 | 28 | 36 | 44 | **50** |
 | `triangleSkipSize` | 8.0 | 6.0 | **4.0** | 3.0 | 2.0 |
@@ -285,7 +285,7 @@ namespace BGE
     level = clampRenderQualityLevel(level)
     ' One column per level: basic, low, medium, high, ultra. Today's pre-feature
     ' value is at medium for two-way knobs, at ultra for knobs already at best quality.
-    drawDistanceScale = [0.4, 0.6, 1.0, 1.5, 2.0]
+    drawDistanceScale = [0.4, 0.6, 1.0, 1.25, 1.5]
     planeSliceCount = [20, 28, 36, 44, 50]
     triangleSkipSize = [8.0, 6.0, 4.0, 3.0, 2.0]
     triangleQuickDrawThreshold = [128.0, 96.0, 64.0, 48.0, 32.0]
@@ -2011,7 +2011,7 @@ This also turns adaptive tuning off - handy for testing, or for a settings menu.
 ## Draw distance
 
 A level scales your camera's `maxDrawDistance` rather than replacing it: Basic
-draws 0.4x as far, Medium exactly what you set, Ultra 2x. Set `maxDrawDistance` to
+draws 0.4x as far, Medium exactly what you set, Ultra 1.5x. Set `maxDrawDistance` to
 what suits your game at Medium. The distance actually used is
 `camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
 running out of memory.

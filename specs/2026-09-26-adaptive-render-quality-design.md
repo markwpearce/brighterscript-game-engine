@@ -23,7 +23,7 @@ Let the engine pick draw-quality values (draw distance, plane slice count, trian
 
 | Field | Replaces | Basic | Low | **Medium** | High | Ultra |
 |---|---|---|---|---|---|---|
-| `drawDistanceScale` | - (new) | 0.4 | 0.6 | **1.0** | 1.5 | 2.0 |
+| `drawDistanceScale` | - (new) | 0.4 | 0.6 | **1.0** | 1.25 | 1.5 |
 | `drawDistanceOverride` | - (new, optional absolute distance; `<= 0` = unset, use the scale) | 0 | 0 | **0** | 0 | 0 |
 | `planeSliceCount` | `SCENE_OBJECT_PLANE_SLICE_COUNT` (50) | 20 | 28 | 36 | 44 | **50** |
 | `triangleSkipSize` | `TriangleDrawThreshold` (4) | 8 | 6 | **4** | 3 | 2 |
@@ -52,7 +52,7 @@ CLAUDE.md gains a conventions bullet stating this rule.
 - New `Camera3d.getEffectiveMaxDrawDistance()`: `drawDistanceOverride` if `> 0`, else `maxDrawDistance * drawDistanceScale`, then clamped to the existing device cap (`getMaxDrawDistanceDeviceCap()`: 900 simulator / 2500 FHD / 30 SD-HD). The cap always wins.
 - Every current reader of `maxDrawDistance` switches to the effective value: `Camera3d.isInView`'s far-clip check (`Camera3d.bs:218`), `projectionChangedThisFrame()`'s dirty check, and `SceneObjectPlane` (pre-perspective bitmap sizing, far distance, supertexture sizing/rebuild checks).
 - **Behavior change**: reading `maxDrawDistance` back after setting it above the device cap now returns what was set (previously the capped value). Existing specs/docs asserting the old read-back behavior are updated.
-- A level change that changes the effective distance triggers `SceneObjectPlane`'s existing bitmap/supertexture rebuilds. That one-off cost is expected; the controller's settle period ignores it.
+- A level change that changes the effective distance triggers `SceneObjectPlane`'s existing bitmap/supertexture rebuilds. That one-off cost is expected; the controller's settle period ignores it. Each rebuild releases the old bitmap before allocating the new one, and a failed allocation logs a warning and skips that plane for the frame (retried next frame) instead of crashing. High/Ultra scales are kept at 1.25/1.5 because the pre-perspective bitmap grows with the square of the distance - Ultra at 2.0 crashed `examples/terrain` (two textured planes) on a real Roku Ultra.
 
 ## Device seeding
 
@@ -92,7 +92,7 @@ The table only picks the starting level; when adaptive tuning is on, the control
   - On a level change, calls `onQualityChanged(level)` on the current scene and every valid entity (same dispatch shape as `postGameEvent`, re-validating entities after each call).
 - `Game` API:
   - `game.setQualityLevel(level)` - pins a level and disables adaptive tuning.
-  - `game.enableAdaptiveQuality(options = {})` / `game.disableAdaptiveQuality()`.
+  - `game.enableAdaptiveQuality(options = {})` / `game.disableAdaptiveQuality()`. Enabling first moves the current level into `minLevel`..`maxLevel` (dispatching `onQualityChanged` if that changes it).
   - Seeding happens in the `Game` constructor.
 - `GameEntity.onQualityChanged(level as BGE.RenderQualityLevel)` - empty overridable hook.
 - `FpsDisplay` appends the level, e.g. `FPS: 30 | Q: High (auto)`.
@@ -117,7 +117,7 @@ Options (`BGE.AdaptiveQualityOptions`, all optional):
 | `stepUpSustainSeconds` | 5.0 | ... sustained this long |
 | `maxMeasurableFps` | 60 | Display refresh ceiling; the step-up threshold is `min(targetFps × stepUpHeadroomFraction, maxMeasurableFps × 0.97)`, so at a 60 fps target a sustained at-target frame rate still probes up |
 | `stepDownCooldownSeconds` | 2.0 | Minimum time between consecutive downward steps |
-| `probeFailWindowSeconds` | 4.0 | A step-down this soon after a step-up marks that level as failed |
+| `probeFailWindowSeconds` | 4.0 | A step-down this soon after a step-up (counting only time after the settle period) marks that level as failed |
 | `probeBackoffSeconds` | 30 | Initial time a failed level is not retried; doubles per repeated failure |
 
 Behavior:
