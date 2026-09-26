@@ -1,0 +1,158 @@
+# Adaptive render quality - design
+
+Issues: #251 (adaptive render settings), #126 (adaptive draw distance), #125 (fade near the draw-distance limit - **out of scope**, stays a separate issue; could later become a quality setting).
+
+## Goal
+
+Let the engine pick draw-quality values (draw distance, plane slice count, triangle thresholds, billboard fast-draw tolerances, ...) per device, and optionally adapt them at runtime to hold a target FPS - raising visual quality when there's headroom, lowering it when there isn't.
+
+## Decisions (from brainstorming)
+
+- **One dial**: a quality level `BGE.RenderQualityLevel` = `basic | low | medium | high | ultra`. Each level is a preset bundle of settings. Automatic tuning moves the level; nothing tunes individual knobs independently.
+- **Device-seeded by default**: every `Game` starts at a level chosen from the device (model table + inference). No opt-in needed for seeding.
+- **Adaptive tuning is opt-in**: `game.enableAdaptiveQuality(options)`. Without it the seeded level never changes.
+- **Games can customize**: per-field overrides of any level's preset, plus an `onQualityChanged(level)` hook on entities/scenes for game-owned knobs (particle counts, effects, enemy density).
+- **Medium = today's values exactly.** A renderer at Medium behaves identically to the pre-feature engine.
+- **Draw distance is a multiplier** on the game's own `Camera3d.maxDrawDistance`, because sensible draw distance is game-specific.
+- **`computeOverlapClusters` is not a quality setting** - its value depends on scene content (interpenetrating models), not device power. It stays the game's explicit choice.
+- **Extensible**: any future constant that trades visual quality for speed goes into `RenderQualitySettings`, enforced by a completeness test.
+
+## Settings and presets
+
+`BGE.RenderQualitySettings` (interface, `engine/quality/RenderQualityPresets.bs`):
+
+| Field | Replaces | Basic | Low | **Medium** | High | Ultra |
+|---|---|---|---|---|---|---|
+| `drawDistanceScale` | - (new) | 0.4 | 0.6 | **1.0** | 1.5 | 2.0 |
+| `maxDrawDistance` | - (new, optional absolute override; `invalid` = use scale) | invalid | invalid | **invalid** | invalid | invalid |
+| `planeSliceCount` | `SCENE_OBJECT_PLANE_SLICE_COUNT` (50) | 20 | 30 | **50** | 70 | 100 |
+| `triangleSkipSize` | `TriangleDrawThreshold` (4) | 8 | 6 | **4** | 3 | 2 |
+| `triangleQuickDrawThreshold` | `TriangleQuickDrawThreshold` (64) | 128 | 96 | **64** | 48 | 32 |
+| `triangleQuickDrawStep` | `levelOfDetail = 2` in `drawQuickTriangleTo` | 4 | 3 | **2** | 2 | 1 |
+| `fastDrawParallelogramTolerance` | `isApproximatelyRotatedRectangle` default 0.03 | 0.10 | 0.06 | **0.03** | 0.02 | 0.01 |
+| `fastDrawPerpendicularityTolerance` | `isApproximatelyRotatedRectangle` default 0.05 | 0.15 | 0.10 | **0.05** | 0.03 | 0.02 |
+
+These non-Medium values are **initial guesses, not measurements**. Per-operation Roku draw costs are not predictable from code; the presets must be tuned on real hardware with the `quality-levels` rendererTest demo (below) before this ships.
+
+**Simulator adjustment** stays separate from presets: today's simulator branch (`TriangleQuickDrawThresholdForSimulator = 32`, `levelOfDetail = 4`) encodes the simulator's cost model (line drawing is slow there), not a quality choice. On the simulator, the renderer applies `min(preset threshold, 32)` and `max(preset step, 4)`, so at Medium the simulator behaves exactly as today.
+
+### Adding a new quality setting
+
+1. Add the field to `RenderQualitySettings`.
+2. Give it a value in all five presets in `RenderQualityPresets.bs` - Medium must be the current hard-coded value, so nothing changes by default.
+3. Replace the constant's read with `rendererObj.qualitySettings.<field>` (or the camera equivalent).
+4. The preset-completeness spec fails CI if any level is missing the field.
+
+CLAUDE.md gains a conventions bullet stating this rule.
+
+## Draw distance
+
+- `Camera3d.maxDrawDistance` becomes the **game-authored base value** and is no longer clamped in place.
+- New `Camera3d.drawDistanceScale` (default 1.0) and `Camera3d.drawDistanceOverride` (default `invalid`), both set by the renderer from its quality settings.
+- New `Camera3d.getEffectiveMaxDrawDistance()`: `override` if set, else `maxDrawDistance * drawDistanceScale`, then clamped to the existing device cap (`getMaxDrawDistanceDeviceCap()`: 900 simulator / 2500 FHD / 30 SD-HD). The cap always wins.
+- Every current reader of `maxDrawDistance` switches to the effective value: `Camera3d.isInView`'s far-clip check (`Camera3d.bs:218`), `projectionChangedThisFrame()`'s dirty check, and `SceneObjectPlane` (pre-perspective bitmap sizing, far distance, supertexture sizing/rebuild checks).
+- **Behavior change**: reading `maxDrawDistance` back after setting it above the device cap now returns what was set (previously the capped value). Existing specs/docs asserting the old read-back behavior are updated.
+- A level change that changes the effective distance triggers `SceneObjectPlane`'s existing bitmap/supertexture rebuilds. That one-off cost is expected; the controller's settle period ignores it.
+
+## Device seeding
+
+`engine/quality/DeviceQualitySeed.bs`: `BGE.seedRenderQualityLevel(model, graphicsPlatform, uiResolutionName, isSimulator) as RenderQualityLevel` - a pure function (unit-testable with fake inputs), plus a thin wrapper that reads `roDeviceInfo` (`GetModel()`, `GetGraphicsPlatform()`, `GetUIResolution().name`, `HasFeature("simulation_engine")`).
+
+Resolution order:
+
+1. Simulator → **medium**.
+2. `graphicsPlatform = "directfb"` (no GPU) → **basic**.
+3. Known model (matched on the model-code prefix before the country/variant suffix, e.g. `4850X`, `3941X2`, `C000GB` → `C000`) → table level.
+4. Unknown model, inferred from Roku's naming conventions:
+   - **Numeric streaming players** (`NNNN`): the first digit is the family (3 = Express/Stick, 4 = Premiere/Ultra, 9 = soundbar/streambar), and a higher number within a family is newer. Use the level of the nearest known model **at or below** it in the same family.
+   - **Roku TVs** (`L000`/`L100` letter codes): later letters are newer. Use the nearest known TV code at or before it alphabetically.
+5. Clamp: a 720p (`HD`) or `SD` UI resolution caps the result at **low**.
+6. Nothing matched → **medium**.
+
+Initial table (from developer.roku.com/dev/docs/hardware, current and updatable models):
+
+| Level | Models |
+|---|---|
+| basic | 3700, 3710, 5000 (MIPS, no GPU); 4200, 4210, 4230 (A9); 3600 (A7) |
+| low | 3800, 3840, 3900, 3910, 3930, 3931, 3960; TVs 8000, D000, H000, K000, T100, K8P |
+| medium | 4620, 4630, 4640, 4660, 4662, 3810, 3811, 3920, 3921, 9100, 9102; TVs 7000, C000, G000, L000, P000 |
+| high | 3820, 3821, 3830, 3940, 3941, 3942, 9104, 4670; TVs 6000, A000 |
+| ultra | 4800, 4850; TVs J000, M000 |
+
+The table only picks the starting level; when adaptive tuning is on, the controller decides from there. Benchmark-driven table generation (#251's CSV proposal) is a later follow-up.
+
+## Runtime ownership
+
+- `BGE.Renderer` gains `qualitySettings as RenderQualitySettings`, defaulting to the Medium preset, and `setQualitySettings(settings)`, which also pushes `drawDistanceScale`/`drawDistanceOverride` onto its camera (and re-pushes them in `setCamera()`). A standalone `Renderer` (no `Game`, e.g. `rendererTest`) therefore behaves exactly as today.
+- `BGE.RenderQualityManager` (`engine/quality/RenderQualityManager.bs`), owned by `Game` as `game.renderQuality`:
+  - `getLevel()`, `setLevel(level)` (applies the level immediately at the next frame boundary)
+  - `overridePreset(level, partialSettings)` - shallow per-field merge onto that level's engine preset; fields not named keep engine defaults, so a setting added later still gets its default under an existing override.
+  - `getSettings(level)` - the merged settings for a level.
+  - Applies settings to the **game canvas renderer only** (`game.canvas.renderer`); the UI canvas is untouched.
+  - On a level change, calls `onQualityChanged(level)` on the current scene and every valid entity (same dispatch shape as `postGameEvent`, re-validating entities after each call).
+- `Game` API:
+  - `game.setQualityLevel(level)` - pins a level and disables adaptive tuning.
+  - `game.enableAdaptiveQuality(options = {})` / `game.disableAdaptiveQuality()`.
+  - Seeding happens in the `Game` constructor.
+- `GameEntity.onQualityChanged(level as BGE.RenderQualityLevel)` - empty overridable hook.
+- `FpsDisplay` appends the level, e.g. `FPS: 30 | Q: High (auto)`.
+
+## Adaptive controller
+
+`BGE.QualityController` (`engine/quality/QualityController.bs`) - a plain class with no `Game` or Roku-component dependency: `update(dt) as RenderQualityLevel` returns the level it wants, and `notifyLevelChanged()` / `notifySceneChanged()` start the settle period. That makes it testable with synthetic `dt` sequences.
+
+`Game` ticks it once per frame, after `SwapBuffers` and before a pending scene change is applied. A requested level change is applied through the manager there, at the frame boundary.
+
+Options (`BGE.AdaptiveQualityOptions`, all optional):
+
+| Option | Default | Meaning |
+|---|---|---|
+| `targetFps` | 30 | Frame-time budget = 1 / targetFps |
+| `minLevel` / `maxLevel` | basic / ultra | Bounds the controller never leaves |
+| `windowSeconds` | 2.0 | Rolling average window of full frame time (`Game.dt`, includes swap) |
+| `outlierFrameSeconds` | 0.25 | Frames longer than this are excluded (GC, loading, stalls) |
+| `settleSeconds` | 0.5 | Samples ignored after a level change or scene change |
+| `stepDownBelowFraction` | 0.9 | Step down when average FPS < targetFps × this |
+| `stepUpHeadroomFraction` | 1.25 | Step up when average FPS ≥ targetFps × this ... |
+| `stepUpSustainSeconds` | 5.0 | ... sustained this long |
+| `stepDownCooldownSeconds` | 2.0 | Minimum time between consecutive downward steps |
+| `probeFailWindowSeconds` | 4.0 | A step-down this soon after a step-up marks that level as failed |
+| `probeBackoffSeconds` | 30 | Initial time a failed level is not retried; doubles per repeated failure |
+
+Behavior:
+
+- **Down fast**: the window average is below the step-down threshold (and the cooldown has passed) → one level down.
+- **Up slow**: the average stays at or above the headroom threshold for `stepUpSustainSeconds` → probe one level up, unless that level is in backoff.
+- **Dead zone**: between the thresholds, nothing changes.
+- **Probe backoff**: a failed up-probe blocks that level for the backoff time. This matters at a 60 fps target, where vsync hides headroom and probing is the only signal.
+- The window resets on every level change and scene change.
+
+All thresholds are options with these defaults, so they can be tuned on hardware without code changes.
+
+## Testing
+
+Rooibos specs (one `@suite` per file):
+
+- Preset completeness: every level defines every field Medium defines; Medium equals the legacy constants.
+- `overridePreset`: per-field merge, other levels untouched, and unnamed fields keep defaults.
+- Device seeding: known models, suffix stripping, family and TV-letter inference, the no-GPU / 720p clamps, simulator, and the Medium fallback.
+- Controller with synthetic `dt` sequences: steps down, steps up only after sustain, dead zone, cooldown, settle, outlier exclusion, min/max bounds, probe backoff and its doubling.
+- Renderer/camera: `setQualitySettings` reaches the triangle thresholds, the fast-draw tolerances and the plane slice count; `getEffectiveMaxDrawDistance` applies scale, override and cap; the simulator adjustment.
+- Game: seeding happens at construction, `setQualityLevel` disables auto, `onQualityChanged` reaches the scene and entities.
+
+Manual / on-device:
+
+- New `rendererTest` demo `quality-levels`: a mixed scene (plane, billboards, circles, triangles). OK cycles the level; the existing timing readout shows the cost per level. This is the preset-tuning tool.
+- `examples/terrain` with `enableAdaptiveQuality()` on a real device via rokubot: confirm the level converges without oscillating, and the plane rebuild hitch on level change is absorbed by the settle period.
+
+## Docs
+
+- CLAUDE.md: an architecture bullet for render quality, the conventions bullet for adding settings, and an update to the `maxDrawDistance` read-back note.
+- `docs/`: a short guide section on quality levels and adaptive tuning (how-to first, per the docs style preference).
+
+## Out of scope
+
+- #125 fade band near the draw distance.
+- Benchmark-CSV-generated device table (#251 follow-up).
+- Particle counts, circle outline segments and other per-drawable values - these belong to games via `onQualityChanged`.
+- UI canvas quality.
