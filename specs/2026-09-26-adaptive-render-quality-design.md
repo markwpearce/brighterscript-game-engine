@@ -24,7 +24,7 @@ Let the engine pick draw-quality values (draw distance, plane slice count, trian
 | Field | Replaces | Basic | Low | **Medium** | High | Ultra |
 |---|---|---|---|---|---|---|
 | `drawDistanceScale` | - (new) | 0.4 | 0.6 | **1.0** | 1.5 | 2.0 |
-| `maxDrawDistance` | - (new, optional absolute override; `invalid` = use scale) | invalid | invalid | **invalid** | invalid | invalid |
+| `drawDistanceOverride` | - (new, optional absolute distance; `<= 0` = unset, use the scale) | 0 | 0 | **0** | 0 | 0 |
 | `planeSliceCount` | `SCENE_OBJECT_PLANE_SLICE_COUNT` (50) | 20 | 28 | 36 | 44 | **50** |
 | `triangleSkipSize` | `TriangleDrawThreshold` (4) | 8 | 6 | **4** | 3 | 2 |
 | `triangleQuickDrawThreshold` | `TriangleQuickDrawThreshold` (64) | 128 | 96 | **64** | 48 | 32 |
@@ -48,8 +48,8 @@ CLAUDE.md gains a conventions bullet stating this rule.
 ## Draw distance
 
 - `Camera3d.maxDrawDistance` becomes the **game-authored base value** and is no longer clamped in place.
-- New `Camera3d.drawDistanceScale` (default 1.0) and `Camera3d.drawDistanceOverride` (default `invalid`), both set by the renderer from its quality settings.
-- New `Camera3d.getEffectiveMaxDrawDistance()`: `override` if set, else `maxDrawDistance * drawDistanceScale`, then clamped to the existing device cap (`getMaxDrawDistanceDeviceCap()`: 900 simulator / 2500 FHD / 30 SD-HD). The cap always wins.
+- New `drawDistanceScale` (default 1.0) and `drawDistanceOverride` (default 0 = unset) fields on the base `Camera` (ignored by `Camera2d`), pushed onto the renderer's camera every frame in `Renderer.setupCameraForFrame()` - so a camera assigned directly (`renderer.camera = cam`, `Game.setCamera()`) still picks them up.
+- New `Camera3d.getEffectiveMaxDrawDistance()`: `drawDistanceOverride` if `> 0`, else `maxDrawDistance * drawDistanceScale`, then clamped to the existing device cap (`getMaxDrawDistanceDeviceCap()`: 900 simulator / 2500 FHD / 30 SD-HD). The cap always wins.
 - Every current reader of `maxDrawDistance` switches to the effective value: `Camera3d.isInView`'s far-clip check (`Camera3d.bs:218`), `projectionChangedThisFrame()`'s dirty check, and `SceneObjectPlane` (pre-perspective bitmap sizing, far distance, supertexture sizing/rebuild checks).
 - **Behavior change**: reading `maxDrawDistance` back after setting it above the device cap now returns what was set (previously the capped value). Existing specs/docs asserting the old read-back behavior are updated.
 - A level change that changes the effective distance triggers `SceneObjectPlane`'s existing bitmap/supertexture rebuilds. That one-off cost is expected; the controller's settle period ignores it.
@@ -83,9 +83,9 @@ The table only picks the starting level; when adaptive tuning is on, the control
 
 ## Runtime ownership
 
-- `BGE.Renderer` gains `qualitySettings as RenderQualitySettings`, defaulting to the Medium preset, and `setQualitySettings(settings)`, which also pushes `drawDistanceScale`/`drawDistanceOverride` onto its camera (and re-pushes them in `setCamera()`). A standalone `Renderer` (no `Game`, e.g. `rendererTest`) is not device-seeded; it uses Medium unless the caller sets something else.
+- `BGE.Renderer` gains `qualitySettings as RenderQualitySettings`, defaulting to the Medium preset, and `setQualitySettings(settings)`, whose draw-distance fields reach the camera through `setupCameraForFrame()` (above). A standalone `Renderer` (no `Game`, e.g. `rendererTest`) is not device-seeded; it uses Medium unless the caller sets something else.
 - `BGE.RenderQualityManager` (`engine/quality/RenderQualityManager.bs`), owned by `Game` as `game.renderQuality`:
-  - `getLevel()`, `setLevel(level)` (applies the level immediately at the next frame boundary)
+  - `getLevel()`, `setLevel(level)` (applies immediately - settings are only read at draw time, so a mid-frame change from an input handler just takes effect for that frame's draw)
   - `overridePreset(level, partialSettings)` - shallow per-field merge onto that level's engine preset; fields not named keep engine defaults, so a setting added later still gets its default under an existing override.
   - `getSettings(level)` - the merged settings for a level.
   - Applies settings to the **game canvas renderer only** (`game.canvas.renderer`); the UI canvas is untouched.
@@ -115,6 +115,7 @@ Options (`BGE.AdaptiveQualityOptions`, all optional):
 | `stepDownBelowFraction` | 0.9 | Step down when average FPS < targetFps × this |
 | `stepUpHeadroomFraction` | 1.25 | Step up when average FPS ≥ targetFps × this ... |
 | `stepUpSustainSeconds` | 5.0 | ... sustained this long |
+| `maxMeasurableFps` | 60 | Display refresh ceiling; the step-up threshold is `min(targetFps × stepUpHeadroomFraction, maxMeasurableFps × 0.97)`, so at a 60 fps target a sustained at-target frame rate still probes up |
 | `stepDownCooldownSeconds` | 2.0 | Minimum time between consecutive downward steps |
 | `probeFailWindowSeconds` | 4.0 | A step-down this soon after a step-up marks that level as failed |
 | `probeBackoffSeconds` | 30 | Initial time a failed level is not retried; doubles per repeated failure |
