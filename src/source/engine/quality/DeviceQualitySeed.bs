@@ -1,0 +1,147 @@
+import "RenderQualityLevel.bs"
+
+namespace BGE
+
+  ' The model-code prefix used to look a device up: everything up to the first
+  ' "X" after the leading 3-4 characters (e.g. "3941X2" -> "3941", "C000GB" -> "C000",
+  ' "K8PXX" -> "K8P"), or the first four characters when there is no "X".
+  '
+  ' @param {string} model - `roDeviceInfo.GetModel()`
+  ' @return {string}
+  function getRenderQualityModelPrefix(model as string) as string
+    if invalid = model or Len(model) = 0
+      return ""
+    end if
+    upper = UCase(model)
+    ' Search from index 3 so a TV code's own letter (e.g. "X000") isn't mistaken for
+    ' the suffix separator.
+    xPos = Instr(4, upper, "X")
+    if xPos > 0
+      return Left(upper, xPos - 1)
+    end if
+    return Left(upper, 4)
+  end function
+
+  ' Starting quality level for a device. Pure - `seedRenderQualityLevelForDevice()`
+  ' calls this with the real device's values.
+  '
+  ' @param {string} model - `roDeviceInfo.GetModel()`, e.g. "4850X"
+  ' @param {string} graphicsPlatform - `roDeviceInfo.GetGraphicsPlatform()`, "opengl" or "directfb"
+  ' @param {string} uiResolutionName - `roDeviceInfo.GetUIResolution().name`: "SD", "HD" or "FHD"
+  ' @param {boolean} isSimulator - whether this is the BrightScript simulator
+  ' @return {integer} a `BGE.RenderQualityLevel` value
+  function seedRenderQualityLevel(model as string, graphicsPlatform as string, uiResolutionName as string, isSimulator as boolean) as integer
+    if isSimulator
+      return RenderQualityLevel.medium
+    end if
+    if "directfb" = LCase(graphicsPlatform)
+      return RenderQualityLevel.basic
+    end if
+
+    level = lookUpRenderQualityModel(getRenderQualityModelPrefix(model))
+    if level < 0
+      level = RenderQualityLevel.medium
+    end if
+
+    if ("HD" = uiResolutionName or "SD" = uiResolutionName) and level > RenderQualityLevel.low
+      level = RenderQualityLevel.low
+    end if
+    return level
+  end function
+
+  ' Reads this device's model, graphics platform and resolution and returns its
+  ' starting quality level. `Game` calls this for you.
+  '
+  ' @return {integer} a `BGE.RenderQualityLevel` value
+  function seedRenderQualityLevelForDevice() as integer
+    device = CreateObject("roDeviceInfo")
+    return seedRenderQualityLevel(device.GetModel(), device.GetGraphicsPlatform(), device.GetUIResolution().name, device.HasFeature("simulation_engine"))
+  end function
+
+  ' Known model prefixes -> level, from developer.roku.com/dev/docs/hardware
+  ' ("Current" and "Updatable" models). Add or correct entries as real benchmark
+  ' data comes in.
+  '
+  ' @return {roAssociativeArray}
+  function getRenderQualityModelTable() as roAssociativeArray
+    basic = RenderQualityLevel.basic
+    low = RenderQualityLevel.low
+    medium = RenderQualityLevel.medium
+    high = RenderQualityLevel.high
+    ultra = RenderQualityLevel.ultra
+    return {
+      ' Streaming players (numeric codes)
+      "3600": basic, "3700": basic, "3710": basic, "4200": basic, "4210": basic, "4230": basic,
+      "3800": low, "3840": low, "3900": low, "3910": low, "3930": low, "3931": low, "3960": low,
+      "3810": medium, "3811": medium, "3920": medium, "3921": medium, "4620": medium, "4630": medium, "4640": medium, "4660": medium, "4662": medium, "9100": medium, "9102": medium,
+      "3820": high, "3821": high, "3830": high, "3940": high, "3941": high, "3942": high, "4670": high, "9104": high,
+      "4800": ultra, "4850": ultra,
+      ' Roku TVs (letter codes)
+      "5000": basic,
+      "8000": low, "D000": low, "H000": low, "K000": low, "K8P": low, "T100": low,
+      "7000": medium, "C000": medium, "G000": medium, "L000": medium, "P000": medium,
+      "6000": high, "A000": high,
+      "J000": ultra, "M000": ultra
+    }
+  end function
+
+  ' Table lookup with inference for unknown codes; -1 when nothing fits.
+  function lookUpRenderQualityModel(prefix as string) as integer
+    if Len(prefix) = 0
+      return -1
+    end if
+    table = getRenderQualityModelTable()
+    if table.DoesExist(prefix)
+      return table[prefix]
+    end if
+
+    isNumericPlayer = isRenderQualityNumericCode(prefix)
+    isTvCode = isRenderQualityTvCode(prefix)
+    bestKey = ""
+    for each key in table
+      ' AA iteration may not preserve key case
+      ukey = UCase(key)
+      if isNumericPlayer and isRenderQualityNumericCode(ukey)
+        ' same family (first digit), numerically at or below, nearest wins
+        if Left(ukey, 1) = Left(prefix, 1) and Val(ukey) <= Val(prefix)
+          if bestKey = "" or Val(ukey) > Val(bestKey)
+            bestKey = ukey
+          end if
+        end if
+      else if isTvCode and isRenderQualityTvCode(ukey)
+        ' TV letter codes: nearest code at or before this one alphabetically
+        if ukey <= prefix
+          if bestKey = "" or ukey > bestKey
+            bestKey = ukey
+          end if
+        end if
+      end if
+    end for
+    if bestKey = ""
+      return -1
+    end if
+    return table[bestKey]
+  end function
+
+  ' "4850", "3941": four digits
+  function isRenderQualityNumericCode(code as string) as boolean
+    if Len(code) <> 4
+      return false
+    end if
+    for i = 1 to 4
+      if Instr(1, "0123456789", Mid(code, i, 1)) = 0
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  ' "M000", "K8P": a letter followed by a digit
+  function isRenderQualityTvCode(code as string) as boolean
+    if Len(code) < 3
+      return false
+    end if
+    return Instr(1, "0123456789", Left(code, 1)) = 0 and Instr(1, "0123456789", Mid(code, 2, 1)) > 0
+  end function
+
+end namespace
