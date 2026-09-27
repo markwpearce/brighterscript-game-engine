@@ -1,0 +1,212 @@
+import "RenderQualityLevel.bs"
+import "../../math/math.bs"
+
+namespace BGE
+
+  ' Options for `Game.enableAdaptiveQuality()`. Every field is optional.
+  interface AdaptiveQualityOptions extends roAssociativeArray
+    ' Frame rate to hold (default 20)
+    optional targetFps as float
+    ' Lowest level the controller may choose (default basic)
+    optional minLevel as integer
+    ' Highest level the controller may choose (default ultra)
+    optional maxLevel as integer
+    ' Seconds of frames averaged (default 1.0)
+    optional windowSeconds as float
+    ' Frames longer than this are ignored, e.g. garbage collection (default 0.25)
+    optional outlierFrameSeconds as float
+    ' Seconds ignored after a level or scene change (default 0.25)
+    optional settleSeconds as float
+    ' Step down when average fps < targetFps * this (default 0.9)
+    optional stepDownBelowFraction as float
+    ' Step up when average fps >= targetFps * this... (default 1.25)
+    optional stepUpHeadroomFraction as float
+    ' ...for this many seconds (default 0.5)
+    optional stepUpSustainSeconds as float
+    ' Display refresh ceiling for the step-up threshold (default 60)
+    optional maxMeasurableFps as float
+    ' Minimum seconds between two downward steps (default 0.75)
+    optional stepDownCooldownSeconds as float
+    ' A step down this soon after a step up marks that level as failed (default 1.5)
+    optional probeFailWindowSeconds as float
+    ' Seconds a failed level isn't retried; doubles on each repeat failure (default 10)
+    optional probeBackoffSeconds as float
+    ' Step up two levels at once when average fps >= targetFps * this; 0 disables (default 2.0)
+    optional stepUpJumpFraction as float
+  end interface
+
+  ' Chooses a render quality level from measured frame times. `Game` runs one for
+  ' you after `enableAdaptiveQuality()`; you don't normally create one yourself.
+  class QualityController
+
+    targetFps as float = 20
+    minLevel as integer = RenderQualityLevel.basic
+    maxLevel as integer = RenderQualityLevel.ultra
+    windowSeconds as float = 1.0
+    outlierFrameSeconds as float = 0.25
+    settleSeconds as float = 0.25
+    stepDownBelowFraction as float = 0.9
+    stepUpHeadroomFraction as float = 1.25
+    stepUpSustainSeconds as float = 0.5
+    maxMeasurableFps as float = 60
+    stepDownCooldownSeconds as float = 0.75
+    probeFailWindowSeconds as float = 1.5
+    probeBackoffSeconds as float = 10
+    stepUpJumpFraction as float = 2.0
+
+    private samples as float[] = []
+    private sampleTime as float = 0
+    private settleRemaining as float = 0
+    private headroomTime as float = 0
+    private clock as float = 0
+    private timeSinceStepDown as float = 1000
+    private timeSinceStepUp as float = 1000
+    private lastProbeLevel as integer = -1
+    ' level (as string) -> clock time it may be retried / its current backoff length
+    private backoffUntil as roAssociativeArray = {}
+    private backoffLength as roAssociativeArray = {}
+
+    ' @param {BGE.AdaptiveQualityOptions} [options={}] - any subset of the options
+    sub new(options = {} as AdaptiveQualityOptions)
+      ' `m.DoesExist(key)` isn't reliable for class fields, so assign each known option explicitly.
+      if options.DoesExist("targetFps")
+        m.targetFps = options.targetFps
+      end if
+      if options.DoesExist("minLevel")
+        m.minLevel = options.minLevel
+      end if
+      if options.DoesExist("maxLevel")
+        m.maxLevel = options.maxLevel
+      end if
+      if options.DoesExist("windowSeconds")
+        m.windowSeconds = options.windowSeconds
+      end if
+      if options.DoesExist("outlierFrameSeconds")
+        m.outlierFrameSeconds = options.outlierFrameSeconds
+      end if
+      if options.DoesExist("settleSeconds")
+        m.settleSeconds = options.settleSeconds
+      end if
+      if options.DoesExist("stepDownBelowFraction")
+        m.stepDownBelowFraction = options.stepDownBelowFraction
+      end if
+      if options.DoesExist("stepUpHeadroomFraction")
+        m.stepUpHeadroomFraction = options.stepUpHeadroomFraction
+      end if
+      if options.DoesExist("stepUpSustainSeconds")
+        m.stepUpSustainSeconds = options.stepUpSustainSeconds
+      end if
+      if options.DoesExist("maxMeasurableFps")
+        m.maxMeasurableFps = options.maxMeasurableFps
+      end if
+      if options.DoesExist("stepDownCooldownSeconds")
+        m.stepDownCooldownSeconds = options.stepDownCooldownSeconds
+      end if
+      if options.DoesExist("probeFailWindowSeconds")
+        m.probeFailWindowSeconds = options.probeFailWindowSeconds
+      end if
+      if options.DoesExist("probeBackoffSeconds")
+        m.probeBackoffSeconds = options.probeBackoffSeconds
+      end if
+      if options.DoesExist("stepUpJumpFraction")
+        m.stepUpJumpFraction = options.stepUpJumpFraction
+      end if
+    end sub
+
+    ' Feed one frame's duration; returns the level to use (currentLevel if no change).
+    '
+    ' @param {float} dt - full frame time in seconds, including the buffer swap
+    ' @param {integer} currentLevel - the level currently applied
+    ' @return {integer}
+    function update(dt as float, currentLevel as integer) as integer
+      m.clock += dt
+
+      if m.settleRemaining > 0
+        m.settleRemaining -= dt
+        return currentLevel
+      end if
+      ' Counted only after the settle, so a slow rebuild frame right after a step up
+      ' can't use up the probe-fail window.
+      m.timeSinceStepDown += dt
+      m.timeSinceStepUp += dt
+      if dt > m.outlierFrameSeconds or dt <= 0
+        return currentLevel
+      end if
+
+      m.samples.push(dt)
+      m.sampleTime += dt
+      while m.sampleTime > m.windowSeconds and m.samples.count() > 1
+        m.sampleTime -= m.samples.shift()
+      end while
+      ' need at least half a window before trusting the average
+      if m.sampleTime < m.windowSeconds * 0.5
+        return currentLevel
+      end if
+
+      avgFps = m.samples.count() / m.sampleTime
+      upThreshold = BGE.Math.Min(m.targetFps * m.stepUpHeadroomFraction, m.maxMeasurableFps * 0.97)
+
+      if avgFps < m.targetFps * m.stepDownBelowFraction
+        m.headroomTime = 0
+        if currentLevel > m.minLevel and m.timeSinceStepDown >= m.stepDownCooldownSeconds
+          if currentLevel = m.lastProbeLevel and m.timeSinceStepUp <= m.probeFailWindowSeconds
+            m.markProbeFailed(currentLevel)
+          end if
+          m.timeSinceStepDown = 0
+          return currentLevel - 1
+        end if
+      else if avgFps >= upThreshold
+        m.headroomTime += dt
+        if m.headroomTime >= m.stepUpSustainSeconds and currentLevel < m.maxLevel and not m.isInBackoff(currentLevel + 1)
+          newLevel = currentLevel + 1
+          ' lots of headroom (e.g. a stationary camera hitting cached draws): skip a level
+          if m.stepUpJumpFraction > 0 and avgFps >= m.targetFps * m.stepUpJumpFraction and newLevel < m.maxLevel and not m.isInBackoff(newLevel + 1)
+            newLevel = newLevel + 1
+          end if
+          m.headroomTime = 0
+          m.timeSinceStepUp = 0
+          m.lastProbeLevel = newLevel
+          return newLevel
+        end if
+      else
+        m.headroomTime = 0
+      end if
+      return currentLevel
+    end function
+
+    ' Call after a new level has been applied: clears the average and waits out the
+    ' settle period so one-off rebuild costs don't count against the new level.
+    sub notifyLevelChanged()
+      m.resetWindow()
+    end sub
+
+    ' Call after a scene change, for the same reason as notifyLevelChanged().
+    sub notifySceneChanged()
+      m.resetWindow()
+    end sub
+
+    private sub resetWindow()
+      m.samples = []
+      m.sampleTime = 0
+      m.headroomTime = 0
+      m.settleRemaining = m.settleSeconds
+    end sub
+
+    private function isInBackoff(level as integer) as boolean
+      key = level.toStr()
+      return m.backoffUntil.DoesExist(key) and m.clock < m.backoffUntil[key]
+    end function
+
+    private sub markProbeFailed(level as integer)
+      key = level.toStr()
+      length = m.probeBackoffSeconds
+      if m.backoffLength.DoesExist(key)
+        length = m.backoffLength[key] * 2
+      end if
+      m.backoffLength[key] = length
+      m.backoffUntil[key] = m.clock + length
+    end sub
+
+  end class
+
+end namespace
