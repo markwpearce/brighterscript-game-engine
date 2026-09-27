@@ -6,7 +6,7 @@ Issue: #63. This is the first of three slices of a *Link to the Past*-style acti
 - **Slice B — Combat:** sword swing, enemies, health, knockback, hearts HUD. Own spec/PR.
 - **Slice C — RPG layer:** NPC dialogue, pickups + inventory, quest flag via `onGameEvent`, save/load via registry. Own spec/PR.
 
-The example is a reference to read, not a game to finish: two small areas, placeholder characters.
+The example is a reference to read, not a game to finish: two small areas, one player character.
 
 ## Goals
 
@@ -18,7 +18,7 @@ The example is a reference to read, not a game to finish: two small areas, place
 
 ## Non-goals (this slice)
 
-Combat, NPCs, dialogue, inventory, save/load, quest flags, real character art, sound/music, inner-corner auto-tiles, a tilemap file format or editor (Tiled support is #196), any engine changes.
+Combat (including the attack animations), NPCs, dialogue, inventory, save/load, quest flags, sound/music, inner-corner auto-tiles, a tilemap file format or editor (Tiled support is #196), any engine changes.
 
 ## Assets and licensing
 
@@ -26,6 +26,8 @@ Two 512×512 sheets on a 32px grid, copied into `examples/rpg/src/sprites/`:
 
 - `PathAndObjects.png` — [RPG Tiles: Cobble Stone Paths & Town Objects](https://opengameart.org/content/rpg-tiles-cobble-stone-paths-town-objects). Zabin, Daneeklu, Jetrel, Hyptosis, Redshrike, Bertram. CC-BY-SA 3.0 (Hyptosis's grass/cliff/water elements CC-BY 3.0).
 - `Castle2.png` — [Castle Tiles for RPGs](https://opengameart.org/content/castle-tiles-for-rpgs). Zabin, Hyptosis, Daniel Cook. CC-BY 3.0.
+
+Player character: **FREE Adventurer 2D Pixel Art** (supplied by Mark). Sixteen 768×80 strips — idle, run, attack 1, attack 2, each in four facings (up/down/left/right), 8 frames of 96×80 per strip. The character is ~19×34px inside each cell, feet at about (48, 58) from the cell's top-left in every frame. The strips are combined once (ImageMagick, not at runtime) into a single `examples/rpg/src/sprites/adventurer.png` (768×1280: 16 rows of 8 cells, in a fixed row order documented in `Player.bs`), so it loads as one `BGE.Sprite` sheet. License: free for personal/commercial projects; must not be resold or redistributed as a standalone asset; no NFTs; credit appreciated, not required. It ships only as part of this example, and is credited in `CREDITS.md`. Slice A uses idle and run; the attack rows are included now for Slice B.
 
 `examples/rpg/src/sprites/CREDITS.md` lists authors, licenses, and links for both, following the attribution text each page asks for. Share-alike applies to the art (and edits of it), not to the engine or example code.
 
@@ -40,7 +42,7 @@ The sheets are atlases, not uniform tilesets. `PathAndObjects.png`'s ground come
 
 ```
 examples/rpg/                      (npm run create-example -- rpg "RPG")
-  src/sprites/  Castle2.png, PathAndObjects.png, CREDITS.md
+  src/sprites/  Castle2.png, PathAndObjects.png, adventurer.png, CREDITS.md
   src/source/
     main.bs                        canvas, sheet loading, "move" axis binding, defineScene x2, start in town
     Maps/
@@ -54,7 +56,7 @@ examples/rpg/                      (npm run create-example -- rpg "RPG")
       Door.bs                      trigger zone -> scene transition
       ScreenFade.bs                persistent full-canvas fade overlay
     Entities/
-      Player.bs                    persistent; input, movement, facing, placeholder drawables
+      Player.bs                    persistent; input, movement, facing, sprite animations
     Scenes/
       TownScene.bs, CastleScene.bs
 ```
@@ -136,7 +138,7 @@ It is plain rectangle maths with no engine types beyond `BGE.Math` vectors, so i
 - Collision box: ~20×12 at the feet, not the whole sprite, so its head can overlap walls/awnings above it.
 - A `RectangleCollider` on the feet box, used only for door triggers.
 - Facing (up/down/left/right) from the dominant input axis; on an exact diagonal the current facing is kept, so it doesn't flicker along walls.
-- Placeholder drawables: a ~16×24 body `DrawableRectangle` plus a small contrasting marker offset toward the facing direction, with a small vertical bob while moving. Colours from `BGE.ColorsRGB` (drawables take packed RGB).
+- Drawn with one `BGE.Sprite` (`addSprite()`, 96×80 cells from `adventurer.png`) with eight named animations: `idle_<facing>` and `run_<facing>`, looping (idle ~8 fps, run ~12 fps; tuned in the playtest). The sprite is offset so the cell's feet point (48, 58) sits on the entity's position, which is the bottom-centre of the collision box. It switches to `run_<facing>` while moving and `idle_<facing>` when stopped, keeping the frame timer when only the facing changes mid-run.
 - Input lock flag used during transitions.
 
 ## Depth
