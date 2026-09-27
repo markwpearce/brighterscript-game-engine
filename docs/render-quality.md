@@ -82,7 +82,7 @@ for every field.
 Every entity and scene gets `onQualityChanged(level)` when the level changes:
 
 ```brighterscript
-override sub onQualityChanged(level as integer)
+override sub onQualityChanged(level as BGE.RenderQualityLevel)
   m.sparks.maxParticles = [20, 40, 80, 120, 200][level]
 end sub
 ```
