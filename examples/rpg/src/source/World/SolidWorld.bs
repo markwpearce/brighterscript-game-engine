@@ -1,1 +1,197 @@
-' Filled in by a later task.
+' Axis-aligned solid rectangles for top-down movement, and moveAndSlide() to keep a moving box
+' out of them while sliding along walls. Plain rectangle maths, independent of the engine's
+' colliders (which only detect overlaps, they don't resolve them).
+' Every rectangle is {x, y, w, h}: (x, y) is the bottom-left corner, world +y up.
+
+' Solids are bucketed on a grid this size so a move only tests nearby rectangles.
+const SOLID_BUCKET_SIZE = 128
+' Longest single sub-step, so a fast move can't skip over a thin solid.
+const SOLID_MAX_STEP = 4.0
+' How far a box may overlap a blocking corner and still be eased around it.
+const SOLID_CORNER_NUDGE = 8.0
+
+class SolidWorld
+
+  private buckets as roAssociativeArray = {}
+  private solids as object = []
+
+  ' @param {float} x - bottom-left x
+  ' @param {float} y - bottom-left y
+  ' @param {float} w
+  ' @param {float} h
+  sub addSolid(x as float, y as float, w as float, h as float)
+    solid = {x: x, y: y, w: w, h: h, id: m.solids.count().toStr()}
+    m.solids.push(solid)
+    for bx = m.bucketIndex(x) to m.bucketIndex(x + w)
+      for by = m.bucketIndex(y) to m.bucketIndex(y + h)
+        key = bx.toStr() + "," + by.toStr()
+        if m.buckets[key] = invalid
+          m.buckets[key] = []
+        end if
+        m.buckets[key].push(solid)
+      end for
+    end for
+  end sub
+
+  function getSolidCount() as integer
+    return m.solids.count()
+  end function
+
+  ' Moves mover by (dx, dy), stopping flush against solids and sliding along them. When moving
+  ' along one axis only, a box that clips a corner by up to SOLID_CORNER_NUDGE is eased around it.
+  '
+  ' @param {object} mover - {x, y, w, h}: the moving box, bottom-left corner
+  ' @param {float} dx
+  ' @param {float} dy
+  ' @return {object} {x, y, blockedX, blockedY}: the box's new bottom-left corner
+  function moveAndSlide(mover as object, dx as float, dy as float) as object
+    largest = Abs(dx)
+    if Abs(dy) > largest
+      largest = Abs(dy)
+    end if
+    steps = Int(largest / SOLID_MAX_STEP) + 1
+    stepX = dx / steps
+    stepY = dy / steps
+    result = {x: mover.x, y: mover.y, blockedX: false, blockedY: false}
+    for i = 1 to steps
+      if stepX <> 0
+        m.stepAxis(result, mover.w, mover.h, stepX, true, dy = 0)
+      end if
+      if stepY <> 0
+        m.stepAxis(result, mover.w, mover.h, stepY, false, dx = 0)
+      end if
+    end for
+    return result
+  end function
+
+  private sub stepAxis(result as object, w as float, h as float, delta as float, alongX as boolean, canNudge as boolean)
+    nx = result.x
+    ny = result.y
+    if alongX
+      nx += delta
+    else
+      ny += delta
+    end if
+    hits = m.overlaps(nx, ny, w, h)
+    if hits.count() = 0
+      result.x = nx
+      result.y = ny
+      return
+    end if
+
+    ' Snap flush to the nearest blocking edge. The box started clear, so this never moves it backwards.
+    if alongX
+      result.blockedX = true
+      for each hit in hits
+        if delta > 0 and hit.x - w < nx
+          nx = hit.x - w
+        else if delta < 0 and hit.x + hit.w > nx
+          nx = hit.x + hit.w
+        end if
+      end for
+      result.x = nx
+    else
+      result.blockedY = true
+      for each hit in hits
+        if delta > 0 and hit.y - h < ny
+          ny = hit.y - h
+        else if delta < 0 and hit.y + hit.h > ny
+          ny = hit.y + hit.h
+        end if
+      end for
+      result.y = ny
+    end if
+
+    if canNudge
+      m.tryNudge(result, w, h, hits, Abs(delta), alongX)
+    end if
+  end sub
+
+  ' Moves the box perpendicular to travel when it only clips the blockers' combined extent by a
+  ' few pixels. Uses the union of all hits so a wall made of stacked tile rects counts as one.
+  private sub tryNudge(result as object, w as float, h as float, hits as object, stepLength as float, alongX as boolean)
+    ' Perpendicular axis: y when travelling along x, x when travelling along y.
+    if alongX
+      boxStart = result.y
+      boxSize = h
+    else
+      boxStart = result.x
+      boxSize = w
+    end if
+    blockStart = invalid
+    blockEnd = invalid
+    for each hit in hits
+      if alongX
+        hitStart = hit.y
+        hitEnd = hit.y + hit.h
+      else
+        hitStart = hit.x
+        hitEnd = hit.x + hit.w
+      end if
+      if blockStart = invalid or hitStart < blockStart
+        blockStart = hitStart
+      end if
+      if blockEnd = invalid or hitEnd > blockEnd
+        blockEnd = hitEnd
+      end if
+    end for
+
+    shift = 0.0
+    overlapAtStart = (boxStart + boxSize) - blockStart
+    overlapAtEnd = blockEnd - boxStart
+    if overlapAtStart > 0 and overlapAtStart <= SOLID_CORNER_NUDGE
+      shift = -m.minFloat(stepLength, overlapAtStart)
+    else if overlapAtEnd > 0 and overlapAtEnd <= SOLID_CORNER_NUDGE
+      shift = m.minFloat(stepLength, overlapAtEnd)
+    end if
+    if shift = 0
+      return
+    end if
+
+    nx = result.x
+    ny = result.y
+    if alongX
+      ny += shift
+    else
+      nx += shift
+    end if
+    if m.overlaps(nx, ny, w, h).count() = 0
+      result.x = nx
+      result.y = ny
+    end if
+  end sub
+
+  ' Solids strictly overlapping the given box. Touching edges don't count, so a box flush
+  ' against a wall is clear.
+  private function overlaps(x as float, y as float, w as float, h as float) as object
+    found = []
+    seen = {}
+    for bx = m.bucketIndex(x) to m.bucketIndex(x + w)
+      for by = m.bucketIndex(y) to m.bucketIndex(y + h)
+        bucket = m.buckets[bx.toStr() + "," + by.toStr()]
+        if bucket <> invalid
+          for each solid in bucket
+            if seen[solid.id] = invalid and x < solid.x + solid.w and x + w > solid.x and y < solid.y + solid.h and y + h > solid.y
+              seen[solid.id] = true
+              found.push(solid)
+            end if
+          end for
+        end if
+      end for
+    end for
+    return found
+  end function
+
+  ' Int() floors, so negative coordinates (map-bounds solids) land in the right bucket.
+  private function bucketIndex(value as float) as integer
+    return Int(value / SOLID_BUCKET_SIZE)
+  end function
+
+  private function minFloat(a as float, b as float) as float
+    if a < b
+      return a
+    end if
+    return b
+  end function
+
+end class
