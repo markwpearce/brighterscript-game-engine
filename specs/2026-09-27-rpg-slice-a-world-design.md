@@ -77,6 +77,7 @@ Each area is two parts.
 | `s` | castle stone floor | no |
 | `~` | water | yes |
 | `#` | solid; visual supplied by a prop drawn over it (castle walls) | yes |
+| `b` | brick wall (castle interior north wall) | yes |
 | `x` | solid void, drawn dark (interior out-of-bounds) | yes |
 
 Auto-tiled paths are written at least two cells wide (see Auto-tiling).
@@ -91,7 +92,7 @@ Sizes: town ~48×32 cells (≈2.4 × 2.8 screens, so the camera scrolls on both 
 
 **Town:** market town. Cobble roads auto-tiled into grass, market stalls, fountain, well, crates and barrels, a stretch of water along one edge with a dock and boats. The castle wall facade runs along the top edge with the arched gate (the door to the castle).
 
-**Castle interior:** stone floor, the castle wall facade along the north edge, `x` void on the other edges, banners, a blacksmith corner (anvils, weapon rack), shelves, and a door on the south edge back to the town gate.
+**Castle interior:** stone floor, a brick wall (`b`) along the north edge, `x` void on the other edges, banners, a blacksmith corner (anvils, weapon rack), shelves, and a door on the south edge back to the town gate.
 
 ## Auto-tiling (`AutoTile.bs`)
 
@@ -113,7 +114,7 @@ Coordinates are measured from the sheets during implementation. A throwaway cont
 ## Building an area (`TileMapEntity.bs`)
 
 - Walks the ground layer. Each cell becomes a `BGE.TileMap.TileSpec` using its atlas region (auto-tiled pieces for path surfaces). All tiles are baked once with `BGE.TileMap.bakeTileMapImages()` into 512px chunks and added as `matchCamera` images at z = −9000 (farthest back).
-- Solid cells (`~`, `#`, `x`) become `BGE.TileMap.ColliderCell`s, merged with `mergeTileColliderRuns()`, and added to the scene's `SolidWorld` as rectangles.
+- Solid cells (`~`, `#`, `b`, `x`) become `BGE.TileMap.ColliderCell`s, merged with `mergeTileColliderRuns()`, and added to the scene's `SolidWorld` as rectangles.
 - Placement-list props become `Prop` entities; doors become `Door` entities; spawns are kept in a lookup by id.
 - Exposes the map's world bounds for camera clamping.
 
@@ -138,7 +139,7 @@ It is plain rectangle maths with no engine types beyond `BGE.Math` vectors, so i
 - Collision box: ~20×12 at the feet, not the whole sprite, so its head can overlap walls/awnings above it.
 - A `RectangleCollider` on the feet box, used only for door triggers.
 - Facing (up/down/left/right) from the dominant input axis; on an exact diagonal the current facing is kept, so it doesn't flicker along walls.
-- Drawn with one `BGE.Sprite` (`addSprite()`, 96×80 cells from `adventurer.png`) with eight named animations: `idle_<facing>` and `run_<facing>`, looping (idle ~8 fps, run ~12 fps; tuned in the playtest). The sprite is offset so the cell's feet point (48, 58) sits on the entity's position, which is the bottom-centre of the collision box. It switches to `run_<facing>` while moving and `idle_<facing>` when stopped, keeping the frame timer when only the facing changes mid-run.
+- Drawn with one `BGE.Sprite` (`addSprite()`, 96×80 cells from `adventurer.png`) with eight named animations: `idle_<facing>` and `run_<facing>`, looping (idle ~8 fps, run ~12 fps; tuned in the playtest). The sprite is offset so the cell's feet point (48, 58) sits on the entity's position, which is the bottom-centre of the collision box. It switches to `run_<facing>` while moving and `idle_<facing>` when stopped (`Sprite.playAnimation()` restarts the frame clock on any animation change, including a facing change mid-run - acceptable for this slice).
 - Input lock flag used during transitions.
 
 ## Depth
