@@ -56,7 +56,7 @@ This also turns adaptive tuning off - handy for testing, or for a settings menu.
 ## Draw distance
 
 A level scales your camera's `maxDrawDistance` rather than replacing it: Basic
-draws 0.4x as far, Medium exactly what you set, Ultra 1.5x. Set `maxDrawDistance` to
+draws 0.75x as far, Low 0.825x, Medium exactly what you set, Ultra 1.5x. Set `maxDrawDistance` to
 what suits your game at Medium. The distance actually used is
 `camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
 running out of memory.

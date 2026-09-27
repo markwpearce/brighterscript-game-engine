@@ -23,7 +23,7 @@ Let the engine pick draw-quality values (draw distance, plane slice count, trian
 
 | Field | Replaces | Basic | Low | **Medium** | High | Ultra |
 |---|---|---|---|---|---|---|
-| `drawDistanceScale` | - (new) | 0.4 | 0.6 | **1.0** | 1.25 | 1.5 |
+| `drawDistanceScale` | - (new) | 0.75 | 0.825 | **1.0** | 1.25 | 1.5 |
 | `drawDistanceOverride` | - (new, optional absolute distance; `<= 0` = unset, use the scale) | 0 | 0 | **0** | 0 | 0 |
 | `planeSliceCount` | `SCENE_OBJECT_PLANE_SLICE_COUNT` (50) | 20 | 28 | 36 | 44 | **50** |
 | `triangleSkipSize` | `TriangleDrawThreshold` (4) | 8 | 6 | **4** | 3 | 2 |
@@ -53,6 +53,7 @@ CLAUDE.md gains a conventions bullet stating this rule.
 - **Planes keep a constant draw distance** (user feedback after on-device testing): `SceneObjectPlane` uses `Camera3d.getPlaneDrawDistance()` - `maxDrawDistance` capped per device, ignoring the level's scale/override - so the horizon never moves with the level and a level change never rebuilds plane bitmaps. Everything else uses the effective distance.
 - Every other current reader of `maxDrawDistance` switches to the effective value: `Camera3d.isInView`'s far-clip check (`Camera3d.bs:218`), `projectionChangedThisFrame()`'s dirty check, and `SceneObjectPlane` (pre-perspective bitmap sizing, far distance, supertexture sizing/rebuild checks).
 - **Behavior change**: reading `maxDrawDistance` back after setting it above the device cap now returns what was set (previously the capped value). Existing specs/docs asserting the old read-back behavior are updated.
+- **Cached bitmaps redraw on a quality change**: `Renderer.qualityVersion` is bumped by `setQualitySettings()`; a `SceneObject` whose last draw saw an older version treats that draw like movement for its cached-bitmap checks (plane composite, billboard temp bitmap, model face rasters), so a still camera shows the new level on the next frame, then goes back to reusing the cache.
 - A level change that changes the effective distance triggers `SceneObjectPlane`'s existing bitmap/supertexture rebuilds. That one-off cost is expected; the controller's settle period ignores it. Each rebuild releases the old bitmap before allocating the new one, and a failed allocation logs a warning and skips that plane for the frame (retried next frame) instead of crashing. High/Ultra scales are kept at 1.25/1.5 because the pre-perspective bitmap grows with the square of the distance - Ultra at 2.0 crashed `examples/terrain` (two textured planes) on a real Roku Ultra.
 
 ## Device seeding
