@@ -16,8 +16,8 @@ the engine implements these pieces internally, see [Engine Internals](/engine-in
 BGE is an object-oriented 2D-first game engine for Roku channels, written in
 [BrighterScript](https://github.com/rokucommunity/brighterscript) and distributed via
 [ROPM](https://ropm.dev). Everything lives under the `BGE` namespace. The `examples/` folder in
-the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `platformer`, `3d`,
-`canvas`, `pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
+the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `platformer`, `rpg`,
+`3d`, `canvas`, `pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
 `quickstart` in particular is a minimal scaffold worth copying as a starting point for a new game.
 
 ## Architecture at a glance
