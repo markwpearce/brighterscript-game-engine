@@ -1,3 +1,6 @@
+import "../quality/RenderQualityLevel.bs"
+import "../quality/RenderQualityPresets.bs"
+import "../quality/RenderQualitySettings.bs"
 import "../../math/CornerPoints.bs"
 import "../../math/math.bs"
 import "../../math/Triangle.bs"
@@ -21,10 +24,17 @@ import "TriangleCache.bs"
 namespace BGE
 
   const RendererResourceSize = 400
-  const TriangleDrawThreshold = 4
-  const TriangleQuickDrawThreshold = 64
-  const TriangleQuickDrawThresholdForSimulator = 32
   const DEPTH_TIE_EPSILON = 0.5
+
+  ' The triangle line-fill values a `Renderer` is using - see `getTriangleQuickDrawParams()`.
+  interface TriangleQuickDrawParams
+    ' Triangles smaller than this many pixels on both axes are skipped
+    skipSize as float
+    ' Triangles smaller than this on either axis use the cheap line-fill
+    threshold as float
+    ' Pixel step between lines in the line-fill
+    step as integer
+  end interface
 
   interface LevelOfDetailOptions
     levelOffset as integer
@@ -118,6 +128,16 @@ namespace BGE
 
     private isSimulator as boolean = false
 
+    ' The draw-quality values this renderer uses. `Game` sets these from the current
+    ' render quality level; a Renderer used without a Game starts at Medium.
+    qualitySettings as BGE.RenderQualitySettings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+
+    ' Bumped by every setQualitySettings() call, so scene objects know to redraw their
+    ' cached bitmaps at the new quality even when nothing moved.
+    qualityVersion as integer = 0
+    ' Derived from qualitySettings once per change, since triangle drawing reads it per call.
+    private triangleQuickDrawParams as TriangleQuickDrawParams = invalid
+
     game as BGE.Game = invalid
 
     name as string = "Renderer"
@@ -148,6 +168,7 @@ namespace BGE
       end if
       m.bmpPool = new BGE.ScratchBitmapPool(options.useBitmapPooling)
       m.setCamera(cam)
+      m.updateTriangleQuickDrawParams()
     end sub
 
 
@@ -266,6 +287,34 @@ namespace BGE
       if isDefaultCamera
         m.camera.useDefaultCameraTarget()
       end if
+    end sub
+
+    ' Replaces this renderer's draw-quality values. Takes effect from the next draw.
+    ' Use this rather than assigning `qualitySettings` directly.
+    '
+    ' @param {BGE.RenderQualitySettings} settings - e.g. `BGE.getRenderQualityPreset(BGE.RenderQualityLevel.high)`
+    sub setQualitySettings(settings as BGE.RenderQualitySettings)
+      m.qualitySettings = settings
+      m.qualityVersion++
+      m.updateTriangleQuickDrawParams()
+    end sub
+
+    ' The triangle line-fill parameters in effect, after the simulator adjustment.
+    '
+    ' @return {object} {skipSize, threshold, step}
+    function getTriangleQuickDrawParams() as TriangleQuickDrawParams
+      return m.triangleQuickDrawParams
+    end function
+
+    private sub updateTriangleQuickDrawParams()
+      threshold = m.qualitySettings.triangleQuickDrawThreshold
+      lineStep = m.qualitySettings.triangleQuickDrawStep
+      if m.isSimulator
+        ' line drawing is comparatively slow on the simulator
+        threshold = BGE.Math.Min(threshold, 32.0)
+        lineStep = cint(BGE.Math.Max(lineStep, 4))
+      end if
+      m.triangleQuickDrawParams = {skipSize: m.qualitySettings.triangleSkipSize, threshold: threshold, step: lineStep}
     end sub
 
     sub resetDrawCallCounter()
@@ -574,6 +623,10 @@ namespace BGE
     end sub
 
     sub setupCameraForFrame()
+      ' pushed every frame so a camera assigned directly (renderer.camera = cam) picks them up
+      m.camera.drawDistanceScale = m.qualitySettings.drawDistanceScale
+      m.camera.drawDistanceOverride = m.qualitySettings.drawDistanceOverride
+
       m.camera.setFrameSize(m.draw2d.getWidth(), m.draw2d.getHeight())
       m.camera.checkMovement()
 
@@ -2060,21 +2113,14 @@ namespace BGE
     private function drawQuickTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer) as boolean
       bounds = BGE.Math.getBounds(points)
 
+      params = m.getTriangleQuickDrawParams()
       triangleSize = BGE.Math.VectorOps.subtract(bounds[1], bounds[0])
-      if triangleSize.x < BGE.TriangleDrawThreshold and triangleSize.y < BGE.TriangleDrawThreshold
+      if triangleSize.x < params.skipSize and triangleSize.y < params.skipSize
         return true
       end if
 
-      threshold = BGE.TriangleQuickDrawThreshold
-      levelOfDetail = 2
-      if m.isSimulator
-        ' Simulator is less efficiient at drawing lines
-        threshold = BGE.TriangleQuickDrawThresholdForSimulator
-        levelOfDetail = 4
-      end if
-
-      if (triangleSize.x < threshold) or (triangleSize.y < threshold)
-        return m.drawTriangleAsRaysTo(canvasDrawTo, points, x, y, rgba, {levelOffset: 0, levelOfDetail: levelOfDetail})
+      if (triangleSize.x < params.threshold) or (triangleSize.y < params.threshold)
+        return m.drawTriangleAsRaysTo(canvasDrawTo, points, x, y, rgba, {levelOffset: 0, levelOfDetail: params.step})
       end if
       return false
     end function

@@ -105,12 +105,9 @@ namespace BGE
     ' top of the "level" vectors - see getLevelUpVector()/getLevelRightVector().
     rollDegrees as float = 0
 
-    ' How far (world units) in front of the camera a point can be and still be
-    ' considered visible - applied everywhere isInView() is checked, including
-    ' SceneObjectPlane's far-render-distance and tiled-texture cache sizing (issue #124).
-    ' Silently capped per-device (see getMaxDrawDistanceDeviceCap()), re-applied every
-    ' frame via checkMovement() - reading this back may show the capped value, not what
-    ' was set.
+    ' How far (world units) in front of the camera your game wants to draw. The
+    ' distance actually used is `getEffectiveMaxDrawDistance()`: this value scaled by
+    ' the current render quality level and capped per device.
     maxDrawDistance as float = 1000
 
     ' Last field of view seen by projectionChangedThisFrame(). fieldOfViewDegrees is a
@@ -118,9 +115,8 @@ namespace BGE
     ' a setter would be silently bypassed.
     private lastProjectionFieldOfView as float = -1
 
-    ' Last maxDrawDistance seen by projectionChangedThisFrame() - dirty-checked like
-    ' fieldOfViewDegrees above, for the same reason.
-    private lastMaxDrawDistance as float = 1000
+    ' Last effective draw distance seen by projectionChangedThisFrame().
+    private lastEffectiveMaxDrawDistance as float = -1
 
     ' Cached device-specific cap for maxDrawDistance (see getMaxDrawDistanceDeviceCap()).
     ' -1 means "not yet computed."
@@ -215,7 +211,7 @@ namespace BGE
         end if
       end for
       forwardDistance = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, m.position), m.orientation)
-      return forwardDistance <= m.maxDrawDistance
+      return forwardDistance <= m.getEffectiveMaxDrawDistance()
     end function
 
 
@@ -559,9 +555,10 @@ namespace BGE
       return BGE.Math.RotateVectorAroundPoint3d(level, BGE.Math.VectorOps.create(), m.orientation, BGE.Math.DegreesToRadians(m.rollDegrees))
     end function
 
-    ' Caps maxDrawDistance per device: SceneObjectPlane's scratch bitmaps scale with it,
-    ' and the BrightScript Simulator silently fails to render past ~908 (binary-search
-    ' confirmed - see lvcabral/brs-engine#1198), hence the 900 cap.
+    ' Caps the effective draw distance (see getEffectiveMaxDrawDistance()) per device:
+    ' SceneObjectPlane's scratch bitmaps scale with it, and the BrightScript Simulator
+    ' silently fails to render past ~908 (binary-search confirmed - see
+    ' lvcabral/brs-engine#1198), hence the 900 cap.
     '
     ' FHD's 2500 is confirmed by the same binary-search method on a real 2024 Roku
     ' Ultra (issue #142): SceneObjectPlane.getPrePerspectiveBmp()'s per-plane scratch
@@ -587,8 +584,8 @@ namespace BGE
     '
     ' IMPORTANT: this cap only prevents the specific scratch-bitmap-allocation crash
     ' above. On this same real SD/HD device, examples/terrain fails in two OTHER,
-    ' maxDrawDistance-independent ways that this cap can't fix (see issue #151):
-    ' SceneObjectSkybox's own 1280x720 temp bitmap (unrelated to maxDrawDistance -
+    ' effective-draw-distance-independent ways that this cap can't fix (see issue #151):
+    ' SceneObjectSkybox's own 1280x720 temp bitmap (unrelated to draw distance -
     ' confirmed crashing even at maxDrawDistance=1) fails to allocate outright, and
     ' SceneObjectPlane's perspective-slice draws (drawScaledObjectTo) silently fail on
     ' this hardware even when nothing crashes, so the ground never actually renders.
@@ -610,6 +607,35 @@ namespace BGE
       return m.maxDrawDistanceDeviceCap
     end function
 
+    ' How far a `DrawablePlane` (ground/terrain) draws: `maxDrawDistance` capped for
+    ' this device, ignoring the quality level, so the horizon stays put when the level
+    ' changes.
+    '
+    ' @return {float}
+    function getPlaneDrawDistance() as float
+      deviceCap = m.getMaxDrawDistanceDeviceCap()
+      if m.maxDrawDistance > deviceCap
+        return deviceCap * 1.0
+      end if
+      return m.maxDrawDistance * 1.0
+    end function
+
+    ' The draw distance the renderer actually uses: `drawDistanceOverride` if set,
+    ' otherwise `maxDrawDistance * drawDistanceScale`, then capped for this device.
+    '
+    ' @return {float}
+    function getEffectiveMaxDrawDistance() as float
+      distance = m.maxDrawDistance * m.drawDistanceScale
+      if m.drawDistanceOverride > 0
+        distance = m.drawDistanceOverride * 1.0
+      end if
+      deviceCap = m.getMaxDrawDistanceDeviceCap()
+      if distance > deviceCap
+        distance = deviceCap * 1.0
+      end if
+      return distance
+    end function
+
     protected override function projectionChangedThisFrame() as boolean
       ' called unconditionally rather than inside an `or`, so it always records the new
       ' frame size even when the FOV changed too
@@ -620,15 +646,9 @@ namespace BGE
         changed = true
       end if
 
-      ' Clamp before the dirty-check, unconditionally, so both the initial default and
-      ' any later explicit change get capped.
-      deviceCap = m.getMaxDrawDistanceDeviceCap()
-      if m.maxDrawDistance > deviceCap
-        m.maxDrawDistance = deviceCap
-      end if
-
-      if m.lastMaxDrawDistance <> m.maxDrawDistance
-        m.lastMaxDrawDistance = m.maxDrawDistance
+      effective = m.getEffectiveMaxDrawDistance()
+      if m.lastEffectiveMaxDrawDistance <> effective
+        m.lastEffectiveMaxDrawDistance = effective
         changed = true
       end if
 

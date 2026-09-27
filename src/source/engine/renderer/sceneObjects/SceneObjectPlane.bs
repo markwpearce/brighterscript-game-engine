@@ -27,7 +27,6 @@ namespace BGE
   end interface
 
   const SCENE_OBJECT_PLANE_NEAR_DISTANCE = 0
-  const SCENE_OBJECT_PLANE_SLICE_COUNT = 50
   ' Above this, the supertexture build's tilesPerAxis^2 blit count is worth a runtime
   ' warning (63x63 = ~4k blits) - see buildSuperTextureIfNeeded().
   const SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD = 63
@@ -121,7 +120,7 @@ namespace BGE
         isRolled = (camera as Camera3d).rollDegrees <> 0
       end if
       isTiled = m.drawable.fillMode = PlaneFillMode.tiledImage
-      if not m.objMovedInRelationToCamera(camera) and m.hasAccurateTempBitmap
+      if not m.objMovedInRelationToCamera(camera) and m.hasAccurateTempBitmap and not m.qualityChangedThisDraw
         ' If nothing has moved (including no roll change - Camera3d.checkMovement's
         ' own roll dirty-check forces movedLastFrame true only on the frame roll
         ' actually changes), redraw whichever cached bitmap is correct for the
@@ -137,15 +136,24 @@ namespace BGE
       end if
       m.hasAccurateTempBitmap = false
 
-      maxDrawDistance = (camera as Camera3d).maxDrawDistance
+      maxDrawDistance = (camera as Camera3d).getPlaneDrawDistance()
       if invalid = m.prePerspectiveBmp or m.prePerspectiveBmpBuiltForMaxDrawDistance <> maxDrawDistance
+        ' Release the old bitmap first so the old and new aren't both alive at once.
+        m.prePerspectiveBmp = invalid
+        m.prePerspectiveBmpBuiltForMaxDrawDistance = -1
         m.prePerspectiveBmp = m.getPrePerspectiveBmp(rendererObj)
+        if invalid = m.prePerspectiveBmp
+          print "[BGE.SceneObjectPlane] warning: couldn't allocate the plane's perspective bitmap for draw distance "; maxDrawDistance; " - skipping this frame"
+          return false
+        end if
         m.prePerspectiveBmpBuiltForMaxDrawDistance = maxDrawDistance
       end if
 
       gotPreBmp = false
       if isTiled
-        m.buildSuperTextureIfNeeded(rendererObj)
+        if not m.buildSuperTextureIfNeeded(rendererObj)
+          return false
+        end if
         wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale)
       else
@@ -154,7 +162,7 @@ namespace BGE
       if not gotPreBmp
         return false
       end if
-      m.hasAccurateTempBitmap = m.drawPerspectiveBmpSlicesToByCamera(rendererObj, m.prePerspectiveBmp, m.perspectivePoints.actual, SCENE_OBJECT_PLANE_NEAR_DISTANCE, SCENE_OBJECT_PLANE_SLICE_COUNT)
+      m.hasAccurateTempBitmap = m.drawPerspectiveBmpSlicesToByCamera(rendererObj, m.prePerspectiveBmp, m.perspectivePoints.actual, SCENE_OBJECT_PLANE_NEAR_DISTANCE, rendererObj.qualitySettings.planeSliceCount)
 
       return m.hasAccurateTempBitmap
     end function
@@ -188,7 +196,7 @@ namespace BGE
 
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       camera = rendererObj.camera as Camera3d
-      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, camera.maxDrawDistance)
+      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, camera.getPlaneDrawDistance())
       if invalid = m.perspectivePoints
         return false
       end if
@@ -345,7 +353,7 @@ namespace BGE
     private function getPrePerspectiveBmp(rendererObj as BGE.Renderer) as roBitmap
       nearDistance = SCENE_OBJECT_PLANE_NEAR_DISTANCE
       camera = rendererObj.camera as Camera3d
-      farDistance = camera.maxDrawDistance
+      farDistance = camera.getPlaneDrawDistance()
       finalHeight = farDistance - nearDistance
       finalWidth = (finalHeight) * tan(BGE.Math.DegreesToRadians(camera.fieldOfViewDegrees) / 2) * 2
       return CreateObject("roBitmap", {width: finalWidth, height: finalHeight, AlphaEnable: true})
@@ -372,11 +380,18 @@ namespace BGE
     ' across many frames, not just within one.
     '
     ' @param {BGE.Renderer} rendererObj
-    private sub buildSuperTextureIfNeeded(rendererObj as BGE.Renderer)
+    ' @return {boolean} false if a bitmap couldn't be allocated (retried next call)
+    private function buildSuperTextureIfNeeded(rendererObj as BGE.Renderer) as boolean
       camera = rendererObj.camera as Camera3d
-      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance and m.superTextureBuiltForTileWidth = m.drawable.region.GetWidth() and m.superTextureBuiltForTileHeight = m.drawable.region.GetHeight()
-        return
+      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.getPlaneDrawDistance() and m.superTextureBuiltForTileWidth = m.drawable.region.GetWidth() and m.superTextureBuiltForTileHeight = m.drawable.region.GetHeight()
+        return true
       end if
+      ' Release the old bitmaps before allocating replacements, and leave the cache
+      ' key unset until the build succeeds so a failed allocation is retried.
+      m.superTextureRegion = invalid
+      m.superTextureBmp = invalid
+      m.tiledScratchBmp = invalid
+      m.superTextureBuiltForMaxDrawDistance = -1
 
       ' Floored at 1 - a degenerate 0-sized tile region would otherwise divide by zero
       ' below (and downstream, a 0-sized bmpWidth/bmpHeight feeding CreateObject("roBitmap", ...)).
@@ -388,7 +403,7 @@ namespace BGE
       ' maxDrawDistance-bounded size - drawScaledObjectTo reads it whole into the
       ' final composite with no sub-crop, so it can't grow with the rotation padding
       ' computed below. Computed from real tile-quantized dimensions, not an estimate.
-      unpaddedTilesPerAxis = Fix(2 * camera.maxDrawDistance / smallestTileDimension) + 1
+      unpaddedTilesPerAxis = Fix(2 * camera.getPlaneDrawDistance() / smallestTileDimension) + 1
       if (unpaddedTilesPerAxis mod 2) = 0
         unpaddedTilesPerAxis = unpaddedTilesPerAxis + 1
       end if
@@ -434,6 +449,10 @@ namespace BGE
       physicalWidth = bmpWidth * m.superTextureScale
       physicalHeight = bmpHeight * m.superTextureScale
       m.superTextureBmp = CreateObject("roBitmap", {width: physicalWidth, height: physicalHeight, AlphaEnable: true})
+      if invalid = m.superTextureBmp
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; physicalWidth; "x"; physicalHeight; " tiledImage supertexture - skipping this plane this frame"
+        return false
+      end if
       m.superTextureBmp.SetAlphaEnable(true)
       m.superTextureBmp.Clear(&h00000000)
 
@@ -447,11 +466,16 @@ namespace BGE
       ' Unpadded size (see unpaddedScratchWidth/Height above) - the destination canvas
       ' must not grow with the source's rotation padding.
       m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth * m.superTextureScale, height: unpaddedScratchHeight * m.superTextureScale, AlphaEnable: true})
+      if invalid = m.tiledScratchBmp
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate the tiledImage scratch bitmap - skipping this plane this frame"
+        return false
+      end if
       m.tiledScratchBmp.SetAlphaEnable(true)
-      m.superTextureBuiltForMaxDrawDistance = camera.maxDrawDistance
+      m.superTextureBuiltForMaxDrawDistance = camera.getPlaneDrawDistance()
       m.superTextureBuiltForTileWidth = m.tileWidth
       m.superTextureBuiltForTileHeight = m.tileHeight
-    end sub
+      return true
+    end function
 
     ' Wraps an unbounded world-derived texture-pixel anchor into this supertexture's
     ' center tile. Only the anchor needs wrapping (not every corner) since the warp's
