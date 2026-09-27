@@ -32,6 +32,8 @@ namespace tests
       return level
     end function
 
+    ' Most tests below pin the original (slower) timings so their hand-worked frame
+    ' counts stay valid; this group covers the shipped defaults.
     @describe("defaults")
 
     @it("targets 20fps: holds at 20fps, steps down below 18fps")
@@ -39,28 +41,58 @@ namespace tests
       c = new BGE.QualityController()
       m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 20, 10))
       slow = new BGE.QualityController()
-      m.assertEqual(BGE.RenderQualityLevel.low, m.simulate(slow, BGE.RenderQualityLevel.medium, 15, 1.5))
+      ' 0.5s half window, then one step; the next needs 0.25s settle + 0.5s
+      m.assertEqual(BGE.RenderQualityLevel.low, m.simulate(slow, BGE.RenderQualityLevel.medium, 15, 0.7))
     end function
 
-    @it("steps up after 2s of sustained headroom")
+    @it("steps up one level after 0.5s of headroom")
     function _()
       c = new BGE.QualityController()
-      ' 1.0s half window + 2.0s sustain
-      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 30, 2.8))
-      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 30, 0.4))
+      ' 0.5s half window + 0.5s sustain
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 30, 0.9))
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 30, 0.2))
+    end function
+
+    @it("jumps two levels when fps is at least twice the target")
+    function _()
+      c = new BGE.QualityController()
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.low, 60, 1.1))
+    end function
+
+    @it("doesn't jump past maxLevel")
+    function _()
+      c = new BGE.QualityController({maxLevel: BGE.RenderQualityLevel.high})
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 1.1))
+    end function
+
+    @it("climbs from low to ultra within about 2.5s at 60fps")
+    function _()
+      c = new BGE.QualityController()
+      m.assertEqual(BGE.RenderQualityLevel.ultra, m.simulate(c, BGE.RenderQualityLevel.low, 60, 2.6))
+    end function
+
+    @it("steps down quickly when fps drops after climbing")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulate(c, BGE.RenderQualityLevel.low, 60, 2.6)
+      m.assertEqual(BGE.RenderQualityLevel.ultra, level)
+      ' camera starts moving: 10fps; first step ~0.6s in, the next ~1.05s later (0.75s
+      ' cooldown counted after the 0.25s settle)
+      level = m.simulate(c, level, 10, 2.2)
+      m.assertTrue(level <= BGE.RenderQualityLevel.medium)
     end function
 
     @describe("stepping down")
 
     @it("steps down when well below target")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.high, 20, 1.5))
     end function
 
     @it("waits the cooldown before stepping down again")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       ' first step at 1.0s (half window); the average is low again by 2.5s (0.5s settle +
       ' 1.0s half window) but the 2s cooldown blocks a second step until 3.0s
       m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.ultra, 20, 2.8))
@@ -68,7 +100,7 @@ namespace tests
 
     @it("never goes below minLevel")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, minLevel: BGE.RenderQualityLevel.low})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0, minLevel: BGE.RenderQualityLevel.low})
       m.assertEqual(BGE.RenderQualityLevel.low, m.simulate(c, BGE.RenderQualityLevel.medium, 10, 30))
     end function
 
@@ -76,7 +108,7 @@ namespace tests
 
     @it("holds when at target")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 30, 20))
     end function
 
@@ -84,20 +116,20 @@ namespace tests
 
     @it("steps up only after sustained headroom")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       m.assertEqual(BGE.RenderQualityLevel.medium, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 4))
       m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 3))
     end function
 
     @it("never goes above maxLevel")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, maxLevel: BGE.RenderQualityLevel.high})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0, maxLevel: BGE.RenderQualityLevel.high})
       m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 60))
     end function
 
     @it("probes up at a 60fps target when holding 60fps")
     function _()
-      c = new BGE.QualityController({targetFps: 60, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 60, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 60, 7))
     end function
 
@@ -105,7 +137,7 @@ namespace tests
 
     @it("ignores a single huge frame")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       level = m.simulate(c, BGE.RenderQualityLevel.medium, 30, 3)
       level = c.update(1.5, level)
       level = m.simulate(c, level, 30, 1)
@@ -114,7 +146,7 @@ namespace tests
 
     @it("ignores slow frames during the settle period after a scene change")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       level = m.simulate(c, BGE.RenderQualityLevel.medium, 30, 3)
       c.notifySceneChanged()
       ' 0.4s of 10fps inside the 0.5s settle, then back to target
@@ -127,7 +159,7 @@ namespace tests
 
     @it("doesn't retry a level that just failed")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       ' headroom -> probe medium->high
       level = m.simulate(c, BGE.RenderQualityLevel.medium, 60, 7)
       m.assertEqual(BGE.RenderQualityLevel.high, level)
@@ -147,7 +179,7 @@ namespace tests
 
     @it("marks a probe failed even when the rebuild frame after the step up is huge")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       level = m.simulateUntilChange(c, BGE.RenderQualityLevel.medium, 60, 10)
       m.assertEqual(BGE.RenderQualityLevel.high, level)
       ' the level change's one-off rebuild is the very next frame, inside the settle period
@@ -161,7 +193,7 @@ namespace tests
 
     @it("doubles the backoff each time a level fails its probe")
     function _()
-      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0})
+      c = new BGE.QualityController({targetFps: 30, stepUpSustainSeconds: 5.0, windowSeconds: 2.0, settleSeconds: 0.5, stepDownCooldownSeconds: 2.0, probeFailWindowSeconds: 4.0, probeBackoffSeconds: 30, stepUpJumpFraction: 0})
       level = m.simulate(c, BGE.RenderQualityLevel.medium, 60, 7)
       m.assertEqual(BGE.RenderQualityLevel.high, level)
       ' first failure: steps down ~1.5s in (0.5s settle + 1.0s half window), so this

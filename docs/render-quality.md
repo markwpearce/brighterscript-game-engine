@@ -26,8 +26,9 @@ game.enableAdaptiveQuality()
 ```
 
 The target defaults to 20fps; pass `{targetFps: 30}` to aim higher. The level drops
-quickly if the frame rate falls below the target, and rises one level after about
-2 seconds of headroom. Keep it within a range with `minLevel`/`maxLevel`:
+quickly if the frame rate falls below the target, and rises about a second after
+there's headroom - two levels at once when the frame rate is at least double the
+target, e.g. when a still camera lets the renderer reuse cached draws. Keep it within a range with `minLevel`/`maxLevel`:
 
 ```brighterscript
 game.enableAdaptiveQuality({minLevel: BGE.RenderQualityLevel.low, maxLevel: BGE.RenderQualityLevel.high})

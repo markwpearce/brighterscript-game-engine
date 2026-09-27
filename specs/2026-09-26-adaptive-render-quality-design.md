@@ -110,16 +110,17 @@ Options (`BGE.AdaptiveQualityOptions`, all optional):
 |---|---|---|
 | `targetFps` | 20 | Frame-time budget = 1 / targetFps |
 | `minLevel` / `maxLevel` | basic / ultra | Bounds the controller never leaves |
-| `windowSeconds` | 2.0 | Rolling average window of full frame time (`Game.dt`, includes swap) |
+| `windowSeconds` | 1.0 | Rolling average window of full frame time (`Game.dt`, includes swap) |
 | `outlierFrameSeconds` | 0.25 | Frames longer than this are excluded (GC, loading, stalls) |
-| `settleSeconds` | 0.5 | Samples ignored after a level change or scene change |
+| `settleSeconds` | 0.25 | Samples ignored after a level change or scene change |
 | `stepDownBelowFraction` | 0.9 | Step down when average FPS < targetFps × this |
 | `stepUpHeadroomFraction` | 1.25 | Step up when average FPS ≥ targetFps × this ... |
-| `stepUpSustainSeconds` | 2.0 | ... sustained this long |
+| `stepUpSustainSeconds` | 0.5 | ... sustained this long |
 | `maxMeasurableFps` | 60 | Display refresh ceiling; the step-up threshold is `min(targetFps × stepUpHeadroomFraction, maxMeasurableFps × 0.97)`, so at a 60 fps target a sustained at-target frame rate still probes up |
-| `stepDownCooldownSeconds` | 2.0 | Minimum time between consecutive downward steps |
-| `probeFailWindowSeconds` | 4.0 | A step-down this soon after a step-up (counting only time after the settle period) marks that level as failed |
-| `probeBackoffSeconds` | 30 | Initial time a failed level is not retried; doubles per repeated failure |
+| `stepDownCooldownSeconds` | 0.75 | Minimum time between consecutive downward steps |
+| `probeFailWindowSeconds` | 1.5 | A step-down this soon after a step-up (counting only time after the settle period) marks that level as failed |
+| `probeBackoffSeconds` | 10 | Initial time a failed level is not retried; doubles per repeated failure |
+| `stepUpJumpFraction` | 2.0 | Step up two levels at once when average FPS ≥ targetFps × this (0 disables) - lets a still camera, whose cached draws are cheap, reach high quality fast |
 
 Behavior:
 
