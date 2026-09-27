@@ -1,0 +1,93 @@
+import "pkg:/source/utils/tilemap/TileMapBaking.bs"
+import "pkg:/source/utils/tilemap/TileMapColliderMerging.bs"
+import "../Maps/Atlas.bs"
+import "../Maps/AutoTile.bs"
+import "../Maps/MapData.bs"
+import "SolidWorld.bs"
+
+' One area's ground: every cell baked once into a few chunk bitmaps (a handful of draw calls
+' instead of one per tile), plus the solid tiles and map bounds added to the area's SolidWorld.
+class TileMapEntity extends BGE.GameEntity
+
+  ' Larger than either map, so each area bakes into one bitmap: adjacent baked chunks can
+  ' leave a 1px gap between them at some camera positions (issue #255), which a scrolling
+  ' camera would turn into flickering seams.
+  private chunkSize = 2048.0
+  private regionCache = {}
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "TileMap"
+  end sub
+
+  ' @param {roAssociativeArray} args - {rows as string[], solidWorld as SolidWorld}
+  override sub onCreate(args as roAssociativeArray)
+    rows = args.rows
+    world = args.solidWorld as SolidWorld
+    numRows = rows.count()
+    numCols = rows[0].len()
+    m.position.z = GROUND_Z
+
+    tiles = [] as BGE.TileMap.TileSpec[]
+    cells = [] as BGE.TileMap.ColliderCell[]
+    for r = 0 to numRows - 1
+      for c = 0 to numCols - 1
+        ch = rows[r].mid(c, 1)
+        tiles.push({worldX: c * TILE_SIZE, worldY: (numRows - r) * TILE_SIZE, region: m.groundRegion(rows, r, c, ch), width: TILE_SIZE, height: TILE_SIZE})
+        if isSolidGroundChar(ch)
+          cells.push({row: r, col: c, tag: "solid"})
+        end if
+      end for
+    end for
+
+    chunks = BGE.TileMap.bakeTileMapImages(tiles, m.chunkSize)
+    for i = 0 to chunks.count() - 1
+      chunk = chunks[i]
+      chunkRegion = CreateObject("roRegion", chunk.bitmap, 0, 0, chunk.bitmap.GetWidth(), chunk.bitmap.GetHeight())
+      m.addImage("groundChunk_" + i.toStr(), chunkRegion, {
+        offset: BGE.Math.VectorOps.create(chunk.worldX, chunk.worldY),
+        drawMode: BGE.SceneObjectDrawMode.matchCamera
+      })
+    end for
+
+    for each colliderRun in BGE.TileMap.mergeTileColliderRuns(cells)
+      world.addSolid(colliderRun.startCol * TILE_SIZE, cellBottomY(numRows, colliderRun.row), (colliderRun.endCol - colliderRun.startCol + 1) * TILE_SIZE, TILE_SIZE)
+    end for
+
+    ' Map bounds, so nothing walks off an edge that has no solid tile on it.
+    mapWidth = numCols * TILE_SIZE
+    mapHeight = numRows * TILE_SIZE
+    world.addSolid(-64, -64, mapWidth + 128, 64)
+    world.addSolid(-64, mapHeight, mapWidth + 128, 64)
+    world.addSolid(-64, 0, 64, mapHeight)
+    world.addSolid(mapWidth, 0, 64, mapHeight)
+  end sub
+
+  private function groundRegion(rows as string[], r as integer, c as integer, ch as string) as roRegion
+    surface = getSurfaceSet(ch)
+    key = ch
+    piece = invalid
+    if surface <> invalid
+      piece = autoTilePiece(rows, r, c)
+      key = ch + piece.col.toStr() + piece.row.toStr()
+    end if
+    if m.regionCache[key] = invalid
+      if piece <> invalid
+        m.regionCache[key] = CreateObject("roRegion", m.game.getBitmap(surface.sheet), surface.x + piece.col * TILE_SIZE, surface.y + piece.row * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+      else if ch = "x"
+        m.regionCache[key] = m.voidRegion()
+      else
+        m.regionCache[key] = atlasRegion(m.game, getAtlas()[groundAtlasKey(ch)])
+      end if
+    end if
+    return m.regionCache[key]
+  end function
+
+  private function voidRegion() as roRegion
+    bitmap = CreateObject("roBitmap", {width: TILE_SIZE, height: TILE_SIZE, AlphaEnable: false})
+    bitmap.Clear(&h141018FF)
+    bitmap.Finish()
+    return CreateObject("roRegion", bitmap, 0, 0, TILE_SIZE, TILE_SIZE)
+  end function
+
+end class
