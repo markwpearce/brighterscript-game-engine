@@ -22,14 +22,15 @@ guessed from its model number, falling back to Medium.
 
 ```brighterscript
 game = new BGE.Game(1280, 720)
-game.enableAdaptiveQuality({targetFps: 30})
+game.enableAdaptiveQuality()
 ```
 
-The level drops quickly if the frame rate falls below the target and rises slowly
-when there's headroom. Keep it within a range with `minLevel`/`maxLevel`:
+The target defaults to 20fps; pass `{targetFps: 30}` to aim higher. The level drops
+quickly if the frame rate falls below the target, and rises one level after about
+2 seconds of headroom. Keep it within a range with `minLevel`/`maxLevel`:
 
 ```brighterscript
-game.enableAdaptiveQuality({targetFps: 30, minLevel: BGE.RenderQualityLevel.low, maxLevel: BGE.RenderQualityLevel.high})
+game.enableAdaptiveQuality({minLevel: BGE.RenderQualityLevel.low, maxLevel: BGE.RenderQualityLevel.high})
 ```
 
 The debug FPS display (`game.enableStandardDebugUi()`) shows the current level.
@@ -59,6 +60,10 @@ what suits your game at Medium. The distance actually used is
 `camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
 running out of memory.
 
+Ground planes (`DrawablePlane`) are the exception: they always draw out to your
+`maxDrawDistance` (capped per device), whatever the level, so the horizon never
+jumps when the level changes. Only other objects are culled closer or further.
+
 ## Change what a level does
 
 ```brighterscript
@@ -81,14 +86,10 @@ override sub onQualityChanged(level as integer)
 end sub
 ```
 
-## A level change isn't free
+## Plane memory
 
-Changing the level re-applies every draw-quality setting immediately, including
-draw distance. Every textured `DrawablePlane` on screen keeps a scratch bitmap
-sized off the draw distance, and a `tiledImage` plane also caches a "supertexture"
-bitmap sized the same way - a distance change rebuilds both at the new size. That's
-a real one-off cost, not free like the other settings, and a longer draw distance
-means bigger bitmaps and more memory (they grow with the square of the distance). The adaptive
-controller already accounts for this: it ignores frame times for a short settle
-period right after any level change, so that one rebuild doesn't itself trigger
-another step down.
+Every textured `DrawablePlane` on screen keeps a scratch bitmap sized off
+`maxDrawDistance`, and a `tiledImage` plane also caches a "supertexture" bitmap sized
+the same way. They grow with the square of the distance, so keep `maxDrawDistance`
+modest in scenes with several textured planes. Because planes ignore the quality
+level's draw-distance scale, a level change never rebuilds them.

@@ -50,7 +50,8 @@ CLAUDE.md gains a conventions bullet stating this rule.
 - `Camera3d.maxDrawDistance` becomes the **game-authored base value** and is no longer clamped in place.
 - New `drawDistanceScale` (default 1.0) and `drawDistanceOverride` (default 0 = unset) fields on the base `Camera` (ignored by `Camera2d`), pushed onto the renderer's camera every frame in `Renderer.setupCameraForFrame()` - so a camera assigned directly (`renderer.camera = cam`, `Game.setCamera()`) still picks them up.
 - New `Camera3d.getEffectiveMaxDrawDistance()`: `drawDistanceOverride` if `> 0`, else `maxDrawDistance * drawDistanceScale`, then clamped to the existing device cap (`getMaxDrawDistanceDeviceCap()`: 900 simulator / 2500 FHD / 30 SD-HD). The cap always wins.
-- Every current reader of `maxDrawDistance` switches to the effective value: `Camera3d.isInView`'s far-clip check (`Camera3d.bs:218`), `projectionChangedThisFrame()`'s dirty check, and `SceneObjectPlane` (pre-perspective bitmap sizing, far distance, supertexture sizing/rebuild checks).
+- **Planes keep a constant draw distance** (user feedback after on-device testing): `SceneObjectPlane` uses `Camera3d.getPlaneDrawDistance()` - `maxDrawDistance` capped per device, ignoring the level's scale/override - so the horizon never moves with the level and a level change never rebuilds plane bitmaps. Everything else uses the effective distance.
+- Every other current reader of `maxDrawDistance` switches to the effective value: `Camera3d.isInView`'s far-clip check (`Camera3d.bs:218`), `projectionChangedThisFrame()`'s dirty check, and `SceneObjectPlane` (pre-perspective bitmap sizing, far distance, supertexture sizing/rebuild checks).
 - **Behavior change**: reading `maxDrawDistance` back after setting it above the device cap now returns what was set (previously the capped value). Existing specs/docs asserting the old read-back behavior are updated.
 - A level change that changes the effective distance triggers `SceneObjectPlane`'s existing bitmap/supertexture rebuilds. That one-off cost is expected; the controller's settle period ignores it. Each rebuild releases the old bitmap before allocating the new one, and a failed allocation logs a warning and skips that plane for the frame (retried next frame) instead of crashing. High/Ultra scales are kept at 1.25/1.5 because the pre-perspective bitmap grows with the square of the distance - Ultra at 2.0 crashed `examples/terrain` (two textured planes) on a real Roku Ultra.
 
@@ -107,14 +108,14 @@ Options (`BGE.AdaptiveQualityOptions`, all optional):
 
 | Option | Default | Meaning |
 |---|---|---|
-| `targetFps` | 30 | Frame-time budget = 1 / targetFps |
+| `targetFps` | 20 | Frame-time budget = 1 / targetFps |
 | `minLevel` / `maxLevel` | basic / ultra | Bounds the controller never leaves |
 | `windowSeconds` | 2.0 | Rolling average window of full frame time (`Game.dt`, includes swap) |
 | `outlierFrameSeconds` | 0.25 | Frames longer than this are excluded (GC, loading, stalls) |
 | `settleSeconds` | 0.5 | Samples ignored after a level change or scene change |
 | `stepDownBelowFraction` | 0.9 | Step down when average FPS < targetFps × this |
 | `stepUpHeadroomFraction` | 1.25 | Step up when average FPS ≥ targetFps × this ... |
-| `stepUpSustainSeconds` | 5.0 | ... sustained this long |
+| `stepUpSustainSeconds` | 2.0 | ... sustained this long |
 | `maxMeasurableFps` | 60 | Display refresh ceiling; the step-up threshold is `min(targetFps × stepUpHeadroomFraction, maxMeasurableFps × 0.97)`, so at a 60 fps target a sustained at-target frame rate still probes up |
 | `stepDownCooldownSeconds` | 2.0 | Minimum time between consecutive downward steps |
 | `probeFailWindowSeconds` | 4.0 | A step-down this soon after a step-up (counting only time after the settle period) marks that level as failed |
