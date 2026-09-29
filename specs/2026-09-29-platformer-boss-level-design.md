@@ -22,7 +22,7 @@ on its head.
 - Full-width solid floor (top edge at y = 128, like the other levels). One one-way
   (`-`) platform on each side, 3 tiles wide, 2 tiles above the floor (top edge at
   y = 256), clear of the plant.
-- Player spawns on the left. No `G` goal, no coins or dino enemies.
+- Player spawns on the left. No `G` in the layout (the goal flag appears when the boss dies), no coins or dino enemies.
 - A new `B` marker in the level rows spawns the boss, rooted on the floor at that
   column's center.
 
@@ -62,8 +62,10 @@ State machine (`PlantBoss.state`):
 - `hidden`: fully underground for ~1.5s, colliders disabled, then `rising` in the
   current phase.
 - `dying`: the 3rd stomp. It flashes and shakes as it sinks, slower (~1.5s), and never
-  comes back. Once it's fully under, `levelComplete` is posted, which shows the existing
-  "You won" panel in `GameStateManager`.
+  comes back. Once it's fully under, it posts `bossDefeated` and `MainScene` spawns a
+  goal flag where it sank (growing out of the ground). Touching the flag wins, the
+  same way as every other level: it's the last level, so `Goal` posts
+  `levelComplete`, which shows the existing "You won" panel in `GameStateManager`.
 
 **Player death resets the fight.** The boss listens for the existing `playerHurt` game
 event: it restores full health (phase 1), destroys every live fireball, and restarts
