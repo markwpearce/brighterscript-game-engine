@@ -29,6 +29,11 @@ Build a full game with entities, scenes, collisions, input, and UI - or just pul
   <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/platformer">Platformer example</a> - gravity, jumping, tile collision resolution, and a full <code>BGE.UI</code> menu/HUD</figcaption>
 </figure>
 
+<figure>
+  <img src="assets/screenshots/rpg.jpg" alt="A top-down RPG town: an adventurer in a red tunic beside a stone fountain on a cobblestone plaza, flanked by two statues and iron lamp posts, with grass, a cobble road leading north and a market stall at the edge">
+  <figcaption><a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rpg">RPG example</a> - a top-down town and castle with auto-tiled paths, depth-sorted props, wall sliding and fade transitions</figcaption>
+</figure>
+
 ## Why BrighterScript Game Engine?
 
 - **Object-oriented, like the engines you already know.** `GameEntity`, `GameScene`, and lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, ...) give you the same shape as Phaser, HaxeFlixel, GameMaker, or Unity - minus the visual editor.
@@ -109,6 +114,7 @@ The `examples/` directory has full Roku channels you can build and run:
 | [`pong`](examples/pong) | Classic 2D Pong, playable in both 2D and 3D camera modes |
 | [`snake`](examples/snake) | Grid-based movement and growing collision shapes, in 2D and 3D |
 | [`platformer`](examples/platformer) | A side-scrolling, multi-level platformer demonstrating gravity, jumping, and collision *resolution* built on top of the engine's detection-only collider system - plus sound, particle effects, and a full `BGE.UI` menu/HUD |
+| [`rpg`](examples/rpg) | A *Link to the Past*-style top-down world (work in progress, issue #63): an auto-tiled town built from character-grid map data, free movement that slides along walls, props the player walks in front of and behind, and fade transitions between the town and a castle interior using persistent entities |
 | [`3d`](examples/3d) | Loading and rendering `.stl` 3D models with the pseudo-3D renderer |
 | [`pixels`](examples/pixels) | A tour of drawables - polygons, rectangles, sprites, and more, one scene per shape |
 | [`canvas`](examples/canvas) | Using the engine's canvas/renderer as a standalone drawing surface |

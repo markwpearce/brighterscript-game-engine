@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Runs the Rooibos test suite headlessly via brs-cli (no device/simulator/display
-// needed) and exits non-zero if any test failed. Assumes `npm run build-tests` has
-// already produced ./test-build.
+// needed) and exits non-zero if any test failed. Assumes the test build (default
+// ./test-build, or the directory passed as the first argument) already exists.
 //
 // brs-cli never exits on its own once the app finishes (it keeps a background
 // handle open even after printing its shutdown line), so this watches stdout for
@@ -17,7 +17,9 @@ const { spawn } = require('child_process');
 const { rokuDeploy } = require('roku-deploy');
 
 const ROOT_DIR = path.join(__dirname, '..');
-const BUILD_DIR = path.join(ROOT_DIR, 'test-build');
+// Optional first argument: the test build directory, relative to the repo root (default
+// ./test-build) - lets an example with its own bsconfig.test.json reuse this runner.
+const BUILD_DIR = path.resolve(ROOT_DIR, process.argv[2] || 'test-build');
 const OUT_DIR = path.join(ROOT_DIR, 'out');
 const ZIP_NAME = 'bge-tests.zip';
 // The test suite has grown enough (860+ specs as of the controller-protocol and
