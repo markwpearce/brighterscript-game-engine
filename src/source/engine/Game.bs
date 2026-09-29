@@ -27,6 +27,7 @@ import "quality/DeviceQualitySeed.bs"
 import "quality/QualityController.bs"
 import "quality/RenderQualityLevel.bs"
 import "quality/RenderQualityManager.bs"
+import "ScreenFade.bs"
 import "TweenManager.bs"
 import "ui/FocusManager.bs"
 import "ui/Style.bs"
@@ -124,6 +125,11 @@ namespace BGE
     ' Timer backing debugPrintPerfStats()'s independent print cadence - see Play().
     private perfStatsTimer as roTimespan = CreateObject("roTimespan")
     private sceneChangedThisFrame as boolean = false
+    ' changeSceneWithFade() state: "" (none), "out" (fading to the new scene) or "in" (fading back)
+    private fadeTransitionPhase as string = ""
+    private fadeTransitionSeconds as float = 0.0
+    private fadeTransitionScene as string = ""
+    private fadeTransitionArgs as roAssociativeArray = invalid
     private sceneChangeDetails as SceneChangeInfo = invalid
 
     ' ****END - For Internal Use, Do Not Manually Alter****
@@ -158,6 +164,9 @@ namespace BGE
     ' Ticks every live tween once per frame and writes interpolated values onto arbitrary
     ' target fields - see BGE.TweenManager.to().
     tweenManager as BGE.TweenManager = new BGE.TweenManager()
+
+    ' Full-screen overlay used by changeSceneWithFade() - see BGE.ScreenFade.
+    screenFade as BGE.ScreenFade = new BGE.ScreenFade()
 
     ' Container for all UI
     gameUi as BGE.UI.UiContainer
@@ -760,6 +769,7 @@ namespace BGE
       end for
 
       m.tweenManager.update()
+      m.updateFadeTransition()
       m.processEntitiesCollisions(startedPaused)
     end sub
 
@@ -884,6 +894,12 @@ namespace BGE
       m.clearStaleInputCapture()
     end sub
 
+    ' Test-only passthrough to the private processEntitiesCollisions(), so specs can run one
+    ' frame's collision pass without driving a full Play() loop iteration.
+    sub processCollisionsForTest()
+      m.processEntitiesCollisions(false)
+    end sub
+
     ' Test-only passthrough to the private dispatchOnInput(), so specs can
     ' exercise the same currentInputEntityId gating Game.Play() relies on
     ' without needing a full Play() loop iteration.
@@ -994,18 +1010,13 @@ namespace BGE
       for each colliderKey in entity.colliders
         myCollider = entity.colliders[colliderKey] as Collider
         if myCollider <> invalid
+          currentContacts = {}
           if myCollider.enabled
             candidates = myCollider.checkCollisions(entity.position)
             for each otherColliderData in candidates
               if invalid <> otherColliderData and invalid <> otherColliderData.entityId
                 if otherColliderData.entityId <> entity.id
-                  otherEntity as GameEntity = invalid
-                  if invalid <> m.Entities[otherColliderData.objectName][otherColliderData.entityId]
-                    otherEntity = m.Entities[otherColliderData.objectName][otherColliderData.entityId] as GameEntity
-                  else if invalid <> m.currentScene and otherColliderData.objectName = m.currentScene.name
-                    ' Or is it the current scene?
-                    otherEntity = m.currentScene as GameEntity
-                  end if
+                  otherEntity = m.findCollisionEntity(otherColliderData.objectName, otherColliderData.entityId)
                   if invalid <> otherEntity and otherEntity.id <> entity.id
                     otherColliderObj = otherEntity.colliders[otherColliderData.colliderName]
                     ' otherColliderData.colliderName can name an internal collider (e.g.
@@ -1014,6 +1025,15 @@ namespace BGE
                     ' than hand onCollision() an invalid otherCollider.
                     if invalid <> otherColliderObj
                       if myCollider.confirmCollision(entity, otherColliderObj, otherEntity)
+                        contactKey = otherEntity.id + "/" + otherColliderObj.name
+                        isNewContact = myCollider.contacts[contactKey] = invalid
+                        currentContacts[contactKey] = {objectName: otherColliderData.objectName, entityId: otherEntity.id, colliderName: otherColliderObj.name}
+                        if isNewContact
+                          entity.onCollisionEnter(myCollider, otherColliderObj, otherEntity)
+                          if not m.isValidEntity(entity)
+                            return false
+                          end if
+                        end if
                         entity.onCollision(myCollider, otherColliderObj, otherEntity)
                         if not m.isValidEntity(entity)
                           return false
@@ -1030,9 +1050,59 @@ namespace BGE
           else
             myCollider.disableCollisionChecking()
           end if
+          if not m.dispatchCollisionExits(entity, myCollider, currentContacts)
+            return false
+          end if
         else
           if invalid <> entity.colliders[colliderKey]
             entity.colliders.Delete(colliderKey)
+          end if
+        end if
+      end for
+      return true
+    end function
+
+
+    ' Looks up the entity a compositor collision record points at - a regular entity or the
+    ' current scene - or invalid if it no longer exists.
+    '
+    ' @param {string} objectName
+    ' @param {string} entityId
+    ' @return {GameEntity}
+    private function findCollisionEntity(objectName as string, entityId as string) as GameEntity
+      if invalid <> m.Entities[objectName] and invalid <> m.Entities[objectName][entityId]
+        return m.Entities[objectName][entityId] as GameEntity
+      else if invalid <> m.currentScene and objectName = m.currentScene.name and m.currentScene.id = entityId
+        return m.currentScene as GameEntity
+      end if
+      return invalid
+    end function
+
+
+    ' Calls onCollisionExit() for every contact myCollider had last frame that isn't in
+    ' currentContacts, then makes currentContacts its contact list.
+    '
+    ' @param {GameEntity} entity
+    ' @param {Collider} myCollider
+    ' @param {roAssociativeArray} currentContacts
+    ' @return {boolean} true if this entity is still valid
+    private function dispatchCollisionExits(entity as GameEntity, myCollider as Collider, currentContacts as roAssociativeArray) as boolean
+      previousContacts = myCollider.contacts
+      myCollider.contacts = currentContacts
+      for each contactKey in previousContacts
+        if currentContacts[contactKey] = invalid
+          contact = previousContacts[contactKey]
+          otherEntity = m.findCollisionEntity(contact.objectName, contact.entityId)
+          otherColliderObj = invalid
+          if invalid <> otherEntity
+            otherColliderObj = otherEntity.colliders[contact.colliderName]
+          end if
+          if invalid = otherColliderObj
+            otherEntity = invalid
+          end if
+          entity.onCollisionExit(myCollider, otherColliderObj, otherEntity)
+          if not m.isValidEntity(entity)
+            return false
           end if
         end if
       end for
@@ -1354,6 +1424,7 @@ namespace BGE
         m.gameUi.draw()
         m.focusManager.draw(m.uiCanvas, m.gameUi.effectiveTheme())
       end if
+      m.screenFade.draw(m.uiCanvas.renderer)
     end sub
 
     ' Function to handle all input and updates and draws for UI layer
@@ -2029,6 +2100,70 @@ namespace BGE
       end if
     end function
 
+    ' Fades the screen to black, changes to the scene registered under the given name, then
+    ' fades back in once its `onCreate(args)` has run. With no current scene yet (e.g. starting
+    ' the first scene), the scene changes straight away and just fades in from black.
+    ' Check `isTransitioning()` to ignore gameplay input while this runs.
+    '
+    ' @param {string} sceneName - The name of a scene registered with `defineScene()`
+    ' @param {object} [args={}] - Passed to the scene's `onCreate()`
+    ' @param {float} [seconds=0.3] - How long each half of the fade takes
+    ' @return {boolean} false if the scene doesn't exist or a transition is already running
+    function changeSceneWithFade(sceneName as string, args = {} as roAssociativeArray, seconds = 0.3 as float) as boolean
+      if m.Scenes[sceneName] = invalid
+        m.log("Game.changeSceneWithFade() - A scene named " + sceneName + " hasn't been defined", BGE.Debug.LogLevel.error)
+        return false
+      end if
+      if m.fadeTransitionPhase <> ""
+        return false
+      end if
+      m.fadeTransitionSeconds = seconds
+      if invalid = m.currentScene
+        m.screenFade.opacity = 1.0
+        m.fadeTransitionPhase = "out"
+        return m.changeScene(sceneName, args)
+      end if
+      m.fadeTransitionPhase = "out"
+      m.fadeTransitionScene = sceneName
+      m.fadeTransitionArgs = args
+      m.screenFade.fadeTo(1, seconds)
+      return true
+    end function
+
+    ' Whether a changeSceneWithFade() transition is running (fading out, changing scene, or
+    ' fading back in).
+    '
+    ' @return {boolean}
+    function isTransitioning() as boolean
+      return m.fadeTransitionPhase <> ""
+    end function
+
+    private sub updateFadeTransition()
+      finished = m.screenFade.tick(m.dt)
+      if not finished
+        return
+      end if
+      if m.fadeTransitionPhase = "out" and m.fadeTransitionScene <> ""
+        sceneName = m.fadeTransitionScene
+        m.fadeTransitionScene = ""
+        m.changeScene(sceneName, m.fadeTransitionArgs)
+      else if m.fadeTransitionPhase = "in"
+        m.fadeTransitionPhase = ""
+      end if
+    end sub
+
+    ' Test-only: one frame's fade step with a given dt, then any scene change it requested,
+    ' the way the end of a Play() frame applies it.
+    '
+    ' @param {float} dt
+    sub updateFadeTransitionForTest(dt as float)
+      m.dt = dt
+      m.updateFadeTransition()
+      if m.sceneChangedThisFrame
+        m.handleSceneChange()
+      end if
+    end sub
+
     private sub handleSceneChange()
       if m.sceneChangedThisFrame and m.sceneChangeDetails <> invalid and m.sceneChangeDetails.scene <> invalid
         thisScene = m.sceneChangeDetails.scene
@@ -2063,6 +2198,10 @@ namespace BGE
         m.currentScene.onCreate(args)
         m.renderQuality.notifySceneChanged()
         m.sceneChangedThisFrame = false
+        if m.fadeTransitionPhase = "out"
+          m.fadeTransitionPhase = "in"
+          m.screenFade.fadeTo(0, m.fadeTransitionSeconds)
+        end if
 
         m.lastGarbageCollection = runGarbageCollector()
         m.garbageCollectionTimer.mark()
