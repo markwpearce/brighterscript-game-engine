@@ -59,12 +59,19 @@ for f in $SRC/e_0*.png; do
 done
 # 2. one palette shared by all frames so colors don't shimmer frame to frame
 magick $TMP/small/e_0*.png +append -alpha off -dither None -colors 24 -unique-colors $TMP/palette.png
-# 3. remap each frame to that palette, then 2x nearest-neighbour (2px chunks)
+# 3. remap each frame to that palette (keeping its own alpha - -remap alone makes
+#    transparent pixels opaque black), then 2x nearest-neighbour (2px chunks)
 for f in $TMP/small/e_0*.png; do
-  magick "$f" -dither None -remap $TMP/palette.png -filter point -resize 200% "$TMP/big/$(basename $f)"
+  b=$(basename $f)
+  magick "$f" -alpha extract "$TMP/mask_$b"
+  magick "$f" -alpha off -dither None -remap $TMP/palette.png "$TMP/mask_$b" -alpha off -compose CopyOpacity -composite -filter point -resize 200% "$TMP/big/$b"
 done
-# 4. pack into a 10-column grid of 146x186 cells, transparent background
-magick montage $TMP/big/e_0*.png -tile 10x -geometry 146x186+0+0 -background none examples/platformer/src/sprites/plant_boss.png
+# 4. pack into a 10-column grid of 146x186 cells (montage needs a font, so +append rows)
+magick $TMP/big/e_00[0-9].png -background none +append +repage $TMP/r0.png
+magick $TMP/big/e_01[0-9].png -background none +append +repage $TMP/r1.png
+magick $TMP/big/e_02[0-9].png -background none +append +repage $TMP/r2.png
+magick $TMP/big/e_03[0-6].png -background none +append +repage $TMP/r3.png
+magick $TMP/r0.png $TMP/r1.png $TMP/r2.png $TMP/r3.png -background none -gravity northwest -append +repage -define png:color-type=6 examples/platformer/src/sprites/plant_boss.png
 cp /Users/mpearce/Downloads/orange_fireball.png examples/platformer/src/sprites/fireball.png
 magick identify examples/platformer/src/sprites/plant_boss.png
 ```

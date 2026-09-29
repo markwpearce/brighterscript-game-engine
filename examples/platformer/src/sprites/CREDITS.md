@@ -38,3 +38,17 @@ Placeholder assets reused from other examples in this repo:
   and recolored to the example's amber accent (`#F2A93A`). No license/
   attribution accompanied the source strip — **provenance/license needs
   confirming before this ships** (same caveat as `player.png` above).
+- `plant_boss.png` — the level 7 boss, from
+  [Man Eating Plant Animation Sprites](https://opengameart.org/content/man-eating-plant-animation-sprites-for-game-developers)
+  by [bevouliin.com](http://bevouliin.com), licensed
+  [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/). Modified: all 37
+  frames pixelated (box-downscaled to 73x93, alpha thresholded, remapped to one
+  shared ~24-color palette, 2x nearest-neighbour upscaled) and packed 10 columns
+  wide in 146x186 cells - see `specs/2026-09-29-platformer-boss-level-plan.md`,
+  Task 1.
+- `fireball.png` — [Fireball](https://opengameart.org/content/fireball-3) by
+  Revon, licensed [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  Unmodified.
+- `../sounds/fire.wav` — [Fire & Evil Spell](https://opengameart.org/content/fire-evil-spell)
+  by artisticdude (submitted by qubodup), licensed
+  [CC-BY 3.0](https://creativecommons.org/licenses/by/3.0/).
