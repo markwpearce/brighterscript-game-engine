@@ -16,8 +16,8 @@ the engine implements these pieces internally, see [Engine Internals](/engine-in
 BGE is an object-oriented 2D-first game engine for Roku channels, written in
 [BrighterScript](https://github.com/rokucommunity/brighterscript) and distributed via
 [ROPM](https://ropm.dev). Everything lives under the `BGE` namespace. The `examples/` folder in
-the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `platformer`, `3d`,
-`canvas`, `pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
+the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `platformer`, `rpg`,
+`3d`, `canvas`, `pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
 `quickstart` in particular is a minimal scaffold worth copying as a starting point for a new game.
 
 ## Architecture at a glance
@@ -209,6 +209,19 @@ override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collid
 end sub
 ```
 
+`onCollision` fires every frame the two colliders overlap. For a one-shot reaction - a door, a
+pickup, a trigger zone - override `onCollisionEnter` instead, which fires once when an overlap
+starts. `onCollisionExit` fires once when it ends, including when the other entity is destroyed
+(its `otherEntity`/`otherCollider` are then `invalid`):
+
+```
+override sub onCollisionEnter(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+  if otherEntity.name = "Player"
+    m.game.changeSceneWithFade("CastleScene")
+  end if
+end sub
+```
+
 For a circle collider centered on the entity (the common case, matching a centered `Drawable` like
 the `Player` example above), the radius is all you need. `RectangleCollider` takes an `offset_x`/
 `offset_y` too, and getting that offset right depends on how the entity is drawn:
@@ -242,6 +255,21 @@ passable from below. None of that lives in the engine - it's ordinary `onCollisi
 top of the same detection-only colliders described above. Read `Player.onCollision` in
 `examples/platformer/src/source/Entities/Player.bs` for the concrete pattern.
 
+## Following the player with the camera
+
+The default camera is a `BGE.Camera2d` centred on `camera.setTarget(point)`. For a world bigger
+than the screen, let it follow an entity and keep it inside the level:
+
+```
+camera = m.game.canvas.renderer.camera as BGE.Camera2d
+camera.setBounds(0, 0, levelWidth, levelHeight)
+camera.follow(playerEntity)
+```
+
+`follow()` re-centres on the entity every frame after every `onUpdate` has run, so the view is
+never a frame behind. `setBounds()` stops the view showing past the level's edges (and centres a
+level that's smaller than the screen); it also applies to plain `setTarget()` calls.
+
 ## The game loop
 
 `Game.Play()` runs one main loop. Every frame goes through six steps, always in this order:
@@ -259,6 +287,10 @@ A few things fall out of this that matter in practice:
 - **Scene changes are deferred to end-of-frame.** Calling `Game.changeScene()` mid-frame doesn't
   swap the scene immediately - it's applied after the draw/swap step, once the current frame is
   fully done with the old scene.
+- **`Game.changeSceneWithFade(name, args)`** fades to black, changes scene, then fades back in
+  after the new scene's `onCreate`. `Game.isTransitioning()` is true for the whole thing, so check
+  it before acting on gameplay input. With no current scene yet, it changes scene straight away and
+  fades in from black - a handy way to start the first scene.
 
 ## Debugging tools worth knowing early
 
