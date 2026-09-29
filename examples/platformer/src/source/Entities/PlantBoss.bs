@@ -4,6 +4,9 @@ import "Fireball.bs"
 ' Level 7's boss - a giant Venus fly trap rooted in the floor. position is the root
 ' point on the floor's top edge. Every sheet frame faces right, so facing left
 ' mirrors the sprite and the collider offsets around that root.
+'
+' Pops up and down: it rises, fires volleys while up, and sinks behind the floor
+' after a stomp or after upTime without one. Three stomps kill it.
 class PlantBoss extends BGE.GameEntity
 
   ' Measured on the pixelated sheet (146x186 cells), relative to the root, facing right.
@@ -20,12 +23,37 @@ class PlantBoss extends BGE.GameEntity
   ' standing right above it flips every frame.
   facingDeadZone = 16.0
 
+  maxHealth = 3
+  health = 3
+  ' rising | up | hurt | sinking | hidden | dying | dead
+  state = "hidden"
+  stateTimer = new BGE.CountdownTimer()
+  stateDuration = 0.0
+  volleyTimer = new BGE.CountdownTimer()
+  telegraphTimer = new BGE.CountdownTimer()
+  telegraphing = false
+  telegraphTweens = [] as integer[]
+  flashTimer = new BGE.CountdownTimer()
+  flashRed = false
+
+  riseTime = 0.5
+  upTime = 6.0
+  telegraphTime = 0.3
+  hurtSinkTime = 0.6
+  sinkTime = 0.6
+  hiddenTime = 1.5
+  dyingSinkTime = 1.5
+  flashInterval = 0.08
+  shakeAmount = 3.0
+  fanSpreadRadians = 18.0 * BGE.Math.PI / 180.0
+  ' Aim at the player's middle, not their feet.
+  playerAimHeight = 27.0
+
   sprite as BGE.Sprite
   head as BGE.RectangleCollider
   stem as BGE.RectangleCollider
   facingRight = true
   sinkDepth = 0.0
-  tempFireTimer = new BGE.CountdownTimer()
 
   sub new(game as BGE.Game)
     super(game)
@@ -44,21 +72,78 @@ class PlantBoss extends BGE.GameEntity
 
     m.head = m.addRectangleCollider("head", m.headWidth, m.headHeight, m.headOffsetX, m.headBottom + m.headHeight)
     m.stem = m.addRectangleCollider("stem", m.stemWidth, m.stemHeight, m.stemOffsetX, m.stemHeight)
+
+    ' Starts underground, so the fight opens with it rising after a beat.
+    m.enterHidden()
   end sub
 
   override sub onUpdate(dt as float)
+    ' Same first-frame hitch clamp as Player - keeps timers/sinking from jumping.
+    if dt > 1 / 30.0
+      dt = 1 / 30.0
+    end if
     m.updateFacing()
-    ' TEMP (Task 3 check) - removed in Task 4
-    m.tempFireTimer.tick(dt)
-    if not m.tempFireTimer.isActive()
-      m.tempFireTimer.start(2.0)
-      playerEntity = m.game.getEntityByName("Player")
-      if invalid <> playerEntity
-        from = m.getMouthPosition()
-        fireballEntity = new Fireball(m.game)
-        m.game.addEntity(fireballEntity)
-        fireballEntity.launch(from, BGE.Math.VectorOps.create(playerEntity.position.x - from.x, playerEntity.position.y + 27 - from.y), 220)
+    m.stateTimer.tick(dt)
+
+    if m.state = "rising"
+      m.setSinkDepth(m.fullSinkDepth * m.stateRemainingFraction())
+      if not m.stateTimer.isActive()
+        m.enterUp()
       end if
+    else if m.state = "up"
+      m.updateVolleys(dt)
+      if not m.stateTimer.isActive()
+        m.enterSink("sinking", m.sinkTime)
+      end if
+    else if m.state = "hurt" or m.state = "sinking" or m.state = "dying"
+      m.setSinkDepth(m.fullSinkDepth * (1.0 - m.stateRemainingFraction()))
+      if m.state <> "sinking"
+        m.updateFlashAndShake(dt)
+      end if
+      if not m.stateTimer.isActive()
+        if m.state = "dying"
+          m.state = "dead"
+          m.game.postGameEvent("levelComplete", {})
+        else
+          m.enterHidden()
+        end if
+      end if
+    else if m.state = "hidden"
+      if not m.stateTimer.isActive()
+        m.enterRising()
+      end if
+    end if
+  end sub
+
+  ' Called by Player on a head stomp. Returns true if it counted (only while fully up).
+  function stomp() as boolean
+    if m.state <> "up"
+      return false
+    end if
+    m.health -= 1
+    m.game.playSound("stomp")
+    m.game.postGameEvent("enemyStomped", {})
+    if m.health <= 0
+      m.game.playSound("monsterDie")
+      m.game.destroyAllEntities("Fireball")
+      m.enterSink("dying", m.dyingSinkTime)
+    else
+      m.enterSink("hurt", m.hurtSinkTime)
+    end if
+    return true
+  end function
+
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    ' A player death restarts the fight at full health - but never undoes a win.
+    if eventName <> "playerHurt" or m.state = "dying" or m.state = "dead"
+      return
+    end if
+    m.health = m.maxHealth
+    m.game.destroyAllEntities("Fireball")
+    if m.state = "hidden"
+      m.startState(m.hiddenTime)
+    else if m.state <> "sinking" and m.state <> "hurt"
+      m.enterSink("sinking", m.sinkTime)
     end if
   end sub
 
@@ -80,6 +165,147 @@ class PlantBoss extends BGE.GameEntity
   sub setSinkDepth(depth as float)
     m.sinkDepth = depth
     m.sprite.offset.y = -depth
+  end sub
+
+  private sub enterRising()
+    m.state = "rising"
+    m.startState(m.riseTime)
+  end sub
+
+  private sub enterUp()
+    m.state = "up"
+    m.setSinkDepth(0)
+    m.setCollidersEnabled(true)
+    m.startState(m.upTime)
+    m.telegraphing = false
+    m.volleyTimer.start(m.getVolleyInterval())
+  end sub
+
+  ' kind: "hurt" | "sinking" | "dying"
+  private sub enterSink(kind as string, duration as float)
+    m.state = kind
+    m.setCollidersEnabled(false)
+    m.stopTelegraph()
+    m.startState(duration)
+    m.flashRed = true
+    m.flashTimer.start(m.flashInterval)
+  end sub
+
+  private sub enterHidden()
+    m.state = "hidden"
+    m.setSinkDepth(m.fullSinkDepth)
+    m.setCollidersEnabled(false)
+    m.sprite.color = &hFFFFFF
+    m.sprite.offset.x = 0
+    m.startState(m.hiddenTime)
+  end sub
+
+  private sub startState(duration as float)
+    m.stateDuration = duration
+    m.stateTimer.start(duration)
+  end sub
+
+  ' 1.0 at the start of the current state, 0.0 once its timer runs out.
+  private function stateRemainingFraction() as float
+    if m.stateDuration <= 0
+      return 0.0
+    end if
+    return m.stateTimer.remaining() / m.stateDuration
+  end function
+
+  private sub setCollidersEnabled(enabled as boolean)
+    m.head.enabled = enabled
+    m.stem.enabled = enabled
+  end sub
+
+  private sub updateFlashAndShake(dt as float)
+    m.flashTimer.tick(dt)
+    if not m.flashTimer.isActive()
+      m.flashRed = not m.flashRed
+      m.flashTimer.start(m.flashInterval)
+    end if
+    if m.flashRed
+      m.sprite.color = &hFF4040
+    else
+      m.sprite.color = &hFFFFFF
+    end if
+    m.sprite.offset.x = (rnd(0) * 2.0 - 1.0) * m.shakeAmount
+  end sub
+
+  private function getPhase() as integer
+    return m.maxHealth + 1 - m.health
+  end function
+
+  private function getVolleyInterval() as float
+    if m.getPhase() >= 3
+      return 1.6
+    end if
+    return 2.5
+  end function
+
+  private function getFireballSpeed() as float
+    if m.getPhase() >= 3
+      return 300.0
+    end if
+    return 220.0
+  end function
+
+  ' A short swell before each volley is the "about to fire" tell - the art has no attack frames.
+  private sub updateVolleys(dt as float)
+    if m.telegraphing
+      m.telegraphTimer.tick(dt)
+      if not m.telegraphTimer.isActive()
+        m.telegraphing = false
+        m.fireVolley()
+        m.volleyTimer.start(m.getVolleyInterval())
+      end if
+      return
+    end if
+    m.volleyTimer.tick(dt)
+    if not m.volleyTimer.isActive()
+      m.telegraphing = true
+      m.telegraphTimer.start(m.telegraphTime)
+      halfMs = cint(m.telegraphTime * 500)
+      m.telegraphTweens = [
+        m.game.tweenManager.to(m.scale, {x: 1.08, y: 1.08}, halfMs, BGE.Tweens.Easing.QuadraticEaseOut),
+        m.game.tweenManager.to(m.scale, {x: 1.0, y: 1.0}, halfMs, BGE.Tweens.Easing.QuadraticEaseIn, {delay: halfMs})
+      ]
+    end if
+  end sub
+
+  ' Cancels a swell cut short by a stomp/sink so it can't keep pulsing the scale.
+  private sub stopTelegraph()
+    m.telegraphing = false
+    for each handle in m.telegraphTweens
+      m.game.tweenManager.cancel(handle)
+    end for
+    m.telegraphTweens = []
+    m.scale.x = 1.0
+    m.scale.y = 1.0
+  end sub
+
+  private sub fireVolley()
+    playerEntity = m.game.getEntityByName("Player")
+    if invalid = playerEntity
+      return
+    end if
+    from = m.getMouthPosition()
+    aim = BGE.Math.VectorOps.create(playerEntity.position.x - from.x, playerEntity.position.y + m.playerAimHeight - from.y)
+    m.spawnFireball(from, aim, 0.0)
+    if m.getPhase() >= 2
+      m.spawnFireball(from, aim, m.fanSpreadRadians)
+      m.spawnFireball(from, aim, -m.fanSpreadRadians)
+    end if
+    m.game.playSound("fire")
+  end sub
+
+  private sub spawnFireball(from as BGE.Math.Vector, aim as BGE.Math.Vector, angleOffset as float)
+    c = cos(angleOffset)
+    s = sin(angleOffset)
+    direction = BGE.Math.VectorOps.create(aim.x * c - aim.y * s, aim.x * s + aim.y * c)
+    fireballEntity = new Fireball(m.game)
+    m.game.addEntity(fireballEntity)
+    fireballEntity.launch(from, direction, m.getFireballSpeed())
   end sub
 
   private sub updateFacing()
