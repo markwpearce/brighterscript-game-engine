@@ -61,7 +61,7 @@ State machine (`PlantBoss.state`):
 - `sinking`: sinks without flashing, then `hidden`.
 - `hidden`: fully underground for ~1.5s, colliders disabled, then `rising` in the
   current phase.
-- `dying`: the 3rd stomp. It flashes and shakes as it sinks, slower (~1.5s), and never
+- `dying`: the 3rd stomp. It flashes and shakes as it sinks, slowly (~4s), and never
   comes back. Once it's fully under, it posts `bossDefeated` and `MainScene` spawns a
   goal flag where it sank (growing out of the ground). Touching the flag wins, the
   same way as every other level: it's the last level, so `Goal` posts
