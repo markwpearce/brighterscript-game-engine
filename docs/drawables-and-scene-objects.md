@@ -97,16 +97,6 @@ dirty-checking can't see it - `setSize` calls `Drawable.invalidateGeometry()`, w
 `geometryVersion` the `SceneObject` compares against to know it must recompute projected geometry
 even though nothing moved. Any `Drawable` that changes shape in place should do the same.
 
-The same goes, for now, for moving a drawable by its own `offset` or `rotation` while its entity
-stands still - for example a boss sinking into the ground by animating its sprite's `offset.y`.
-The renderer only notices that once the entity itself moves, so call `invalidateGeometry()` after
-changing it:
-
-```brighterscript
-m.sprite.offset.y = -sinkDepth
-m.sprite.invalidateGeometry()
-```
-
 ### Outlines
 
 Setting `outlineRGBA` on **any** billboard drawable - a rectangle, a polygon, an image, text -
