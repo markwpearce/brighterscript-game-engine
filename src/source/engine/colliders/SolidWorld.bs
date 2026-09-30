@@ -1,0 +1,273 @@
+namespace BGE
+
+  ' Options for `BGE.SolidWorld.moveAndSlide()`.
+  interface SlideOptions extends roAssociativeArray
+    ' How far (px) a box moving along one axis may clip a corner and still be eased around it.
+    ' 0 turns corner easing off. Default 8.
+    optional cornerNudge as float
+    ' Longest single sub-step (px), so a fast move can't skip over a thin solid. Default 4.
+    optional maxStep as float
+  end interface
+
+  ' Result of `BGE.SolidWorld.moveAndSlide()`.
+  interface SlideResult
+    ' New bottom-left x of the moving box
+    x as float
+    ' New bottom-left y of the moving box
+    y as float
+    ' True if a solid stopped movement along x
+    blockedX as boolean
+    ' True if a solid stopped movement along y
+    blockedY as boolean
+  end interface
+
+  ' A set of static, axis-aligned solid rectangles for top-down movement (walls, water, prop
+  ' bases), and `moveAndSlide()` to move a box through them: it stops flush against solids,
+  ' slides along walls, and eases around corners it only just clips.
+  '
+  ' Every rectangle is `{x, y, w, h}` - `(x, y)` is the bottom-left corner, world +y up. This is
+  ' plain rectangle maths, separate from colliders: colliders report overlaps, while a
+  ' `SolidWorld` keeps a mover out of them. For platformer tiles (including one-way platforms)
+  ' see `BGE.resolveAabbTileCollision()` instead.
+  '
+  ' @example
+  ' world = new BGE.SolidWorld()
+  ' world.addBounds(0, 0, mapWidth, mapHeight)
+  ' world.addSolid(64, 64, 32, 32)
+  ' ' Each frame, move the player's feet box:
+  ' result = world.moveAndSlide({x: feetX, y: feetY, w: 20, h: 12}, dx, dy)
+  ' feetX = result.x
+  ' feetY = result.y
+  class SolidWorld
+
+    private bucketSize as float = 128
+    private buckets as roAssociativeArray = {}
+    private solids as object = []
+
+    ' @param {integer} [bucketSize=128] - solids are grouped in square cells this size (px), so
+    '   a move only tests nearby solids. Roughly the size of a typical solid works well.
+    sub new(bucketSize = 128 as integer)
+      m.bucketSize = bucketSize
+    end sub
+
+    ' Adds a solid rectangle.
+    '
+    ' @param {float} x - bottom-left x
+    ' @param {float} y - bottom-left y
+    ' @param {float} w
+    ' @param {float} h
+    sub addSolid(x as float, y as float, w as float, h as float)
+      solid = {x: x, y: y, w: w, h: h, id: m.solids.count().toStr()}
+      m.solids.push(solid)
+      for bx = m.bucketIndex(x) to m.bucketIndex(x + w)
+        for by = m.bucketIndex(y) to m.bucketIndex(y + h)
+          key = bx.toStr() + "," + by.toStr()
+          if m.buckets[key] = invalid
+            m.buckets[key] = []
+          end if
+          m.buckets[key].push(solid)
+        end for
+      end for
+    end sub
+
+    ' Adds four solids around the outside of a rectangle, so movers can't leave it (e.g. the
+    ' edges of a map).
+    '
+    ' @param {float} x - bottom-left x of the area to keep movers inside
+    ' @param {float} y - bottom-left y
+    ' @param {float} w
+    ' @param {float} h
+    ' @param {float} [thickness=64] - how thick each wall is
+    sub addBounds(x as float, y as float, w as float, h as float, thickness = 64 as float)
+      m.addSolid(x - thickness, y - thickness, w + thickness * 2, thickness)
+      m.addSolid(x - thickness, y + h, w + thickness * 2, thickness)
+      m.addSolid(x - thickness, y, thickness, h)
+      m.addSolid(x + w, y, thickness, h)
+    end sub
+
+    ' @return {integer} how many solids have been added
+    function getSolidCount() as integer
+      return m.solids.count()
+    end function
+
+    ' Whether a box overlaps no solid. A box only touching a solid's edge is free.
+    '
+    ' @param {float} x - bottom-left x
+    ' @param {float} y - bottom-left y
+    ' @param {float} w
+    ' @param {float} h
+    ' @return {boolean}
+    function isAreaFree(x as float, y as float, w as float, h as float) as boolean
+      return m.overlaps(x, y, w, h).count() = 0
+    end function
+
+    ' Moves a box by (dx, dy), stopping flush against solids and sliding along them. When moving
+    ' along one axis only, a box that clips a corner by up to `options.cornerNudge` is eased
+    ' around it. The box must start clear of every solid.
+    '
+    ' @param {object} mover - `{x, y, w, h}`: the moving box, bottom-left corner
+    ' @param {float} dx
+    ' @param {float} dy
+    ' @param {BGE.SlideOptions} [options={}] - `cornerNudge` (default 8, 0 = off), `maxStep` (default 4)
+    ' @return {BGE.SlideResult} the box's new bottom-left corner, and which axes were blocked
+    function moveAndSlide(mover as object, dx as float, dy as float, options = {} as BGE.SlideOptions) as BGE.SlideResult
+      cornerNudge = 8.0
+      if options.DoesExist("cornerNudge")
+        cornerNudge = options.cornerNudge
+      end if
+      maxStep = 4.0
+      if options.DoesExist("maxStep") and options.maxStep > 0
+        maxStep = options.maxStep
+      end if
+
+      largest = Abs(dx)
+      if Abs(dy) > largest
+        largest = Abs(dy)
+      end if
+      steps = Int(largest / maxStep) + 1
+      stepX = dx / steps
+      stepY = dy / steps
+      result = {x: mover.x, y: mover.y, blockedX: false, blockedY: false}
+      for i = 1 to steps
+        if stepX <> 0
+          m.stepAxis(result, mover.w, mover.h, stepX, true, dy = 0, cornerNudge)
+        end if
+        if stepY <> 0
+          m.stepAxis(result, mover.w, mover.h, stepY, false, dx = 0, cornerNudge)
+        end if
+      end for
+      return result
+    end function
+
+    private sub stepAxis(result as object, w as float, h as float, delta as float, alongX as boolean, singleAxis as boolean, cornerNudge as float)
+      nx = result.x
+      ny = result.y
+      if alongX
+        nx += delta
+      else
+        ny += delta
+      end if
+      hits = m.overlaps(nx, ny, w, h)
+      if hits.count() = 0
+        result.x = nx
+        result.y = ny
+        return
+      end if
+
+      ' Snap flush to the nearest blocking edge. The box started clear, so this never moves it backwards.
+      if alongX
+        result.blockedX = true
+        for each hit in hits
+          if delta > 0 and hit.x - w < nx
+            nx = hit.x - w
+          else if delta < 0 and hit.x + hit.w > nx
+            nx = hit.x + hit.w
+          end if
+        end for
+        result.x = nx
+      else
+        result.blockedY = true
+        for each hit in hits
+          if delta > 0 and hit.y - h < ny
+            ny = hit.y - h
+          else if delta < 0 and hit.y + hit.h > ny
+            ny = hit.y + hit.h
+          end if
+        end for
+        result.y = ny
+      end if
+
+      if singleAxis and cornerNudge > 0
+        m.tryNudge(result, w, h, hits, Abs(delta), alongX, cornerNudge)
+      end if
+    end sub
+
+    ' Moves the box perpendicular to travel when it only clips the blockers' combined extent by a
+    ' few pixels. Uses the union of all hits so a wall made of stacked tile rects counts as one.
+    private sub tryNudge(result as object, w as float, h as float, hits as object, stepLength as float, alongX as boolean, cornerNudge as float)
+      ' Perpendicular axis: y when travelling along x, x when travelling along y.
+      if alongX
+        boxStart = result.y
+        boxSize = h
+      else
+        boxStart = result.x
+        boxSize = w
+      end if
+      blockStart = invalid
+      blockEnd = invalid
+      for each hit in hits
+        if alongX
+          hitStart = hit.y
+          hitEnd = hit.y + hit.h
+        else
+          hitStart = hit.x
+          hitEnd = hit.x + hit.w
+        end if
+        if blockStart = invalid or hitStart < blockStart
+          blockStart = hitStart
+        end if
+        if blockEnd = invalid or hitEnd > blockEnd
+          blockEnd = hitEnd
+        end if
+      end for
+
+      shift = 0.0
+      overlapAtStart = (boxStart + boxSize) - blockStart
+      overlapAtEnd = blockEnd - boxStart
+      if overlapAtStart > 0 and overlapAtStart <= cornerNudge
+        shift = -m.minFloat(stepLength, overlapAtStart)
+      else if overlapAtEnd > 0 and overlapAtEnd <= cornerNudge
+        shift = m.minFloat(stepLength, overlapAtEnd)
+      end if
+      if shift = 0
+        return
+      end if
+
+      nx = result.x
+      ny = result.y
+      if alongX
+        ny += shift
+      else
+        nx += shift
+      end if
+      if m.overlaps(nx, ny, w, h).count() = 0
+        result.x = nx
+        result.y = ny
+      end if
+    end sub
+
+    ' Solids strictly overlapping the given box. Touching edges don't count, so a box flush
+    ' against a wall is clear.
+    private function overlaps(x as float, y as float, w as float, h as float) as object
+      found = []
+      seen = {}
+      for bx = m.bucketIndex(x) to m.bucketIndex(x + w)
+        for by = m.bucketIndex(y) to m.bucketIndex(y + h)
+          bucket = m.buckets[bx.toStr() + "," + by.toStr()]
+          if bucket <> invalid
+            for each solid in bucket
+              if seen[solid.id] = invalid and x < solid.x + solid.w and x + w > solid.x and y < solid.y + solid.h and y + h > solid.y
+                seen[solid.id] = true
+                found.push(solid)
+              end if
+            end for
+          end if
+        end for
+      end for
+      return found
+    end function
+
+    ' Int() floors, so negative coordinates (map-bounds solids) land in the right bucket.
+    private function bucketIndex(value as float) as integer
+      return Int(value / m.bucketSize)
+    end function
+
+    private function minFloat(a as float, b as float) as float
+      if a < b
+        return a
+      end if
+      return b
+    end function
+
+  end class
+end namespace
