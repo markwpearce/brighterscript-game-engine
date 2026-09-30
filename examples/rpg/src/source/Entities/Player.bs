@@ -1,11 +1,29 @@
 import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/utils/CountdownTimer.bs"
 import "Facing.bs"
+import "Combat.bs"
+import "Enemy.bs"
 
 ' Walk speed at full stick deflection, px/sec (tuned in playtest).
 const PLAYER_SPEED = 180.0
 ' Collision box at the feet only, so the head can overlap walls and awnings above.
 const PLAYER_BOX_W = 20.0
 const PLAYER_BOX_H = 12.0
+' Health in half-hearts.
+const PLAYER_MAX_HEALTH = 6
+const PLAYER_LOW_HEALTH = 2
+const PLAYER_INVULNERABLE_SECONDS = 1.0
+const PLAYER_KNOCKBACK_DISTANCE = 32.0
+const PLAYER_KNOCKBACK_SECONDS = 0.2
+const PLAYER_DEFEAT_SECONDS = 1.0
+const LOW_HEALTH_BEEP_SECONDS = 3.0
+' A swing is one 8-frame attack strip at 16 fps. The sword connects while the slash arc is
+' drawn (frames 2-3).
+const SWING_SECONDS = 0.5
+const SWING_HIT_START = 0.125
+const SWING_HIT_END = 0.25
+' An OK press this close to the end of a swing starts the next one as soon as it ends.
+const SWING_BUFFER_SECONDS = 0.15
 
 ' The player. Its position is the bottom-centre of the feet box. It moves itself through the
 ' area's SolidWorld rather than via velocity, so the engine's own velocity step never moves it
@@ -14,7 +32,27 @@ class Player extends BGE.GameEntity
 
   solidWorld as BGE.SolidWorld = invalid
   facing as string = "down"
+  health as integer = PLAYER_MAX_HEALTH
+  maxHealth as integer = PLAYER_MAX_HEALTH
+  coins as integer = 0
+  ' The spawn point the player last arrived at - where it comes back after being defeated.
+  lastSpawn as string = ""
   private sprite as BGE.Sprite = invalid
+  private sword as BGE.RectangleCollider = invalid
+  private swinging as boolean = false
+  private swingTime as float = 0.0
+  ' Alternates between the attack1 (0) and attack2 (1) animations.
+  private swingIndex as integer = 1
+  ' Ids of enemies already hit by this swing, so one swing hits each enemy once.
+  private hitThisSwing as roAssociativeArray = {}
+  private swingBuffer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private invulnerable as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private knockbackTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  ' px/sec while knockbackTimer runs
+  private knockback as object = {x: 0.0, y: 0.0}
+  private defeated as boolean = false
+  private defeatTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private lowHealthTimer as float = 0.0
 
   sub new(game as BGE.Game)
     super(game)
@@ -23,36 +61,65 @@ class Player extends BGE.GameEntity
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    ' adventurer.png: 16 rows of 8 96x80 cells - see main.bs's composition note for the row order.
+    ' adventurer.png: 16 rows of 8 96x80 cells - idle, run, attack1, attack2, each facing
+    ' down/up/left/right.
     m.sprite = m.addSprite("body", m.game.getBitmap("adventurer"), 96, 80)
     ' Pins the art's feet (48, 58 within each cell) onto the entity's position.
     m.sprite.applyPreTranslation(-48, -58)
-    animations = ["idle_down", "idle_up", "idle_left", "idle_right", "run_down", "run_up", "run_left", "run_right"]
+    animations = ["idle_down", "idle_up", "idle_left", "idle_right", "run_down", "run_up", "run_left", "run_right", "attack1_down", "attack1_up", "attack1_left", "attack1_right", "attack2_down", "attack2_up", "attack2_left", "attack2_right"]
     for i = 0 to animations.count() - 1
-      frameRate = 8
-      if i >= 4
+      if i < 4
+        m.sprite.addAnimation(animations[i], {startFrame: i * 8, frameCount: 8}, 8, BGE.SpritePlayMode.Loop)
+      else if i < 8
         ' Fast enough that the stride keeps up with PLAYER_SPEED instead of sliding.
-        frameRate = 16
+        m.sprite.addAnimation(animations[i], {startFrame: i * 8, frameCount: 8}, 16, BGE.SpritePlayMode.Loop)
+      else
+        m.sprite.addAnimation(animations[i], {startFrame: i * 8, frameCount: 8}, 16, BGE.SpritePlayMode.Forward)
       end if
-      m.sprite.addAnimation(animations[i], {startFrame: i * 8, frameCount: 8}, frameRate, BGE.SpritePlayMode.Loop)
     end for
     m.sprite.playAnimation("idle_down")
     m.addRectangleCollider("feet", PLAYER_BOX_W, PLAYER_BOX_H, -PLAYER_BOX_W / 2, PLAYER_BOX_H)
+    ' Only enabled during a swing's hit window, placed by updateSwing().
+    m.sword = m.addRectangleCollider("sword", 1, 1, 0, 0, false)
   end sub
 
-  ' Puts the player at an area's spawn point, bound to that area's solids.
+  ' Puts the player at an area's spawn point, bound to that area's solids. Coming back after
+  ' being defeated restores full health.
   '
   ' @param {float} x - feet x
   ' @param {float} y - feet y
   ' @param {string} facing
   ' @param {BGE.SolidWorld} world
-  sub placeAt(x as float, y as float, facing as string, world as BGE.SolidWorld)
+  ' @param {string} spawnId - remembered as where to come back to after being defeated
+  sub placeAt(x as float, y as float, facing as string, world as BGE.SolidWorld, spawnId as string)
     m.position.x = x
     m.position.y = y
     m.position.z = -y
     m.facing = facing
     m.solidWorld = world
+    m.lastSpawn = spawnId
+    if m.defeated or m.health <= 0
+      m.health = m.maxHealth
+    end if
+    m.defeated = false
+    m.endSwing()
+    m.swingBuffer.stop()
+    m.knockbackTimer.stop()
+    m.invulnerable.stop()
+    m.sprite.alpha = 255
     m.sprite.playAnimation("idle_" + facing)
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if input.press and input.isButton("ok")
+      m.requestSwing()
+    end if
+  end sub
+
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    if eventName = "coinCollected"
+      m.coins++
+    end if
   end sub
 
   override sub onUpdate(dt as float)
@@ -63,7 +130,46 @@ class Player extends BGE.GameEntity
     if dt > 0.1
       dt = 0.1
     end if
+    m.swingBuffer.tick(dt)
+    m.invulnerable.tick(dt)
+    m.updateBlink()
+    m.updateLowHealthBeep(dt)
 
+    if m.defeated
+      m.defeatTimer.tick(dt)
+      if not m.defeatTimer.isActive() and not m.game.isTransitioning()
+        m.game.changeSceneWithFade(m.game.getScene().name, {spawn: m.lastSpawn})
+      end if
+      return
+    end if
+    if m.knockbackTimer.isActive()
+      m.knockbackTimer.tick(dt)
+      m.moveBy(m.knockback.x * dt, m.knockback.y * dt, {cornerNudge: 0})
+      return
+    end if
+    if m.swinging
+      m.updateSwing(dt)
+      return
+    end if
+    m.updateWalk(dt)
+  end sub
+
+  override sub onCollision(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+    if m.defeated or otherCollider.name <> "body" or not otherEntity.tagsList.contains("enemy")
+      return
+    end if
+    if myCollider.name = "sword"
+      if m.hitThisSwing[otherEntity.id] = invalid
+        m.hitThisSwing[otherEntity.id] = true
+        hitEnemy = otherEntity as Enemy
+        hitEnemy.hurt(m.position.x, m.position.y)
+      end if
+    else if myCollider.name = "feet"
+      m.takeHit(otherEntity.position.x, otherEntity.position.y)
+    end if
+  end sub
+
+  private sub updateWalk(dt as float)
     moveX = 0.0
     moveY = 0.0
     ' No walking while an area transition is fading.
@@ -83,13 +189,111 @@ class Player extends BGE.GameEntity
       return
     end if
 
+    m.moveBy(moveX * PLAYER_SPEED * dt, moveY * PLAYER_SPEED * dt, {})
+    m.facing = facingFor(moveX, moveY, m.facing)
+    m.sprite.playAnimation("run_" + m.facing)
+  end sub
+
+  private sub moveBy(dx as float, dy as float, options as BGE.SlideOptions)
     feetBox = {x: m.position.x - PLAYER_BOX_W / 2, y: m.position.y, w: PLAYER_BOX_W, h: PLAYER_BOX_H}
-    result = m.solidWorld.moveAndSlide(feetBox, moveX * PLAYER_SPEED * dt, moveY * PLAYER_SPEED * dt)
+    result = m.solidWorld.moveAndSlide(feetBox, dx, dy, options)
     m.position.x = result.x + PLAYER_BOX_W / 2
     m.position.y = result.y
     m.position.z = -m.position.y
-    m.facing = facingFor(moveX, moveY, m.facing)
-    m.sprite.playAnimation("run_" + m.facing)
+  end sub
+
+  private sub requestSwing()
+    if m.defeated or m.solidWorld = invalid or m.game.isTransitioning() or m.knockbackTimer.isActive()
+      return
+    end if
+    if not m.swinging
+      m.startSwing()
+    else if SWING_SECONDS - m.swingTime <= SWING_BUFFER_SECONDS
+      m.swingBuffer.start(SWING_BUFFER_SECONDS)
+    end if
+  end sub
+
+  private sub startSwing()
+    m.swinging = true
+    m.swingTime = 0.0
+    m.swingIndex = 1 - m.swingIndex
+    m.hitThisSwing = {}
+    ' Facing is locked for the whole swing, so the animation is never restarted part way.
+    m.sprite.playAnimation("attack" + (m.swingIndex + 1).toStr() + "_" + m.facing)
+    m.game.playSound("sword")
+  end sub
+
+  private sub updateSwing(dt as float)
+    m.swingTime += dt
+    hitting = m.swingTime >= SWING_HIT_START and m.swingTime < SWING_HIT_END
+    if hitting
+      ' Collider offsets are the box's bottom-left x and its top y (see addRectangleCollider).
+      hitbox = swordBox(m.facing)
+      m.sword.offset.x = hitbox.x
+      m.sword.offset.y = hitbox.y + hitbox.h
+      m.sword.width = hitbox.w
+      m.sword.height = hitbox.h
+    end if
+    m.sword.enabled = hitting
+    if m.swingTime >= SWING_SECONDS
+      m.endSwing()
+      if m.swingBuffer.isActive()
+        m.swingBuffer.stop()
+        m.startSwing()
+      else
+        m.sprite.playAnimation("idle_" + m.facing)
+      end if
+    end if
+  end sub
+
+  private sub endSwing()
+    m.swinging = false
+    m.sword.enabled = false
+  end sub
+
+  private sub takeHit(fromX as float, fromY as float)
+    if m.invulnerable.isActive() or m.game.isTransitioning()
+      return
+    end if
+    m.health -= 1
+    m.game.playSound("pain")
+    m.endSwing()
+    m.swingBuffer.stop()
+    m.invulnerable.start(PLAYER_INVULNERABLE_SECONDS)
+    if m.health <= 0
+      m.health = 0
+      m.defeated = true
+      m.defeatTimer.start(PLAYER_DEFEAT_SECONDS)
+      m.game.playSound("die")
+      m.sprite.playAnimation("idle_" + m.facing)
+      return
+    end if
+    push = knockbackVector(fromX, fromY, m.position.x, m.position.y, PLAYER_KNOCKBACK_DISTANCE)
+    m.knockback = {x: push.x / PLAYER_KNOCKBACK_SECONDS, y: push.y / PLAYER_KNOCKBACK_SECONDS}
+    m.knockbackTimer.start(PLAYER_KNOCKBACK_SECONDS)
+    m.sprite.playAnimation("idle_" + m.facing)
+  end sub
+
+  ' Flickers while invulnerable after a hit.
+  private sub updateBlink()
+    if m.invulnerable.isActive() and not m.defeated and Int(m.invulnerable.remaining() * 10) mod 2 = 0
+      m.sprite.alpha = 60
+    else
+      m.sprite.alpha = 255
+    end if
+  end sub
+
+  private sub updateLowHealthBeep(dt as float)
+    if m.defeated or m.health > PLAYER_LOW_HEALTH
+      ' Beeps straight away the next time health drops this low.
+      m.lowHealthTimer = 0.0
+      return
+    end if
+    m.lowHealthTimer -= dt
+    if m.lowHealthTimer <= 0
+      m.game.playSound("lowHealth")
+      m.lowHealthTimer = LOW_HEALTH_BEEP_SECONDS
+    end if
   end sub
 
 end class
