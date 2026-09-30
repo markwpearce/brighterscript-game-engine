@@ -22,7 +22,7 @@ Sprites (`examples/rpg/src/sprites/`, credited in its `CREDITS.md`):
 
 - `rat.png` — `rodent-1.0/PNG/32x32/rat.png` from [Rodents (Rat Rework)](https://opengameart.org/node/82869) by Tuomo Untinen (Reemax) & Jordan Irwin (AntumDeluge). CC-BY 3.0 / CC-BY-SA 3.0. 96×128: 3 walk frames × 4 rows (N/E/S/W), 32×32 cells; the centre frame is idle.
 - `bat.png` — `bat-1.3/PNG/48x64/bat-NESW.png` from [Bat (Rework)](https://opengameart.org/node/77508) by bagzie. OGA-BY 3.0 / CC-BY 3.0. 144×256: 3 flap frames × 4 rows (N/E/S/W), 48×64 cells.
-- `heart.png`, `heart_empty.png`, `coin.png` — 9×9 icons (`heart_shaded`, `heart_noborder_simple` dimmed or similar, `coin_shaded`) from [RetroPixel Icons V1 (9x9)](https://opengameart.org/content/retropixel-icons-v1-9x9) by Anton Revin. CC0 (credit optional, given anyway).
+- `heart.png`, `coin.png` — 9×9 icons (`heart_shaded`, `coin_shaded`; an empty heart is the full one drawn with a dark tint) from [RetroPixel Icons V1 (9x9)](https://opengameart.org/content/retropixel-icons-v1-9x9) by Anton Revin. CC0 (credit optional, given anyway).
 
 Sounds (`examples/rpg/src/sounds/`, new `CREDITS.md`):
 
@@ -66,6 +66,8 @@ namespace BGE
     ' Four solids of `thickness` surrounding the rectangle, so movers stay inside it.
     sub addBounds(x as float, y as float, w as float, h as float, thickness = 64 as float)
     function getSolidCount() as integer
+    ' True if the box overlaps no solid (touching an edge is free).
+    function isAreaFree(x as float, y as float, w as float, h as float) as boolean
     function moveAndSlide(mover as object, dx as float, dy as float, options = {} as BGE.SlideOptions) as BGE.SlideResult
   end class
 end namespace
@@ -87,7 +89,7 @@ Docs: public doc comments on the class for game developers; a CLAUDE.md Collisio
 
 - OK press starts a swing if not already swinging. Swings alternate `attack1_<facing>` / `attack2_<facing>` (sheet rows 8–15), played with `SpritePlayMode.Forward` at 16 fps (8 frames ≈ 0.5s).
 - During a swing, movement is ignored and facing is locked, so no mid-swing animation change restarts the frame clock.
-- The hit window is the arc frames (2–3, ≈ 0.125–0.25s into the swing). During it a `RectangleCollider` "sword" (~28×24) is enabled, placed in front of the feet in the facing direction (`Combat.swordBox(facing)`), and disabled otherwise.
+- The hit window is the arc frames (2–3, ≈ 0.125–0.25s into the swing). During it a `RectangleCollider` "sword" is enabled (28px reach × 32px span), placed in front of the feet in the facing direction (`Combat.swordBox(facing)`), and disabled otherwise.
 - Each enemy can be hit at most once per swing (a per-swing set of hit enemy ids).
 - An OK press during the last 0.15s of a swing is buffered (`BGE.CountdownTimer`) and starts the next swing the moment the current one ends.
 - The swing is timed by the player's own elapsed-time counter (not by reading the sprite's frame), so the hit window doesn't depend on sprite internals.
@@ -97,9 +99,10 @@ Docs: public doc comments on the class for game developers; a CLAUDE.md Collisio
 `Enemy` base class (extends `BGE.GameEntity`): `health`, contact collider "body", `hurt(fromX, fromY)` (flash, knockback, sound, death), a 0.15s knockback, death fade + 50% coin drop. Subclasses supply movement and animation.
 
 - **Rat** (2 health): 32×32 sprite, walk animation per facing (rows N/E/S/W → up/right/down/left), idle = centre frame. Wanders in a random 4-way direction for 1–2s, pauses, repeats; within ~120px of the player it chases. Moves (and is knocked back) through the area's `BGE.SolidWorld` with a ~16×10 feet box. `position.z = -feetY`, like the player.
-- **Bat** (1 health): 48×64 sprite, flap animation per facing. Flies toward the player on a sine wobble, ignoring solids, clamped to the map bounds. Drawn at a fixed height above its ground point, with a small dark ellipse shadow on the ground; z from the ground point so it depth-sorts correctly.
-- On hit: white/red flash (~0.1s) via the sprite's color, knockback ~24px over 0.15s away from the player (`Combat.knockbackVector`), `enemy_hit` sound. Knockback uses `cornerNudge: 0`.
-- On last hit: `enemy_die` sound, colliders disabled, fade out over ~0.3s, 50% chance to spawn a `Coin` at its feet, then `delete()`.
+- **Bat** (1 health): 48×64 sprite, flap animation per facing. Flies toward the player on a sine wobble, ignoring solids, clamped to the map bounds. Drawn at a fixed height above its ground point, with a small dark circle shadow on the ground; z from the ground point so it depth-sorts correctly.
+- Every character (player, rats, bats) has a dark translucent circle shadow at its feet, from a shared `Entities/Shadow.bs` helper; a dying enemy fades it with its sprite.
+- On hit: white/red flash (~0.1s) via the sprite's color, knockback ~24px over 0.15s away from the player (`Combat.knockbackVector`), `enemy_hit` sound. Knockback uses `cornerNudge: 0`. An enemy that hurts the player by touching it recoils 48px, so it can't keep hitting the player the moment invulnerability ends.
+- On last hit: `enemy_die` sound, colliders disabled, fade out over ~0.3s, 50% chance to spawn a `Coin` at its feet, then `invalidate()`.
 - Placement: `{type: "enemy", kind: "rat" | "bat", col, row}` entries in `MapData` placement lists (a few rats in town, a few bats in the castle). Not persistent — re-entering an area respawns them.
 
 ### Player health
@@ -107,7 +110,7 @@ Docs: public doc comments on the class for game developers; a CLAUDE.md Collisio
 - `maxHealth = 6` half-hearts (3 hearts). Contact with an enemy's "body" collider costs 1 half-heart, checked in `onCollision` while not invulnerable (so standing inside an enemy keeps hurting after the window ends).
 - On damage: `pain.wav`, knockback ~32px over 0.2s away from the enemy through `moveAndSlide` (`cornerNudge: 0`), input ignored during knockback, 1s invulnerability (`BGE.CountdownTimer`) with the sprite blinking (alpha toggled ~10 Hz).
 - Low health: while `health <= 2`, `low_health.wav` plays every 3s.
-- Defeat at 0: `die.wav`, input locked, after ~1s `changeSceneWithFade(currentScene, {spawn: <first spawn>})` and health restored to max on arrival. Coins are kept.
+- Defeat at 0: `die.wav`, input locked, after ~1s `changeSceneWithFade(currentScene, {spawn: player.lastSpawn})` (the spawn point the player last arrived at) and health restored to max on arrival. Coins are kept.
 
 ### Coins
 
@@ -117,7 +120,7 @@ Docs: public doc comments on the class for game developers; a CLAUDE.md Collisio
 
 A `gameUi` child, title-safe (≥10% inset from every canvas edge, top-left):
 
-- A row of 3 hearts, each full, half, or empty from `Combat.heartStates(health, maxHealth)` (returns `"full" | "half" | "empty"` per heart). Half = the left half of the full icon drawn over the empty icon.
+- A row of 3 hearts, each full, half, or empty from `Combat.heartStates(health, maxHealth)` (returns `"full" | "half" | "empty"` per heart). Empty = the full icon tinted dark; half = the left 5 columns of the full icon drawn over an empty one.
 - Below it, the coin icon and the count in Quill and Antler Expanded.
 - Icons drawn at an integer scale of the UI canvas so pixels stay crisp. Redraws from the player's current state each frame (no events needed).
 
@@ -125,7 +128,7 @@ A `gameUi` child, title-safe (≥10% inset from every canvas edge, top-left):
 
 Pure functions with no engine state, unit tested:
 
-- `swordBox(facing, feetX, feetY)` → `{x, y, w, h}` in front of the feet for each facing.
+- `swordBox(facing)` → `{x, y, w, h}` in front of the feet for each facing, relative to the feet point.
 - `knockbackVector(fromX, fromY, toX, toY, distance)` → `{x, y}` away from the source; exactly-overlapping positions push down (a fixed fallback, never NaN).
 - `heartStates(health, maxHealth)` → array of heart states.
 
