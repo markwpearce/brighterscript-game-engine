@@ -255,6 +255,30 @@ passable from below. None of that lives in the engine - it's ordinary `onCollisi
 top of the same detection-only colliders described above. Read `Player.onCollision` in
 `examples/platformer/src/source/Entities/Player.bs` for the concrete pattern.
 
+### Walls in a top-down game
+
+For top-down movement against static walls, `BGE.SolidWorld` does the resolving for you. Add
+the solid rectangles once when the scene is built, then move each walker's feet box through them
+instead of setting its `velocity`. It stops the box flush against walls, slides it along them,
+and eases it around corners it only just clips:
+
+```
+' In the scene's onCreate:
+m.solidWorld = new BGE.SolidWorld()
+m.solidWorld.addBounds(0, 0, mapWidth, mapHeight)
+m.solidWorld.addSolid(wallX, wallY, wallWidth, wallHeight)
+
+' In the player's onUpdate (the feet box is 20x12, its bottom-centre at the entity's position):
+feetBox = {x: m.position.x - 10, y: m.position.y, w: 20, h: 12}
+result = m.solidWorld.moveAndSlide(feetBox, moveX * speed * dt, moveY * speed * dt)
+m.position.x = result.x + 10
+m.position.y = result.y
+```
+
+Rectangles are `{x, y, w, h}` with `(x, y)` the bottom-left corner. Pass `{cornerNudge: 0}` as a
+fourth argument for moves that shouldn't be eased around corners, like a knockback.
+`examples/rpg`'s `Player` and `Rat` both move this way.
+
 ## Following the player with the camera
 
 The default camera is a `BGE.Camera2d` centred on `camera.setTarget(point)`. For a world bigger
