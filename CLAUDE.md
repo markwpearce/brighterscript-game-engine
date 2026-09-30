@@ -72,6 +72,8 @@ order: 1
 
 `group` controls which sidebar section it's clubbed under (must appear in `sectionOrder` to control placement, otherwise it's appended alphabetically); `order` controls position within that group. Cross-link between guides with a plain root-relative markdown link to the other guide's slug (its filename without extension, e.g. `[Engine Internals](/engine-internals)`) — the theme rewrites these through `opts.basePath` automatically, but literal `opts.menu` entries in `jsdoc.json` do NOT get this rewriting and need the `/brighterscript-game-engine` prefix added by hand. Diagrams must be flat SVG/PNG files under `docs/images/`, referenced with a normal markdown image tag — `clean-jsdoc-theme` does not support Mermaid code fences.
 
+**A `const` must be a plain literal** (`0.0333333`, not `1.0 / 30.0`): `brighterscript-jsdocs-plugin` converts each file to JS stubs for jsdoc and writes an expression const out as `[object Object]`, which makes `npm run docs` fail with `ERROR: Unable to parse <file>.bs: Unexpected token`. Its line/column numbers are for that converted stub, not the `.bs` source, so they won't point at the right line.
+
 ## Architecture
 
 Everything lives in the `BGE` namespace. `rootDir` is `src`, `outDir` is `build` (see `bsconfig.json`).
