@@ -1,0 +1,148 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/utils/CountdownTimer.bs"
+import "Combat.bs"
+import "Coin.bs"
+
+const ENEMY_KNOCKBACK_DISTANCE = 24.0
+const ENEMY_KNOCKBACK_SECONDS = 0.15
+const ENEMY_FLASH_SECONDS = 0.1
+const ENEMY_FADE_SECONDS = 0.3
+const ENEMY_COIN_CHANCE = 0.5
+' Sprite tint while flashing from a hit (packed RGB).
+const ENEMY_FLASH_COLOR = &hFF5050
+
+' Base class for everything the sword can hit. Its position is the bottom-centre of its feet
+' box, like the player's. Subclasses add a sprite (m.sprite), a "body" collider, set health and
+' the feet box size, and move themselves in moveEnemy().
+class Enemy extends BGE.GameEntity
+
+  health as integer = 1
+  isDying as boolean = false
+  solidWorld as BGE.SolidWorld = invalid
+  mapWidth as float = 0
+  mapHeight as float = 0
+  protected boxW as float = 16
+  protected boxH as float = 10
+  protected sprite as BGE.Sprite = invalid
+  ' px/sec while knockbackTimer runs
+  private knockback as object = {x: 0.0, y: 0.0}
+  private knockbackTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private flashTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private fadeTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.tagsList.add("enemy")
+  end sub
+
+  ' @param {roAssociativeArray} args - {x, y (feet), solidWorld, mapWidth, mapHeight}
+  override sub onCreate(args as roAssociativeArray)
+    m.position.x = args.x
+    m.position.y = args.y
+    m.position.z = -args.y
+    m.solidWorld = args.solidWorld
+    m.mapWidth = args.mapWidth
+    m.mapHeight = args.mapHeight
+  end sub
+
+  ' Called when the player's sword hits this enemy.
+  '
+  ' @param {float} fromX - where the hit came from (the player's feet)
+  ' @param {float} fromY
+  ' @return {boolean} true if the hit defeated it
+  function hurt(fromX as float, fromY as float) as boolean
+    if m.isDying
+      return false
+    end if
+    m.health -= 1
+    push = knockbackVector(fromX, fromY, m.position.x, m.position.y, ENEMY_KNOCKBACK_DISTANCE)
+    m.knockback = {x: push.x / ENEMY_KNOCKBACK_SECONDS, y: push.y / ENEMY_KNOCKBACK_SECONDS}
+    m.knockbackTimer.start(ENEMY_KNOCKBACK_SECONDS)
+    if m.health <= 0
+      m.die()
+      return true
+    end if
+    m.game.playSound("enemyHit")
+    m.flashTimer.start(ENEMY_FLASH_SECONDS)
+    m.sprite.color = ENEMY_FLASH_COLOR
+    return false
+  end function
+
+  override sub onUpdate(dt as float)
+    if m.solidWorld = invalid
+      return
+    end if
+    if dt > 0.1
+      dt = 0.1
+    end if
+
+    m.flashTimer.tick(dt)
+    if not m.flashTimer.isActive() and not m.isDying
+      m.sprite.color = &hFFFFFF
+    end if
+
+    if m.knockbackTimer.isActive()
+      m.knockbackTimer.tick(dt)
+      ' No corner easing, so a knockback never slides an enemy somewhere unexpected.
+      m.applyMove(m.knockback.x * dt, m.knockback.y * dt, {cornerNudge: 0})
+    else if not m.isDying
+      m.moveEnemy(dt)
+    end if
+
+    if m.isDying
+      m.fadeTimer.tick(dt)
+      m.sprite.alpha = 255 * m.fadeTimer.remaining() / ENEMY_FADE_SECONDS
+      if not m.fadeTimer.isActive()
+        m.dropCoin()
+        m.invalidate()
+      end if
+    end if
+  end sub
+
+  ' Moves this enemy for one frame. Overridden by each enemy type.
+  '
+  ' @param {float} dt
+  protected sub moveEnemy(dt as float)
+  end sub
+
+  ' Moves the feet box through the area's solids. Bat overrides this to fly over them.
+  '
+  ' @param {float} dx
+  ' @param {float} dy
+  ' @param {BGE.SlideOptions} options
+  protected sub applyMove(dx as float, dy as float, options as BGE.SlideOptions)
+    feetBox = {x: m.position.x - m.boxW / 2, y: m.position.y, w: m.boxW, h: m.boxH}
+    result = m.solidWorld.moveAndSlide(feetBox, dx, dy, options)
+    m.position.x = result.x + m.boxW / 2
+    m.position.y = result.y
+    m.position.z = -m.position.y
+  end sub
+
+  ' The player, or invalid before it's been created.
+  protected function getPlayer() as BGE.GameEntity
+    return m.game.getEntityByName("Player")
+  end function
+
+  private sub die()
+    m.isDying = true
+    m.game.playSound("enemyDie")
+    for each colliderName in m.colliders
+      m.colliders[colliderName].enabled = false
+    end for
+    m.sprite.color = ENEMY_FLASH_COLOR
+    m.fadeTimer.start(ENEMY_FADE_SECONDS)
+  end sub
+
+  private sub dropCoin()
+    if Rnd(0) >= ENEMY_COIN_CHANCE
+      return
+    end if
+    ' A bat can die over water or a wall, where a coin couldn't be reached.
+    if not m.solidWorld.isAreaFree(m.position.x - COIN_SIZE / 2, m.position.y, COIN_SIZE, COIN_SIZE)
+      return
+    end if
+    newCoin = new Coin(m.game)
+    m.game.addEntity(newCoin, {x: m.position.x, y: m.position.y})
+  end sub
+
+end class
