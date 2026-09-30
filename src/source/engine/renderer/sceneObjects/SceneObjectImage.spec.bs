@@ -225,6 +225,109 @@ namespace tests
       m.assertEqual(-32, imageDrawable.region.GetPretranslationY())
     end function
 
+    @describe("directScaled with a negative scale (issue #237)")
+
+    ' A 64x64 centre-anchored sprite whose top left quadrant is red and the rest blue, so a
+    ' horizontal mirror, a vertical one and a half turn all put the red somewhere different.
+    private function newQuadrantImage(scale as BGE.Math.Vector) as BGE.Image
+      sourceBitmap = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: true})
+      sourceBitmap.Clear(&h0000FFFF)
+      sourceBitmap.DrawRect(0, 0, 32, 32, &hFF0000FF)
+      region = CreateObject("roRegion", sourceBitmap, 0, 0, 64, 64)
+      region.SetPretranslation(-32, -32)
+      return new BGE.Image(m.entity, region, {drawMode: BGE.SceneObjectDrawMode.directScaled, scale: scale})
+    end function
+
+    ' Which quadrant of the drawn sprite's on-canvas bounds came out red: "TL", "TR", "BL",
+    ' "BR", or "" if none did (e.g. it drew somewhere else entirely).
+    private function drawAndFindRedQuadrant(imageDrawable as BGE.Image) as string
+      m.bitmap.Clear(&h000000FF)
+      m.drawOnce(imageDrawable)
+      sceneObj = imageDrawable.getSceneObjects()[0] as BGE.SceneObjectImage
+      bounds = sceneObj.getCanvasPoints().getBounds()
+      quarterW = (bounds[1].x - bounds[0].x) / 4
+      quarterH = (bounds[1].y - bounds[0].y) / 4
+      samples = {
+        TL: [bounds[0].x + quarterW, bounds[0].y + quarterH],
+        TR: [bounds[0].x + 3 * quarterW, bounds[0].y + quarterH],
+        BL: [bounds[0].x + quarterW, bounds[0].y + 3 * quarterH],
+        BR: [bounds[0].x + 3 * quarterW, bounds[0].y + 3 * quarterH]
+      }
+      found = ""
+      for each quadrant in samples.Keys()
+        point = samples[quadrant]
+        bytes = m.bitmap.GetByteArray(Int(point[0]), Int(point[1]), 1, 1)
+        if bytes[0] > 128 and bytes[2] < 128
+          found = found + quadrant
+        end if
+      end for
+      return found
+    end function
+
+    @it("draws an unflipped sprite with its top left quadrant top left")
+    function _()
+      m.assertEqual("TL", m.drawAndFindRedQuadrant(m.newQuadrantImage(BGE.Math.VectorOps.create(1, 1, 1))))
+    end function
+
+    @it("mirrors left to right for a negative scale.x")
+    function _()
+      m.assertEqual("TR", m.drawAndFindRedQuadrant(m.newQuadrantImage(BGE.Math.VectorOps.create(-1, 1, 1))))
+    end function
+
+    @it("mirrors top to bottom for a negative scale.y")
+    function _()
+      m.assertEqual("BL", m.drawAndFindRedQuadrant(m.newQuadrantImage(BGE.Math.VectorOps.create(1, -1, 1))))
+    end function
+
+    @it("turns half way round for a negative scale on both axes")
+    function _()
+      m.assertEqual("BR", m.drawAndFindRedQuadrant(m.newQuadrantImage(BGE.Math.VectorOps.create(-1, -1, 1))))
+    end function
+
+    ' Real Roku hardware only mirrors a DrawTransformedObject call at a rotation of exactly
+    ' 0 - brs-engine mirrors at any angle, so the pixel tests above can't catch a draw that
+    ' only breaks on a device. This checks every call that reaches the native API instead.
+    @it("never asks the native draw call to mirror at a nonzero rotation, banked or not")
+    function _()
+      spy = m.renderer as dynamic
+      spy.nativeMirrorCalls = []
+      spy.drawTransformedObjectTo = function(draw2d as object, x as float, y as float, scaleX as float, scaleY as float, theta as float, region as object, rgba = -1 as integer) as boolean
+        if scaleX < 0 or scaleY < 0
+          m.nativeMirrorCalls.push(theta)
+        end if
+        return true
+      end function
+      camera = m.renderer.camera as BGE.Camera3d
+      for each roll in [0, 20]
+        camera.rollDegrees = roll
+        for each scale in [[-1, 1], [1, -1]]
+          image = m.newQuadrantImage(BGE.Math.VectorOps.create(scale[0], scale[1], 1))
+          image.banksWithCameraRoll = true
+          image.color = BGE.ColorsRGB.Yellow ' a tint forces drawTransformedObjectTo
+          m.drawOnce(image)
+          image.removeFromRenderer(m.renderer)
+        end for
+      end for
+      m.assertTrue(spy.nativeMirrorCalls.count() > 0)
+      for each mirrorTheta in spy.nativeMirrorCalls
+        m.assertEqual(0, Fix(mirrorTheta * 1000))
+      end for
+    end function
+
+    @it("keeps a centre-anchored sprite's footprint when mirrored")
+    function _()
+      unflipped = m.newQuadrantImage(BGE.Math.VectorOps.create(1, 1, 1))
+      m.drawOnce(unflipped)
+      unflippedBounds = (unflipped.getSceneObjects()[0] as BGE.SceneObjectImage).getCanvasPoints().getBounds()
+      unflipped.removeFromRenderer(m.renderer)
+
+      mirrored = m.newQuadrantImage(BGE.Math.VectorOps.create(-1, 1, 1))
+      m.drawOnce(mirrored)
+      mirroredBounds = (mirrored.getSceneObjects()[0] as BGE.SceneObjectImage).getCanvasPoints().getBounds()
+      m.assertEqual(unflippedBounds[0].x, mirroredBounds[0].x)
+      m.assertEqual(unflippedBounds[1].x, mirroredBounds[1].x)
+    end function
+
     @describe("banksWithCameraRoll")
 
     ' directScaled builds its quad from the camera's own getRightVector()/getUpVector(),

@@ -194,6 +194,28 @@ namespace BGE
       return m.canvasPoints.isApproximatelyRotatedRectangle(m.fastDrawParallelogramTolerance, m.fastDrawPerpendicularityTolerance)
     end function
 
+    ' How to blit a mirrored, unrotated quad: flipped on whichever axis leaves a rotation of
+    ' 0. Real Roku hardware only mirrors a DrawTransformedObject call at a rotation of
+    ' exactly 0 - at any other angle a negative scaleX turns the region half way round
+    ' instead, and a negative scaleY is ignored (issue #237). A mirrored quad measures a
+    ' rotation half a turn off, since its "right" edge is really its left - or its top,
+    ' for a vertical flip.
+    '
+    ' @param {BGE.Math.CornerPoints} quad a quad isMirroredOnCanvas() is true for
+    ' @return {object} {flipX, flipY} - or invalid if the quad is also rotated
+    private function getMirroredBlitTransform(quad as BGE.Math.CornerPoints) as object
+      ' getAvgRotation() is negated, so it runs 0 to -2pi
+      rotation = BGE.Math.constrainAngle(quad.getAvgRotation())
+      ' 0.01 radians is under 1px of skew across a 100px sprite
+      tolerance = 0.01
+      if Abs(rotation - BGE.Math.PI) < tolerance
+        return {flipX: true, flipY: false}
+      else if rotation < tolerance or Abs(rotation - 2 * BGE.Math.PI) < tolerance
+        return {flipX: false, flipY: true}
+      end if
+      return invalid
+    end function
+
     ' Draws this object's fill via the cheap rotate+scale fast path - only valid to call
     ' once isEligibleForFastDrawCheck(drawMode) and canUseTransformedFastDraw() have both
     ' been confirmed (usesTempBitmap() below already does this and caches the result into
@@ -355,6 +377,21 @@ namespace BGE
       totalScaleX = 1.0 * quad.getAvgWidth() / regionObj.getWidth()
       totalScaleY = 1.0 * quad.getAvgHeight() / regionObj.getHeight()
       theta = quad.getAvgRotation()
+      ' Roku mirrors a region drawn at a negative scale around its draw position, so a
+      ' mirrored quad still draws from topLeft, just flipped (issue #237).
+      if quad.isMirroredOnCanvas()
+        mirror = m.getMirroredBlitTransform(quad)
+        if invalid = mirror
+          ' Also rotated, which hardware can't mirror in one call
+          return m.drawMirroredRegionRotated(rendererObj, regionObj, quad, totalScaleX, totalScaleY, theta, color)
+        else if mirror.flipX
+          theta = 0
+          totalScaleX = -totalScaleX
+        else
+          theta = 0
+          totalScaleY = -totalScaleY
+        end if
+      end if
 
       ' The quad may already have the region's pretranslation baked into it (true for
       ' directScaled - see updateCanvasPointsForCameraFacingQuad), and Roku's draw calls would
@@ -364,6 +401,29 @@ namespace BGE
       regionObj.setPretranslation(0, 0)
       retVal = rendererObj.drawRegion(regionObj, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -theta, color)
       regionObj.setPretranslation(preTransX, preTransY)
+      return retVal
+    end function
+
+
+    ' Blits a mirrored quad that is also rotated in two steps, since real hardware can't do
+    ' both in one call (see getMirroredBlitTransform()): mirror the region into a scratch
+    ' bitmap at a rotation of 0, then blit that at a positive scale. Mirroring it moves the
+    ' region's left edge to the right, so it's drawn from the quad's topRight instead.
+    private function drawMirroredRegionRotated(rendererObj as BGE.Renderer, regionObj as roRegion, quad as BGE.Math.CornerPoints, scaleX as float, scaleY as float, theta as float, color as integer) as boolean
+      width = regionObj.getWidth()
+      height = regionObj.getHeight()
+      scratch = rendererObj.bmpPool.getRegion(width, height)
+      if invalid = scratch
+        return false
+      end if
+      preTransX = regionObj.getPretranslationX()
+      preTransY = regionObj.getPretranslationY()
+      regionObj.setPretranslation(0, 0)
+      scratch.region.DrawScaledObject(width, 0, -1, 1, regionObj)
+      regionObj.setPretranslation(preTransX, preTransY)
+      mirrored = CreateObject("roRegion", scratch.getBitmapObject(), scratch.region.GetX(), scratch.region.GetY(), width, height)
+      retVal = rendererObj.drawRegion(mirrored, quad.topRight.x, quad.topRight.y, scaleX, scaleY, -(theta + BGE.Math.PI), color)
+      rendererObj.bmpPool.returnRegion(scratch)
       return retVal
     end function
 
