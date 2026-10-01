@@ -30,3 +30,7 @@ License: OGA-BY 3.0 / CC-BY 3.0. Unmodified.
 `heart_shaded.png` and `coin_shaded.png` from "RetroPixel Icons V1 (9x9)" by Anton Revin.
 https://opengameart.org/content/retropixel-icons-v1-9x9
 License: CC0 (credit optional). Unmodified.
+
+## ../images/ (channel icons and splash screens)
+"Broadsword" key art, supplied by the repo owner. Each image is the same artwork scaled to
+fill and centre-cropped to that file's size.
