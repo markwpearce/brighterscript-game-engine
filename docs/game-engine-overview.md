@@ -339,6 +339,8 @@ A few things fall out of this that matter in practice:
   `Drawable`s/`Collider`s, with no direct `Renderer` calls in gameplay code.
 - Read `examples/breakout` or `examples/pong` for a complete, small, real game with comments
   explaining the collider-offset and velocity choices made for each entity.
+- Building a level out of tiles? See [Tile Maps](/tile-maps) for baking the ground, tile
+  collision for side-scrolling and top-down games, and auto-tiling.
 - See [Engine Internals](/engine-internals) for how the renderer, camera, and collision
   system fit together under the hood - useful once you're debugging something that doesn't behave
   like the docs above suggest it should.
