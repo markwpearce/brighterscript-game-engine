@@ -89,7 +89,7 @@ Docs: public doc comments on the class for game developers; a CLAUDE.md Collisio
 
 - OK press starts a swing if not already swinging. Swings alternate `attack1_<facing>` / `attack2_<facing>` (sheet rows 8–15), played with `SpritePlayMode.Forward` at 16 fps (8 frames ≈ 0.5s).
 - During a swing, movement is ignored and facing is locked, so no mid-swing animation change restarts the frame clock.
-- The hit window is the arc frames (2–3, ≈ 0.125–0.25s into the swing). During it a `RectangleCollider` "sword" is enabled (28px reach × 32px span), placed in front of the feet in the facing direction (`Combat.swordBox(facing)`), and disabled otherwise.
+- The hit window runs from the press through the arc frames (0–0.25s into the swing), so the sword connects the moment OK is pressed. During it a `RectangleCollider` "sword" is enabled (28px reach × 32px span), placed in front of the feet in the facing direction (`Combat.swordBox(facing)`), and disabled otherwise.
 - Each enemy can be hit at most once per swing (a per-swing set of hit enemy ids).
 - An OK press during the last 0.15s of a swing is buffered (`BGE.CountdownTimer`) and starts the next swing the moment the current one ends.
 - The swing is timed by the player's own elapsed-time counter (not by reading the sprite's frame), so the hit window doesn't depend on sprite internals.
