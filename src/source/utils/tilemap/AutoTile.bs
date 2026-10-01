@@ -1,0 +1,188 @@
+namespace BGE.TileMap
+
+  ' Options for the auto-tiling functions.
+  interface AutoTileOptions extends roAssociativeArray
+    ' When true (the default), a neighbour outside the map counts as the same surface, so a
+    ' path or wall runs cleanly off the map edge instead of drawing a border there.
+    optional outOfBoundsMatches as boolean
+  end interface
+
+  ' Which of a cell's four side neighbours are the same surface as it, as a 4-bit mask:
+  ' N = 1, E = 2, S = 4, W = 8 (clockwise from the top). A bit is set when that neighbour
+  ' matches. The result (0-15) indexes a 16-tile set directly.
+  '
+  ' The map is a list of strings, one per row (row 0 at the top), one character per cell. Two
+  ' cells are the same surface when they hold the same character.
+  '
+  ' @example
+  ' rows = [
+  '   "....",
+  '   ".cc.",
+  '   "...."
+  ' ]
+  ' mask = BGE.TileMap.getNeighbourMask4(rows, 1, 1) ' 2 - only the east neighbour matches
+  '
+  ' @param {string[]} rows - the map, one string per row
+  ' @param {integer} r - row index (0 = top)
+  ' @param {integer} c - column index (0 = left)
+  ' @param {BGE.TileMap.AutoTileOptions} [options]
+  ' @return {integer} 0-15
+  function getNeighbourMask4(rows as string[], r as integer, c as integer, options = {} as BGE.TileMap.AutoTileOptions) as integer
+    surface = rows[r].mid(c, 1)
+    outOfBoundsMatches = autoTileOutOfBoundsMatches(options)
+    mask = 0
+    if autoTileMatches(rows, r - 1, c, surface, outOfBoundsMatches)
+      mask += 1
+    end if
+    if autoTileMatches(rows, r, c + 1, surface, outOfBoundsMatches)
+      mask += 2
+    end if
+    if autoTileMatches(rows, r + 1, c, surface, outOfBoundsMatches)
+      mask += 4
+    end if
+    if autoTileMatches(rows, r, c - 1, surface, outOfBoundsMatches)
+      mask += 8
+    end if
+    return mask
+  end function
+
+  ' Which of a cell's eight neighbours are the same surface as it, as an 8-bit mask, clockwise
+  ' from the top: N = 1, NE = 2, E = 4, SE = 8, S = 16, SW = 32, W = 64, NW = 128. This is the
+  ' common "blob" numbering - pass the result to getBlobTileIndex() to pick one of 47 tiles.
+  '
+  ' @param {string[]} rows - the map, one string per row
+  ' @param {integer} r - row index (0 = top)
+  ' @param {integer} c - column index (0 = left)
+  ' @param {BGE.TileMap.AutoTileOptions} [options]
+  ' @return {integer} 0-255
+  function getNeighbourMask8(rows as string[], r as integer, c as integer, options = {} as BGE.TileMap.AutoTileOptions) as integer
+    surface = rows[r].mid(c, 1)
+    outOfBoundsMatches = autoTileOutOfBoundsMatches(options)
+    ' Clockwise from N, matching the bit order.
+    rowOffsets = [-1, -1, 0, 1, 1, 1, 0, -1]
+    colOffsets = [0, 1, 1, 1, 0, -1, -1, -1]
+    mask = 0
+    bit = 1
+    for i = 0 to 7
+      if autoTileMatches(rows, r + rowOffsets[i], c + colOffsets[i], surface, outOfBoundsMatches)
+        mask += bit
+      end if
+      bit *= 2
+    end for
+    return mask
+  end function
+
+  ' Simplifies an 8-bit neighbour mask (see getNeighbourMask8()) to the form a 47-tile blob set
+  ' uses: a corner neighbour only matters when both sides next to it also match, so its bit is
+  ' cleared otherwise. Every possible mask reduces to one of 47 values.
+  '
+  ' Use this to look tiles up yourself when your sheet's 47 tiles are laid out in some other
+  ' order than getBlobTileIndex() assumes.
+  '
+  ' @param {integer} mask8 - 0-255
+  ' @return {integer} the reduced mask, still 0-255
+  function reduceBlobMask(mask8 as integer) as integer
+    n = (mask8 and 1) <> 0
+    e = (mask8 and 4) <> 0
+    s = (mask8 and 16) <> 0
+    w = (mask8 and 64) <> 0
+    reduced = mask8 and (1 + 4 + 16 + 64)
+    if n and e
+      reduced = reduced or (mask8 and 2)
+    end if
+    if s and e
+      reduced = reduced or (mask8 and 8)
+    end if
+    if s and w
+      reduced = reduced or (mask8 and 32)
+    end if
+    if n and w
+      reduced = reduced or (mask8 and 128)
+    end if
+    return reduced
+  end function
+
+  ' Picks one of the 47 tiles in a blob tile set (0-46) from a cell's 8-bit neighbour mask. Tiles
+  ' are numbered by their reduced mask (see reduceBlobMask()) in ascending order: tile 0 is an
+  ' isolated cell with no matching neighbours, tile 46 is fully surrounded.
+  '
+  ' Blob sheets don't share one layout, so if yours is arranged differently, map
+  ' reduceBlobMask()'s value to your own tile positions instead.
+  '
+  ' @example
+  ' mask = BGE.TileMap.getNeighbourMask8(rows, r, c)
+  ' tile = BGE.TileMap.getBlobTileIndex(mask)
+  ' region = CreateObject("roRegion", sheet, (tile mod 8) * 32, (tile \ 8) * 32, 32, 32)
+  '
+  ' @param {integer} mask8 - 0-255, from getNeighbourMask8()
+  ' @return {integer} 0-46
+  function getBlobTileIndex(mask8 as integer) as integer
+    return getBlobTileIndexTable()[reduceBlobMask(mask8)]
+  end function
+
+  ' Picks a piece from a 3x3 edge set - four corners, four edges and a centre, drawn as a
+  ' surface bordered by another - using a cell's four side neighbours. This is the simplest
+  ' auto-tile sheet, but it has no inner-corner or one-cell-wide pieces: an inner corner (only
+  ' a diagonal neighbour differs) and a one-cell-wide run both get the centre piece. Use a
+  ' 47-tile set with getBlobTileIndex() if you need those.
+  '
+  ' @example
+  ' piece = BGE.TileMap.getEdgePiece3x3(rows, r, c)
+  ' region = CreateObject("roRegion", sheet, piece.col * 32, piece.row * 32, 32, 32)
+  '
+  ' @param {string[]} rows - the map, one string per row
+  ' @param {integer} r - row index (0 = top)
+  ' @param {integer} c - column index (0 = left)
+  ' @param {BGE.TileMap.AutoTileOptions} [options]
+  ' @return {object} {col, row}, 0-2 each: the piece's position within the 3x3 set
+  function getEdgePiece3x3(rows as string[], r as integer, c as integer, options = {} as BGE.TileMap.AutoTileOptions) as object
+    mask = getNeighbourMask4(rows, r, c, options)
+    return {
+      col: autoTileAxisPiece((mask and 8) = 0, (mask and 2) = 0),
+      row: autoTileAxisPiece((mask and 1) = 0, (mask and 4) = 0)
+    }
+  end function
+
+  ' 0 = leading edge (west/north), 2 = trailing edge (east/south), 1 = centre.
+  function autoTileAxisPiece(leadingDiffers as boolean, trailingDiffers as boolean) as integer
+    if leadingDiffers and not trailingDiffers
+      return 0
+    else if trailingDiffers and not leadingDiffers
+      return 2
+    end if
+    return 1
+  end function
+
+  function autoTileOutOfBoundsMatches(options as BGE.TileMap.AutoTileOptions) as boolean
+    if options <> invalid and options.outOfBoundsMatches <> invalid
+      return options.outOfBoundsMatches
+    end if
+    return true
+  end function
+
+  function autoTileMatches(rows as string[], r as integer, c as integer, surface as string, outOfBoundsMatches as boolean) as boolean
+    if r < 0 or r >= rows.count() or c < 0 or c >= rows[r].len()
+      return outOfBoundsMatches
+    end if
+    return rows[r].mid(c, 1) = surface
+  end function
+
+  ' Reduced mask -> 0-46, built once on first use and kept on the global AA.
+  function getBlobTileIndexTable() as object
+    globals = GetGlobalAA()
+    if globals.bgeBlobTileIndexTable = invalid
+      table = []
+      table[255] = invalid
+      index = 0
+      for mask = 0 to 255
+        if reduceBlobMask(mask) = mask
+          table[mask] = index
+          index++
+        end if
+      end for
+      globals.bgeBlobTileIndexTable = table
+    end if
+    return globals.bgeBlobTileIndexTable
+  end function
+
+end namespace
