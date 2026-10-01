@@ -32,5 +32,5 @@ https://opengameart.org/content/retropixel-icons-v1-9x9
 License: CC0 (credit optional). Unmodified.
 
 ## ../images/ (channel icons and splash screens)
-"Broadsword" key art, supplied by the repo owner. Each image is the same artwork scaled to
-fill and centre-cropped to that file's size.
+"Broadsword" key art, generated with Google Gemini (supplied by the repo owner). Each image is
+the same artwork scaled to fill and centre-cropped to that file's size.
