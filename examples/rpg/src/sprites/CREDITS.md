@@ -53,3 +53,7 @@ monster-free version.
 ## ui/box.9.png
 "RPG GUI Block Element" by Bart. https://opengameart.org/content/rpg-gui-block-element
 License: CC-BY 3.0. 9-patch stretch markers added by the repo owner.
+
+## ui/button.9.png, ui/frame.9.png
+"Buttons and Frame", https://opengameart.org/content/buttons-and-frame. License: CC0.
+9-patch stretch markers added by the repo owner.
