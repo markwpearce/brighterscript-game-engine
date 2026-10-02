@@ -10,7 +10,7 @@ The story layer (flags, items, conditions/effects, dialogue pages, event rules, 
 
 **"The Witch of the Keep."** A witch has taken the castle. Her goblins hold the hall, bats nest in the rafters, and rats pour out of the cellars into town. The knight at the gate lets no one in.
 
-Slice C covers the first three beats. Slice D (its own issue) adds goblins, the goblin captain and throne-room key, the witch boss fight, and the ending.
+Slice C covers the first three beats. Slice D (#289) adds goblins, the goblin captain and throne-room key, the witch boss fight, and the ending.
 
 | Beat | What happens | What moves it on |
 |------|--------------|------------------|
@@ -406,4 +406,4 @@ Combat and grinding in the sewer are real-time, so the repo owner plays those an
 - `examples/rpg/src/sprites/CREDITS.md`: the NPC sheet, the Ails item icons (noting the rust recolour), and the title art.
 - `CLAUDE.md`: the UI section gets `Label.wrapWidth`/`BGE.UI.wrapText()`. The rpg bullet gets the story layer, NPCs, the shop/inventory, saving, the sewer, and `--param stage`.
 - `docs/`: mention `wrapWidth` wherever a guide covers `Label`.
-- File the Slice D issue (goblins, captain and key, throne room, witch boss, ending, and the decision whether to promote the story layer to the engine).
+- Slice D is #289 (goblins, captain and key, throne room, witch boss, ending, and whether to promote the story layer). Slice E is #290 (music and sound pass).
