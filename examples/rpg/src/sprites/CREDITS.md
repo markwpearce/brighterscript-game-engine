@@ -49,3 +49,7 @@ the repo owner. `swordRusty.png` is `swordSteel.png` recoloured.
 Currently a copy of the splash art (the same Gemini "Broadsword" key art, supplied by the repo
 owner, monsters included), scaled to fill and centre-cropped to 1280x720. To be replaced by the
 monster-free version.
+
+## ui/box.9.png
+"RPG GUI Block Element" by Bart. https://opengameart.org/content/rpg-gui-block-element
+License: CC-BY 3.0. 9-patch stretch markers added by the repo owner.
