@@ -255,6 +255,12 @@ passable from below. None of that lives in the engine - it's ordinary `onCollisi
 top of the same detection-only colliders described above. Read `Player.onCollision` in
 `examples/platformer/src/source/Entities/Player.bs` for the concrete pattern.
 
+One thing to know when resolving: colliders that only touch edge to edge don't overlap, so they
+don't collide. Once you've snapped the player flush onto the ground, `onCollision` won't fire for
+it next frame unless something moves the player back into it. A "grounded" flag that you clear
+every frame and expect `onCollision` to set again will flicker. Keep applying gravity while
+grounded, or check for ground directly, as the platformer's `Player` does.
+
 ### Walls in a top-down game
 
 For top-down movement against static walls, `BGE.SolidWorld` does the resolving for you. Add
