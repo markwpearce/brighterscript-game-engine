@@ -76,10 +76,10 @@ Goblins, the witch, the throne room, keys, the ending (Slice D). Promoting the s
 
   Exact cell sizes and facing rows are found while repacking. Each character gets stand and walk frames for down/up/left/right; where the sheet only has one side view, the other is a horizontal flip.
 
-- Item icons (34×34), from "RPG Icons Extra" by Ails (Henrique Lazarini, ails.deviantart.com), CC-BY 3.0 per its `info.txt`, copied into `sprites/items/`:
+- Item icons (34×34). The potion comes from "RPG Icons Extra" by Ails (Henrique Lazarini, ails.deviantart.com), CC-BY 3.0 per its `info.txt`, copied into `sprites/items/`:
   - `potion.png`: `icon_29.png` (round red flask), the healing potion.
-  - `swordSteel.png`: `icon_100.png` (broad steel blade), the steel sword.
-  - `swordRusty.png`: `icon_100.png` recoloured to rust with ImageMagick, the starting sword. `CREDITS.md` notes it's a modified copy.
+  - `swordSteel.png`: `broadsword_icon.png` (34×34, supplied by the repo owner), the steel sword.
+  - `swordRusty.png`: the same broadsword icon recoloured to rust with ImageMagick, the starting sword. `CREDITS.md` notes it's a modified copy.
   
   The heart container reuses `heart.png` (9×9) drawn at 4×, so it sits at about the same size as the 34px icons on a 720p UI canvas. The panels draw every icon at an integer scale picked from the UI canvas height, like `HeartsHud`.
 - `images/title.jpg`: the monster-free "Broadsword" key art for the title screen, generated with Google Gemini and supplied by the repo owner, credited alongside the existing splash/icon art in `CREDITS.md`. It's scaled to 1280×720 when added.
