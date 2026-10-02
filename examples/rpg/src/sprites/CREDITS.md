@@ -46,5 +46,6 @@ From "RPG Icons Extra" by Ails (Henrique Lazarini), https://ails.deviantart.com.
 the repo owner. `swordRusty.png` is `swordSteel.png` recoloured.
 
 ## ../images/title.jpg
-The "Broadsword" key art without monsters, generated with Google Gemini (supplied by the repo
-owner), scaled to fill and centre-cropped to 1280x720.
+Currently a copy of the splash art (the same Gemini "Broadsword" key art, supplied by the repo
+owner, monsters included), scaled to fill and centre-cropped to 1280x720. To be replaced by the
+monster-free version.
