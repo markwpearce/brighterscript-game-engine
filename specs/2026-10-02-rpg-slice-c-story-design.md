@@ -76,8 +76,12 @@ Goblins, the witch, the throne room, keys, the ending (Slice D). Promoting the s
 
   Exact cell sizes and facing rows are found while repacking. Each character gets stand and walk frames for down/up/left/right; where the sheet only has one side view, the other is a horizontal flip.
 
-- Item icons, from [RetroPixel Icons V1 (9x9)](https://opengameart.org/content/retropixel-icons-v1-9x9) by Anton Revin, CC0: `sword_simple.png` (rusty sword) and `sword_blue.png` (steel sword) are copied into `sprites/`. The heart container reuses `heart.png`.
-- **Healing potion icon: to be supplied by the repo owner** (≈9×9–16×16, close to RetroPixel's style). Until it arrives, the inventory/shop draw a placeholder (a red `drawRectangle`), so this doesn't block the work.
+- Item icons (34×34), from "RPG Icons Extra" by Ails (Henrique Lazarini, ails.deviantart.com), CC-BY 3.0 per its `info.txt`, copied into `sprites/items/`:
+  - `potion.png`: `icon_29.png` (round red flask), the healing potion.
+  - `swordSteel.png`: `icon_100.png` (broad steel blade), the steel sword.
+  - `swordRusty.png`: `icon_100.png` recoloured to rust with ImageMagick, the starting sword. `CREDITS.md` notes it's a modified copy.
+  
+  The heart container reuses `heart.png` (9×9) drawn at 4×, so it sits at about the same size as the 34px icons on a 720p UI canvas. The panels draw every icon at an integer scale picked from the UI canvas height, like `HeartsHud`.
 - `images/title.jpg`: the monster-free "Broadsword" key art for the title screen, generated with Google Gemini and supplied by the repo owner, credited alongside the existing splash/icon art in `CREDITS.md`. It's scaled to 1280×720 when added.
 - Tiles for the sewer come from the sheets already in the example: `stoneFloor`, `brick` and `water` from Castle2.png, plus two new atlas regions there: the dark tunnel archway (≈ x 430, y 222) as the sewer entrance in town, and the ladder (≈ x 64, y 256) as the exit in the sewer. Exact rectangles are measured when adding them.
 
@@ -399,7 +403,7 @@ Combat and grinding in the sewer are real-time, so the repo owner plays those an
 
 ## Docs
 
-- `examples/rpg/src/sprites/CREDITS.md`: the NPC sheet and the two RetroPixel swords (and the potion once supplied).
+- `examples/rpg/src/sprites/CREDITS.md`: the NPC sheet, the Ails item icons (noting the rust recolour), and the title art.
 - `CLAUDE.md`: the UI section gets `Label.wrapWidth`/`BGE.UI.wrapText()`. The rpg bullet gets the story layer, NPCs, the shop/inventory, saving, the sewer, and `--param stage`.
 - `docs/`: mention `wrapWidth` wherever a guide covers `Label`.
 - File the Slice D issue (goblins, captain and key, throne room, witch boss, ending, and the decision whether to promote the story layer to the engine).
