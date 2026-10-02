@@ -29,7 +29,12 @@ class Story extends BGE.GameEntity
   private sceneName as string = ""
   private spawn as string = ""
   private modalCount as integer = 0
+  ' Modal releases waiting out their delay (see releaseModalLater).
+  private pendingReleases as integer = 0
+  private releaseDelay as integer = 0
   private talkingNpc as Npc = invalid
+  ' The panel currently open (DialogueBox, ShopPanel or InventoryPanel), so button actions reach it.
+  private openPanel as dynamic = invalid
 
   sub new(game as BGE.Game)
     super(game)
@@ -107,23 +112,69 @@ class Story extends BGE.GameEntity
 
   ' Called by the DialogueBox when the last page is read (choice is invalid without choices).
   sub finishDialogue(page as object, choice as dynamic)
-    m.closeModal()
-    if m.talkingNpc <> invalid and m.talkingNpc.isValid()
-      m.talkingNpc.setTalking(false)
+    m.openPanel = invalid
+    ' One merged result: a single settle, save and batch of posts.
+    effects = []
+    if page.effects <> invalid
+      effects.append(page.effects)
     end if
-    m.talkingNpc = invalid
-    m.applyResult(applyEffects(page.effects, m.context()))
+    opensShop = false
     if choice <> invalid
-      m.applyResult(applyEffects(choice.effects, m.context()))
-      if choice.open = "shop"
-        m.openShop()
+      if choice.effects <> invalid
+        effects.append(choice.effects)
       end if
+      opensShop = choice.open <> invalid and choice.open = "shop"
     end if
+    m.applyResult(applyEffects(effects, m.context()))
+    ' Open the shop before releasing the dialogue's modal so the game never resumes in between.
+    if opensShop
+      m.openShop()
+    end if
+    m.endTalking()
+    m.releaseModalLater()
   end sub
 
   ' Called by the DialogueBox when the player backs out: no effects run.
   sub cancelDialogue()
-    m.closeModal()
+    m.openPanel = invalid
+    m.endTalking()
+    m.releaseModalLater()
+  end sub
+
+  ' Called by the shop and inventory panels once they've closed themselves.
+  sub panelClosed()
+    m.openPanel = invalid
+    m.releaseModalLater()
+  end sub
+
+  ' Called by panel buttons (see MenuPanel/ActionButton).
+  sub onMenuAction(actionId as string)
+    if m.openPanel <> invalid
+      m.openPanel.onAction(actionId)
+    end if
+  end sub
+
+  ' The press that closed a panel is still being dispatched this frame; resuming at once would
+  ' let the player see it (a talk or sword swing on OK, a quit on Back). Wait a couple of frames.
+  private sub releaseModalLater()
+    m.pendingReleases++
+    m.releaseDelay = 2
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    if m.pendingReleases > 0
+      m.releaseDelay--
+      if m.releaseDelay <= 0
+        releases = m.pendingReleases
+        m.pendingReleases = 0
+        for i = 1 to releases
+          m.closeModal()
+        end for
+      end if
+    end if
+  end sub
+
+  private sub endTalking()
     if m.talkingNpc <> invalid and m.talkingNpc.isValid()
       m.talkingNpc.setTalking(false)
     end if
@@ -230,12 +281,14 @@ class Story extends BGE.GameEntity
     end if
     m.openModal()
     dialogue = new DialogueBox(m.game, page, m.flags)
+    m.openPanel = dialogue
     dialogue.open(m.game.gameUi)
   end sub
 
   private sub openShop()
     m.openModal()
     panel = new ShopPanel(m.game)
+    m.openPanel = panel
     panel.open(m.game.gameUi)
   end sub
 
@@ -245,6 +298,7 @@ class Story extends BGE.GameEntity
     end if
     m.openModal()
     panel = new InventoryPanel(m.game)
+    m.openPanel = panel
     panel.open(m.game.gameUi)
   end sub
 
