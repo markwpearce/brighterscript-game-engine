@@ -1,6 +1,7 @@
 import "../math/math.bs"
 import "../math/vector.bs"
 import "../utils/colors.bs"
+import "../utils/controlEvents.bs"
 import "../utils/parsers/OBJParser.bs"
 import "../utils/parsers/STLParser.bs"
 import "../utils/utils.bs"
@@ -84,6 +85,8 @@ namespace BGE
     ' a time - two remotes each holding a different button now both repeat
     ' correctly instead of one clobbering the other's state.
     private remoteHeldButtons = {}
+    ' Characters typed on a keyboard this frame, kept out of the button events - see getControlEventKind().
+    private keyboardCharsThisFrame as integer[] = []
     private optional inputEntityId as string or dynamic = invalid
     private optional currentInputEntityId as string or dynamic = invalid
     ' Was the entity that set inputEntityId a UiContainer (isContainer())?
@@ -371,10 +374,19 @@ namespace BGE
         m.uiCanvas.renderer.resetDrawCallCounter()
         urlMsg = m.urlPort.GetMessage()
         universalControlEvents = [] as roUniversalControlEvent[]
+        m.keyboardCharsThisFrame = []
         screenMsg = m.screen_port.GetMessage()
         ecpMsg = m.ecpInputPort.GetMessage()
         while screenMsg <> invalid
-          if type(screenMsg) = "roUniversalControlEvent" and screenMsg.GetInt() <> 11
+          eventKind = BGE.ControlEventKind.button
+          if type(screenMsg) = "roUniversalControlEvent"
+            eventKind = BGE.getControlEventKind(screenMsg.GetInt(), screenMsg.GetChar())
+          end if
+          if eventKind = BGE.ControlEventKind.charPress
+            m.keyboardCharsThisFrame.Push(screenMsg.GetChar())
+          else if eventKind = BGE.ControlEventKind.charRelease
+            ' only the press reaches onECPKeyboard()
+          else if type(screenMsg) = "roUniversalControlEvent" and screenMsg.GetInt() <> 11
             universalControlEvents.Push(screenMsg as roUniversalControlEvent)
             remoteId = (screenMsg as roUniversalControlEvent).GetRemoteID()
             if screenMsg.GetInt() < 100
@@ -900,6 +912,17 @@ namespace BGE
       m.processEntitiesCollisions(false)
     end sub
 
+    ' Test-only: runs processEntityOnInput() for one entity as if these characters had been
+    ' typed this frame, with no button events.
+    '
+    ' @param {GameEntity} entity
+    ' @param {integer[]} chars
+    ' @return {boolean} true if the entity is still valid
+    function processKeyboardCharsForTest(entity as GameEntity, chars as integer[]) as boolean
+      m.keyboardCharsThisFrame = chars
+      return m.processEntityOnInput(entity, [], [])
+    end function
+
     ' Test-only passthrough to the private dispatchOnInput(), so specs can
     ' exercise the same currentInputEntityId gating Game.Play() relies on
     ' without needing a full Play() loop iteration.
@@ -961,14 +984,15 @@ namespace BGE
         if not m.dispatchOnInput(entity, m.gameInputForRemoteMsg(msg))
           return false
         end if
-
-        if entity.onECPKeyboard <> invalid and msg.GetChar() <> 0 and msg.GetChar() = msg.GetInt()
-          entity.onECPKeyboard(msg.GetChar())
+      end for
+      if entity.onECPKeyboard <> invalid
+        for each char in m.keyboardCharsThisFrame
+          entity.onECPKeyboard(char)
           if not m.isValidEntity(entity)
             return false
           end if
-        end if
-      end for
+        end for
+      end if
       for each heldInput in remoteHeldInputs
         if not m.dispatchOnInput(entity, heldInput)
           return false
