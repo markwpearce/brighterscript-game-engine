@@ -44,6 +44,9 @@ connected, the built-in page also sends its standard-mapping face/menu buttons u
 these same names (alongside their raw numeric index, e.g. `"0"`), so a binding to
 `"ok"`/`"b"`/`"back"` works for a touch tap, a remote press, and a real controller
 button with no extra binding needed - see "Simulator/physical gamepad buttons" below.
+The gamepad's X/Y also send `"x"`/`"y"` (and L1/R1 send `"l1"`/`"r1"`). Controller
+input reaches `gameUi` widgets' `onInput()` too (not just entities and the focus
+system), so a custom widget can handle a gamepad press the same as a remote one.
 
 The recommended way to read bound state each frame is `onControls()`, a
 `GameEntity` lifecycle hook called once per frame with the game's
