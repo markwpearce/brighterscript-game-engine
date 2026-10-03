@@ -1,0 +1,77 @@
+' examples/rpg/src/source/Story/EventRules.bs
+import "Conditions.bs"
+import "Effects.bs"
+import "ValueKinds.bs"
+import "StoryTypes.bs"
+
+const STORY_SETTLE_MAX_PASSES = 4
+
+' Story changes that happen without dialogue. Every rule whose event, match and when pass runs,
+' in order. "storyChanged" rules run after anything changes (see settleStory), which is how the
+' gate opens whichever of Bram's word and the sword comes last.
+'
+' @return {EventRule[]}
+function getEventRules() as EventRule[]
+  return [
+    {event: "enemyKilled", match: {kind: "rat"}, when: [{flag: "rats.stage", eq: 1}], effects: [{add: "rats.kills", amount: 1}]},
+    {event: "enemyKilled", match: {kind: "rat"}, when: [{flag: "rats.stage", eq: 1}, {flag: "rats.kills", gte: 4}], effects: [{set: "rats.stage", value: 2}]},
+    {event: "storyChanged", when: [{flag: "bram.vouched"}, {notItem: "steelSword"}], effects: [{set: "gate.stage", value: 1}]},
+    {event: "storyChanged", when: [{flag: "bram.vouched"}, {hasItem: "steelSword"}, {notFlag: "gate.open"}], effects: [{set: "gate.open", value: true}, {post: "gateOpened"}]},
+    {event: "storyChanged", when: [{flag: "gate.open"}], effects: [{set: "gate.stage", value: 2}]}
+  ]
+end function
+
+' @param {EventRule[]} rules
+' @param {string} eventName
+' @param {roAssociativeArray} data - the event's data; a rule's match keys must equal these fields
+' @param {StoryContext} ctx - newStoryContext()
+' @return {StoryResult}
+function runEventRules(rules as EventRule[], eventName as string, data as roAssociativeArray, ctx as StoryContext) as StoryResult
+  total = {changed: false, posts: []} as StoryResult
+  for each rule in rules
+    if rule.event = eventName and ruleMatches(rule.match, data) and evaluateConditions(rule.when, ctx)
+      result = applyEffects(rule.effects, ctx)
+      total.changed = total.changed or result.changed
+      total.posts.append(result.posts)
+    end if
+  end for
+  return total
+end function
+
+function ruleMatches(match as roAssociativeArray, data as roAssociativeArray) as boolean
+  if match = invalid
+    return true
+  end if
+  for each key in match
+    if data = invalid or not data.DoesExist(key)
+      return false
+    end if
+    ' Compare normalized kinds first, so <> never sees mismatched types and boxings don't matter.
+    if valueKind(data[key]) <> valueKind(match[key])
+      return false
+    end if
+    if data[key] <> match[key]
+      return false
+    end if
+  end for
+  return true
+end function
+
+' Runs "storyChanged" rules until nothing more changes.
+'
+' @param {EventRule[]} rules
+' @param {StoryContext} ctx
+' @return {StoryResult} across every pass
+function settleStory(rules as EventRule[], ctx as StoryContext) as StoryResult
+  total = {changed: false, posts: []} as StoryResult
+  for pass = 1 to STORY_SETTLE_MAX_PASSES
+    result = runEventRules(rules, "storyChanged", {}, ctx)
+    total.posts.append(result.posts)
+    if not result.changed
+      return total
+    end if
+    total.changed = true
+  end for
+  print "[rpg] warning: story rules still changing after " + STORY_SETTLE_MAX_PASSES.toStr() + " passes"
+  return total
+end function

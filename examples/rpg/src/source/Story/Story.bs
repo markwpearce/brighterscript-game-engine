@@ -1,0 +1,323 @@
+' examples/rpg/src/source/Story/Story.bs
+import "pkg:/source/utils/registry.bs"
+import "StoryFlags.bs"
+import "Inventory.bs"
+import "Items.bs"
+import "Conditions.bs"
+import "Effects.bs"
+import "EventRules.bs"
+import "DialogueData.bs"
+import "QuestData.bs"
+import "ShopData.bs"
+import "SaveData.bs"
+import "Checkpoints.bs"
+import "StoryTypes.bs"
+import "../Entities/Player.bs"
+import "../Entities/Npc.bs"
+import "../UI/DialogueBox.bs"
+import "../UI/ShopPanel.bs"
+import "../UI/InventoryPanel.bs"
+
+' Owns the story state (flags, inventory) and runs it: answers game events with the event rules,
+' opens dialogue/shop/inventory panels, and autosaves. Persistent and never paused, so it keeps
+' working while a panel has the game paused.
+class Story extends BGE.GameEntity
+
+  flags as StoryFlags = invalid
+  inventory as Inventory = invalid
+  ' Off while a --param deep link is active, so testing never overwrites a real save.
+  savingEnabled as boolean = true
+  private sceneName as string = ""
+  private spawn as string = ""
+  private modalCount as integer = 0
+  ' Modal releases waiting out their delay (see releaseModalLater).
+  private pendingReleases as integer = 0
+  private releaseDelay as integer = 0
+  private talkingNpc as Npc = invalid
+  ' The panel currently open (DialogueBox, ShopPanel or InventoryPanel), so button actions reach it.
+  private openPanel as StoryPanel = invalid
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Story"
+    m.persistent = true
+    m.pauseable = false
+    m.flags = new StoryFlags()
+    m.inventory = new Inventory(getItemDefinitions())
+  end sub
+
+  function context() as StoryContext
+    return newStoryContext(m.flags, m.inventory, m.getPlayer())
+  end function
+
+  sub newGame()
+    m.flags.clear()
+    m.inventory.clear()
+    m.getPlayer().resetForNewGame()
+    m.syncPlayer()
+  end sub
+
+  ' @param {SaveData} save - from readSave()
+  sub loadSave(save as SaveData)
+    m.flags.loadAA(save.flags)
+    m.inventory.loadAA(save.inventory)
+    m.getPlayer().applySavedStats(save.player)
+    m.syncPlayer()
+  end sub
+
+  ' Jumps to a numbered story checkpoint (--param stage=N).
+  sub applyCheckpoint(n as integer)
+    m.newGame()
+    state = checkpointState(n)
+    m.flags.loadAA(state.flags.toAA())
+    m.inventory.loadAA(state.inventory.toAA())
+    m.getPlayer().coins = state.coins
+    m.syncPlayer()
+  end sub
+
+  ' @return {SaveData} the saved game, or invalid if there's none (or it's unreadable)
+  function readSave() as SaveData
+    save = validateSaveData(BGE.registryRead(SAVE_SECTION, SAVE_KEY))
+    if save = invalid
+      return invalid
+    end if
+    ' A save naming a scene that no longer exists is as good as none.
+    for each sceneName in m.game.getSceneNames()
+      if sceneName = save.scene
+        return save
+      end if
+    end for
+    return invalid
+  end function
+
+  sub deleteSave()
+    section = CreateObject("roRegistrySection", SAVE_SECTION)
+    section.Delete(SAVE_KEY)
+    section.Flush()
+  end sub
+
+  ' Called by an area once it's built: remembers where to resume, and saves.
+  sub arrivedAt(sceneName as string, spawn as string)
+    m.sceneName = sceneName
+    m.spawn = spawn
+    m.save()
+  end sub
+
+  sub save()
+    if not m.savingEnabled or m.sceneName = ""
+      return
+    end if
+    BGE.registryWrite(SAVE_SECTION, SAVE_KEY, buildSaveData(m.sceneName, m.spawn, m.flags, m.inventory, m.getPlayer()))
+    m.game.postGameEvent("storySaved")
+  end sub
+
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    if eventName = "talkRequested"
+      m.startDialogue(data.npcId)
+    else if eventName = "inventoryRequested"
+      m.openInventory()
+    else if eventName = "enemyKilled"
+      m.applyResult(runEventRules(getEventRules(), eventName, data, m.context()))
+    end if
+  end sub
+
+  ' Called by the DialogueBox when the last page is read (choice is invalid without choices).
+  sub finishDialogue(page as DialoguePage, choice as DialogueChoice)
+    m.openPanel = invalid
+    ' One merged result: a single settle, save and batch of posts.
+    effects = [] as StoryEffect[]
+    if page.effects <> invalid
+      effects.append(page.effects)
+    end if
+    opensShop = false
+    if choice <> invalid
+      if choice.effects <> invalid
+        effects.append(choice.effects)
+      end if
+      opensShop = choice.open <> invalid and choice.open = "shop"
+    end if
+    m.applyResult(applyEffects(effects, m.context()))
+    ' Open the shop before releasing the dialogue's modal so the game never resumes in between.
+    if opensShop
+      m.openShop()
+    end if
+    m.endTalking()
+    m.releaseModalLater()
+  end sub
+
+  ' Called by the DialogueBox when the player backs out: no effects run.
+  sub cancelDialogue()
+    m.openPanel = invalid
+    m.endTalking()
+    m.releaseModalLater()
+  end sub
+
+  ' Called by the shop and inventory panels once they've closed themselves.
+  sub panelClosed()
+    m.openPanel = invalid
+    m.releaseModalLater()
+  end sub
+
+  ' Reopens the shop after a purchase so its labels show what's owned. The count stays above 0.
+  sub reopenShop()
+    m.openShop()
+  end sub
+
+  ' Called by panel buttons (see MenuPanel/ActionButton).
+  sub onMenuAction(actionId as string)
+    if m.openPanel <> invalid
+      m.openPanel.onAction(actionId)
+    end if
+  end sub
+
+  ' The press that closed a panel is still being dispatched this frame; resuming at once would
+  ' let the player see it (a talk or sword swing on OK, a quit on Back). Wait a couple of frames.
+  private sub releaseModalLater()
+    m.pendingReleases++
+    m.releaseDelay = 2
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    if m.pendingReleases > 0
+      m.releaseDelay--
+      if m.releaseDelay <= 0
+        releases = m.pendingReleases
+        m.pendingReleases = 0
+        for i = 1 to releases
+          m.closeModal()
+        end for
+      end if
+    end if
+  end sub
+
+  private sub endTalking()
+    if m.talkingNpc <> invalid and m.talkingNpc.isValid()
+      m.talkingNpc.setTalking(false)
+    end if
+    m.talkingNpc = invalid
+  end sub
+
+  function shopItems() as ShopItem[]
+    return getShopItems()
+  end function
+
+  function priceOf(itemId as string) as integer
+    for each row in getShopItems()
+      if row.itemId = itemId
+        return row.price
+      end if
+    end for
+    return 0
+  end function
+
+  function buy(itemId as string) as ActionResult
+    ctx = m.context()
+    result = buyItem(itemId, m.priceOf(itemId), ctx)
+    if result.ok
+      m.game.playSound("coin")
+      m.applyResult({changed: true, posts: []})
+    end if
+    return result
+  end function
+
+  function use(itemId as string) as ActionResult
+    result = useItem(itemId, m.context())
+    if result.ok
+      m.applyResult({changed: true, posts: []})
+    end if
+    return result
+  end function
+
+  function objectives() as string[]
+    return currentObjectives(getQuestData(), m.flags)
+  end function
+
+  ' Panels call these so the game stays paused while any of them is open.
+  sub openModal()
+    if m.modalCount = 0
+      m.game.Pause()
+    end if
+    m.modalCount++
+  end sub
+
+  sub closeModal()
+    if m.modalCount > 0
+      m.modalCount--
+      if m.modalCount = 0
+        m.game.Resume()
+      end if
+    end if
+  end sub
+
+  function isModalOpen() as boolean
+    return m.modalCount > 0
+  end function
+
+  ' Settles the story after a change, posts what the rules asked for, keeps the player's
+  ' sword in step with the inventory, and saves.
+  private sub applyResult(result as StoryResult)
+    if not result.changed and result.posts.count() = 0
+      return
+    end if
+    settled = settleStory(getEventRules(), m.context())
+    m.syncPlayer()
+    posts = [] as string[]
+    posts.append(result.posts)
+    posts.append(settled.posts)
+    m.save()
+    for each eventName in posts
+      m.game.postGameEvent(eventName)
+    end for
+  end sub
+
+  private sub syncPlayer()
+    m.getPlayer().swordDamage = swordDamageFor(m.inventory)
+  end sub
+
+  private sub startDialogue(npcId as string)
+    if m.isModalOpen()
+      return
+    end if
+    page = selectDialoguePage(getDialogueData()[npcId] as DialoguePage[], m.context())
+    if page = invalid
+      return
+    end if
+    for each entity in m.game.getEntitiesByTag("npc")
+      npcEntity = entity as Npc
+      if npcEntity.npcId = npcId
+        m.talkingNpc = npcEntity
+      end if
+    end for
+    playerEntity = m.getPlayer()
+    if m.talkingNpc <> invalid
+      m.talkingNpc.setTalking(true)
+      m.talkingNpc.faceToward(playerEntity.position.x, playerEntity.position.y)
+    end if
+    m.openModal()
+    dialogue = new DialogueBox(m.game, page, m.flags)
+    m.openPanel = dialogue
+    dialogue.open(m.game.gameUi)
+  end sub
+
+  private sub openShop()
+    m.openModal()
+    panel = new ShopPanel(m.game)
+    m.openPanel = panel
+    panel.open(m.game.gameUi)
+  end sub
+
+  private sub openInventory()
+    if m.isModalOpen() or m.game.isTransitioning() or m.getPlayer().isDefeated()
+      return
+    end if
+    m.openModal()
+    panel = new InventoryPanel(m.game)
+    m.openPanel = panel
+    panel.open(m.game.gameUi)
+  end sub
+
+  private function getPlayer() as Player
+    return m.game.getEntityByName("Player") as Player
+  end function
+
+end class

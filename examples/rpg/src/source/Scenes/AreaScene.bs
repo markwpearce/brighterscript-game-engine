@@ -3,9 +3,15 @@ import "pkg:/source/engine/colliders/SolidWorld.bs"
 import "../World/TileMapEntity.bs"
 import "../World/Prop.bs"
 import "../Entities/Player.bs"
+import "../UI/InputRoles.bs"
 import "../World/Door.bs"
 import "../Entities/Rat.bs"
 import "../Entities/Bat.bs"
+import "../Entities/Npc.bs"
+import "../Story/Story.bs"
+import "../Story/Conditions.bs"
+import "../Maps/MapTypes.bs"
+import "../Entities/Shapes.bs"
 
 ' Outline colour for SolidWorld walls in the debug overlay (packed RGBA).
 const SOLID_DEBUG_RGBA = &h00FFFFFF
@@ -19,6 +25,8 @@ class AreaScene extends BGE.GameScene
   mapHeight as float = 0
   ' Spawn id -> {x, y, facing}: player feet position on arrival.
   spawns as roAssociativeArray = {}
+  ' Feet points {x, y} of every `drain` placement (where the sewer's new rats come from).
+  drains as Point[] = []
 
   sub new(game as BGE.Game)
     super(game)
@@ -28,7 +36,7 @@ class AreaScene extends BGE.GameScene
     return []
   end function
 
-  function getPlacements() as object
+  function getPlacements() as MapPlacement[]
     return []
   end function
 
@@ -39,12 +47,15 @@ class AreaScene extends BGE.GameScene
     m.mapHeight = numRows * TILE_SIZE
     m.solidWorld = new BGE.SolidWorld()
     m.spawns = {}
+    m.drains = [] as Point[]
 
     tileMap = new TileMapEntity(m.game)
     m.game.addEntity(tileMap, {rows: rows, solidWorld: m.solidWorld})
-    addPlacementSolids(m.solidWorld, m.getPlacements(), numRows)
+    storyEntity = m.game.getEntityByName("Story") as Story
+    placements = filterPlacements(m.getPlacements(), storyEntity.context())
+    addPlacementSolids(m.solidWorld, placements, numRows)
 
-    for each item in m.getPlacements()
+    for each item in placements
       if item.atlasKey <> invalid
         newProp = new Prop(m.game)
         m.game.addEntity(newProp, {atlasKey: item.atlasKey, x: item.col * TILE_SIZE, y: cellBottomY(numRows, item.row), solidWorld: m.solidWorld})
@@ -53,6 +64,12 @@ class AreaScene extends BGE.GameScene
         m.game.addEntity(newDoor, {x: item.col * TILE_SIZE, y: cellBottomY(numRows, item.row), w: item.w * TILE_SIZE, h: item.h * TILE_SIZE, target: item.target, spawn: item.spawn})
       else if item.type = "enemy"
         m.addEnemy(item, numRows)
+      else if item.type = "drain"
+        m.drains.push(enemySpawnPoint(item, numRows))
+      else if item.type = "npc"
+        feet = npcSpawnPoint(item, numRows)
+        newNpc = new Npc(m.game)
+        m.game.addEntity(newNpc, {npcId: item.npcId, character: item.character, x: feet.x, y: feet.y, facing: item.facing, wander: item.wander * 1.0, solidWorld: m.solidWorld})
       else if item.type = "spawn"
         ' Feet a little above the cell's bottom edge, so the 12px-tall feet box sits inside the cell.
         m.spawns[item.id] = {x: item.col * TILE_SIZE, y: cellBottomY(numRows, item.row) + 10, facing: item.facing}
@@ -69,9 +86,10 @@ class AreaScene extends BGE.GameScene
     camera = m.game.canvas.renderer.camera as BGE.Camera2d
     camera.setBounds(0, 0, m.mapWidth, m.mapHeight)
     camera.follow(playerEntity)
+    storyEntity.arrivedAt(m.name, spawnId)
   end sub
 
-  private sub addEnemy(item as object, numRows as integer)
+  private sub addEnemy(item as MapPlacement, numRows as integer)
     feet = enemySpawnPoint(item, numRows)
     args = {x: feet.x, y: feet.y, solidWorld: m.solidWorld, mapWidth: m.mapWidth, mapHeight: m.mapHeight}
     if item.kind = "bat"
@@ -84,8 +102,10 @@ class AreaScene extends BGE.GameScene
   end sub
 
   override sub onInput(input as BGE.GameInput)
-    if input.press and input.isButton("back")
+    if isQuitButton(input.press, input.button)
       m.game.End()
+    else if isInventoryButton(input.press, input.button)
+      m.game.postGameEvent("inventoryRequested")
     else if input.press and input.isButton("options")
       ' Fps/input overlays, collider outlines, and (below) the SolidWorld's walls.
       showDebug = not m.game.isDebugUiEnabled()
