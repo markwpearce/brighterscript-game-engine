@@ -1,0 +1,147 @@
+import "Enemy.bs"
+import "Facing.bs"
+import "Shadow.bs"
+import "Loot.bs"
+
+const GOBLIN_SPEED = 60.0
+const GOBLIN_CHASE_RANGE = 160.0
+const GOBLIN_ATTACK_RANGE = 48.0
+const GOBLIN_TELL_SECONDS = 0.4
+const GOBLIN_LUNGE_SECONDS = 0.25
+const GOBLIN_LUNGE_SPEED = 180.0
+const GOBLIN_BOX_W = 18.0
+const GOBLIN_BOX_H = 10.0
+const GOBLIN_FRAMES_PER_ROW = 11
+
+' A goblin with a short sword: chases the player, plants its feet (the tell), then lunges. A hit
+' during the tell cancels the lunge. Takes three hits.
+'
+' goblin.png: 64x64 cells, 11 per row. Rows 0-3 face down/right/up/left: frames 0-7 walk, 8-10
+' swing. Row 4 is the death animation (frames 44-48).
+class Goblin extends Enemy
+
+  protected facing as FacingDirection = FacingDirection.down
+  ' "walk", "tell" or "lunge" (GoblinKing adds its own)
+  protected state as string = "walk"
+  protected stateTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  ' Set by freezePose(): stands still in one pose (the showcase room).
+  protected frozen as boolean = false
+  protected lungeX as float = 0.0
+  protected lungeY as float = 0.0
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Goblin"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    super.onCreate(args)
+    m.health = 3
+    m.boxW = GOBLIN_BOX_W
+    m.boxH = GOBLIN_BOX_H
+    m.headHeight = 44
+    addGroundShadow(m, 9)
+    m.sprite = m.addSprite("body", m.game.getBitmap("goblin"), 64, 64)
+    ' Pins the goblin's feet (32, 60 within each cell) onto the entity's position.
+    m.sprite.applyPreTranslation(-32, -60)
+    rowFacings = [FacingDirection.down, FacingDirection.right, FacingDirection.up, FacingDirection.left]
+    for i = 0 to 3
+      first = i * GOBLIN_FRAMES_PER_ROW
+      m.sprite.addAnimation("walk_" + rowFacings[i], [first, first + 1, first + 2, first + 3, first + 4, first + 5, first + 6, first + 7], 12, BGE.SpritePlayMode.Loop)
+      m.sprite.addAnimation("idle_" + rowFacings[i], [first], 1, BGE.SpritePlayMode.Loop)
+      m.sprite.addAnimation("swing_" + rowFacings[i], [first + 8, first + 9, first + 10], 12, BGE.SpritePlayMode.Forward)
+    end for
+    death = 4 * GOBLIN_FRAMES_PER_ROW
+    m.sprite.addAnimation("death", [death, death + 1, death + 2, death + 3, death + 4], 10, BGE.SpritePlayMode.Forward)
+    m.sprite.playAnimation("idle_down")
+    m.addRectangleCollider("body", 20, 32, -10, 32)
+  end sub
+
+  ' Holds one pose for a screenshot: "walk", "tell", "lunge" or "dying".
+  '
+  ' @param {string} pose
+  sub freezePose(pose as string)
+    m.frozen = true
+    if pose = "walk"
+      m.playFacing("walk_")
+    else if pose = "tell" or pose = "lunge"
+      m.playFacing("swing_")
+    else if pose = "dying"
+      m.sprite.playAnimation("death")
+    end if
+  end sub
+
+  override function hurt(fromX as float, fromY as float, amount = 1 as integer) as boolean
+    ' A hit during the tell spoils the lunge.
+    if m.state = "tell"
+      m.state = "walk"
+    end if
+    return super.hurt(fromX, fromY, amount)
+  end function
+
+  protected override function lootTable() as LootEntry[]
+    return [{drop: "coin", chance: 0.3}, {drop: "potion", chance: 0.1}]
+  end function
+
+  protected override sub onDying()
+    m.sprite.playAnimation("death")
+  end sub
+
+  protected override sub moveEnemy(dt as float)
+    if m.frozen
+      return
+    end if
+    m.stateTimer.tick(dt)
+    target = m.getPlayer()
+    if m.state = "tell"
+      if not m.stateTimer.isActive()
+        m.state = "lunge"
+        m.stateTimer.start(GOBLIN_LUNGE_SECONDS)
+      end if
+      return
+    else if m.state = "lunge"
+      m.applyMove(m.lungeX * GOBLIN_LUNGE_SPEED * dt, m.lungeY * GOBLIN_LUNGE_SPEED * dt, {cornerNudge: 0})
+      if not m.stateTimer.isActive()
+        m.state = "walk"
+      end if
+      return
+    end if
+
+    if target = invalid
+      m.playFacing("idle_")
+      return
+    end if
+    dx = target.position.x - m.position.x
+    dy = target.position.y - m.position.y
+    distance = Sqr(dx * dx + dy * dy)
+    if distance > GOBLIN_CHASE_RANGE or distance < 1
+      m.playFacing("idle_")
+      return
+    end if
+    dirX = dx / distance
+    dirY = dy / distance
+    if m.isRetreating()
+      m.walk(-dirX * GOBLIN_SPEED * dt, -dirY * GOBLIN_SPEED * dt)
+    else if distance < GOBLIN_ATTACK_RANGE
+      m.lungeX = dirX
+      m.lungeY = dirY
+      m.facing = facingFor(dx, dy, m.facing)
+      m.state = "tell"
+      m.stateTimer.start(GOBLIN_TELL_SECONDS)
+      m.playFacing("swing_")
+    else
+      m.walk(dirX * GOBLIN_SPEED * dt, dirY * GOBLIN_SPEED * dt)
+    end if
+  end sub
+
+  protected sub walk(dx as float, dy as float)
+    m.applyMove(dx, dy, {})
+    m.facing = facingFor(dx, dy, m.facing)
+    m.playFacing("walk_")
+  end sub
+
+  protected sub playFacing(prefix as string)
+    m.sprite.playAnimation(prefix + m.facing)
+  end sub
+
+end class
