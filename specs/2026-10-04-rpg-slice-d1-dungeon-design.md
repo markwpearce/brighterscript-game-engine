@@ -159,7 +159,7 @@ A `Goblin` subclass: 1.5× scale, gold/red tint, a wider feet box and body colli
 
 ## Engine change: `SolidWorld.removeSolid`
 
-`BGE.SolidWorld.addSolid()` returns an integer id; new `removeSolid(id)` takes the solid out of its grid buckets (and `getSolids()`). Existing callers that ignore the return value are unaffected. Covered by the engine's `SolidWorld.spec.bs`.
+`BGE.SolidWorld.addSolid()` returns the solid's id (a string, as `SolidWorldSolid.id` already is); new `removeSolid(id)` takes the solid out of its grid buckets (and `getSolids()`). Existing callers that ignore the return value are unaffected. Covered by the engine's `SolidWorld.spec.bs`.
 
 ## Checkpoints
 
