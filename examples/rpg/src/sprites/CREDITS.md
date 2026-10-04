@@ -57,3 +57,18 @@ License: CC-BY 3.0. 9-patch stretch markers added by the repo owner.
 ## ui/button.9.png, ui/frame.9.png
 "Buttons and Frame", https://opengameart.org/content/buttons-and-frame. License: CC0.
 9-patch stretch markers added by the repo owner.
+
+## goblin.png
+`goblinsword.png` from "[LPC] Goblin" by Stephen "Redshrike" Challener (graphic artist) and
+William.Thompsonj (contributor). https://opengameart.org/content/lpc-goblin
+License: CC-BY 3.0 (also CC-BY 4.0 / OGA-BY 3.0 / GPL 2.0 / GPL 3.0). Unmodified.
+
+## items/keys.png
+`KeyIcons.png` from "Key Icons" by BizmasterStudios. https://opengameart.org/content/key-icons
+License: CC-BY 4.0. Unmodified.
+
+## indoorTiles.png
+"RPG Indoor Tileset: Expansion 1" by Stephen Challener (Redshrike) and Jetrel, hosted by
+OpenGameArt.org. https://opengameart.org/content/rpg-indoor-tileset-expansion-1
+License: CC-BY 3.0 (also OGA-BY 3.0 / GPL 2.0 / GPL 3.0). Unmodified; only a floor tile is used
+(the floor switches).
