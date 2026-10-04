@@ -78,7 +78,7 @@ Most dungeon mechanics are just live placements:
 
 - **Effect `{message: "text"}`**: opens a one-page, speaker-less dialogue box (the existing `DialogueBox`, pausing gameplay the same way). Used by switches and locked doors.
 - **Events routed by `Story.onGameEvent`** to the event rules: `roomCleared {room}` and `switchPressed {id}`, alongside the existing `enemyKilled`.
-- **Items**: `smallKey` (max 3) and `throneKey` (max 1), icons from `KeyIcons.png` (iron key and gold heart key).
+- **Items**: `smallKey` (max 3) and `throneKey` (max 1), icons from `KeyIcons.png` (bronze key and gold heart key).
 
 ### Event rules (sketch)
 
