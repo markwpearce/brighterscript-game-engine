@@ -1,0 +1,123 @@
+namespace tests
+  @suite("keep dungeon")
+  class DungeonTests extends rooibos.BaseTestSuite
+
+    private function makeContext(allFlags as boolean) as object
+      flags = new StoryFlags()
+      carried = new Inventory(getItemDefinitions())
+      if allFlags
+        for each key in ["gate.open", "dng.guard.cleared", "dng.guard.keyTaken", "dng.L1.open", "dng.portcullis", "dng.ante.a", "dng.ante.b", "dng.ante.solved", "dng.ante.keyTaken", "dng.L2.open", "dng.kingDefeated", "dng.heartTaken"]
+          flags.set(key, true)
+        end for
+        carried.add("throneKey")
+      end if
+      return newStoryContext(flags, carried, {health: 6, maxHealth: 6, coins: 0})
+    end function
+
+    ' Solid ground, placement solids, prop footprints, bounds, and every gate that's present.
+    private function buildWorld(rows as string[], placements as object, ctx as object) as BGE.SolidWorld
+      numRows = rows.count()
+      world = new BGE.SolidWorld()
+      for r = 0 to numRows - 1
+        for c = 0 to rows[r].len() - 1
+          if isSolidGroundChar(rows[r].mid(c, 1))
+            world.addSolid(c * TILE_SIZE, cellBottomY(numRows, r), TILE_SIZE, TILE_SIZE)
+          end if
+        end for
+      end for
+      present = filterPlacements(placements, ctx)
+      addPlacementSolids(world, present, numRows)
+      for each item in present
+        if item.atlasKey <> invalid
+          fp = getAtlas()[item.atlasKey].footprint
+          if fp <> invalid
+            world.addSolid(item.col * TILE_SIZE + fp.x, cellBottomY(numRows, item.row) + fp.y, fp.w, fp.h)
+          end if
+        else if item.type = "gate"
+          world.addSolid(item.col * TILE_SIZE, cellBottomY(numRows, item.row), item.w * TILE_SIZE, item.h * TILE_SIZE)
+        end if
+      end for
+      world.addBounds(0, 0, rows[0].len() * TILE_SIZE, numRows * TILE_SIZE)
+      return world
+    end function
+
+    @describe("room rows")
+
+    @it("builds a 20x11 room with only the asked-for openings")
+    function _()
+      rows = buildRoomRows("ne")
+      m.assertEqual(11, rows.count())
+      for each row in rows
+        m.assertEqual(20, row.len())
+      end for
+      m.assertEqual("s", rows[0].mid(9, 1))
+      m.assertEqual("s", rows[2].mid(10, 1))
+      m.assertEqual("s", rows[6].mid(19, 1))
+      m.assertEqual("x", rows[6].mid(0, 1))
+      m.assertEqual("x", rows[10].mid(9, 1))
+      m.assertEqual("b", rows[1].mid(4, 1))
+      m.assertEqual("s", rows[5].mid(4, 1))
+    end function
+
+    @describe("doors")
+
+    @it("leads every dungeon door to a spawn that exists in its target room")
+    function _()
+      maps = getAreaMaps()
+      for each name in ["CastleScene", "GuardroomScene", "StoreroomScene", "BarracksScene", "AntechamberScene", "KingsHallScene"]
+        for each item in maps[name].placements
+          if item.type = "door"
+            m.assertTrue(maps.DoesExist(item.target), name + " door leads to unknown " + item.target)
+            found = false
+            for each other in maps[item.target].placements
+              if other.type = "spawn" and other.id = item.spawn
+                found = true
+              end if
+            end for
+            m.assertTrue(found, name + " door to " + item.target + " names missing spawn " + item.spawn)
+          end if
+        end for
+      end for
+    end function
+
+    @describe("open ground")
+
+    @it("leaves every spawn, enemy, pot, pickup and switch on open ground, before and after")
+    function _()
+      maps = getAreaMaps()
+      for each allFlags in [false, true]
+        ctx = m.makeContext(allFlags)
+        for each name in ["CastleScene", "GuardroomScene", "StoreroomScene", "BarracksScene", "AntechamberScene", "KingsHallScene"]
+          area = maps[name]
+          numRows = area.rows.count()
+          world = m.buildWorld(area.rows, area.placements, ctx)
+          for each item in filterPlacements(area.placements, ctx)
+            label = name + " " + FormatJson(item) + " (all flags: " + allFlags.toStr() + ")"
+            if item.type = "spawn"
+              m.assertTrue(world.isAreaFree(item.col * TILE_SIZE - 10, cellBottomY(numRows, item.row) + 10, 20, 12), label + " is blocked")
+            else if item.type = "enemy" or item.type = "pot" or item.type = "pickup"
+              feet = enemySpawnPoint(item, numRows)
+              m.assertTrue(world.isAreaFree(feet.x - ENEMY_SPAWN_CLEARANCE / 2, feet.y, ENEMY_SPAWN_CLEARANCE, ENEMY_SPAWN_CLEARANCE), label + " starts inside a solid")
+            else if item.type = "switch"
+              m.assertTrue(world.isAreaFree(item.col * TILE_SIZE + 4, cellBottomY(numRows, item.row) + 4, 24, 24), label + " is under a solid")
+            end if
+          end for
+        end for
+      end for
+    end function
+
+    @it("opens every gate except the great door once everything is done")
+    function _()
+      maps = getAreaMaps()
+      ctx = m.makeContext(true)
+      for each name in ["CastleScene", "GuardroomScene", "AntechamberScene", "KingsHallScene"]
+        for each item in filterPlacements(maps[name].placements, ctx)
+          if item.type = "gate"
+            m.assertEqual("great", item.style, name + " still has a " + item.style + " gate")
+          end if
+        end for
+      end for
+    end function
+
+  end class
+end namespace
