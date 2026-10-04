@@ -129,7 +129,7 @@ A clay vase from `PathAndObjects.png` (already loaded): a solid in `SolidWorld` 
 
 ### `Goblin` (`Entities/Goblin.bs`)
 
-An `Enemy` subclass from `goblinsword.png` (LPC Goblin, Redshrike, CC-BY 3.0): 704×320, 11 columns × 5 rows of 64×64. Rows face down, left, up, right (a different order from the rat/bat sheets, so `Goblin` has its own row map); about 7 walk frames then 4 swing frames per row; row 4 is the death animation. Feet pinned near (32, 58).
+An `Enemy` subclass from `goblinsword.png` (LPC Goblin, Redshrike, CC-BY 3.0): 704×320, 11 columns × 5 rows of 64×64. Rows face down, right, up, left (a different order from the rat/bat sheets, so `Goblin` has its own row map); about 7 walk frames then 4 swing frames per row; row 4 is the death animation. Feet pinned near (32, 58).
 
 - 3 HP, walks at 60 px/s, chases within 160 px.
 - Within ~48 px it plants for 0.4s playing the swing frames (the tell), then lunges at ~3× speed for 0.25s. Damage is the existing 1-heart contact damage, so `Player` is unchanged.
