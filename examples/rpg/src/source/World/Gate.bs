@@ -1,0 +1,112 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/utils/CountdownTimer.bs"
+import "../Maps/Atlas.bs"
+import "../Maps/MapTypes.bs"
+import "AtlasRegion.bs"
+import "../Story/Story.bs"
+
+const GATE_FADE_SECONDS = 0.3
+' Iron bars across a side or bottom opening (packed RGB).
+const GATE_IRON_RGB = &h2E2E36
+const GATE_BAR_RGB = &h6A6A78
+' How far past the solid the player's feet are noticed walking into it.
+const GATE_TRIGGER_MARGIN = 4.0
+
+' Blocks a doorway: a solid in the area's SolidWorld plus its art. North-wall gates draw the
+' closed portcullis arch; side and bottom gates draw iron bars. A locked or great gate also
+' shows a key, and walking into it asks the Story to unlock it. When its live placement is
+' removed it fades out (see open()).
+class Gate extends BGE.GameEntity
+
+  private solidWorld as BGE.SolidWorld = invalid
+  private solidId as string = ""
+  private unlock as GateUnlock = invalid
+  private isOpening as boolean = false
+  private fadeTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Gate"
+  end sub
+
+  ' @param {roAssociativeArray} args - {x, y (bottom-left, px), w, h (px), style, side, unlock, solidWorld}
+  override sub onCreate(args as roAssociativeArray)
+    m.position.x = args.x
+    m.position.y = args.y
+    m.position.z = -args.y
+    m.solidWorld = args.solidWorld
+    m.unlock = args.unlock
+    m.solidId = m.solidWorld.addSolid(args.x, args.y, args.w, args.h)
+    if args.side = "n"
+      entry = getAtlas()["archBars"] as AtlasEntry
+      m.addImage("bars", atlasRegion(m.game, entry), {
+        offset: BGE.Math.VectorOps.create((args.w - entry.w) / 2, entry.h),
+        drawMode: BGE.SceneObjectDrawMode.matchCamera
+      })
+    else
+      m.addIronBars(args.w, args.h, args.side)
+    end if
+    keyIcon = ""
+    if args.style = "locked"
+      keyIcon = "smallKey"
+    else if args.style = "great"
+      keyIcon = "throneKey"
+    end if
+    if keyIcon <> ""
+      bitmap = m.game.getBitmap(keyIcon)
+      m.addImage("key", CreateObject("roRegion", bitmap, 0, 0, 32, 32), {
+        offset: BGE.Math.VectorOps.create((args.w - 32) / 2, args.h + 32),
+        drawMode: BGE.SceneObjectDrawMode.matchCamera
+      })
+    end if
+    margin = GATE_TRIGGER_MARGIN
+    m.addRectangleCollider("trigger", args.w + margin * 2, args.h + margin * 2, -margin, args.h + margin)
+  end sub
+
+  ' Fades out and stops blocking. The solid goes at once, so the player can walk on.
+  sub open()
+    if m.isOpening
+      return
+    end if
+    m.isOpening = true
+    m.solidWorld.removeSolid(m.solidId)
+    m.colliders["trigger"].enabled = false
+    m.fadeTimer.start(GATE_FADE_SECONDS)
+  end sub
+
+  override sub onUpdate(dt as float)
+    if not m.isOpening
+      return
+    end if
+    m.fadeTimer.tick(dt)
+    for each drawableObj in m.drawables
+      drawableObj.alpha = 255 * m.fadeTimer.remaining() / GATE_FADE_SECONDS
+    end for
+    if not m.fadeTimer.isActive()
+      m.invalidate()
+    end if
+  end sub
+
+  override sub onCollisionEnter(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+    if m.unlock = invalid or m.isOpening or otherEntity.name <> "Player" or otherCollider.name <> "feet"
+      return
+    end if
+    storyEntity = m.game.getEntityByName("Story") as Story
+    storyEntity.tryUnlock(m.unlock)
+  end sub
+
+  ' A dark frame with lighter bars running across the opening.
+  private sub addIronBars(w as float, h as float, side as string)
+    m.addRectangle("frame", w, h, {color: GATE_IRON_RGB, offset: BGE.Math.VectorOps.create(0, h)})
+    for i = 1 to 3
+      if side = "s"
+        barX = w * i / 4 - 2
+        m.addRectangle("bar" + i.toStr(), 4, h, {color: GATE_BAR_RGB, offset: BGE.Math.VectorOps.create(barX, h)})
+      else
+        barY = h * i / 4 + 2
+        m.addRectangle("bar" + i.toStr(), w, 4, {color: GATE_BAR_RGB, offset: BGE.Math.VectorOps.create(0, barY)})
+      end if
+    end for
+  end sub
+
+end class

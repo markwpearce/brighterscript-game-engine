@@ -12,6 +12,9 @@ import "../Story/Story.bs"
 import "../Story/Conditions.bs"
 import "../Maps/MapTypes.bs"
 import "../Entities/Shapes.bs"
+import "../Maps/LivePlacements.bs"
+import "../World/Gate.bs"
+import "../World/Pickup.bs"
 
 ' Outline colour for SolidWorld walls in the debug overlay (packed RGBA).
 const SOLID_DEBUG_RGBA = &h00FFFFFF
@@ -27,6 +30,11 @@ class AreaScene extends BGE.GameScene
   spawns as roAssociativeArray = {}
   ' Feet points {x, y} of every `drain` placement (where the sewer's new rats come from).
   drains as Point[] = []
+  ' Every placement, so live ones can be built later by index.
+  placements as MapPlacement[] = []
+  ' Placement index (as a string) -> the entity built for each live placement present now.
+  liveEntities as roAssociativeArray = {}
+  private numRows as integer = 0
 
   sub new(game as BGE.Game)
     super(game)
@@ -49,32 +57,18 @@ class AreaScene extends BGE.GameScene
     m.spawns = {}
     m.drains = [] as Point[]
 
+    m.numRows = numRows
     tileMap = new TileMapEntity(m.game)
     m.game.addEntity(tileMap, {rows: rows, solidWorld: m.solidWorld})
     storyEntity = m.game.getEntityByName("Story") as Story
-    placements = filterPlacements(m.getPlacements(), storyEntity.context())
-    addPlacementSolids(m.solidWorld, placements, numRows)
-
-    for each item in placements
-      if item.atlasKey <> invalid
-        newProp = new Prop(m.game)
-        m.game.addEntity(newProp, {atlasKey: item.atlasKey, x: item.col * TILE_SIZE, y: cellBottomY(numRows, item.row), solidWorld: m.solidWorld})
-      else if item.type = "door"
-        newDoor = new Door(m.game)
-        m.game.addEntity(newDoor, {x: item.col * TILE_SIZE, y: cellBottomY(numRows, item.row), w: item.w * TILE_SIZE, h: item.h * TILE_SIZE, target: item.target, spawn: item.spawn})
-      else if item.type = "enemy"
-        m.addEnemy(item, numRows)
-      else if item.type = "drain"
-        m.drains.push(enemySpawnPoint(item, numRows))
-      else if item.type = "npc"
-        feet = npcSpawnPoint(item, numRows)
-        newNpc = new Npc(m.game)
-        m.game.addEntity(newNpc, {npcId: item.npcId, character: item.character, x: feet.x, y: feet.y, facing: item.facing, wander: item.wander * 1.0, solidWorld: m.solidWorld})
-      else if item.type = "spawn"
-        ' Feet a little above the cell's bottom edge, so the 12px-tall feet box sits inside the cell.
-        m.spawns[item.id] = {x: item.col * TILE_SIZE, y: cellBottomY(numRows, item.row) + 10, facing: item.facing}
-      end if
+    m.placements = m.getPlacements()
+    built = filterPlacements(nonLivePlacements(m.placements), storyEntity.context())
+    addPlacementSolids(m.solidWorld, built, numRows)
+    for each item in built
+      m.buildPlacement(item, numRows)
     end for
+    m.liveEntities = {}
+    m.refreshLivePlacements()
 
     spawnId = args.spawn
     if spawnId = invalid or m.spawns[spawnId] = invalid
@@ -89,15 +83,87 @@ class AreaScene extends BGE.GameScene
     storyEntity.arrivedAt(m.name, spawnId)
   end sub
 
-  private sub addEnemy(item as MapPlacement, numRows as integer)
+  private function addEnemy(item as MapPlacement, numRows as integer) as BGE.GameEntity
     feet = enemySpawnPoint(item, numRows)
     args = {x: feet.x, y: feet.y, solidWorld: m.solidWorld, mapWidth: m.mapWidth, mapHeight: m.mapHeight}
     if item.kind = "bat"
       newBat = new Bat(m.game)
       m.game.addEntity(newBat, args)
-    else
-      newRat = new Rat(m.game)
-      m.game.addEntity(newRat, args)
+      return newBat
+    end if
+    newRat = new Rat(m.game)
+    m.game.addEntity(newRat, args)
+    return newRat
+  end function
+
+  ' Builds one placement's entity (or records its spawn/drain point).
+  '
+  ' @return {BGE.GameEntity} the entity added, or invalid
+  protected function buildPlacement(item as MapPlacement, numRows as integer) as BGE.GameEntity
+    storyEntity = m.game.getEntityByName("Story") as Story
+    x = item.col * TILE_SIZE
+    y = cellBottomY(numRows, item.row)
+    if item.atlasKey <> invalid
+      newProp = new Prop(m.game)
+      m.game.addEntity(newProp, {atlasKey: item.atlasKey, x: x, y: y, solidWorld: m.solidWorld})
+      return newProp
+    else if item.type = "door"
+      newDoor = new Door(m.game)
+      m.game.addEntity(newDoor, {x: x, y: y, w: item.w * TILE_SIZE, h: item.h * TILE_SIZE, target: item.target, spawn: item.spawn})
+      return newDoor
+    else if item.type = "enemy"
+      if storyEntity.peaceful
+        return invalid
+      end if
+      return m.addEnemy(item, numRows)
+    else if item.type = "drain"
+      m.drains.push(enemySpawnPoint(item, numRows))
+    else if item.type = "npc"
+      feet = npcSpawnPoint(item, numRows)
+      newNpc = new Npc(m.game)
+      m.game.addEntity(newNpc, {npcId: item.npcId, character: item.character, x: feet.x, y: feet.y, facing: item.facing, wander: item.wander * 1.0, solidWorld: m.solidWorld})
+      return newNpc
+    else if item.type = "spawn"
+      ' Feet a little above the cell's bottom edge, so the 12px-tall feet box sits inside the cell.
+      m.spawns[item.id] = {x: x, y: y + 10, facing: item.facing}
+    else if item.type = "gate"
+      newGate = new Gate(m.game)
+      m.game.addEntity(newGate, {x: x, y: y, w: item.w * TILE_SIZE, h: item.h * TILE_SIZE, style: item.style, side: item.side, unlock: item.unlock, solidWorld: m.solidWorld})
+      return newGate
+    else if item.type = "pickup"
+      feet = enemySpawnPoint(item, numRows)
+      newPickup = new Pickup(m.game)
+      m.game.addEntity(newPickup, {x: feet.x, y: feet.y, item: item.item, icon: item.icon, effects: item.effects})
+      return newPickup
+    end if
+    return invalid
+  end function
+
+  ' Brings live placements in line with the story: builds the ones whose `when` now passes and
+  ' removes (opens, for a gate) the ones whose `when` no longer does.
+  private sub refreshLivePlacements()
+    storyEntity = m.game.getEntityByName("Story") as Story
+    diff = diffLivePlacements(m.placements, m.liveEntities, storyEntity.context())
+    for each index in diff.remove
+      key = index.toStr()
+      entity = m.liveEntities[key] as BGE.GameEntity
+      m.liveEntities.Delete(key)
+      if entity.isValid()
+        if entity.name = "Gate"
+          (entity as Gate).open()
+        else
+          entity.invalidate()
+        end if
+      end if
+    end for
+    for each index in diff.add
+      m.liveEntities[index.toStr()] = m.buildPlacement(m.placements[index], m.numRows)
+    end for
+  end sub
+
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    if eventName = "storyUpdated"
+      m.refreshLivePlacements()
     end if
   end sub
 
