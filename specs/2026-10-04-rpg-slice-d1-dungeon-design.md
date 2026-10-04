@@ -47,7 +47,7 @@ Six rooms, each one screen: 20×11 cells of 32px on the 640×360 canvas (top row
 |------|-------|----------|
 | Entry hall | `CastleScene` (map replaced with a one-screen room) | Servant NPC (`redGirl` row of `npcs.png`), bats, south door to town, west to guardroom, east locked door L1, north portcullis. |
 | Guardroom | `GuardroomScene` | Shutters close until 3 goblins are dead; clearing drops small key #1. North to storeroom. |
-| Storeroom | `StoreroomScene` | Optional. Many pots, and a heart container pickup (live, `when: [{notFlag: "dng.heartTaken"}, {notItem: "heartContainer"}]`, so it never appears if one was bought in the shop). |
+| Storeroom | `StoreroomScene` | Optional. Many pots, and a heart container pickup that is there whether or not one was bought in the shop: the player starts with 3 hearts, so the shop's and this one make 5. It bypasses the `heartContainer` inventory item (max 1) and applies its effects directly: `{type: "pickup", icon: "heartIcon", when: [{notFlag: "dng.heartTaken"}], effects: [{addMaxHealth: 2}, {heal: 2}, {set: "dng.heartTaken", value: true}]}`. |
 | Barracks | `BarracksScene` | 2 goblins, the switch that raises the entry hall's portcullis. |
 | Antechamber | `AntechamberScene` | Goblins, bats, pots. Two floor switches; pressing both drops small key #2. North locked door L2. |
 | King's hall | `KingsHallScene` | Shutters close until the goblin king is defeated. Great door (north), sealed. |
@@ -121,7 +121,7 @@ Drawn from the teal floor tiles of the indoor tileset expansion at 2× (16px sou
 
 ### `Pickup` (`World/Pickup.bs`)
 
-A generic item on the floor (key, heart container, potion) with an `effects` list run on touch. `Coin` stays as it is. A pickup whose item is at its cap stays on the floor.
+A generic item on the floor (key, heart container, potion) with an `effects` list run on touch. Its sprite comes from `item`'s icon, or an explicit `icon` for a pickup that isn't an inventory item (the storeroom heart). `Coin` stays as it is. A pickup whose `item` is at its cap stays on the floor.
 
 ### `Pot` (`World/Pot.bs`)
 
