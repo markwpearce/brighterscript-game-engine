@@ -33,6 +33,12 @@ class Story extends BGE.GameEntity
   ' Modal releases waiting out their delay (see releaseModalLater).
   private pendingReleases as integer = 0
   private releaseDelay as integer = 0
+  ' Deep-link testing: skip enemy placements (--param peaceful=1).
+  peaceful as boolean = false
+  ' Deep-link testing: a panel to open once the first area has faded in ("inventory").
+  openOnArrival as string = ""
+  ' message effects waiting for every panel to close
+  private pendingMessages as string[] = []
   private talkingNpc as Npc = invalid
   ' The panel currently open (DialogueBox, ShopPanel or InventoryPanel), so button actions reach it.
   private openPanel as StoryPanel = invalid
@@ -116,9 +122,19 @@ class Story extends BGE.GameEntity
       m.startDialogue(data.npcId)
     else if eventName = "inventoryRequested"
       m.openInventory()
-    else if eventName = "enemyKilled"
+    else if eventName = "enemyKilled" or eventName = "roomCleared" or eventName = "switchPressed"
       m.applyResult(runEventRules(getEventRules(), eventName, data, m.context()))
     end if
+  end sub
+
+  ' Runs story effects for something in the world (a pickup, a switch, a door).
+  sub runEffects(effects as StoryEffect[])
+    m.applyResult(applyEffects(effects, m.context()))
+  end sub
+
+  ' Shows a speaker-less dialogue box once nothing else is open.
+  sub showMessage(text as string)
+    m.pendingMessages.push(text)
   end sub
 
   ' Called by the DialogueBox when the last page is read (choice is invalid without choices).
@@ -188,6 +204,15 @@ class Story extends BGE.GameEntity
         end for
       end if
     end if
+    canOpen = not m.isModalOpen() and m.pendingReleases = 0 and not m.game.isTransitioning()
+    if canOpen and m.pendingMessages.count() > 0
+      text = m.pendingMessages.Shift()
+      page = {speaker: "", lines: [text]} as DialoguePage
+      m.openDialogue(page)
+    else if canOpen and m.openOnArrival = "inventory" and m.sceneName <> ""
+      m.openOnArrival = ""
+      m.openInventory()
+    end if
   end sub
 
   private sub endTalking()
@@ -215,7 +240,7 @@ class Story extends BGE.GameEntity
     result = buyItem(itemId, m.priceOf(itemId), ctx)
     if result.ok
       m.game.playSound("coin")
-      m.applyResult({changed: true, posts: []})
+      m.applyResult({changed: true, posts: [], messages: []})
     end if
     return result
   end function
@@ -223,7 +248,7 @@ class Story extends BGE.GameEntity
   function use(itemId as string) as ActionResult
     result = useItem(itemId, m.context())
     if result.ok
-      m.applyResult({changed: true, posts: []})
+      m.applyResult({changed: true, posts: [], messages: []})
     end if
     return result
   end function
@@ -256,7 +281,7 @@ class Story extends BGE.GameEntity
   ' Settles the story after a change, posts what the rules asked for, keeps the player's
   ' sword in step with the inventory, and saves.
   private sub applyResult(result as StoryResult)
-    if not result.changed and result.posts.count() = 0
+    if not result.changed and result.posts.count() = 0 and result.messages.count() = 0
       return
     end if
     settled = settleStory(getEventRules(), m.context())
@@ -264,10 +289,18 @@ class Story extends BGE.GameEntity
     posts = [] as string[]
     posts.append(result.posts)
     posts.append(settled.posts)
-    m.save()
+    m.pendingMessages.append(result.messages)
+    m.pendingMessages.append(settled.messages)
+    if result.changed or settled.changed
+      m.save()
+    end if
     for each eventName in posts
       m.game.postGameEvent(eventName)
     end for
+    if result.changed or settled.changed
+      ' Live map placements (gates, keys) re-check their conditions on this.
+      m.game.postGameEvent("storyUpdated")
+    end if
   end sub
 
   private sub syncPlayer()
@@ -293,6 +326,10 @@ class Story extends BGE.GameEntity
       m.talkingNpc.setTalking(true)
       m.talkingNpc.faceToward(playerEntity.position.x, playerEntity.position.y)
     end if
+    m.openDialogue(page)
+  end sub
+
+  private sub openDialogue(page as DialoguePage)
     m.openModal()
     dialogue = new DialogueBox(m.game, page, m.flags)
     m.openPanel = dialogue
