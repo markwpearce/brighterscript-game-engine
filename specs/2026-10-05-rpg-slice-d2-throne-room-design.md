@@ -192,7 +192,7 @@ So the layer stays in the example. A follow-up issue records the split above and
 
 ## Assets and credits
 
-- `sprites/witch.png` — the repo owner's `lpcfemalechainpreview.png`, an LPC character sheet. Its exact LPC sources and authors are confirmed with the repo owner before it's credited in `sprites/CREDITS.md` (LPC sheets combine several artists' CC-BY-SA/GPL parts).
+- `sprites/witch.png` — `lpcfemalechainpreview.png` from "LPC Combat Armor for women" by Matthew Krohn (makrohn), adapted from art by Johannes Sjölund. https://opengameart.org/content/lpc-combat-armor-for-women License: CC-BY-SA 3.0 / GPL 3.0 / OGA-BY 3.0. Unmodified (tinted in code). Credited in `sprites/CREDITS.md`.
 - The throne prop and any extra props come from sheets already in the repo (`Castle2.png`, `indoorTiles.png`).
 
 ## Docs
