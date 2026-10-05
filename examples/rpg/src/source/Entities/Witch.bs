@@ -1,0 +1,371 @@
+import "Enemy.bs"
+import "Goblin.bs"
+import "WitchBolt.bs"
+import "WitchLogic.bs"
+import "Player.bs"
+import "Facing.bs"
+import "Shadow.bs"
+import "Loot.bs"
+import "DamageNumber.bs"
+import "Shapes.bs"
+import "../World/Spawning.bs"
+
+const WITCH_HEALTH = 16
+' Dark violet (packed RGB), so the plain LPC sheet reads as the witch.
+const WITCH_TINT = &hB890FF
+const WITCH_FRAMES_PER_ROW = 13
+const WITCH_FLEE_RANGE = 96.0
+const WITCH_FLEE_SPEED = 50.0
+const WITCH_VOLLEY_GAP = 0.8
+const WITCH_CAST_SECONDS = 0.6
+const WITCH_SUMMON_TELL = 0.8
+' How often she casts while her goblins shield her.
+const WITCH_SHIELDED_VOLLEY_GAP = 1.6
+const WITCH_EXHAUSTED_SECONDS = 2.0
+const WITCH_BLINK_SECONDS = 0.2
+const WITCH_BOLT_SPEED = 140.0
+const WITCH_PHASE2_BOLT_SCALE = 1.3
+const WITCH_FAN_SPREAD = 40.0
+const WITCH_SUMMON_MIN_DISTANCE = 96.0
+' Where her hands are, above her feet: bolts start here.
+const WITCH_HAND_HEIGHT = 30.0
+const WITCH_SHIELD_RADIUS = 24.0
+' Packed RGB.
+const WITCH_SHIELD_RGB = &h9060FF
+const WITCH_SHIELD_ALPHA = 80
+
+' The witch: never chases. She casts fans of bolts, summons goblins from the circles and hides
+' behind a shield while any of them live, then slumps, exhausted - the time to hit her. Each
+' hit makes her blink to the perch farthest from the player. Below half health her fans are
+' wider and faster and her waves bigger.
+'
+' witch.png (LPC): 64x64 cells, 13 per row. Rows 0-3 spellcast (up/left/down/right, 7 frames),
+' rows 8-11 walk (9 frames, the first a standing pose), row 20 hurt/death (6 frames).
+class Witch extends Enemy
+
+  ' "volley", "summon", "shielded", "exhausted", "blinkOut" or "blinkIn"
+  private state as string = "volley"
+  private stateTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  ' Between bolt fans.
+  private castTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  ' Holds the spellcast pose after a cast.
+  private castLock as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private volleysLeft as integer = 0
+  private facing as FacingDirection = FacingDirection.down
+  private drains as Point[] = []
+  private perches as Point[] = []
+  private perchIndex as integer = -1
+  private shield as BGE.DrawableCircle = invalid
+  private frozen as boolean = false
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Witch"
+    m.tagsList.add("boss")
+  end sub
+
+  ' @param {roAssociativeArray} args - Enemy's, plus {drains, perches: Point[]}
+  override sub onCreate(args as roAssociativeArray)
+    super.onCreate(args)
+    m.health = WITCH_HEALTH
+    m.maxHealth = WITCH_HEALTH
+    m.displayName = "The Witch"
+    m.boxW = 18
+    m.boxH = 10
+    m.headHeight = 56
+    m.knockbackScale = 0
+    m.deathHoldSeconds = 0.6
+    m.baseColor = WITCH_TINT
+    if args.drains <> invalid
+      m.drains = args.drains
+    end if
+    if args.perches <> invalid
+      m.perches = args.perches
+    end if
+    addGroundShadow(m, 9)
+    r = WITCH_SHIELD_RADIUS
+    m.shield = m.addCircle("shield", r, {color: WITCH_SHIELD_RGB, alpha: 0, offset: BGE.Math.VectorOps.create(-r, r + WITCH_HAND_HEIGHT)})
+    m.sprite = m.addSprite("body", m.game.getBitmap("witch"), 64, 64)
+    ' Pins her feet (32, 62 within each cell) onto the entity's position.
+    m.sprite.applyPreTranslation(-32, -62)
+    m.sprite.color = WITCH_TINT
+    rowFacings = [FacingDirection.up, FacingDirection.left, FacingDirection.down, FacingDirection.right]
+    for i = 0 to 3
+      cast = i * WITCH_FRAMES_PER_ROW
+      walk = (8 + i) * WITCH_FRAMES_PER_ROW
+      m.sprite.addAnimation("cast_" + rowFacings[i], [cast, cast + 1, cast + 2, cast + 3, cast + 4, cast + 5, cast + 6], 12, BGE.SpritePlayMode.Forward)
+      m.sprite.addAnimation("walk_" + rowFacings[i], [walk + 1, walk + 2, walk + 3, walk + 4, walk + 5, walk + 6, walk + 7, walk + 8], 10, BGE.SpritePlayMode.Loop)
+      m.sprite.addAnimation("idle_" + rowFacings[i], [walk], 1, BGE.SpritePlayMode.Loop)
+    end for
+    hurtRow = 20 * WITCH_FRAMES_PER_ROW
+    m.sprite.addAnimation("slump", [hurtRow, hurtRow + 1, hurtRow + 2], 8, BGE.SpritePlayMode.Forward)
+    m.sprite.addAnimation("death", [hurtRow, hurtRow + 1, hurtRow + 2, hurtRow + 3, hurtRow + 4, hurtRow + 5], 10, BGE.SpritePlayMode.Forward)
+    m.sprite.playAnimation("idle_down")
+    m.addRectangleCollider("body", 20, 40, -10, 40)
+    m.startVolleys()
+  end sub
+
+  ' Holds one pose for a screenshot: "cast", "shielded", "exhausted", "blink" or "dying".
+  '
+  ' @param {string} pose
+  sub freezePose(pose as string)
+    m.frozen = true
+    if pose = "cast"
+      m.playFacing("cast_")
+    else if pose = "shielded"
+      m.shield.alpha = WITCH_SHIELD_ALPHA
+      m.playFacing("cast_")
+    else if pose = "exhausted"
+      m.sprite.playAnimation("slump")
+    else if pose = "blink"
+      m.sprite.alpha = 110
+    else if pose = "dying"
+      m.sprite.playAnimation("death")
+    end if
+  end sub
+
+  override function hurt(fromX as float, fromY as float, amount = 1 as integer) as boolean
+    if m.isDying or m.state = "blinkOut" or m.state = "blinkIn"
+      return false
+    end if
+    if isShielded(m.summonsAlive())
+      clink = new DamageNumber(m.game)
+      m.game.addEntity(clink, {x: m.position.x, y: m.position.y + m.headHeight, amount: 0, text: "clink", color: WITCH_SHIELD_RGB})
+      m.game.playSound("enemyHit")
+      playerEntity = m.getPlayer()
+      if playerEntity <> invalid
+        (playerEntity as Player).pushBack(m.position.x, m.position.y)
+      end if
+      return false
+    end if
+    defeated = super.hurt(fromX, fromY, amount)
+    if not defeated
+      m.startBlink()
+    end if
+    return defeated
+  end function
+
+  ' A boss doesn't back off after hurting the player.
+  override sub recoil(fromX as float, fromY as float)
+  end sub
+
+  protected override function lootTable() as LootEntry[]
+    return []
+  end function
+
+  protected override sub onDying()
+    m.shield.alpha = 0
+    m.sprite.playAnimation("death")
+    for each entity in m.game.getEntitiesByTag("summon")
+      (entity as Enemy).vanish()
+    end for
+    for each entity in m.game.getEntitiesByTag("projectile")
+      entity.invalidate()
+    end for
+  end sub
+
+  protected override function currentTint() as integer
+    return WITCH_TINT
+  end function
+
+  protected override sub moveEnemy(dt as float)
+    ' Still while frozen for a screenshot, and while the room fades in (before her speech).
+    if m.frozen or m.game.isTransitioning()
+      return
+    end if
+    m.stateTimer.tick(dt)
+    m.castTimer.tick(dt)
+    m.castLock.tick(dt)
+    shielded = isShielded(m.summonsAlive())
+    if shielded
+      m.shield.alpha = WITCH_SHIELD_ALPHA
+    else
+      m.shield.alpha = 0
+    end if
+
+    if m.state = "blinkOut"
+      m.sprite.alpha = 255 * m.stateTimer.remaining() / WITCH_BLINK_SECONDS
+      if not m.stateTimer.isActive()
+        m.moveToNextPerch()
+        m.state = "blinkIn"
+        m.stateTimer.start(WITCH_BLINK_SECONDS)
+      end if
+      return
+    else if m.state = "blinkIn"
+      m.sprite.alpha = 255 * (1 - m.stateTimer.remaining() / WITCH_BLINK_SECONDS)
+      if not m.stateTimer.isActive()
+        m.sprite.alpha = 255
+        m.colliders["body"].enabled = true
+        m.startVolleys()
+      end if
+      return
+    else if m.state = "exhausted"
+      if not m.stateTimer.isActive()
+        m.startVolleys()
+      end if
+      return
+    else if m.state = "summon"
+      if not m.stateTimer.isActive()
+        m.summonWave()
+      end if
+      return
+    else if m.state = "shielded"
+      if not shielded
+        m.state = "exhausted"
+        m.stateTimer.start(WITCH_EXHAUSTED_SECONDS)
+        m.sprite.playAnimation("slump")
+        return
+      end if
+      if not m.castTimer.isActive()
+        m.castFan()
+        m.castTimer.start(WITCH_SHIELDED_VOLLEY_GAP)
+      end if
+    else if m.state = "volley"
+      if not m.castTimer.isActive()
+        if m.volleysLeft <= 0
+          m.state = "summon"
+          m.stateTimer.start(WITCH_SUMMON_TELL)
+          m.facePlayer()
+          m.playFacing("cast_")
+          return
+        end if
+        m.castFan()
+        m.volleysLeft--
+        m.castTimer.start(WITCH_VOLLEY_GAP)
+      end if
+    end if
+    m.keepDistance(dt)
+  end sub
+
+  private sub startVolleys()
+    m.state = "volley"
+    m.volleysLeft = 2
+    if m.isPhaseTwo()
+      m.volleysLeft = 3
+    end if
+    m.castTimer.start(WITCH_VOLLEY_GAP)
+  end sub
+
+  private sub startBlink()
+    m.state = "blinkOut"
+    m.stateTimer.start(WITCH_BLINK_SECONDS)
+    m.colliders["body"].enabled = false
+  end sub
+
+  private sub moveToNextPerch()
+    playerEntity = m.getPlayer()
+    if playerEntity = invalid
+      return
+    end if
+    index = pickPerch(m.perches, playerEntity.position.x, playerEntity.position.y, m.perchIndex)
+    if index < 0
+      return
+    end if
+    m.perchIndex = index
+    m.position.x = m.perches[index].x
+    m.position.y = m.perches[index].y
+    m.position.z = -m.position.y
+  end sub
+
+  private sub castFan()
+    playerEntity = m.getPlayer()
+    if playerEntity = invalid
+      return
+    end if
+    startY = m.position.y + 1
+    dx = playerEntity.position.x - m.position.x
+    dy = playerEntity.position.y - startY
+    distance = Sqr(dx * dx + dy * dy)
+    if distance < 1
+      return
+    end if
+    m.facePlayer()
+    m.playFacing("cast_")
+    m.castLock.start(WITCH_CAST_SECONDS)
+    count = 3
+    speed = WITCH_BOLT_SPEED
+    if m.isPhaseTwo()
+      count = 5
+      speed = speed * WITCH_PHASE2_BOLT_SCALE
+    end if
+    for each dir in boltFan(dx / distance, dy / distance, count, WITCH_FAN_SPREAD)
+      bolt = new WitchBolt(m.game)
+      m.game.addEntity(bolt, {x: m.position.x, y: startY, dirX: dir.x, dirY: dir.y, speed: speed, solidWorld: m.solidWorld, mapWidth: m.mapWidth, mapHeight: m.mapHeight})
+    end for
+  end sub
+
+  private sub summonWave()
+    playerEntity = m.getPlayer()
+    count = 2
+    if m.isPhaseTwo()
+      count = 3
+    end if
+    spawned = 0
+    if playerEntity <> invalid
+      for i = 1 to count
+        index = pickDrain(m.drains, playerEntity.position.x, playerEntity.position.y, WITCH_SUMMON_MIN_DISTANCE, Rnd(0))
+        if index >= 0
+          summon = new Goblin(m.game)
+          m.game.addEntity(summon, {x: m.drains[index].x, y: m.drains[index].y, solidWorld: m.solidWorld, mapWidth: m.mapWidth, mapHeight: m.mapHeight, summoned: true})
+          spawned++
+        end if
+      end for
+    end if
+    if spawned = 0
+      ' Nowhere to summon (or no player): skip straight to the opening.
+      m.state = "exhausted"
+      m.stateTimer.start(WITCH_EXHAUSTED_SECONDS)
+      m.sprite.playAnimation("slump")
+      return
+    end if
+    m.state = "shielded"
+    m.castTimer.start(WITCH_SHIELDED_VOLLEY_GAP)
+  end sub
+
+  ' Drifts away when the player is close; otherwise stands (or holds the cast pose).
+  private sub keepDistance(dt as float)
+    playerEntity = m.getPlayer()
+    if playerEntity = invalid
+      return
+    end if
+    dx = m.position.x - playerEntity.position.x
+    dy = m.position.y - playerEntity.position.y
+    distance = Sqr(dx * dx + dy * dy)
+    if distance < WITCH_FLEE_RANGE and distance > 1
+      m.applyMove(dx / distance * WITCH_FLEE_SPEED * dt, dy / distance * WITCH_FLEE_SPEED * dt, {})
+      if not m.castLock.isActive()
+        m.facing = facingFor(dx, dy, m.facing)
+        m.playFacing("walk_")
+      end if
+    else if not m.castLock.isActive()
+      m.facePlayer()
+      m.playFacing("idle_")
+    end if
+  end sub
+
+  private function summonsAlive() as integer
+    alive = 0
+    for each entity in m.game.getEntitiesByTag("summon")
+      if not (entity as Enemy).isDying
+        alive++
+      end if
+    end for
+    return alive
+  end function
+
+  private function isPhaseTwo() as boolean
+    return witchIsPhaseTwo(m.health, m.maxHealth)
+  end function
+
+  private sub facePlayer()
+    playerEntity = m.getPlayer()
+    if playerEntity <> invalid
+      m.facing = facingFor(playerEntity.position.x - m.position.x, playerEntity.position.y - m.position.y, m.facing)
+    end if
+  end sub
+
+  private sub playFacing(prefix as string)
+    m.sprite.playAnimation(prefix + m.facing)
+  end sub
+
+end class
