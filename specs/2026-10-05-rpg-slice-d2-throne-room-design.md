@@ -50,7 +50,7 @@ unlock: {
 }
 ```
 
-The throne key stays in the inventory (a keepsake; nothing else uses it). A live north `Door` to `ThroneRoomScene` (gated on `flag: "dng.throneDoor.open"`) sits behind the gate, as D1's locked doors do. Gate removal already fades it out.
+The throne key stays in the inventory (a keepsake; nothing else uses it). A plain north `Door` to `ThroneRoomScene` sits behind the gate, as D1's locked doors do: the gate's solid keeps it out of reach until the gate opens. Gate removal already fades it out.
 
 ### `message` effect: optional speaker
 
@@ -62,8 +62,8 @@ One screen (20×11 cells of 32px), built with `buildRoomRows("s")` like the othe
 
 | Placement | Notes |
 |---|---|
-| Throne | Prop at the north wall, centre (from `Castle2.png`; region picked in the plan and checked on a device). Banners and statues either side. |
-| Summoning circles | Four `drain` placements (the existing type the sewer uses), each also drawing a dark violet ring on the floor (a `DrawableCircle` outline, or a small `SummonCircle` prop). |
+| Throne dais | No sheet in the repo has a throne, so the red-and-gold rug from `indoorTiles.png` (region x 112, y 96, 64×64) pre-rendered at 2× (128×128, a `throneRug` bitmap in `main.bs`, like `floorSwitch`) lies at the north wall, centre, as a royal dais. It's a prop with a new `floor: true` flag, so it draws at floor depth under the witch standing on it. Banners and statues either side. |
+| Summoning circles | Four `summonCircle` placements: each records a drain point (the list the sewer's `drain` placements fill, so `pickDrain` works unchanged) and draws a dark violet disc on the floor (`World/SummonCircle.bs`). |
 | Perches | Three or four new `perch` placements: points the witch blinks to. `AreaScene` collects them like `drains` (`m.perches as Point[]`). |
 | Shutter | South, `{type: "gate", style: "shutter", live: true, when: [{notFlag: "witch.defeated"}]}`. Spawn point one cell inside it, as everywhere else. |
 | Witch | `{type: "enemy", kind: "witch", col: 9, row: 4, when: [{notFlag: "witch.defeated"}]}` (not live). |
@@ -141,11 +141,11 @@ Which rooms count as the keep, and where to come back to, is a pure function so 
 function defeatRespawn(sceneName as string, lastSpawn as string) as SpawnTarget
 ```
 
-It returns `{scene: "CastleScene", spawn: "entrance"}` for any keep room (`CastleScene`, the five D1 rooms, `ThroneRoomScene`; listed once in `DungeonData.bs` as `getKeepScenes()`, which `withKeepEnemiesGone()` below also uses) and `{scene: sceneName, spawn: lastSpawn}` otherwise. `Player`'s defeat timer calls it in place of the current `changeSceneWithFade(m.game.getScene().name, {spawn: m.lastSpawn})`. `GoblinShowcaseScene` (debug only) isn't a keep room.
+It returns `{scene: "CastleScene", spawn: "entrance"}` for any keep room (`CastleScene`, the five D1 rooms, `ThroneRoomScene`; listed once in `Maps/Keep.bs` as `getKeepScenes()`, which `withKeepEnemiesGone()` below also uses) and `{scene: sceneName, spawn: lastSpawn}` otherwise. `Player`'s defeat timer calls it in place of the current `changeSceneWithFade(m.game.getScene().name, {spawn: m.lastSpawn})`. `GoblinShowcaseScene` (debug only) isn't a keep room.
 
 ## The keep at peace
 
-Every enemy placement in the keep's rooms (`getKeepScenes()`) gets `notFlag: "witch.defeated"` added, by one helper in `DungeonData.bs` (`withKeepEnemiesGone(placements)`) applied when each room's placements are built, so no placement has to remember it. The sewer's rats are not affected: the sewer is under the town, not part of the keep, and stays a place to earn coins.
+Every enemy placement in the keep's rooms (`getKeepScenes()`) gets `notFlag: "witch.defeated"` added, by one helper in `Maps/Keep.bs` (`withKeepEnemiesGone(placements)`) that `AreaScene` applies to any keep room's placements, so no placement has to remember it. The sewer's rats are not affected: the sewer is under the town, not part of the keep, and stays a place to earn coins.
 
 New pages, most specific first:
 
@@ -210,7 +210,7 @@ So the layer stays in the example. A follow-up issue records the split above and
 ## Assets and credits
 
 - `sprites/witch.png` — `lpcfemalechainpreview.png` from "LPC Combat Armor for women" by Matthew Krohn (makrohn), adapted from art by Johannes Sjölund. https://opengameart.org/content/lpc-combat-armor-for-women License: CC-BY-SA 3.0 / GPL 3.0 / OGA-BY 3.0. Unmodified (tinted in code). Credited in `sprites/CREDITS.md`.
-- The throne prop and any extra props come from sheets already in the repo (`Castle2.png`, `indoorTiles.png`).
+- The throne-room rug and other props come from sheets already in the repo (`indoorTiles.png`, `Castle2.png`).
 
 ## Docs
 
