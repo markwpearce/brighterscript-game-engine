@@ -124,11 +124,28 @@ Plays the death row (row 20), holds (`deathHoldSeconds`), then the existing fade
 ]}
 ```
 
-which also opens the shutter (live placement). Dying mid-fight reloads the scene at `lastSpawn` as today, so the witch comes back at full health and the intro doesn't replay.
+which also opens the shutter (live placement). Dying mid-fight sends the player back to the entry hall (see [Defeat in the keep](#defeat-in-the-keep)); the witch is at full health when they return, and the intro doesn't replay.
+
+## Defeat in the keep
+
+Today a defeat reloads the current scene at `Player.lastSpawn`. In the keep it now always sends the player back to the entry hall instead: `CastleScene`, spawn `entrance` (just inside the south door), with full health as today.
+
+Everything the story tracks stays exactly as it was. This already holds, since flags, inventory (keys, the throne key, potions used) and coins live on the persistent `Story`/`Player` entities and a defeat only changes scene: opened doors and gates stay open, pressed switches stay down, collected keys stay collected, and the goblin king stays dead. What resets is what resets on any room entry: goblins, pots, and the witch's health and summons.
+
+Outside the keep (town, sewer) defeat is unchanged.
+
+Which rooms count as the keep, and where to come back to, is a pure function so it can be tested:
+
+```
+' @return {SpawnTarget} {scene, spawn}
+function defeatRespawn(sceneName as string, lastSpawn as string) as SpawnTarget
+```
+
+It returns `{scene: "CastleScene", spawn: "entrance"}` for any keep room (`CastleScene`, the five D1 rooms, `ThroneRoomScene`; listed once in `DungeonData.bs` as `getKeepScenes()`, which `withKeepEnemiesGone()` below also uses) and `{scene: sceneName, spawn: lastSpawn}` otherwise. `Player`'s defeat timer calls it in place of the current `changeSceneWithFade(m.game.getScene().name, {spawn: m.lastSpawn})`. `GoblinShowcaseScene` (debug only) isn't a keep room.
 
 ## The keep at peace
 
-Every enemy placement in the castle rooms (`CastleScene`, the five D1 rooms, `ThroneRoomScene`) gets `notFlag: "witch.defeated"` added, by one helper in `DungeonData.bs` (`withKeepEnemiesGone(placements)`) applied when each room's placements are built, so no placement has to remember it. The sewer's rats are not affected: the sewer is under the town, not part of the keep, and stays a place to earn coins.
+Every enemy placement in the keep's rooms (`getKeepScenes()`) gets `notFlag: "witch.defeated"` added, by one helper in `DungeonData.bs` (`withKeepEnemiesGone(placements)`) applied when each room's placements are built, so no placement has to remember it. The sewer's rats are not affected: the sewer is under the town, not part of the keep, and stays a place to earn coins.
 
 New pages, most specific first:
 
@@ -180,7 +197,7 @@ So the layer stays in the example. A follow-up issue records the split above and
 
 ## Testing
 
-- **Rooibos, `examples/rpg/tests/`**: the great door's unlock effects; `message` with a speaker; the witch's `enemyKilled` rule and the `keep` stages 3-5; `withKeepEnemiesGone()` (castle rooms gain the condition, the sewer doesn't); Bram's/Mara's page selection after victory; checkpoints 7 and 8 and `checkpointScene()`; `boltFan`, `pickPerch`, `isShielded`; every door in `getAreaMaps()` (now including `ThroneRoomScene`) leads somewhere real.
+- **Rooibos, `examples/rpg/tests/`**: the great door's unlock effects; `message` with a speaker; the witch's `enemyKilled` rule and the `keep` stages 3-5; `withKeepEnemiesGone()` (castle rooms gain the condition, the sewer doesn't); Bram's/Mara's page selection after victory; checkpoints 7 and 8 and `checkpointScene()`; `defeatRespawn()` (every keep room goes to the entry hall, town and sewer keep `lastSpawn`); `boltFan`, `pickPerch`, `isShielded`; every door in `getAreaMaps()` (now including `ThroneRoomScene`) leads somewhere real.
 - **On a device**: screenshots only, via deep links (the throne room with and without the witch, the opened great door, the showcase poses, the credits, title-safe checks). The fight itself is played by hand.
 
 ## Non-goals
