@@ -72,3 +72,9 @@ License: CC-BY 4.0. Unmodified.
 OpenGameArt.org. https://opengameart.org/content/rpg-indoor-tileset-expansion-1
 License: CC-BY 3.0 (also OGA-BY 3.0 / GPL 2.0 / GPL 3.0). Unmodified; only a floor tile is used
 (the floor switches).
+
+## castleWalls.png
+Derived from `Castle2.png` ("Castle Tiles for RPGs" by Zabin, Hyptosis, and Daniel Cook, CC-BY 3.0,
+https://opengameart.org/content/castle-tiles-for-rpgs) by `examples/rpg/scripts/build-castle-walls.js`:
+brick turned and squashed into side/south wall tiles, and the portcullis arches turned and squashed
+for side/south doorways. License: CC-BY 3.0.
