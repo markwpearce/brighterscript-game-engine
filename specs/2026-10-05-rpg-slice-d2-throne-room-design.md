@@ -92,13 +92,13 @@ The facing order (up, left, down, right) is LPC's, different again from the gobl
 
 A state machine in the style of `GoblinKing` and the platformer's `PlantBoss`:
 
-1. **Volley** — plays spellcast, then fires a fan of 3 bolts aimed at the player, 2-3 times about 0.8 s apart.
-2. **Summon** — spellcast again (a longer tell, ~0.8 s), then a wave of 2 goblins appears, each at a circle chosen by `pickDrain` at least 96 px from the player (a circle may be reused if fewer are far enough away; if none is, the wave waits a frame). Each summoned goblin is a normal `Goblin` with `summoned: true` in its args, so it drops no loot.
+1. **Volley** — plays spellcast, then fires a fan of 3 bolts aimed at the player, 2-3 times about 1.6 s apart.
+2. **Summon** — spellcast again (a longer tell, ~0.8 s), then one goblin appears, at a circle chosen by `pickDrain` at least 96 px from the player (if none is far enough away, she skips straight to exhausted). Each summoned goblin is a normal `Goblin` with `summoned: true` in its args, so it drops no loot.
 3. **Shielded** — while any goblin she summoned is alive, a ring is drawn around her and sword hits bounce off: no damage, a small "clink" marker in place of a damage number, and the player is knocked back slightly. She keeps casting volleys while shielded.
 4. **Exhausted** — once the wave is dead, she slumps (hurt row, first frames) for ~2 s, unshielded.
 5. **Hit** — any sword hit while unshielded deals damage as usual and then she **blinks**: fades out over ~0.2 s, reappears at the perch farthest from the player (`pickPerch`), and the cycle restarts at 1.
 
-Phase 2 (at or below half health): 5-bolt fans, bolts 1.3× faster, waves of 3 goblins.
+Phase 2 (at or below half health): 5-bolt fans, bolts 1.3× faster; still one goblin at a time.
 
 `hurt()` returns `false` (no hit) while shielded or blinking; a hit doesn't knock her back (`knockbackScale = 0`), and she doesn't `recoil()` after touching the player (like the king).
 
