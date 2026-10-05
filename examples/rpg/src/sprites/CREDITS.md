@@ -63,9 +63,10 @@ License: CC-BY 3.0. 9-patch stretch markers added by the repo owner.
 William.Thompsonj (contributor). https://opengameart.org/content/lpc-goblin
 License: CC-BY 3.0 (also CC-BY 4.0 / OGA-BY 3.0 / GPL 2.0 / GPL 3.0). Unmodified.
 
-## items/keys.png
-`KeyIcons.png` from "Key Icons" by BizmasterStudios. https://opengameart.org/content/key-icons
-License: CC-BY 4.0. Unmodified.
+## items/locks.png, items/keySilver.png, items/keyGold.png
+`lock.png`, `key-silver.png` and `key-gold.png` from "Locks and Keys" by Kelvin Shadewing.
+https://opengameart.org/content/locks-and-keys
+License: CC-BY-SA 4.0 (also GPL 3.0). Unmodified.
 
 ## indoorTiles.png
 "RPG Indoor Tileset: Expansion 1" by Stephen Challener (Redshrike) and Jetrel, hosted by

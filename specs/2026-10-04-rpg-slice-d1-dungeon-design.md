@@ -78,7 +78,7 @@ Most dungeon mechanics are just live placements:
 
 - **Effect `{message: "text"}`**: opens a one-page, speaker-less dialogue box (the existing `DialogueBox`, pausing gameplay the same way). Used by switches and locked doors.
 - **Events routed by `Story.onGameEvent`** to the event rules: `roomCleared {room}` and `switchPressed {id}`, alongside the existing `enemyKilled`.
-- **Items**: `smallKey` (max 3) and `throneKey` (max 1), icons from `KeyIcons.png` (bronze key and gold heart key).
+- **Items**: `smallKey` (max 3) and `throneKey` (max 1), silver and gold keys from "Locks and Keys" (`items/keySilver.png`/`keyGold.png`, 8-frame spin sheets - pickups spin, the HUD and inventory use the first frame). A silver key opens silver locks, the gold key the great door's gold lock.
 
 ### Event rules (sketch)
 
@@ -110,7 +110,7 @@ The antechamber's key is a live pickup gated on `dng.ante.solved`; the king's th
 
 A solid in the room's `SolidWorld`, a sprite, and a trigger collider slightly larger than the solid.
 
-- **Styles**: `bars` (portcullis), `shutter` (closes behind you), `locked` (needs a key), `great` (the throne door). Art comes from `Castle2.png` (barred arch, doorway) and `KeyIcons.png`; exact regions are picked in the plan and checked on a device.
+- **Styles**: `bars` (portcullis), `shutter` (closes behind you), `locked` (needs a key), `great` (the throne door). Art comes from `Castle2.png` (barred arch, doorway; turned for side/south walls in `castleWalls.png`) and `items/locks.png` (silver lock on locked doors, gold on the great door); exact regions are picked in the plan and checked on a device.
 - **Unlocking**: when the player's `feet` enter the trigger (`onCollisionEnter`, once per contact), a `locked`/`great` gate runs `unlock.effects` if `unlock.when` passes, otherwise shows `lockedMessage` via the `message` effect.
 - **Opening**: when its live placement is removed, the gate fades out over ~0.3s, then removes its solid (`SolidWorld.removeSolid`) and itself.
 - **The great door** in D1: without the throne key, *"A great door, sealed by the witch's magic. The keyhole is shaped like a heart."* With it, *"The key turns, but dark magic holds the door shut."* (sets `dng.throneDoor.tried`). It never opens in D1.
@@ -200,7 +200,7 @@ For checking what a screen looks like with a screenshot, never for driving the p
 New files under `examples/rpg/src/sprites/`, each credited in `sprites/CREDITS.md`:
 
 - `goblinsword.png` — LPC Goblin, Redshrike, CC-BY 3.0 (https://opengameart.org/content/lpc-goblin).
-- `KeyIcons.png` — Key Icons (https://opengameart.org/content/key-icons); licence and author recorded from the page.
+- `items/locks.png`, `items/keySilver.png`, `items/keyGold.png` — "Locks and Keys" by Kelvin Shadewing, CC-BY-SA 4.0 (https://opengameart.org/content/locks-and-keys).
 - The indoor tileset expansion (https://opengameart.org/content/rpg-indoor-tileset-expansion-1) — only the floor-switch tiles are needed. The source PNG is RGB with no alpha, so its background colour is converted to transparency when imported.
 
 The witch sheet (`lpcfemalechainpreview.png`, a full 832×1344 LPC sheet, sliceable despite #289's note) is D2's.
