@@ -57,3 +57,25 @@ License: CC-BY 3.0. 9-patch stretch markers added by the repo owner.
 ## ui/button.9.png, ui/frame.9.png
 "Buttons and Frame", https://opengameart.org/content/buttons-and-frame. License: CC0.
 9-patch stretch markers added by the repo owner.
+
+## goblin.png
+`goblinsword.png` from "[LPC] Goblin" by Stephen "Redshrike" Challener (graphic artist) and
+William.Thompsonj (contributor). https://opengameart.org/content/lpc-goblin
+License: CC-BY 3.0 (also CC-BY 4.0 / OGA-BY 3.0 / GPL 2.0 / GPL 3.0). Unmodified.
+
+## items/locks.png, items/keySilver.png, items/keyGold.png
+`lock.png`, `key-silver.png` and `key-gold.png` from "Locks and Keys" by Kelvin Shadewing.
+https://opengameart.org/content/locks-and-keys
+License: CC-BY-SA 4.0 (also GPL 3.0). Unmodified.
+
+## indoorTiles.png
+"RPG Indoor Tileset: Expansion 1" by Stephen Challener (Redshrike) and Jetrel, hosted by
+OpenGameArt.org. https://opengameart.org/content/rpg-indoor-tileset-expansion-1
+License: CC-BY 3.0 (also OGA-BY 3.0 / GPL 2.0 / GPL 3.0). Unmodified; only a floor tile is used
+(the floor switches).
+
+## castleWalls.png
+Derived from `Castle2.png` ("Castle Tiles for RPGs" by Zabin, Hyptosis, and Daniel Cook, CC-BY 3.0,
+https://opengameart.org/content/castle-tiles-for-rpgs) by `examples/rpg/scripts/build-castle-walls.js`:
+brick turned and squashed into side/south wall tiles, and the portcullis arches turned and squashed
+for side/south doorways. License: CC-BY 3.0.

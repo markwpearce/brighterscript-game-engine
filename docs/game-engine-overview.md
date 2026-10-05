@@ -285,6 +285,9 @@ Rectangles are `{x, y, w, h}` with `(x, y)` the bottom-left corner. Pass `{corne
 fourth argument for moves that shouldn't be eased around corners, like a knockback.
 `examples/rpg`'s `Player` and `Rat` both move this way.
 
+`addSolid` returns an id. Pass it to `removeSolid(id)` to take that rectangle back out, for
+example when a door opens.
+
 ## Following the player with the camera
 
 The default camera is a `BGE.Camera2d` centred on `camera.setTarget(point)`. For a world bigger

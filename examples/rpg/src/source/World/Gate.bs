@@ -1,0 +1,101 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/utils/CountdownTimer.bs"
+import "../Maps/Atlas.bs"
+import "../Maps/MapTypes.bs"
+import "AtlasRegion.bs"
+import "../Story/Story.bs"
+
+const GATE_FADE_SECONDS = 0.3
+' How far past the solid the player's feet are noticed walking into it.
+const GATE_TRIGGER_MARGIN = 4.0
+
+' Blocks a doorway: a solid in the area's SolidWorld plus its art - the closed portcullis arch,
+' turned to face out of the room on a side or bottom wall. A locked or great gate also
+' shows a silver or gold lock, and walking into it asks the Story to unlock it. When its live placement is
+' removed it fades out (see open()).
+class Gate extends BGE.GameEntity
+
+  private solidWorld as BGE.SolidWorld = invalid
+  private solidId as string = ""
+  private unlock as GateUnlock = invalid
+  private isOpening as boolean = false
+  private fadeTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Gate"
+  end sub
+
+  ' @param {roAssociativeArray} args - {x, y (bottom-left, px), w, h (px), style, side, unlock, solidWorld}
+  override sub onCreate(args as roAssociativeArray)
+    m.position.x = args.x
+    m.position.y = args.y
+    ' In front of its own doorway arch, which sits up to 10px lower (pushSideArch).
+    m.position.z = -args.y + 20
+    m.solidWorld = args.solidWorld
+    m.unlock = args.unlock
+    m.solidId = m.solidWorld.addSolid(args.x, args.y, args.w, args.h)
+    ' The barred arch for each wall, and where its top-left sits relative to the opening: the
+    ' north arch is centred on the opening, side/south ones overhang it by 10px each end.
+    archKeys = {n: "archBars", w: "archBarsW", e: "archBarsE", s: "archBarsS"}
+    entry = getAtlas()[archKeys[args.side]] as AtlasEntry
+    if args.side = "w" or args.side = "e"
+      artOffset = BGE.Math.VectorOps.create(0, args.h + (entry.h - args.h) / 2)
+    else
+      artOffset = BGE.Math.VectorOps.create((args.w - entry.w) / 2, entry.h)
+    end if
+    m.addImage("bars", atlasRegion(m.game, entry), {offset: artOffset, drawMode: BGE.SceneObjectDrawMode.matchCamera})
+    lockIcon = ""
+    if args.style = "locked"
+      lockIcon = "lockSilver"
+    else if args.style = "great"
+      lockIcon = "lockGold"
+    end if
+    if lockIcon <> ""
+      ' Centred on the bars: half way up the arch on the north wall, mid-opening elsewhere.
+      lockTop = args.h / 2 + 16
+      if args.side = "n"
+        lockTop = entry.h / 2 + 16
+      end if
+      m.addImage("lock", CreateObject("roRegion", m.game.getBitmap(lockIcon), 0, 0, 32, 32), {
+        offset: BGE.Math.VectorOps.create((args.w - 32) / 2, lockTop),
+        drawMode: BGE.SceneObjectDrawMode.matchCamera
+      })
+    end if
+    margin = GATE_TRIGGER_MARGIN
+    m.addRectangleCollider("trigger", args.w + margin * 2, args.h + margin * 2, -margin, args.h + margin)
+  end sub
+
+  ' Fades out and stops blocking. The solid goes at once, so the player can walk on.
+  sub open()
+    if m.isOpening
+      return
+    end if
+    m.isOpening = true
+    m.solidWorld.removeSolid(m.solidId)
+    m.colliders["trigger"].enabled = false
+    m.fadeTimer.start(GATE_FADE_SECONDS)
+  end sub
+
+  override sub onUpdate(dt as float)
+    if not m.isOpening
+      return
+    end if
+    m.fadeTimer.tick(dt)
+    for each drawableObj in m.drawables
+      drawableObj.alpha = 255 * m.fadeTimer.remaining() / GATE_FADE_SECONDS
+    end for
+    if not m.fadeTimer.isActive()
+      m.invalidate()
+    end if
+  end sub
+
+  override sub onCollisionEnter(myCollider as BGE.Collider, otherCollider as BGE.Collider, otherEntity as BGE.GameEntity)
+    if m.unlock = invalid or m.isOpening or otherEntity.name <> "Player" or otherCollider.name <> "feet"
+      return
+    end if
+    storyEntity = m.game.getEntityByName("Story") as Story
+    storyEntity.tryUnlock(m.unlock)
+  end sub
+
+end class

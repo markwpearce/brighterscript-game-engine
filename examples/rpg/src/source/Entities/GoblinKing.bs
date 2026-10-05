@@ -1,0 +1,175 @@
+import "Goblin.bs"
+import "Facing.bs"
+import "Loot.bs"
+
+const KING_HEALTH = 12
+const KING_SCALE = 1.5
+' Gold tint (packed RGB).
+const KING_TINT = &hFFD070
+const KING_SPEED = 40.0
+const KING_CHARGE_EVERY = 3.0
+const KING_TELL_SECONDS = 0.6
+const KING_QUICK_TELL_SECONDS = 0.3
+const KING_CHARGE_SPEED = 220.0
+const KING_PHASE2_SPEED_SCALE = 1.3
+const KING_STUN_SECONDS = 1.2
+' Flash tint during the tell (packed RGB).
+const KING_TELL_RGB = &hFF8040
+' Tint while stunned (packed RGB).
+const KING_STUN_RGB = &h9090FF
+
+' The goblin king: chases slowly, then plants and flashes (the tell) and charges in a straight
+' line until he hits a wall, which stuns him - the safe time to hit him. Below half health he
+' charges faster, twice in a row.
+class GoblinKing extends Goblin
+
+  private chargeTimer as BGE.CountdownTimer = new BGE.CountdownTimer()
+  private chargesLeft as integer = 0
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "GoblinKing"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    super.onCreate(args)
+    m.health = KING_HEALTH
+    m.boxW = 28
+    m.boxH = 14
+    m.headHeight = 66
+    m.knockbackScale = 0.25
+    m.baseColor = KING_TINT
+    m.sprite.color = KING_TINT
+    m.sprite.scale = BGE.Math.VectorOps.create(KING_SCALE, KING_SCALE, 1)
+    m.removeCollider("body")
+    m.addRectangleCollider("body", 30, 48, -15, 48)
+    m.chargeTimer.start(KING_CHARGE_EVERY)
+  end sub
+
+  override sub freezePose(pose as string)
+    if pose = "stunned"
+      m.frozen = true
+      m.state = "stunned"
+      m.playFacing("idle_")
+    else if pose = "tell"
+      m.frozen = true
+      m.state = "tell"
+      m.playFacing("swing_")
+    else
+      super.freezePose(pose)
+    end if
+  end sub
+
+  protected override function currentTint() as integer
+    if m.state = "tell"
+      return KING_TELL_RGB
+    else if m.state = "stunned"
+      return KING_STUN_RGB
+    end if
+    return KING_TINT
+  end function
+
+  ' A hit must not cancel the tell or charge, or he could be stun-locked and never charge.
+  override function hurt(fromX as float, fromY as float, amount = 1 as integer) as boolean
+    savedState = m.state
+    result = super.hurt(fromX, fromY, amount)
+    if not m.isDying
+      m.state = savedState
+    end if
+    return result
+  end function
+
+  ' A boss doesn't back off after hurting the player.
+  override sub recoil(fromX as float, fromY as float)
+  end sub
+
+  protected override function lootTable() as LootEntry[]
+    return []
+  end function
+
+  function isPhaseTwo() as boolean
+    return m.health <= KING_HEALTH / 2
+  end function
+
+  protected override sub moveEnemy(dt as float)
+    if m.frozen
+      return
+    end if
+    m.stateTimer.tick(dt)
+    target = m.getPlayer()
+    if m.state = "stunned"
+      if not m.stateTimer.isActive()
+        m.state = "walk"
+        m.chargeTimer.start(KING_CHARGE_EVERY)
+      end if
+      return
+    else if m.state = "tell"
+      if not m.stateTimer.isActive()
+        m.state = "lunge"
+      end if
+      return
+    else if m.state = "lunge"
+      m.charge(dt)
+      return
+    end if
+
+    if target = invalid
+      return
+    end if
+    dx = target.position.x - m.position.x
+    dy = target.position.y - m.position.y
+    distance = Sqr(dx * dx + dy * dy)
+    m.chargeTimer.tick(dt)
+    if not m.chargeTimer.isActive() and distance > 1
+      m.chargesLeft = 1
+      if m.isPhaseTwo()
+        m.chargesLeft = 2
+      end if
+      m.startTell(dx / distance, dy / distance, KING_TELL_SECONDS)
+    else if distance > 1
+      m.walk(dx / distance * KING_SPEED * dt, dy / distance * KING_SPEED * dt)
+    end if
+  end sub
+
+  private sub startTell(dirX as float, dirY as float, seconds as float)
+    m.lungeX = dirX
+    m.lungeY = dirY
+    m.facing = facingFor(dirX, dirY, m.facing)
+    m.state = "tell"
+    m.stateTimer.start(seconds)
+    m.playFacing("swing_")
+  end sub
+
+  ' Runs straight on until something stops him.
+  private sub charge(dt as float)
+    speed = KING_CHARGE_SPEED
+    if m.isPhaseTwo()
+      speed = speed * KING_PHASE2_SPEED_SCALE
+    end if
+    beforeX = m.position.x
+    beforeY = m.position.y
+    m.applyMove(m.lungeX * speed * dt, m.lungeY * speed * dt, {cornerNudge: 0})
+    ' Progress along the charge direction, so sliding along a wall still counts as a hit.
+    progress = (m.position.x - beforeX) * m.lungeX + (m.position.y - beforeY) * m.lungeY
+    if progress >= speed * dt * 0.5
+      return
+    end if
+    ' Hit a wall.
+    m.chargesLeft--
+    target = m.getPlayer()
+    if m.chargesLeft > 0 and target <> invalid
+      dx = target.position.x - m.position.x
+      dy = target.position.y - m.position.y
+      distance = Sqr(dx * dx + dy * dy)
+      if distance > 1
+        m.startTell(dx / distance, dy / distance, KING_QUICK_TELL_SECONDS)
+        return
+      end if
+    end if
+    m.game.playSound("enemyHit")
+    m.state = "stunned"
+    m.stateTimer.start(KING_STUN_SECONDS)
+    m.playFacing("idle_")
+  end sub
+
+end class
