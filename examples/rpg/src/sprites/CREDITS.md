@@ -1,5 +1,7 @@
 # Art credits
 
+In-game credits (Story/CreditsData.bs) are kept in step with this file by hand.
+
 ## PathAndObjects.png
 "RPG Tiles: Cobble Stone Paths & Town Objects" by Zabin, Daneeklu, Jetrel, Hyptosis, Redshrike, Bertram.
 https://opengameart.org/content/rpg-tiles-cobble-stone-paths-town-objects (see that page for who did what)
