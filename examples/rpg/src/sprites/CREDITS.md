@@ -83,4 +83,5 @@ for side/south doorways. License: CC-BY 3.0.
 ## witch.png
 `lpcfemalechainpreview.png` from "LPC Combat Armor for women" by Matthew Krohn (makrohn), adapted
 from art by Johannes Sjölund. https://opengameart.org/content/lpc-combat-armor-for-women
-License: CC-BY-SA 3.0 (also GPL 3.0 / OGA-BY 3.0). Unmodified (tinted in code).
+License: CC-BY-SA 3.0 (also GPL 3.0 / OGA-BY 3.0). Modified: the 1px semi-transparent cell borders cleared by
+`examples/rpg/scripts/build-witch.js`. Tinted in code.
