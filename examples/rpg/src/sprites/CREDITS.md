@@ -1,5 +1,7 @@
 # Art credits
 
+In-game credits (Story/CreditsData.bs) are kept in step with this file by hand.
+
 ## PathAndObjects.png
 "RPG Tiles: Cobble Stone Paths & Town Objects" by Zabin, Daneeklu, Jetrel, Hyptosis, Redshrike, Bertram.
 https://opengameart.org/content/rpg-tiles-cobble-stone-paths-town-objects (see that page for who did what)
@@ -79,3 +81,9 @@ Derived from `Castle2.png` ("Castle Tiles for RPGs" by Zabin, Hyptosis, and Dani
 https://opengameart.org/content/castle-tiles-for-rpgs) by `examples/rpg/scripts/build-castle-walls.js`:
 brick turned and squashed into side/south wall tiles, and the portcullis arches turned and squashed
 for side/south doorways. License: CC-BY 3.0.
+
+## witch.png
+`lpcfemalechainpreview.png` from "LPC Combat Armor for women" by Matthew Krohn (makrohn), adapted
+from art by Johannes Sjölund. https://opengameart.org/content/lpc-combat-armor-for-women
+License: CC-BY-SA 3.0 (also GPL 3.0 / OGA-BY 3.0). Modified: the 1px semi-transparent cell borders cleared by
+`examples/rpg/scripts/build-witch.js`. Tinted in code.
