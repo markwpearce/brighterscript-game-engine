@@ -1,0 +1,98 @@
+name: Publish Release
+
+# Runs when a release/x.y.z PR (opened by initialize-release.yml) is merged: tags
+# the merge commit, publishes to npm and creates the GitHub release. Safe to re-run
+# after a partial failure - each step skips what's already done.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write # npm trusted publishing (OIDC)
+
+jobs:
+  publish-release:
+    if: >-
+      github.event.pull_request.merged &&
+      startsWith(github.event.pull_request.head.ref, 'release/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    # On the job, not the workflow, so other closed PRs (skipped runs) can't replace a queued release.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          # No registry-url: it writes a placeholder NODE_AUTH_TOKEN that npm would send instead of using OIDC.
+          node-version: 24
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@^11.5.1
+
+      - name: Read version
+        id: version
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$BRANCH" != "release/$VERSION" ]; then
+            echo "::error::branch $BRANCH doesn't match package.json version $VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+
+      - name: Install ropm modules
+        run: npx ropm install
+
+      - name: Tag
+        env:
+          TAG: v${{ steps.version.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            git fetch --depth 1 origin tag "$TAG"
+            if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::$TAG already exists on a different commit"
+              exit 1
+            fi
+            echo "$TAG already exists"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+      - name: Publish to npm
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if OUTPUT=$(npm view "brighterscript-game-engine@$VERSION" version 2>&1) && [ -n "$OUTPUT" ]; then
+            echo "$VERSION is already on npm"
+          elif [[ "$OUTPUT" == *E404* ]]; then
+            # `prepack` builds the engine into build/.
+            npm publish
+          else
+            echo "$OUTPUT"
+            echo "::error::couldn't check whether $VERSION is already on npm"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "release v$VERSION already exists"
+          else
+            node scripts/release-changelog.js notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+            gh release create "v$VERSION" --title "v$VERSION" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+          fi
