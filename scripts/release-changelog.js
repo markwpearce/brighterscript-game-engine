@@ -32,14 +32,29 @@ function findHeading(lines, name) {
     return lines.findIndex((line) => heading.test(line));
 }
 
+// Start of the compare links at the bottom of the file - only the final run of
+// link references, so one inside an entry doesn't end its section early.
+function findLinkRefsStart(lines) {
+    let end = lines.length;
+    while (end > 0 && lines[end - 1].trim() === '') {
+        end--;
+    }
+    let start = end;
+    while (start > 0 && LINK_REF.test(lines[start - 1])) {
+        start--;
+    }
+    return start;
+}
+
 // The first line after `start` that ends a section: the next "## " heading or the link references.
 function findSectionEnd(lines, start) {
-    for (let i = start + 1; i < lines.length; i++) {
-        if (lines[i].startsWith('## ') || LINK_REF.test(lines[i])) {
+    const linkRefsStart = findLinkRefsStart(lines);
+    for (let i = start + 1; i < linkRefsStart; i++) {
+        if (lines[i].startsWith('## ')) {
             return i;
         }
     }
-    return lines.length;
+    return linkRefsStart;
 }
 
 function trimBlankLines(lines) {
@@ -69,7 +84,7 @@ function prepare(text, version, date) {
         fail('[Unreleased] is empty - add the release\'s changes to CHANGELOG.md first');
     }
 
-    const linkIndex = lines.findIndex((line) => line.startsWith('[Unreleased]: '));
+    const linkIndex = lines.findIndex((line, i) => i >= end && line.startsWith('[Unreleased]: '));
     if (linkIndex < 0) {
         fail('no "[Unreleased]: " compare link in CHANGELOG.md');
     }

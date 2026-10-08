@@ -13,13 +13,16 @@ permissions:
   contents: write
   id-token: write # npm trusted publishing (OIDC)
 
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 jobs:
   publish-release:
-    if: github.event.pull_request.merged && startsWith(github.event.pull_request.head.ref, 'release/')
+    if: >-
+      github.event.pull_request.merged &&
+      startsWith(github.event.pull_request.head.ref, 'release/') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    # On the job, not the workflow, so other closed PRs (skipped runs) can't replace a queued release.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,11 +31,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
+          # No registry-url: it writes a placeholder NODE_AUTH_TOKEN that npm would send instead of using OIDC.
           node-version: 24
-          registry-url: https://registry.npmjs.org
 
       # Trusted publishing needs npm 11.5.1 or later.
-      - run: npm install -g npm@latest
+      - run: npm install -g npm@^11.5.1
 
       - name: Read version
         id: version
@@ -56,6 +59,11 @@ jobs:
           TAG: v${{ steps.version.outputs.version }}
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            git fetch --depth 1 origin tag "$TAG"
+            if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::$TAG already exists on a different commit"
+              exit 1
+            fi
             echo "$TAG already exists"
           else
             git tag "$TAG"
@@ -66,11 +74,15 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "brighterscript-game-engine@$VERSION" version > /dev/null 2>&1; then
+          if OUTPUT=$(npm view "brighterscript-game-engine@$VERSION" version 2>&1) && [ -n "$OUTPUT" ]; then
             echo "$VERSION is already on npm"
-          else
+          elif [[ "$OUTPUT" == *E404* ]]; then
             # `prepack` builds the engine into build/.
             npm publish
+          else
+            echo "$OUTPUT"
+            echo "::error::couldn't check whether $VERSION is already on npm"
+            exit 1
           fi
 
       - name: Create GitHub release
