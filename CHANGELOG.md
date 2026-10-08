@@ -4,6 +4,8 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-08
+
 ### Added
 
 - Releases are automated: an Initialize Release workflow opens a `release/x.y.z` PR, and merging it tags, publishes to npm (trusted publishing) and creates the GitHub release ([#248](https://github.com/markwpearce/brighterscript-game-engine/issues/248)).
@@ -143,7 +145,8 @@ Most leftover uses of the old names fail to compile. The exception: an `override
 - README rewrite: engine + standalone drawing-library pitch, runnable quick-start code sample, examples table, screenshots.
 - Example tooling (`prepare-examples`, `build-examples`, `validate-examples`, `clean-all`, `create-example`) rewritten in plain Node, so it works on Windows without Git Bash/WSL.
 
-[Unreleased]: https://github.com/markwpearce/brighterscript-game-engine/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/markwpearce/brighterscript-game-engine/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/markwpearce/brighterscript-game-engine/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/markwpearce/brighterscript-game-engine/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/markwpearce/brighterscript-game-engine/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/markwpearce/brighterscript-game-engine/compare/1.1...v0.5.0
