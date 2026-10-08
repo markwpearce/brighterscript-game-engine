@@ -15,6 +15,16 @@ namespace tests
       }
     end function
 
+    ' Camera at the origin looking down -z, so a point's forward distance is just -z.
+    private sub lookDownNegativeZ()
+      m.camera.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, -1))
+    end sub
+
+    private sub assertNear(expected as float, actual as float)
+      m.assertTrue(abs(expected - actual) < 0.001, `expected ${expected} but got ${actual}`)
+    end sub
+
     @describe("setTarget")
 
     @it("points orientation at the target as a normalized direction vector")
@@ -128,28 +138,42 @@ namespace tests
 
     @describe("maxDrawDistance and the projection version")
 
-    @it("bumps projectionVersion when maxDrawDistance changes")
+    ' The far-clip doesn't affect how points project, so a draw-distance change must not
+    ' force every SceneObject to recompute its canvas geometry.
+    @it("does not bump projectionVersion when maxDrawDistance changes")
     function _()
       m.camera.setFrameSize(200, 200)
       m.camera.checkMovement()
       before = m.camera.projectionVersion
 
       m.camera.maxDrawDistance = 250
-      m.camera.checkMovement()
-
-      m.assertTrue(m.camera.projectionVersion > before)
-    end function
-
-    @it("holds projectionVersion steady when maxDrawDistance is unchanged")
-    function _()
-      m.camera.setFrameSize(200, 200)
-      m.camera.maxDrawDistance = 250
-      m.camera.checkMovement()
-      before = m.camera.projectionVersion
-
       m.camera.checkMovement()
 
       m.assertEqual(before, m.camera.projectionVersion)
+    end function
+
+    @it("reports farDistanceChangedThisFrame when the draw distance moves")
+    function _()
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.camera.checkMovement()
+      m.camera.checkMovement()
+      m.assertFalse(m.camera.farDistanceChangedThisFrame())
+
+      m.camera.maxDrawDistance = 250
+      m.camera.checkMovement()
+      m.assertTrue(m.camera.farDistanceChangedThisFrame())
+
+      m.camera.checkMovement()
+      m.assertFalse(m.camera.farDistanceChangedThisFrame())
+    end function
+
+    @it("reports farDistanceChangedThisFrame when the fade fraction changes")
+    function _()
+      m.camera.checkMovement()
+      m.camera.checkMovement()
+      m.camera.drawDistanceFadeFraction = 0.3
+      m.camera.checkMovement()
+      m.assertTrue(m.camera.farDistanceChangedThisFrame())
     end function
 
     @describe("getHorizonLine")
@@ -328,13 +352,13 @@ namespace tests
       m.assertFalse(m.camera.isInView(BGE.Math.VectorOps.create(0, 0, -950)))
     end function
 
-    @it("bumps projectionVersion when drawDistanceScale changes")
+    @it("does not bump projectionVersion when drawDistanceScale changes")
     function _()
       m.camera.checkMovement()
       before = m.camera.projectionVersion
       m.camera.drawDistanceScale = 0.5
       m.camera.checkMovement()
-      m.assertNotEqual(before, m.camera.projectionVersion)
+      m.assertEqual(before, m.camera.projectionVersion)
     end function
 
     @describe("rollDegrees")
@@ -436,6 +460,174 @@ namespace tests
       m.camera.checkMovement()
 
       m.assertInvalid(m.camera.worldToCamera)
+    end function
+
+    @describe("getDistanceFadeAlpha")
+
+    @it("is fully opaque before the fade band, half way through it, and clear at the limit")
+    function _()
+      m.lookDownNegativeZ()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceFadeFraction = 0.5
+      m.camera.checkMovement()
+
+      ' band runs from 250 to 500
+      m.assertNear(1.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -100)))
+      m.assertNear(1.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -250)))
+      m.assertNear(0.5, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -375)))
+      m.assertNear(0.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -500)))
+      m.assertNear(0.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -800)))
+    end function
+
+    @it("fades across the last 15% by default")
+    function _()
+      m.lookDownNegativeZ()
+      m.camera.maxDrawDistance = 400
+      m.camera.checkMovement()
+      ' band runs from 340 to 400
+      m.assertNear(1.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -340)))
+      m.assertNear(0.5, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -370)))
+    end function
+
+    @it("doesn't fade at all with a fraction of 0 or below")
+    function _()
+      m.lookDownNegativeZ()
+      m.camera.maxDrawDistance = 500
+      for each fraction in [0.0, -1.0]
+        m.camera.drawDistanceFadeFraction = fraction
+        m.camera.checkMovement()
+        m.assertNear(1.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -499)))
+      end for
+    end function
+
+    @it("treats a fraction above 1 as fading across the whole distance")
+    function _()
+      m.lookDownNegativeZ()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceFadeFraction = 2.0
+      m.camera.checkMovement()
+      m.assertNear(0.5, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, -250)))
+      m.assertNear(1.0, m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(0, 0, 10)))
+    end function
+
+    @describe("eased draw distance")
+
+    @it("starts at the full draw distance on the first frame instead of easing up to it")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.checkMovement()
+      m.assertNear(500.0, m.camera.getCurrentDrawDistance())
+    end function
+
+    @it("eases linearly to a new target over drawDistanceTransitionSeconds")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.advanceDrawDistance(0)
+      m.camera.maxDrawDistance = 300
+
+      m.camera.advanceDrawDistance(0.05)
+      m.camera.advanceDrawDistance(0.05)
+      m.assertNear(480.0, m.camera.getCurrentDrawDistance())
+
+      for i = 1 to 9
+        m.camera.advanceDrawDistance(0.1)
+      end for
+      m.assertNear(300.0, m.camera.getCurrentDrawDistance())
+    end function
+
+    @it("stops exactly on the target")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.advanceDrawDistance(0)
+      m.camera.maxDrawDistance = 300
+      for i = 1 to 20
+        m.camera.advanceDrawDistance(0.1)
+      end for
+      m.assertNear(300.0, m.camera.getCurrentDrawDistance())
+      m.assertFalse(m.camera.farDistanceChangedThisFrame())
+    end function
+
+    @it("clamps one long frame so it can't finish the transition at once")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.advanceDrawDistance(0)
+      m.camera.maxDrawDistance = 300
+      m.camera.advanceDrawDistance(5.0)
+      ' clamped to 0.1s -> 20 units of a 200-unit change
+      m.assertNear(480.0, m.camera.getCurrentDrawDistance())
+    end function
+
+    @it("continues from where it is when the target changes mid-transition")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.advanceDrawDistance(0)
+      m.camera.maxDrawDistance = 300
+      for i = 1 to 5
+        m.camera.advanceDrawDistance(0.1)
+      end for
+      m.assertNear(400.0, m.camera.getCurrentDrawDistance())
+
+      m.camera.maxDrawDistance = 600
+      m.camera.advanceDrawDistance(0.1)
+      ' new transition: 200 units over 1s from 400
+      m.assertNear(420.0, m.camera.getCurrentDrawDistance())
+    end function
+
+    @it("snaps when drawDistanceTransitionSeconds is 0")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.camera.advanceDrawDistance(0)
+      m.camera.maxDrawDistance = 300
+      m.camera.advanceDrawDistance(0.01)
+      m.assertNear(300.0, m.camera.getCurrentDrawDistance())
+    end function
+
+    @it("snapDrawDistance jumps straight to the target")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.advanceDrawDistance(0)
+      m.camera.maxDrawDistance = 300
+      m.camera.snapDrawDistance()
+      m.assertNear(300.0, m.camera.getCurrentDrawDistance())
+      m.camera.advanceDrawDistance(0.01)
+      m.assertNear(300.0, m.camera.getCurrentDrawDistance())
+    end function
+
+    @it("eases a quality-scale change rather than applying it at once")
+    function _()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.advanceDrawDistance(0)
+      m.camera.drawDistanceScale = 0.5
+      m.camera.advanceDrawDistance(0.1)
+      m.assertNear(475.0, m.camera.getCurrentDrawDistance())
+      m.assertNear(250.0, m.camera.getEffectiveMaxDrawDistance())
+    end function
+
+    @it("far-clips at the current, eased distance")
+    function _()
+      m.lookDownNegativeZ()
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceTransitionSeconds = 1.0
+      m.camera.checkMovement()
+      m.camera.maxDrawDistance = 300
+      m.camera.advanceDrawDistance(0.1)
+      ' current is 480: a point at 450 is still in view mid-transition
+      m.assertTrue(m.camera.isInView(BGE.Math.VectorOps.create(0, 0, -450)))
+      m.assertFalse(m.camera.isInView(BGE.Math.VectorOps.create(0, 0, -490)))
+    end function
+
+    @it("reports its transition time through the base Camera API")
+    function _()
+      m.camera.drawDistanceTransitionSeconds = 0.6
+      cam = m.camera as BGE.Camera
+      m.assertNear(0.6, cam.getDrawDistanceTransitionSeconds())
     end function
 
   end class
