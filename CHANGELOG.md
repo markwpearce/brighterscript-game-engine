@@ -4,6 +4,10 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+### Added
+
+- Releases are automated: an Initialize Release workflow opens a `release/x.y.z` PR, and merging it tags, publishes to npm (trusted publishing) and creates the GitHub release ([#248](https://github.com/markwpearce/brighterscript-game-engine/issues/248)).
+
 ## [0.7.0] - 2026-09-24
 
 ### Changed (breaking)

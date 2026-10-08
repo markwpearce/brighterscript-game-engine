@@ -1,0 +1,72 @@
+name: Initialize Release
+
+# Opens a release/x.y.z PR that bumps package.json and dates the [Unreleased]
+# section of CHANGELOG.md. Merging that PR runs publish-release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        required: true
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  initialize-release:
+    runs-on: ubuntu-latest
+    steps:
+      # A PR opened with the default GITHUB_TOKEN doesn't trigger other workflows, so
+      # the required `validate` check would never run on it. DOCS_PAT is a classic PAT
+      # with `repo` scope; without it the PR still opens, but needs a push to run CI.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.DOCS_PAT || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Bump version
+        id: version
+        run: |
+          # --ignore-scripts skips `preversion` (npm run validate); CI validates the PR instead.
+          npm version ${{ inputs.bump }} --no-git-tag-version --ignore-scripts
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Date the changelog
+        run: node scripts/release-changelog.js prepare ${{ steps.version.outputs.version }}
+
+      - name: Open the release PR
+        env:
+          GH_TOKEN: ${{ secrets.DOCS_PAT || github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          BRANCH="release/$VERSION"
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            echo "::error::$BRANCH already exists - merge or delete it first"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -am "$VERSION"
+          git push origin "$BRANCH"
+          node scripts/release-changelog.js notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+          {
+            echo "Release $VERSION. Merging this tags \`v$VERSION\`, publishes to npm and creates the GitHub release with these notes:"
+            echo
+            echo "---"
+            echo
+            cat "$RUNNER_TEMP/notes.md"
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --base main --head "$BRANCH" --title "Release $VERSION" --body-file "$RUNNER_TEMP/body.md"
