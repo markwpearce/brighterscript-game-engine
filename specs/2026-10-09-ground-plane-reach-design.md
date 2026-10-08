@@ -52,9 +52,9 @@ right vector (perpendicular to `projFwd` on the plane):
   (d = F for a level camera)
 - `farCenter = cameraPointOnPlane + projFwd * d`
 - `halfWidth = F * tan(hFOV / 2)` (the frustum's half width at forward depth F)
-- `topLeft = farCenter - right * halfWidth`, `topRight = farCenter + right * halfWidth`
-  (matching the existing corner handedness: check against today's `topLeft`/`topRight`
-  rotation signs)
+- `topLeft = farCenter - right * halfWidth`, `topRight = farCenter + right * halfWidth`.
+  Same handedness as today: `topRight` is rotated by -hFOV/2 about the plane's +y normal,
+  which takes forward (0,0,-1) to +x, the camera's right.
 
 Apply when a top ray misses the ground **or** hits it past forward depth F (camera pitched
 slightly down), so the quad never reaches past what the pre-perspective bitmap covers.
