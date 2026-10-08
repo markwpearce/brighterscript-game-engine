@@ -6,9 +6,49 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [0.8.0] - 2026-10-08
 
+### Changed
+
+- Every game now starts at a render quality level seeded from the Roku model, so draw distance, plane slices and fast-draw tolerances can differ from 0.7.0 on devices that don't seed Medium - see Render quality below ([#126](https://github.com/markwpearce/brighterscript-game-engine/issues/126), [#251](https://github.com/markwpearce/brighterscript-game-engine/issues/251)).
+- `Camera2d.worldPointToCanvasPoint()` rounds to the nearest pixel instead of truncating, and the view snaps to whole pixels, so images placed edge to edge no longer leave a 1px seam ([#255](https://github.com/markwpearce/brighterscript-game-engine/issues/255)).
+- `Game.loadBitmap()` returns `false` (and logs) when the image fails to decode, instead of storing `invalid` and returning `true`. It now accepts `.webp`, `.jpeg`, `.bmp` and `.gif` too (SVG doesn't decode on Roku, and an animated GIF only shows its first frame).
+
 ### Added
 
+**Rendering**
+- Render quality levels (Basic, Low, Medium, High, Ultra), each bundling the draw-quality settings. `Game.enableAdaptiveQuality()` moves between levels to hold a target frame rate, `Game.setQualityLevel()` pins one, and `onQualityChanged(level)` reaches entities, the scene and UI. New [Render Quality](https://markwpearce.github.io/brighterscript-game-engine/render-quality) guide ([#126](https://github.com/markwpearce/brighterscript-game-engine/issues/126), [#251](https://github.com/markwpearce/brighterscript-game-engine/issues/251)).
+- `Camera2d.follow(entity)` and `setBounds()`, applied just before drawing so the camera never runs a frame behind.
+- `Game.changeSceneWithFade()` / `isTransitioning()` (`BGE.ScreenFade`).
+- A negative scale mirrors a `directScaled` billboard about its anchor, including on real hardware with camera roll ([#237](https://github.com/markwpearce/brighterscript-game-engine/issues/237)).
+
+**Collision and movement**
+- `GameEntity.onCollisionEnter()` / `onCollisionExit()`.
+- `BGE.SolidWorld`: top-down movement against static rectangles with `moveAndSlide()` (wall sliding, corner nudging, no tunnelling), plus `addSolid()`/`removeSolid()`, `addBounds()`, `isAreaFree()` and `getSolids()` ([#256](https://github.com/markwpearce/brighterscript-game-engine/issues/256)).
+
+**Tile maps**
+- Auto-tiling in `BGE.TileMap`: `getNeighbourMask4()`/`getNeighbourMask8()`, `reduceBlobMask()`/`getBlobTileIndex()` for 47-tile blob sets, and `getEdgePiece3x3()`. Maps can be string rows or arrays of tile ids ([#272](https://github.com/markwpearce/brighterscript-game-engine/issues/272)).
+- New [Tile Maps](https://markwpearce.github.io/brighterscript-game-engine/tile-maps) guide ([#278](https://github.com/markwpearce/brighterscript-game-engine/issues/278)).
+
+**UI, audio and tooling**
+- `BGE.UI.Label.wrapWidth` and `BGE.UI.wrapText()` for word wrapping; `DrawableText` sizes multi-line text by its widest line.
+- `Game.musicPlay(path, loop, restart = true)` - pass `restart = false` to leave a track that's already playing alone - and `Game.getMusicPath()`.
+- `npm run audio -- sfx|music|silences|info`: ffmpeg tools that make Roku-safe sound effects (mono 22.05 kHz WAV) and music (96 kbps MP3).
 - Releases are automated: an Initialize Release workflow opens a `release/x.y.z` PR, and merging it tags, publishes to npm (trusted publishing) and creates the GitHub release ([#248](https://github.com/markwpearce/brighterscript-game-engine/issues/248)).
+
+**Examples**
+- New: `rpg` ("Broadsword"), a top-down action adventure with a town, sewer, a six-room dungeon, a boss, NPCs and a story, a shop, saving, music and sound effects ([#63](https://github.com/markwpearce/brighterscript-game-engine/issues/63), [#256](https://github.com/markwpearce/brighterscript-game-engine/issues/256), [#257](https://github.com/markwpearce/brighterscript-game-engine/issues/257), [#289](https://github.com/markwpearce/brighterscript-game-engine/issues/289), [#296](https://github.com/markwpearce/brighterscript-game-engine/issues/296), [#290](https://github.com/markwpearce/brighterscript-game-engine/issues/290)).
+- `platformer`: a level 7 boss fight against a Venus fly trap.
+- `rendererTest`: `quality-levels` and `negative-scale` demos.
+
+### Fixed
+
+- Typed keyboard characters leaked into button input: each character's release arrived as a button (`"d"` as a Back release), and characters below 100 got stuck as held buttons. Characters now only reach `onECPKeyboard()` ([#194](https://github.com/markwpearce/brighterscript-game-engine/issues/194)).
+- `handleSceneChange()` crashed when entities existed before the first `changeScene()` ([#244](https://github.com/markwpearce/brighterscript-game-engine/issues/244)); `gameUi`/`debugUi` now get `onChangeScene()` ([#245](https://github.com/markwpearce/brighterscript-game-engine/issues/245)).
+- `destroyAllEntities()` skipped every other entity ([#263](https://github.com/markwpearce/brighterscript-game-engine/issues/263)).
+- A drawable moved by its own offset, rotation or scale didn't redraw while its entity stood still ([#264](https://github.com/markwpearce/brighterscript-game-engine/issues/264)).
+- `Camera2d` culled an image bigger than the view once all four of its corners were off screen ([#258](https://github.com/markwpearce/brighterscript-game-engine/issues/258)).
+- `DrawableCircle` ignored its anchor in the plain 2D draw modes ([#273](https://github.com/markwpearce/brighterscript-game-engine/issues/273)).
+- `DrawableText` multi-line sizing and bitmap reuse; controller-page input now reaches `gameUi.onInput()`; `FocusManager.focusWidget()` clears a held stick direction.
+- `RectangleCollider` offset docs (`offset.y` is the top edge) ([#280](https://github.com/markwpearce/brighterscript-game-engine/issues/280)), and documented that colliders touching edge to edge don't collide ([#200](https://github.com/markwpearce/brighterscript-game-engine/issues/200)).
 
 ## [0.7.0] - 2026-09-24
 
