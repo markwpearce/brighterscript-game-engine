@@ -12,6 +12,9 @@
 //   node scripts/release-changelog.js append-unreleased <file>
 //     Adds the file's contents to the end of [Unreleased] under "### Pull requests"
 //     (the fallback when Claude couldn't draft the changelog).
+//   node scripts/release-changelog.js check-draft <originalFile>
+//     Fails unless CHANGELOG.md differs from <originalFile> only inside [Unreleased],
+//     and [Unreleased] isn't empty.
 
 const fs = require('fs');
 const path = require('path');
@@ -114,6 +117,28 @@ function prepare(text, version, date) {
     ].join('\n');
 }
 
+// The changelog with the body of [Unreleased] cut out, to compare everything else.
+function withoutUnreleasedBody(text) {
+    const lines = text.split('\n');
+    const unreleased = findHeading(lines, 'Unreleased');
+    if (unreleased < 0) {
+        return undefined;
+    }
+    return [...lines.slice(0, unreleased + 1), ...lines.slice(findSectionEnd(lines, unreleased))].join('\n');
+}
+
+function checkDraft(text, original) {
+    const outside = withoutUnreleasedBody(text);
+    if (outside === undefined || outside !== withoutUnreleasedBody(original)) {
+        fail('the draft changed CHANGELOG.md outside [Unreleased]');
+    }
+    const lines = text.split('\n');
+    const unreleased = findHeading(lines, 'Unreleased');
+    if (trimBlankLines(lines.slice(unreleased + 1, findSectionEnd(lines, unreleased))).length === 0) {
+        fail('[Unreleased] is empty after the draft');
+    }
+}
+
 function appendUnreleased(text, addition) {
     const lines = text.split('\n');
     const unreleased = findHeading(lines, 'Unreleased');
@@ -151,6 +176,13 @@ if (command === 'append-unreleased') {
         fail('usage: release-changelog.js append-unreleased <file>');
     }
     fs.writeFileSync(CHANGELOG, appendUnreleased(text, fs.readFileSync(version, 'utf8')));
+    process.exit(0);
+}
+if (command === 'check-draft') {
+    if (!version) {
+        fail('usage: release-changelog.js check-draft <originalFile>');
+    }
+    checkDraft(text, fs.readFileSync(version, 'utf8'));
     process.exit(0);
 }
 if (!version || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
