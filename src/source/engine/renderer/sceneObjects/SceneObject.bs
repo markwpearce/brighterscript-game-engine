@@ -153,6 +153,13 @@ namespace BGE
     ' plane-drawing loop, which deliberately doesn't gate on this for that reason).
     negDistanceFromCamera as float = 0
 
+    ' How faded this object is by the camera's draw-distance fade band, from 1 (fully
+    ' visible) to 0 (at or past the draw distance). Applied on top of `Drawable.alpha`.
+    distanceFadeAlpha as float = 1.0
+
+    ' Bounding points computed for this frame's fade, reused by the frustum check.
+    private boundingPointsThisFrame as BGE.Math.Vector[] = invalid
+
     private previousTransform = {}
 
     worldPosition = BGE.Math.VectorOps.create()
@@ -304,6 +311,7 @@ namespace BGE
     '
     ' @param {Camera} cameraObj
     sub update(cameraObj as Camera)
+      m.boundingPointsThisFrame = invalid
       ' movedLastFrame() alone misses a drawable moved by its own offset/rotation while its
       ' owner stands still - its MotionChecker only re-checks inside the recompute (issue #264).
       objMovedLastFrame = m.drawable.movedLastFrame(true) or m.drawable.hasPendingTransformChange()
@@ -337,6 +345,16 @@ namespace BGE
         m.depthPosition = m.getPositionForCameraDistance(sceneObjDrawMode)
         m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.depthPosition)
       end if
+      ' a re-enabled object missed every update while disabled, and a resize moves its corners
+      if m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or m.geometryChanged() or cameraObj.farDistanceChangedThisFrame()
+        if cameraObj.fadesWithDistance() and m.participatesInDistanceFade()
+          ' nearest bounding point, so a large object near the camera doesn't fade by its far end
+          m.boundingPointsThisFrame = m.getBoundingPoints(cameraObj)
+          m.distanceFadeAlpha = cameraObj.getDistanceFadeAlphaForPoints(m.boundingPointsThisFrame)
+        else
+          m.distanceFadeAlpha = 1.0
+        end if
+      end if
       m.wasEnabledLastFrame = m.isEnabled()
     end sub
 
@@ -358,6 +376,12 @@ namespace BGE
       return m.worldPosition
     end function
 
+
+    ' Called by Renderer each frame it skips update() because this object is disabled,
+    ' so the frame it's re-enabled is seen as its first frame since being enabled.
+    sub markSkippedWhileDisabled()
+      m.wasEnabledLastFrame = false
+    end sub
 
     ' Check if the object is enabled
     '
@@ -390,10 +414,13 @@ namespace BGE
       ' A mode change or a camera projection change bypasses the on-screen shortcut as well
       ' as the geometry cache: that shortcut declines to re-examine a culled object until
       ' something moves, and neither of these counts as movement.
-      enteredDrawPath = modeChanged or projectionChanged or m.isPotentiallyOnScreen(rendererObj.camera)
+      ' A fully faded object is treated exactly like a frustum cull.
+      enteredDrawPath = m.distanceFadeAlpha > 0 and (modeChanged or projectionChanged or m.isPotentiallyOnScreen(rendererObj.camera))
       deterministicFailure = false
       if enteredDrawPath
-        if m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or modeChanged or projectionChanged
+        ' lastFrameWasCulled: a fully faded object consumes mode/projection/geometry changes
+        ' without recomputing, so it must recompute when it comes back.
+        if m.lastFrameWasCulled or m.objMovedInRelationToCamera(rendererObj.camera) or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or modeChanged or projectionChanged
           m.hasValidCanvasPosition = m.findCanvasPosition(rendererObj, drawModeToUse)
         end if
         if m.hasValidCanvasPosition
@@ -567,13 +594,15 @@ namespace BGE
     ' the culled state at all, and what lets a failed object discover it is still on screen
     ' and retry. Latching on any non-draw - which is what the old framesSinceDrawn counter
     ' did - is what made a single failed frame permanent. See issue #48.
+    ' A draw-distance change also re-runs the check, so a stationary object comes back
+    ' into view as the limit grows past it.
     '
     ' @param {Camera} cameraObj
     protected function isPotentiallyOnScreen(cameraObj as Camera) as boolean
       if m.isFirstFrameSinceEnabled
         return true
       end if
-      if not m.objMovedInRelationToCamera(cameraObj) and not m.geometryChanged()
+      if not m.objMovedInRelationToCamera(cameraObj) and not m.geometryChanged() and not cameraObj.farDistanceChangedThisFrame()
         if m.lastFrameWasCulled
           return false
         end if
@@ -585,7 +614,11 @@ namespace BGE
       ' Text) rather than just the anchor. Camera2d then tests those corners' bounding box
       ' against the view, so an object bigger than the view isn't culled once all of its
       ' corners are off screen (issue #258).
-      return cameraObj.isAnyInView(m.getBoundingPoints(cameraObj))
+      points = m.boundingPointsThisFrame
+      if invalid = points
+        points = m.getBoundingPoints(cameraObj)
+      end if
+      return cameraObj.isAnyInView(points)
     end function
 
 
@@ -644,6 +677,15 @@ namespace BGE
     ' @return {boolean}
     function participatesInOverlapDetection() as boolean
       return not m.isStatic
+    end function
+
+    ' Whether this object fades out near a 3D camera's draw distance. Fading is judged by
+    ' the nearest of the object's bounding points. Override to return false for a type
+    ' with no single meaningful distance.
+    '
+    ' @return {boolean}
+    function participatesInDistanceFade() as boolean
+      return true
     end function
 
     ' Whether this concrete SceneObject type's geometry can be represented as a single

@@ -252,6 +252,31 @@ never backface culled: it has no face to turn away.
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
 lets you cycle through them (`examples/3d`'s BaseScene displays it on screen).
 
+## Draw-distance fade
+
+With a `Camera3d`, nothing past the camera's draw distance is drawn. Instead of popping
+out of view at that limit, objects fade out across the far end of it:
+
+```brighterscript
+camera = new BGE.Camera3d()
+camera.maxDrawDistance = 1000
+' fade across the last 20% (800-1000) instead of the default 15%
+camera.drawDistanceFadeFraction = 0.2
+game.setCamera(camera)
+```
+
+Set `drawDistanceFadeFraction = 0` for a hard cut-off. The fade multiplies whatever
+`Drawable.alpha` you've set, so an image at alpha 128 halfway through the band draws at 64.
+
+When the draw distance changes - a new render quality level, or your game changing
+`maxDrawDistance` - the camera eases to the new distance over
+`drawDistanceTransitionSeconds` (default 0.75), so distant objects fade in or out
+gradually. Call `camera.snapDrawDistance()` after a camera cut to skip the transition.
+
+Ground planes, skyboxes and parallax layers don't fade: they have no single distance from
+the camera. Everything else fades by its nearest corner, so a long wall stays solid while
+its near end is well inside the draw distance.
+
 ## How `Renderer.render()` actually draws a frame
 
 `Renderer.render()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a

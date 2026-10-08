@@ -96,6 +96,10 @@ namespace BGE
     end sub
   end class
 
+  ' Longest frame step the draw-distance transition advances by, so one slow frame
+  ' can't finish a transition in a single jump.
+  const MAX_DRAW_DISTANCE_TRANSITION_STEP_SECONDS = 0.1
+
   class Camera3d extends Camera
 
     fieldOfViewDegrees as float = 90
@@ -115,8 +119,22 @@ namespace BGE
     ' a setter would be silently bypassed.
     private lastProjectionFieldOfView as float = -1
 
-    ' Last effective draw distance seen by projectionChangedThisFrame().
-    private lastEffectiveMaxDrawDistance as float = -1
+    ' The far end of the draw distance over which objects fade out instead of popping
+    ' out of view, as a fraction of it: 0.15 fades across the last 15%. 0 turns fading off.
+    drawDistanceFadeFraction as float = 0.15
+
+    ' Seconds a change in draw distance (a quality level change, or a new
+    ' maxDrawDistance) takes to ease in, so distant objects fade in or out gradually
+    ' instead of all at once. 0 applies a change immediately.
+    drawDistanceTransitionSeconds as float = 0.75
+
+    ' Eased draw distance; -1 until the first frame, which starts at the target.
+    private currentDrawDistance as float = -1
+    private drawDistanceTransitionTarget as float = -1
+    private drawDistanceTransitionSpeed as float = 0
+    private lastDrawDistanceFadeFraction as float = -1
+    private farDistanceChanged as boolean = false
+    private drawDistanceClock as roTimespan = invalid
 
     ' Cached device-specific cap for maxDrawDistance (see getMaxDrawDistanceDeviceCap()).
     ' -1 means "not yet computed."
@@ -151,6 +169,7 @@ namespace BGE
     end sub
 
     override sub checkMovement()
+      m.advanceDrawDistance(m.getDrawDistanceClockSeconds())
       rollChanged = m.rollDegrees <> m.lastRollDegrees
       m.lastRollDegrees = m.rollDegrees
 
@@ -211,7 +230,7 @@ namespace BGE
         end if
       end for
       forwardDistance = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, m.position), m.orientation)
-      return forwardDistance <= m.getEffectiveMaxDrawDistance()
+      return forwardDistance <= m.getCurrentDrawDistance()
     end function
 
 
@@ -636,6 +655,131 @@ namespace BGE
       return distance
     end function
 
+    ' The draw distance actually used for clipping and fading this frame. Follows
+    ' `getEffectiveMaxDrawDistance()`, easing toward it over
+    ' `drawDistanceTransitionSeconds` whenever it changes.
+    '
+    ' @return {float}
+    function getCurrentDrawDistance() as float
+      if m.currentDrawDistance < 0
+        return m.getEffectiveMaxDrawDistance()
+      end if
+      return m.currentDrawDistance
+    end function
+
+    ' Jumps straight to the target draw distance, skipping any transition in progress -
+    ' e.g. after a camera cut, where easing the horizon would look odd.
+    sub snapDrawDistance()
+      m.currentDrawDistance = -1
+    end sub
+
+    ' Moves the current draw distance toward its target by `dt` seconds' worth of the
+    ' transition. Called every frame by `checkMovement()`; only call it yourself in tests.
+    '
+    ' @param {float} dt elapsed seconds (clamped to 0-0.1)
+    sub advanceDrawDistance(dt as float)
+      if dt < 0
+        dt = 0
+      else if dt > MAX_DRAW_DISTANCE_TRANSITION_STEP_SECONDS
+        dt = MAX_DRAW_DISTANCE_TRANSITION_STEP_SECONDS
+      end if
+      target = m.getEffectiveMaxDrawDistance()
+      previous = m.currentDrawDistance
+      if m.currentDrawDistance < 0 or m.drawDistanceTransitionSeconds <= 0
+        m.currentDrawDistance = target
+        m.drawDistanceTransitionTarget = target
+      else if m.currentDrawDistance <> target
+        if target <> m.drawDistanceTransitionTarget
+          ' a new target restarts the transition from wherever it is now
+          m.drawDistanceTransitionTarget = target
+          m.drawDistanceTransitionSpeed = abs(target - m.currentDrawDistance) / m.drawDistanceTransitionSeconds
+        end if
+        stepSize = m.drawDistanceTransitionSpeed * dt
+        if abs(target - m.currentDrawDistance) <= stepSize
+          m.currentDrawDistance = target
+        else if target > m.currentDrawDistance
+          m.currentDrawDistance = m.currentDrawDistance + stepSize
+        else
+          m.currentDrawDistance = m.currentDrawDistance - stepSize
+        end if
+      end if
+      fractionChanged = m.drawDistanceFadeFraction <> m.lastDrawDistanceFadeFraction
+      m.lastDrawDistanceFadeFraction = m.drawDistanceFadeFraction
+      m.farDistanceChanged = fractionChanged or previous <> m.currentDrawDistance
+    end sub
+
+    override function farDistanceChangedThisFrame() as boolean
+      return m.farDistanceChanged
+    end function
+
+    override function isDrawDistanceTransitioning() as boolean
+      return m.currentDrawDistance >= 0 and m.currentDrawDistance <> m.getEffectiveMaxDrawDistance()
+    end function
+
+    ' 1 inside the draw distance, falling linearly to 0 across the last
+    ' `drawDistanceFadeFraction` of it, 0 at or beyond it.
+    '
+    ' @param {BGE.Math.Vector} point world position
+    ' @return {float}
+    override function getDistanceFadeAlpha(point as BGE.Math.Vector) as float
+      if m.drawDistanceFadeFraction <= 0
+        return 1.0
+      end if
+      return m.fadeAlphaForForwardDistance(BGE.Math.VectorOps.dotProduct(point, m.orientation) - BGE.Math.VectorOps.dotProduct(m.position, m.orientation))
+    end function
+
+    override function fadesWithDistance() as boolean
+      return m.drawDistanceFadeFraction > 0
+    end function
+
+    ' Like getDistanceFadeAlpha(), judged by whichever point is nearest, so a large
+    ' object stays visible while any part of it is well inside the draw distance.
+    '
+    ' @param {BGE.Math.Vector[]} points world positions
+    ' @return {float}
+    override function getDistanceFadeAlphaForPoints(points as BGE.Math.Vector[]) as float
+      if m.drawDistanceFadeFraction <= 0 or points.count() = 0
+        return 1.0
+      end if
+      ' dot(point - position, orientation), without allocating a vector per point
+      cameraOffset = BGE.Math.VectorOps.dotProduct(m.position, m.orientation)
+      forwardDistance = BGE.Math.VectorOps.dotProduct(points[0], m.orientation) - cameraOffset
+      for i = 1 to points.count() - 1
+        pointDistance = BGE.Math.VectorOps.dotProduct(points[i], m.orientation) - cameraOffset
+        if pointDistance < forwardDistance
+          forwardDistance = pointDistance
+        end if
+      end for
+      return m.fadeAlphaForForwardDistance(forwardDistance)
+    end function
+
+    private function fadeAlphaForForwardDistance(forwardDistance as float) as float
+      fraction = m.drawDistanceFadeFraction
+      if fraction > 1
+        fraction = 1.0
+      end if
+      far = m.getCurrentDrawDistance()
+      if forwardDistance >= far
+        return 0.0
+      end if
+      bandStart = far * (1 - fraction)
+      if forwardDistance <= bandStart
+        return 1.0
+      end if
+      return (far - forwardDistance) / (far - bandStart)
+    end function
+
+    ' Seconds since the last call, from this camera's own clock (0 on the first call).
+    private function getDrawDistanceClockSeconds() as float
+      if invalid = m.drawDistanceClock
+        m.drawDistanceClock = CreateObject("roTimespan")
+        return 0.0
+      end if
+      seconds = m.drawDistanceClock.TotalMilliseconds() / 1000.0
+      m.drawDistanceClock.Mark()
+      return seconds
+    end function
+
     protected override function projectionChangedThisFrame() as boolean
       ' called unconditionally rather than inside an `or`, so it always records the new
       ' frame size even when the FOV changed too
@@ -646,11 +790,6 @@ namespace BGE
         changed = true
       end if
 
-      effective = m.getEffectiveMaxDrawDistance()
-      if m.lastEffectiveMaxDrawDistance <> effective
-        m.lastEffectiveMaxDrawDistance = effective
-        changed = true
-      end if
 
       return changed
     end function
