@@ -124,17 +124,22 @@ becomes `&hFFFFFF00 + alpha`.
   cache-safe vs. canvas distinction visible at each call site.
 - **`SceneObjectModel` per-face (cluster) path**: each face's color gets the fade. Known
   artifact: a model drawn face by face shows faint overlapping faces while in the band.
-- **`SceneObjectParticle`**: one fade per emitter (from the emitter's depth position),
-  multiplied into each particle's existing interpolated alpha.
+- **`SceneObjectParticle`**: opts out of the object-level fade; each particle fades by its
+  own distance in `performDraw()` (`Camera.getDistanceFadeAlpha(particle.position)`),
+  multiplied into its existing interpolated alpha. (Changed after review: one fade per
+  emitter let a single near particle keep a whole far plume opaque, and went stale with
+  the emitter and camera parked.)
 
 ### 4. Adaptive quality
 
 A step down now saves its frame time over the transition instead of immediately. With a
 0.25s settle and 0.75s step-down cooldown, `QualityController` could read the mid-transition
-frames as still slow and drop a second level. Fix: `QualityController.notifyLevelChanged()`
-takes an optional `extraSettleSeconds`; `RenderQualityManager.setLevel()` passes the
-renderer camera's `drawDistanceTransitionSeconds` when it's a `Camera3d`, so the settle
-covers `max(settleSeconds, transition)`.
+frames as still slow and drop a second level. Fix: `Camera.isDrawDistanceTransitioning()`;
+while it's true, `RenderQualityManager.update()` resets the controller's window instead of
+feeding it a frame, so the normal settle starts once the distance lands. (Changed after
+review: a fixed extra settle of `drawDistanceTransitionSeconds` ran out early below 10fps,
+where the 0.1s step clamp stretches the transition, and also applied to level changes
+that don't move the draw distance.)
 
 ### 5. Docs
 
