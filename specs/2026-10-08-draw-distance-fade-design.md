@@ -59,7 +59,7 @@ New public methods:
   forward distance as `isInView()` (`dot(point - position, orientation)`), so alpha 0 lines
   up exactly with the far-clip. Always `1.0` when the fraction is `<= 0`.
 - `farDistanceChangedThisFrame() as boolean` - true on a frame where the current draw
-  distance changed.
+  distance or `drawDistanceFadeFraction` changed (either one changes every object's fade).
 
 Changes:
 
@@ -75,7 +75,9 @@ Changes:
   (see section 2).
 - Easing is driven from `checkMovement()` (already called once per frame by
   `Renderer.setupCameraForFrame()`) using a camera-owned `roTimespan` for dt, clamped to
-  1/30s per frame like `ScreenFade` so one slow frame can't complete a transition. The
+  0.1s per frame so one slow frame can't complete a transition (a tighter 1/30s clamp, like
+  `ScreenFade`'s, would stretch a 0.75s transition past 1s at 20fps and outlast the adaptive
+  settle extension in section 4). The
   stepping itself is a separate `advanceDrawDistance(dt)` method so specs can drive it
   deterministically. No `Renderer`/`Game` signature changes are needed, and a `Renderer`
   used without a `Game` (e.g. `examples/rendererTest`) eases too.
