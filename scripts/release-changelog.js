@@ -9,6 +9,9 @@
 //     bottom. Fails if [Unreleased] is empty.
 //   node scripts/release-changelog.js notes <version>
 //     Prints the body of that version's section, for the GitHub release notes.
+//   node scripts/release-changelog.js append-unreleased <file>
+//     Adds the file's contents to the end of [Unreleased] under "### Pull requests"
+//     (the fallback when Claude couldn't draft the changelog).
 
 const fs = require('fs');
 const path = require('path');
@@ -111,6 +114,26 @@ function prepare(text, version, date) {
     ].join('\n');
 }
 
+function appendUnreleased(text, addition) {
+    const lines = text.split('\n');
+    const unreleased = findHeading(lines, 'Unreleased');
+    if (unreleased < 0) {
+        fail('no "## [Unreleased]" heading in CHANGELOG.md');
+    }
+    const end = findSectionEnd(lines, unreleased);
+    const body = trimBlankLines(lines.slice(unreleased + 1, end));
+    return [
+        ...lines.slice(0, unreleased + 1),
+        '',
+        ...(body.length > 0 ? [...body, ''] : []),
+        '### Pull requests',
+        '',
+        ...trimBlankLines(addition.split('\n')),
+        '',
+        ...lines.slice(end)
+    ].join('\n');
+}
+
 function notes(text, version) {
     const lines = text.split('\n');
     const start = findHeading(lines, version);
@@ -122,10 +145,17 @@ function notes(text, version) {
 }
 
 const [command, version, date] = process.argv.slice(2);
+const text = fs.readFileSync(CHANGELOG, 'utf8');
+if (command === 'append-unreleased') {
+    if (!version) {
+        fail('usage: release-changelog.js append-unreleased <file>');
+    }
+    fs.writeFileSync(CHANGELOG, appendUnreleased(text, fs.readFileSync(version, 'utf8')));
+    process.exit(0);
+}
 if (!version || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
     fail('usage: release-changelog.js <prepare|notes> <x.y.z> [date]');
 }
-const text = fs.readFileSync(CHANGELOG, 'utf8');
 if (command === 'prepare') {
     fs.writeFileSync(CHANGELOG, prepare(text, version, date || new Date().toISOString().slice(0, 10)));
 } else if (command === 'notes') {
