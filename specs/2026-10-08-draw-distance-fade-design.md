@@ -86,8 +86,12 @@ Changes:
 ### 2. `SceneObject`
 
 - New field `distanceFadeAlpha as float = 1.0`.
-- In `update()`, recompute it from the cached `depthPosition` when `depthChangedThisFrame` or
-  `cameraObj.farDistanceChangedThisFrame()`. One dot product, a subtract and a divide.
+- In `update()`, recompute it when `depthChangedThisFrame` or
+  `cameraObj.farDistanceChangedThisFrame()`, from the **nearest** of the object's bounding
+  points (`getBoundingPoints()`, the same points the frustum check uses) via
+  `Camera.getDistanceFadeAlphaForPoints()`. (Changed after review: fading by `depthPosition`
+  culled a long wall or big model whose near end was beside the camera.) Skipped, with alpha
+  reset to 1, when `Camera.fadesWithDistance()` is false (2D cameras, fraction 0).
 - New overridable `participatesInDistanceFade() as boolean` (default `true`).
   `SceneObjectPlane`, `SceneObjectSkybox` and `SceneObjectParallaxLayer` return `false` and
   always keep `1.0`.

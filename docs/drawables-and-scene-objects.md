@@ -274,8 +274,8 @@ When the draw distance changes - a new render quality level, or your game changi
 gradually. Call `camera.snapDrawDistance()` after a camera cut to skip the transition.
 
 Ground planes, skyboxes and parallax layers don't fade: they have no single distance from
-the camera. An object fades by its depth position (its centre for a billboard), so a large
-object whose centre is past the limit disappears even if its near edge is inside it.
+the camera. Everything else fades by its nearest corner, so a long wall stays solid while
+its near end is well inside the draw distance.
 
 ## How `Renderer.render()` actually draws a frame
 
