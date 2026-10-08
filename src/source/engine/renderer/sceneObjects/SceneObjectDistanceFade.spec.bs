@@ -112,6 +112,123 @@ namespace tests
       m.assertNear(1.0, sceneObj.distanceFadeAlpha)
     end function
 
+    ' Replaces `methodName` on the renderer with a spy that records each call's rgba
+    ' into `spy.rgbaCalls` and returns true without drawing.
+    private function spyOnRgba(methodName as string) as dynamic
+      spy = m.renderer as dynamic
+      spy.rgbaCalls = []
+      if methodName = "drawRegionTo"
+        spy.drawRegionTo = function(canvasDrawTo as object, regionToDraw as object, x as float, y as float, scaleX = 1 as float, scaleY = 1 as float, rotation = 0 as float, rgba = -1 as integer) as boolean
+          m.rgbaCalls.push(rgba)
+          return true
+        end function
+      else if methodName = "drawObjectTo"
+        spy.drawObjectTo = function(draw2d as object, x as integer, y as integer, src as object, rgba = -1 as integer) as boolean
+          m.rgbaCalls.push(rgba)
+          return true
+        end function
+      else if methodName = "drawLineTo"
+        spy.drawLineTo = function(draw2d as object, x as float, y as float, endX as float, endY as float, rgba as integer) as boolean
+          m.rgbaCalls.push(rgba)
+          return true
+        end function
+      else if methodName = "drawRectangleTo"
+        spy.drawRectangleTo = function(draw2d as object, x as float, y as float, width as float, height as float, rgba as integer) as boolean
+          m.rgbaCalls.push(rgba)
+          return true
+        end function
+      end if
+      return spy
+    end function
+
+    ' The alpha byte of the last rgba the spy recorded.
+    private function lastAlpha(spy as dynamic) as integer
+      m.assertTrue(spy.rgbaCalls.count() > 0, "expected at least one recorded draw")
+      return spy.rgbaCalls[spy.rgbaCalls.count() - 1] and &hFF
+    end function
+
+    ' Draws two frames with fading off, records the alpha, then turns the band on
+    ' (object at 375 -> fade 0.5) and records the alpha of the next frame.
+    private function alphaBeforeAndAfterFade(spy as dynamic) as integer[]
+      m.camera.drawDistanceFadeFraction = 0
+      m.drawFrame()
+      m.drawFrame()
+      before = m.lastAlpha(spy)
+      m.camera.drawDistanceFadeFraction = 0.5
+      m.drawFrame()
+      return [before, m.lastAlpha(spy)]
+    end function
+
+    @describe("applying the fade at draw time")
+
+    @it("fades an image drawn directly to the canvas")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      spy = m.spyOnRgba("drawRegionTo")
+      m.newImage().addToRenderer(m.renderer)
+      alphas = m.alphaBeforeAndAfterFade(spy)
+      m.assertEqual(255, alphas[0])
+      m.assertEqual(128, alphas[1])
+    end function
+
+    @it("multiplies a game-set Drawable.alpha rather than replacing it")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      spy = m.spyOnRgba("drawRegionTo")
+      m.newImage({alpha: 128}).addToRenderer(m.renderer)
+      alphas = m.alphaBeforeAndAfterFade(spy)
+      m.assertEqual(128, alphas[0])
+      m.assertEqual(64, alphas[1])
+    end function
+
+    @it("fades a cached temp bitmap's blit")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      spy = m.spyOnRgba("drawObjectTo")
+      rect = new BGE.DrawableRectangle(m.entity, 40, 40, {color: BGE.ColorsRGB.Red})
+      rect.addToRenderer(m.renderer)
+      alphas = m.alphaBeforeAndAfterFade(spy)
+      m.assertEqual(255, alphas[0])
+      m.assertEqual(128, alphas[1])
+    end function
+
+    @it("reuses the cached temp bitmap while only the fade changes")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      rect = new BGE.DrawableRectangle(m.entity, 40, 40, {color: BGE.ColorsRGB.Red})
+      rect.addToRenderer(m.renderer)
+      m.drawFrame()
+      m.drawFrame()
+      ' baseline: a frame with nothing changed is just the blit
+      m.assertEqual(1, m.drawFrame())
+
+      m.camera.maxDrawDistance = 450
+      ' still one blit - no re-rasterizing for a fade change
+      m.assertEqual(1, m.drawFrame())
+    end function
+
+    @it("fades a line")
+    function _()
+      spy = m.spyOnRgba("drawLineTo")
+      line = new BGE.DrawableLine(m.entity, BGE.Math.VectorOps.create(-10, 0, -375), BGE.Math.VectorOps.create(10, 0, -375), {color: BGE.ColorsRGB.White})
+      line.addToRenderer(m.renderer)
+      alphas = m.alphaBeforeAndAfterFade(spy)
+      m.assertEqual(255, alphas[0])
+      m.assertEqual(128, alphas[1])
+    end function
+
+    @it("fades particles by their emitter's distance")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      spy = m.spyOnRgba("drawRectangleTo")
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100})
+      emitter.addToRenderer(m.renderer)
+      m.entity.updateTransformationMatrix()
+      emitter.burst(1)
+      alphas = m.alphaBeforeAndAfterFade(spy)
+      m.assertEqual(Int(alphas[0] * 0.5 + 0.5), alphas[1])
+    end function
+
   end class
 
 end namespace
