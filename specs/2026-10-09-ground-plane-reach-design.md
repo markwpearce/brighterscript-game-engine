@@ -103,9 +103,18 @@ height and width from depth x tan), so no other change is needed except scaling
 supertexture already caps its own size (`getMaxSuperTextureDimension()`), and its scratch
 bitmap scales with `superTextureScale`.
 
-Tradeoff: at High/Ultra (F = 1250/1500 in terrain) the ground texture is sampled at 0.8/0.67
-px per world unit, so it's somewhat softer, most visibly near the camera. Memory and draw cost
-match today's default. Medium and below are unchanged.
+Tradeoff: under a `Game` the ground reaches the highest level's distance at **every** level
+(that's what keeps the horizon fixed), so on real FHD hardware with terrain's defaults the
+ground is 1500 deep at all levels, Medium included: the top-down bitmap samples at 0.67 px per
+world unit and the tiled grass supertexture is ~28% softer, with a one-time build about twice
+as long. Memory and per-frame draw cost match today's default. The simulator is unaffected
+(its 900 device cap was already the limit). (Corrected after review: an earlier draft said
+Medium was unchanged, which contradicted the fixed-horizon goal.)
+
+A static decal's rotated texture now goes into its own scratch bitmap sized to the rotated
+decal (grow-only, at most ~1.41x the texture's size), shifted so the whole decal fits. The
+texture-sized pooled scratch it used before only held the part of the decal within one
+texture-width of the quad's far corner, so with the longer reach the decal mostly vanished.
 
 ### 5. Docs
 
