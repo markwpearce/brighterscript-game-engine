@@ -1,0 +1,117 @@
+namespace tests
+
+  ' Draw-distance fading (issue #125): a Camera3d at the origin looking down -z, with a
+  ' 500-unit draw distance whose last half (250-500) is the fade band, and no easing.
+  @suite("BGE.SceneObject distance fade")
+  class SceneObjectDistanceFadeTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    entity as BGE.GameEntity
+    bitmap as roBitmap
+    renderer as BGE.Renderer
+    camera as BGE.Camera3d
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.entity = new BGE.GameEntity(m.game, {name: "TestEntity"})
+      m.bitmap = CreateObject("roBitmap", {width: 200, height: 200, alphaEnable: true})
+      m.camera = new BGE.Camera3d()
+      m.camera.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, -1))
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceFadeFraction = 0.5
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.renderer = new BGE.Renderer(m.bitmap, m.game, m.camera)
+    end function
+
+    private function newImage(args = {} as roAssociativeArray) as BGE.Image
+      sourceBitmap = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: true})
+      region = CreateObject("roRegion", sourceBitmap, 0, 0, 64, 64)
+      return new BGE.Image(m.entity, region, args)
+    end function
+
+    ' One Game-loop frame: camera setup then render. Returns the draw calls it took.
+    private function drawFrame() as integer
+      m.entity.updateTransformationMatrix()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.setupCameraForFrame()
+      m.renderer.render()
+      return m.renderer.getDrawCallsLastFrame()
+    end function
+
+    private sub assertNear(expected as float, actual as float)
+      m.assertTrue(abs(expected - actual) < 0.001, `expected ${expected} but got ${actual}`)
+    end sub
+
+    @describe("distanceFadeAlpha")
+
+    @it("is 1 well inside the draw distance")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -100)
+      sceneObj = m.newImage().addToRenderer(m.renderer)
+      m.drawFrame()
+      m.assertNear(1.0, sceneObj.distanceFadeAlpha)
+    end function
+
+    @it("is 0.5 half way through the fade band")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      sceneObj = m.newImage().addToRenderer(m.renderer)
+      m.drawFrame()
+      m.assertNear(0.5, sceneObj.distanceFadeAlpha)
+    end function
+
+    @it("follows a change to the draw distance even though nothing moved")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -375)
+      sceneObj = m.newImage().addToRenderer(m.renderer)
+      m.drawFrame()
+      m.drawFrame()
+      m.camera.maxDrawDistance = 750
+      m.drawFrame()
+      ' band now 375-750: right at its start
+      m.assertNear(1.0, sceneObj.distanceFadeAlpha)
+    end function
+
+    @describe("fully faded objects")
+
+    @it("draws nothing and counts as culled at the limit")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -500)
+      sceneObj = m.newImage().addToRenderer(m.renderer)
+      m.drawFrame()
+      m.assertEqual(0, m.drawFrame())
+      m.assertTrue(sceneObj.isCulled())
+    end function
+
+    @it("reappears once the limit grows past a stationary, already culled object")
+    function _()
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, -600)
+      sceneObj = m.newImage().addToRenderer(m.renderer)
+      m.drawFrame()
+      m.drawFrame()
+      m.assertTrue(sceneObj.isCulled())
+
+      m.camera.maxDrawDistance = 900
+      m.assertTrue(m.drawFrame() > 0)
+      m.assertFalse(sceneObj.isCulled())
+    end function
+
+    @describe("types without a single distance")
+
+    @it("leaves a ground plane unfaded")
+    function _()
+      bmp = CreateObject("roBitmap", {width: 8, height: 8, AlphaEnable: true})
+      region = CreateObject("roRegion", bmp, 0, 0, 8, 8)
+      plane = new BGE.DrawablePlane(m.entity, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: -2000}})
+      ' DrawablePlane.addToRenderer() doesn't return its scene object, so build one directly
+      sceneObj = new BGE.SceneObjectPlane("plane", plane)
+      m.renderer.setupCameraForFrame()
+      sceneObj.update(m.camera)
+      m.assertFalse(sceneObj.participatesInDistanceFade())
+      m.assertNear(1.0, sceneObj.distanceFadeAlpha)
+    end function
+
+  end class
+
+end namespace
