@@ -464,6 +464,92 @@ namespace tests
       m.assertTrue(foundRed, `no decal pixels in column ${column} of a ${bmp.GetWidth()}x${bmp.GetHeight()} bitmap`)
     end function
 
+    @describe("perspective slices (issue #313)")
+
+    ' Camera 50 units up, pitched slightly down, over a static decal. Renders it and
+    ' returns its scene object.
+    private function renderPitchedGround() as object
+      decalBmp = CreateObject("roBitmap", {width: 256, height: 256, AlphaEnable: true})
+      decalRegion = CreateObject("roRegion", decalBmp, 0, 0, 256, 256)
+      decal = new BGE.DrawablePlane(m.testScene, decalRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.staticImage})
+      m.testScene.addDrawable("Decal", decal)
+      renderer = m.game.canvas.renderer
+      camera = renderer.camera as BGE.Camera3d
+      camera.maxDrawDistance = 1000
+      camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 40, -100))
+      for i = 1 to 4
+        m.testScene.updateTransformationMatrix()
+        renderer.setupCameraForFrame()
+        renderer.render()
+      end for
+      return decal.getSceneObjects()[0] as object
+    end function
+
+    private function getSlices(plane as object, sliceCount as integer) as object
+      bmp = plane.prePerspectiveBmp
+      return plane.computePerspectiveSlices(m.game.canvas.renderer, bmp.GetWidth(), bmp.GetHeight(), plane.perspectivePoints, sliceCount)
+    end function
+
+    ' Where a slice draws a world point on the ground, versus where the camera projects
+    ' it. The camera looks down -z, so the bitmap maps world x and z linearly.
+    @it("draws a ground point near the side of the frame where the camera projects it")
+    function _()
+      plane = m.renderPitchedGround()
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      bmp = plane.prePerspectiveBmp
+      corners = plane.perspectivePoints.actual
+      slices = m.getSlices(plane, 36)
+      m.assertEqual(36, slices.count())
+      for i = 0 to slices.count() - 1
+        slice = slices[i]
+        midDepth = (slice.nearDepth + slice.farDepth) / 2
+        ' 80% of the way from the centre to the right edge of the frame, at mid depth
+        lateral = 0.8 * midDepth * (camera.frameSize.x / 2) / camera.getFocalLength()
+        z = (midDepth + camera.position.y * camera.orientation.y) / camera.orientation.z
+        point = BGE.Math.VectorOps.create(lateral, 0, z)
+        bmpX = (point.x - corners.topLeft.x) / (corners.topRight.x - corners.topLeft.x) * bmp.GetWidth()
+        drawnX = slice.destX + (bmpX - slice.srcX) * slice.scaleX
+        projectedX = camera.worldPointToCanvasPoint(point).x
+        m.assertTrue(Abs(drawnX - projectedX) < 1.5, `slice ${i}: drawn at x=${drawnX}, projected to x=${projectedX}`)
+      end for
+    end function
+
+    @it("spaces slices so every slice spans the same depth ratio")
+    function _()
+      plane = m.renderPitchedGround()
+      slices = m.getSlices(plane, 36)
+      firstRatio = slices[0].farDepth / slices[0].nearDepth
+      m.assertTrue(firstRatio > 1)
+      for i = 1 to slices.count() - 1
+        ratio = slices[i].farDepth / slices[i].nearDepth
+        m.assertTrue(Abs(ratio - firstRatio) < 0.001, `slice ${i} ratio ${ratio} vs ${firstRatio}`)
+        m.assertTrue(Abs(slices[i].nearDepth - slices[i - 1].farDepth) < 0.001, `slice ${i} doesn't start where slice ${i - 1} ends`)
+      end for
+    end function
+
+    @it("uses whole-pixel source rects inside the bitmap that still map the exact span across the full width")
+    function _()
+      plane = m.renderPitchedGround()
+      bmp = plane.prePerspectiveBmp
+      frameWidth = m.game.canvas.renderer.camera.frameSize.x
+      slices = m.getSlices(plane, 36)
+      m.assertEqual(36, slices.count())
+      for i = 0 to slices.count() - 1
+        slice = slices[i]
+        m.assertEqual(slice.srcX, Int(slice.srcX))
+        m.assertEqual(slice.srcY, Int(slice.srcY))
+        m.assertEqual(slice.srcWidth, Int(slice.srcWidth))
+        m.assertEqual(slice.srcHeight, Int(slice.srcHeight))
+        m.assertTrue(slice.srcX >= 0 and slice.srcY >= 0, `slice ${i} starts outside the bitmap`)
+        m.assertTrue(slice.srcX + slice.srcWidth <= bmp.GetWidth() and slice.srcY + slice.srcHeight <= bmp.GetHeight(), `slice ${i} ends outside the bitmap`)
+        ' the exact span's left edge lands on x = 0 and its right edge on the frame's
+        m.assertTrue(Abs(slice.destX + (slice.exactSrcLeft - slice.srcX) * slice.scaleX) < 0.01, `slice ${i} left edge misplaced`)
+        m.assertTrue(Abs(slice.exactSrcWidth * slice.scaleX - frameWidth) < 0.01, `slice ${i} doesn't span the frame`)
+        m.assertTrue(slice.destX <= 0 and slice.destX + slice.srcWidth * slice.scaleX >= frameWidth, `slice ${i} leaves a gap at the sides`)
+      end for
+    end function
+
   end class
 
 end namespace

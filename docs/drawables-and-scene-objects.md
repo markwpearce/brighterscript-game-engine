@@ -462,14 +462,20 @@ Each frame, `SceneObjectPlane` (in `findCanvasPosition`, via `getPerspectivePoin
    source texture region so the quad's corner lines up correctly, then scales that into a
    rectangular "pre-perspective" bitmap - effectively turning "camera looking at a trapezoid on the
    ground" into "looking straight down at a flat rectangle."
-4. `drawPerspectiveBmpSlicesToByCamera()` slices that pre-perspective bitmap into `~50` thin
-   horizontal bands (near-to-far). Each band's on-screen position comes from projecting its two
+4. `drawPerspectiveBmpSlicesToByCamera()` slices that pre-perspective bitmap into thin horizontal
+   bands (`RenderQualitySettings.planeSliceCount`, 20-50 depending on the quality level), each
+   drawn with one scaled blit. Each band's on-screen position comes from projecting its
    world-space boundary points through the camera's own perspective formula
-   (`projectPlanePointToCanvasY`, the same math `Camera3d.worldPointToCanvasPoint` uses for every
-   other 3D object) rather than an arbitrary curve - bands near the camera land large near the
-   bottom of the frame, bands near the horizon shrink toward it, which is what produces the
-   perspective effect, and what keeps the ground exactly aligned with any per-point-projected
-   object (a billboard, say) at the same world position.
+   (the same math `Camera3d.worldPointToCanvasPoint` uses for every
+   other 3D object) - bands near the camera land large near the bottom of the frame, bands near
+   the horizon shrink toward it, which is what produces the perspective effect, and what keeps the
+   ground aligned with any per-point-projected object (a billboard, say) at the same world
+   position. Each band's source span is exactly the ground the camera shows across the frame at
+   the band's mid depth. A single blit can't change its horizontal scale as depth changes, so a
+   straight line on the ground is drawn as a short staircase whose steps grow toward the sides of
+   the frame. The size of a band's step depends on how much deeper its far edge is than its near
+   edge, so the bands are spaced to give every one the same far/near depth ratio. Raising
+   `planeSliceCount` makes the steps smaller, at the cost of one more native draw call per band.
 
 ### Texture anchoring
 
