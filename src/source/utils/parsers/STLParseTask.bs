@@ -1,0 +1,194 @@
+import "../../engine/drawables/Model3d.bs"
+import "../../engine/loading/LoadTask.bs"
+import "../../math/vector.bs"
+import "../../roku_modules/rodash/rodash.d.bs"
+import "../strings.bs"
+import "../utils.bs"
+
+namespace BGE.Parsers
+
+  ' Parses ASCII .stl content a slice at a time. `model` is set once `step()` returns true
+  ' (invalid if the content couldn't be parsed). Same results as `parseSTLAsciiFile()`.
+  class STLAsciiParseTask extends BGE.LoadTask
+
+    ' The parsed model, once done
+    model as BGE.Model3d = invalid
+
+    private lines as roArray
+    private lineIndex as integer = 0
+    private depth as integer = 0
+    private solidName as string = ""
+    private vertexes as BGE.Math.Vector[]
+    private normal as BGE.Math.Vector = invalid
+    private faces as BGE.Model3dFace[]
+    private stopped as boolean = false
+    private sliceTimer as roTimespan
+    private solidRegex as roRegex
+    private facetRegex as roRegex
+    private outerLoopRegex as roRegex
+    private vertexRegex as roRegex
+    private endLoopRegex as roRegex
+    private endFacetRegex as roRegex
+    private endSolidRegex as roRegex
+
+    sub new(content as string)
+      super()
+      m.name = "parse .stl"
+      m.lines = content.Split(chr(10))
+      m.vertexes = []
+      m.faces = []
+      m.sliceTimer = CreateObject("roTimespan")
+      m.solidRegex = CreateObject("roRegex", "solid\s+(.*)", "")
+      m.facetRegex = CreateObject("roRegex", "facet normal\s+(.*)", "")
+      m.outerLoopRegex = CreateObject("roRegex", "outer loop", "")
+      m.vertexRegex = CreateObject("roRegex", "vertex\s+(.*)", "")
+      m.endLoopRegex = CreateObject("roRegex", "endloop", "")
+      m.endFacetRegex = CreateObject("roRegex", "endfacet", "")
+      m.endSolidRegex = CreateObject("roRegex", "endsolid", "")
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      m.sliceTimer.Mark()
+      lineCount = m.lines.count()
+      try
+        while m.lineIndex < lineCount and not m.stopped
+          m.parseLine(m.lines[m.lineIndex])
+          m.lineIndex++
+          if (m.lineIndex mod 16) = 0 and m.sliceTimer.TotalMilliseconds() >= budgetMs and m.lineIndex < lineCount and not m.stopped
+            return false
+          end if
+        end while
+      catch e
+        m.error = "could not parse .stl: " + e.message
+        return true
+      end try
+      m.model = new BGE.Model3d(m.faces)
+      m.model.name = m.solidName
+      return true
+    end function
+
+    override function getProgress() as float
+      lineCount = m.lines.count()
+      if lineCount = 0 or m.model <> invalid
+        return 1.0
+      end if
+      return m.lineIndex / lineCount
+    end function
+
+    private sub parseLine(line as string)
+      if m.depth = 0
+        if m.solidRegex.isMatch(line)
+          m.solidName = m.solidRegex.match(line)[1]
+          m.depth++
+        else
+          print `Unable to read line ${m.lineIndex}, depth ${m.depth}: ${line}`
+          m.stopped = true
+        end if
+      else if m.depth = 1
+        if m.facetRegex.isMatch(line)
+          normalStr = m.facetRegex.match(line)[1] as string
+          m.normal = BGE.Math.VectorFromFloatArray(rodash.map(normalStr.Split(" "), BGE.stringToFloat))
+          m.depth++
+        else if m.endSolidRegex.isMatch(line)
+          m.stopped = true
+        else
+          print `Unable to read line ${m.lineIndex}, depth ${m.depth}: ${line}`
+        end if
+      else if m.depth = 2
+        if m.outerLoopRegex.isMatch(line)
+          m.vertexes = []
+          m.depth++
+        else if m.endFacetRegex.IsMatch(line)
+          m.faces.push(BGE.Model3dFaceOps.create(m.vertexes, m.normal))
+          m.depth--
+        else
+          print `Unable to read line ${m.lineIndex}, depth ${m.depth}: ${line}`
+        end if
+      else if m.depth = 3
+        if m.vertexRegex.isMatch(line) and m.vertexes.Count() < 3
+          vertexStr = m.vertexRegex.match(line)[1] as string
+          vertex = BGE.Math.VectorFromFloatArray(rodash.map(vertexStr.Split(" "), BGE.stringToFloat))
+          if not rodash.isInvalid(vertex)
+            m.vertexes.Push(vertex)
+          end if
+        else if m.endLoopRegex.IsMatch(line)
+          m.depth--
+        else
+          print `Unable to read line ${m.lineIndex}, depth ${m.depth}: ${line}`
+        end if
+      end if
+    end sub
+
+  end class
+
+  ' Parses binary .stl bytes a slice of triangles at a time. Same results as
+  ' `parseSTLBinaryFile()`.
+  class STLBinaryParseTask extends BGE.LoadTask
+
+    ' The parsed model, once done
+    model as BGE.Model3d = invalid
+
+    private fileBytes as roByteArray
+    private faceCount as integer = 0
+    private faceIndex as integer = 0
+    private byteIndex as integer = 84
+    private faces as BGE.Model3dFace[]
+    private sliceTimer as roTimespan
+
+    sub new(fileBytes as roByteArray)
+      super()
+      m.name = "parse .stl"
+      m.fileBytes = fileBytes
+      m.faces = []
+      m.sliceTimer = CreateObject("roTimespan")
+      ' 80-byte title + 4-byte triangle count + 50 bytes per triangle
+      if fileBytes.Count() > 120
+        m.faceCount = BGE.bytesToInteger(fileBytes, 80)
+      end if
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      m.sliceTimer.Mark()
+      while m.faceIndex < m.faceCount
+        m.parseFace()
+        m.faceIndex++
+        if (m.faceIndex mod 16) = 0 and m.sliceTimer.TotalMilliseconds() >= budgetMs and m.faceIndex < m.faceCount
+          return false
+        end if
+      end while
+      m.model = new BGE.Model3d(m.faces)
+      m.model.name = "BinarySTL"
+      return true
+    end function
+
+    override function getProgress() as float
+      if m.faceCount = 0 or m.model <> invalid
+        return 1.0
+      end if
+      return m.faceIndex / m.faceCount
+    end function
+
+    private sub parseFace()
+      try
+        normal = m.readVector()
+        v0 = m.readVector()
+        v1 = m.readVector()
+        v2 = m.readVector()
+        m.byteIndex += 2 ' attribute byte count
+        m.faces.Push(BGE.Model3dFaceOps.create([v0, v1, v2], normal))
+      catch error
+        print `Unable to process face ${m.faceIndex}: ${rodash.toString(error)}`
+      end try
+    end sub
+
+    private function readVector() as BGE.Math.Vector
+      x = BGE.bytesToFloat(m.fileBytes, m.byteIndex)
+      y = BGE.bytesToFloat(m.fileBytes, m.byteIndex + 4)
+      z = BGE.bytesToFloat(m.fileBytes, m.byteIndex + 8)
+      m.byteIndex += 12
+      return BGE.Math.VectorOps.create(x, y, z)
+    end function
+
+  end class
+
+end namespace

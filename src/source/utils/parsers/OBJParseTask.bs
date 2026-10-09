@@ -1,0 +1,88 @@
+import "../../engine/drawables/Model3d.bs"
+import "../../engine/loading/LoadTask.bs"
+import "../../math/vector.bs"
+import "../../roku_modules/rodash/rodash.d.bs"
+import "../strings.bs"
+import "OBJParser.bs"
+
+namespace BGE.Parsers
+
+  ' Parses Wavefront .obj content a slice at a time - see `BGE.AssetLoader.load3dModel()`.
+  ' `model` is set once `step()` returns true. Same results as `parseOBJContent()`, which runs
+  ' one of these to completion.
+  class OBJParseTask extends BGE.LoadTask
+
+    ' The parsed model, once done
+    model as BGE.Model3d = invalid
+
+    private lines as roArray
+    private lineIndex as integer = 0
+    private baseDir as string
+    private vertices as BGE.Math.Vector[]
+    private texCoords as BGE.Math.Vector[]
+    private faces as BGE.Model3dFace[]
+    private modelName as string = "OBJModel"
+    private hasName as boolean = false
+    private mtllibName as string = ""
+    private sliceTimer as roTimespan
+
+    sub new(content as string, baseDir = "" as string)
+      super()
+      m.name = "parse .obj"
+      m.lines = content.Split(chr(10))
+      m.baseDir = baseDir
+      m.vertices = []
+      m.texCoords = []
+      m.faces = []
+      m.sliceTimer = CreateObject("roTimespan")
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      m.sliceTimer.Mark()
+      lineCount = m.lines.count()
+      while m.lineIndex < lineCount
+        m.parseLine(m.lines[m.lineIndex])
+        m.lineIndex++
+        if (m.lineIndex mod 16) = 0 and m.sliceTimer.TotalMilliseconds() >= budgetMs and m.lineIndex < lineCount
+          return false
+        end if
+      end while
+      m.model = new BGE.Model3d(m.faces)
+      m.model.name = m.modelName
+      if m.baseDir <> "" and m.mtllibName <> ""
+        m.model.texturePath = BGE.Parsers.resolveOBJTexturePath(m.baseDir, m.mtllibName)
+      end if
+      return true
+    end function
+
+    override function getProgress() as float
+      lineCount = m.lines.count()
+      if lineCount = 0 or m.model <> invalid
+        return 1.0
+      end if
+      return m.lineIndex / lineCount
+    end function
+
+    private sub parseLine(rawLine as string)
+      tokens = rodash.compact(rawLine.Trim().Split(" "))
+      if tokens.count() = 0
+        return
+      end if
+      keyword = tokens[0]
+      if keyword = "v" and tokens.count() >= 4
+        m.vertices.push(BGE.Math.VectorOps.create(BGE.stringToFloat(tokens[1]), BGE.stringToFloat(tokens[2]), BGE.stringToFloat(tokens[3])))
+      else if keyword = "vt" and tokens.count() >= 3
+        m.texCoords.push(BGE.Math.VectorOps.create(BGE.stringToFloat(tokens[1]), BGE.stringToFloat(tokens[2]), 0))
+      else if (keyword = "o" or keyword = "g") and tokens.count() >= 2 and not m.hasName
+        m.modelName = tokens[1]
+        m.hasName = true
+      else if keyword = "mtllib" and tokens.count() >= 2 and m.mtllibName = ""
+        m.mtllibName = tokens[1]
+      else if keyword = "f" and tokens.count() >= 4
+        BGE.Parsers.appendOBJFace(m.faces, BGE.Parsers.resolveOBJFaceVertices(tokens, m.vertices), BGE.Parsers.resolveOBJFaceTexCoords(tokens, m.texCoords))
+      end if
+    end sub
+
+  end class
+
+end namespace
