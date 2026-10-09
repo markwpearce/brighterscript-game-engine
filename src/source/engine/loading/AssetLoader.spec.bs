@@ -1,0 +1,230 @@
+import "pkg:/source/engine/loading/AssetLoader.bs"
+
+namespace tests
+
+  @suite("BGE.AssetLoader")
+  class AssetLoaderTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as BGE.AssetLoader
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.loader = new BGE.AssetLoader(m.game)
+    end function
+
+    @describe("progress and completion")
+
+    @it("is done with progress 1 when it has no tasks")
+    function _()
+      m.assertFalse(m.loader.hasTasks())
+      m.assertTrue(m.loader.isDone())
+      m.assertEqual(1.0, m.loader.getProgress())
+    end function
+
+    @it("runs many fast tasks in one update")
+    function _()
+      for i = 1 to 20
+        task = new FakeLoadTask(1, 0)
+        m.loader.addTask(task)
+      end for
+      m.loader.update(1000)
+      m.assertTrue(m.loader.isDone())
+      m.assertEqual(1.0, m.loader.getProgress())
+    end function
+
+    @it("stops stepping once the budget is used")
+    function _()
+      slow = new FakeLoadTask(10, 5)
+      slow.loaderTimer = m.loader.timer
+      m.loader.addTask(slow)
+      m.loader.update(12)
+      ' each step costs 5ms of the 12ms budget: steps at 0ms, 5ms and 10ms
+      m.assertEqual(3, slow.stepCount)
+      m.assertFalse(m.loader.isDone())
+    end function
+
+    @it("weights progress by task weight")
+    function _()
+      light = new FakeLoadTask(1, 0)
+      heavy = new FakeLoadTask(100, 0)
+      heavy.weight = 3.0
+      heavy.waitingForNextFrameAfterStep = true
+      m.loader.addTask(light)
+      m.loader.addTask(heavy)
+      m.loader.update(1000)
+      ' light done (1 * 1) + heavy at 1/100 (3 * 0.01) over total weight 4
+      m.assertTrue(Abs(m.loader.getProgress() - (1.03 / 4.0)) < 0.0001)
+    end function
+
+    @it("never reports a task's progress going backwards or past 1")
+    function _()
+      task = new FakeLoadTask(5, 0)
+      task.waitingForNextFrameAfterStep = true
+      m.loader.addTask(task)
+      task.fakeProgress = 0.6
+      m.loader.update(1000)
+      m.assertTrue(Abs(m.loader.getProgress() - 0.6) < 0.0001)
+      task.fakeProgress = 0.2
+      m.loader.update(1000)
+      m.assertTrue(Abs(m.loader.getProgress() - 0.6) < 0.0001)
+      task.fakeProgress = 7.0
+      m.loader.update(1000)
+      m.assertTrue(m.loader.getProgress() <= 1.0)
+    end function
+
+    @it("calls onComplete exactly once")
+    function _()
+      task = new FakeLoadTask(1, 0)
+      m.loader.addTask(task)
+      ' a dynamic alias, since completeCount isn't a declared AssetLoader field
+      loaderAA = m.loader as dynamic
+      loaderAA.completeCount = 0
+      m.loader.onComplete = sub(loader as object)
+        loader.completeCount = loader.completeCount + 1
+      end sub
+      m.loader.update(1000)
+      m.loader.update(1000)
+      m.assertEqual(1, loaderAA.completeCount)
+    end function
+
+    @it("starts a fresh batch when a task is added after the queue drained")
+    function _()
+      first = new FakeLoadTask(1, 0)
+      first.failWith = "first failed"
+      m.loader.addTask(first)
+      m.loader.update(1000)
+      m.assertEqual(1, m.loader.getErrors().count())
+      second = new FakeLoadTask(2, 0)
+      second.waitingForNextFrameAfterStep = true
+      m.loader.addTask(second)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertTrue(m.loader.getProgress() < 1.0)
+    end function
+
+    @describe("dependencies")
+
+    @it("does not start a task until its dependencies are done")
+    function _()
+      first = new FakeLoadTask(3, 0)
+      first.waitingForNextFrameAfterStep = true
+      second = new FakeLoadTask(1, 0)
+      second.after(first)
+      m.loader.addTask(first)
+      m.loader.addTask(second)
+      m.loader.update(1000)
+      m.assertEqual(0, second.stepCount)
+      m.loader.update(1000)
+      m.loader.update(1000)
+      m.loader.update(1000)
+      m.assertEqual(1, second.stepCount)
+      m.assertTrue(m.loader.isDone())
+    end function
+
+    @it("fails a task whose dependency failed, without running it")
+    function _()
+      first = new FakeLoadTask(1, 0)
+      first.failWith = "boom"
+      second = new FakeLoadTask(1, 0)
+      second.after(first)
+      m.loader.addTask(first)
+      m.loader.addTask(second)
+      m.loader.update(1000)
+      m.assertTrue(m.loader.isDone())
+      m.assertEqual(0, second.stepCount)
+      m.assertEqual(2, m.loader.getErrors().count())
+    end function
+
+    @describe("failures")
+
+    @it("treats a task that throws as failed and done")
+    function _()
+      task = new FakeLoadTask(1, 0)
+      task.throwOnStep = true
+      m.loader.addTask(task)
+      m.loader.update(1000)
+      m.assertTrue(m.loader.isDone())
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertNotInvalid(task.error)
+    end function
+
+    @describe("addStep")
+
+    @it("calls a step function with its context until it returns true")
+    function _()
+      context = {calls: 0}
+      m.loader.addStep(function(ctx as object) as dynamic
+        ctx.calls = ctx.calls + 1
+        return ctx.calls >= 3
+      end function, context)
+      m.loader.update(1000)
+      m.assertEqual(3, context.calls)
+      m.assertTrue(m.loader.isDone())
+    end function
+
+    @it("uses a numeric return as progress, done at 1")
+    function _()
+      context = {calls: 0}
+      m.loader.addStep(function(ctx as object) as dynamic
+        ctx.calls = ctx.calls + 1
+        return ctx.calls / 4.0
+      end function, context)
+      m.loader.update(1000)
+      m.assertEqual(4, context.calls)
+      m.assertTrue(m.loader.isDone())
+    end function
+
+    @it("fails a step function that throws")
+    function _()
+      m.loader.addStep(function(ctx as object) as dynamic
+        return ctx.missing.field
+      end function, {})
+      m.loader.update(1000)
+      m.assertTrue(m.loader.isDone())
+      m.assertEqual(1, m.loader.getErrors().count())
+    end function
+
+  end class
+
+  ' Finishes after `stepsToFinish` steps, advancing the loader's clock by `msPerStep` per step.
+  class FakeLoadTask extends BGE.LoadTask
+    stepsToFinish as integer
+    msPerStep as integer
+    stepCount as integer = 0
+    fakeProgress as dynamic = invalid
+    failWith as dynamic = invalid
+    throwOnStep as boolean = false
+    waitingForNextFrameAfterStep as boolean = false
+    loaderTimer as dynamic = invalid
+
+    sub new(stepsToFinish as integer, msPerStep as integer)
+      super()
+      m.stepsToFinish = stepsToFinish
+      m.msPerStep = msPerStep
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if m.throwOnStep
+        throw "fake task threw"
+      end if
+      m.stepCount++
+      if m.loaderTimer <> invalid
+        m.loaderTimer.addTime(m.msPerStep)
+      end if
+      if m.failWith <> invalid
+        m.error = m.failWith
+        return true
+      end if
+      m.waitingForNextFrame = m.waitingForNextFrameAfterStep
+      return m.stepCount >= m.stepsToFinish
+    end function
+
+    override function getProgress() as float
+      if m.fakeProgress <> invalid
+        return m.fakeProgress
+      end if
+      return m.stepCount / m.stepsToFinish
+    end function
+  end class
+
+end namespace
