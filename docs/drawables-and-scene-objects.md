@@ -277,6 +277,11 @@ Ground planes, skyboxes and parallax layers don't fade: they have no single dist
 the camera. Everything else fades by its nearest corner, so a long wall stays solid while
 its near end is well inside the draw distance.
 
+A ground plane always reaches the farthest any quality level would draw objects (1.5x
+`maxDrawDistance` with the default presets), so objects fade out on the ground rather than
+past its edge, and the horizon doesn't move when the quality level changes. Past the
+default distance, the ground's texture gets a little softer instead of costing more memory.
+
 ## How `Renderer.render()` actually draws a frame
 
 `Renderer.render()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a
@@ -446,9 +451,11 @@ Each frame, `SceneObjectPlane` (in `findCanvasPosition`, via `getPerspectivePoin
    each frame using a true (`atan`-derived) vertical field of view rather than reusing
    `Camera3d.frustumRays` (which uses a cheaper linear approximation - accurate enough for frustum
    culling, but not for this plane's own edges; see "Roll" below for the rolled case, which builds
-   its own rays too). Corners whose rays don't hit the plane at all (pointing above the horizon)
-   are approximated instead by rotating a point on the plane at `camera.maxDrawDistance`
-   around the plane's normal by half the field of view.
+   its own rays too). Corners whose rays don't hit the plane at all
+   (pointing above the horizon), or that hit it farther away than the plane draws, are placed
+   instead on the plane at the camera's draw distance straight ahead, the full width of the
+   view at that depth - the same depth every other object is clipped at, so nothing stands
+   past the ground's far edge.
 2. Converts those four world points into **texture pixel coordinates** via
    `BGE.Math.worldPointToTexturePixel` (see "Texture anchoring" below).
 3. `populatePerspectiveBmp()` un-warps the resulting quad: it rotates/translates the *entire*

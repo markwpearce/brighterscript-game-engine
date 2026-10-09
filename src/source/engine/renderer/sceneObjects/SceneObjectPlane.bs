@@ -10,7 +10,9 @@ import "../../interfaces.bs"
 import "../cameras/Camera.bs"
 import "../cameras/Camera3d.bs"
 import "../Renderer.bs"
+import "../RendererHelpers.bs"
 import "SceneObject.bs"
+import "PlaneBitmapSizing.bs"
 
 namespace BGE
 
@@ -48,6 +50,8 @@ namespace BGE
     private superTextureRegion as roRegion
     ' Rotate step's scratch destination - must differ from superTextureBmp since that's the rotate source.
     private tiledScratchBmp as roBitmap
+    ' A static decal's rotated texture, sized to the decal (see populatePerspectiveBmp)
+    private decalScratchBmp as roBitmap = invalid
     private superTextureBuiltForMaxDrawDistance as float = -1
     private tileWidth as float
     private tileHeight as float
@@ -306,21 +310,12 @@ namespace BGE
 
       scaledOrientationFromCameraPointOnPlane = BGE.Math.VectorOps.add(cameraPointOnPlane, BGE.Math.VectorOps.scale(BGE.Math.VectorOps.getNormalizedCopy(projectedRay.direction), farDistance))
 
-      if invalid = output.topRight
-        output.topRight = BGE.Math.RotateVectorAroundPoint3d(
-        scaledOrientationFromCameraPointOnPlane,
-        cameraPointOnPlane,
-        plane.normal,
-        BGE.Math.DegreesToRadians(-horizFov / 2)
-        )
+      projectedForward = BGE.Math.VectorOps.getNormalizedCopy(projectedRay.direction)
+      if invalid = output.topRight or m.isPastForwardDepth(camera, output.topRight, farDistance)
+        output.topRight = m.getFarEdgeCorner(camera, plane, cameraPointOnPlane, projectedForward, farDistance, horizFov, 1)
       end if
-      if invalid = output.topLeft
-        output.topLeft = BGE.Math.RotateVectorAroundPoint3d(
-        scaledOrientationFromCameraPointOnPlane,
-        cameraPointOnPlane,
-        plane.normal,
-        BGE.Math.DegreesToRadians(horizFov / 2)
-        )
+      if invalid = output.topLeft or m.isPastForwardDepth(camera, output.topLeft, farDistance)
+        output.topLeft = m.getFarEdgeCorner(camera, plane, cameraPointOnPlane, projectedForward, farDistance, horizFov, -1)
       end if
       if invalid = output.bottomRight
         output.bottomRight = BGE.Math.RotateVectorAroundPoint3d(
@@ -363,6 +358,27 @@ namespace BGE
       return {actual: output, mapped: mapped}
     end function
 
+    private function isPastForwardDepth(camera as Camera3d, point as BGE.Math.Vector, farDistance as float) as boolean
+      return BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, camera.position), camera.orientation) > farDistance
+    end function
+
+    ' A far corner on the plane at forward depth `farDistance` - the same flat depth
+    ' Camera3d.isInView() clips objects at - on the left (side -1) or right (+1)
+    ' edge of the view. Not a fixed radius around the camera, which would stop the
+    ' ground short of the object far-clip straight ahead (issue #307).
+    private function getFarEdgeCorner(camera as Camera3d, plane as BGE.Math.Plane, cameraPointOnPlane as BGE.Math.Vector, projectedForward as BGE.Math.Vector, farDistance as float, horizFov as float, side as float) as BGE.Math.Vector
+      cameraOffsetDepth = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(cameraPointOnPlane, camera.position), camera.orientation)
+      forwardRate = BGE.Math.VectorOps.dotProduct(projectedForward, camera.orientation)
+      if forwardRate <= 0.0001
+        forwardRate = 0.0001
+      end if
+      along = (farDistance - cameraOffsetDepth) / forwardRate
+      farCenter = BGE.Math.VectorOps.add(cameraPointOnPlane, BGE.Math.VectorOps.scale(projectedForward, along))
+      right = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.crossProduct(projectedForward, plane.normal))
+      halfWidth = farDistance * tan(BGE.Math.DegreesToRadians(horizFov) / 2)
+      return BGE.Math.VectorOps.add(farCenter, BGE.Math.VectorOps.scale(right, halfWidth * side))
+    end function
+
     ' Sizes the "rectified" (top-down) scratch bitmap that populatePerspectiveBmp()
     ' warps the ground texture into. Its width is derived from camera.fieldOfViewDegrees
     ' - drawPerspectiveBmpSlicesToByCamera()'s own tanHalfFov (used for each slice's
@@ -375,9 +391,10 @@ namespace BGE
       nearDistance = SCENE_OBJECT_PLANE_NEAR_DISTANCE
       camera = rendererObj.camera as Camera3d
       farDistance = camera.getPlaneDrawDistance()
-      finalHeight = farDistance - nearDistance
-      finalWidth = (finalHeight) * tan(BGE.Math.DegreesToRadians(camera.fieldOfViewDegrees) / 2) * 2
-      return CreateObject("roBitmap", {width: finalWidth, height: finalHeight, AlphaEnable: true})
+      ' everything downstream works in this bitmap's own pixels, so a scaled-down
+      ' bitmap needs no other change (SCENE_OBJECT_PLANE_NEAR_DISTANCE is 0)
+      size = BGE.getPlanePrePerspectiveBmpSize(farDistance - nearDistance, camera.fieldOfViewDegrees, BGE.PLANE_PRE_PERSPECTIVE_MAX_PIXELS)
+      return CreateObject("roBitmap", {width: size.width, height: size.height, AlphaEnable: true})
     end function
 
     ' Caps the supertexture's physical bitmap size regardless of how much world-space
@@ -515,6 +532,47 @@ namespace BGE
       return BGE.Math.VectorOps.create(logicalX * m.superTextureScale, logicalY * m.superTextureScale, 0)
     end function
 
+    ' Where `srcRegion` lands, rotated by `theta` about `pivot` with the pivot at the
+    ' origin - the placement drawRotatedImageWithCenterTo() uses with a -pivot translation.
+    '
+    ' @return {BGE.PlaneScratchBounds}
+    private function getRotatedSourceBounds(srcRegion as ifDraw2D, pivot as BGE.Math.Vector, theta as float) as BGE.PlaneScratchBounds
+      rotatedPivot = m.rotateLikeDrawRotated(pivot, theta)
+      corners = [BGE.Math.VectorOps.create(0, 0), BGE.Math.VectorOps.create(srcRegion.GetWidth(), 0), BGE.Math.VectorOps.create(0, srcRegion.GetHeight()), BGE.Math.VectorOps.create(srcRegion.GetWidth(), srcRegion.GetHeight())]
+      minX = invalid
+      minY = invalid
+      maxX = invalid
+      maxY = invalid
+      for each corner in corners
+        landed = BGE.Math.VectorOps.subtract(m.rotateLikeDrawRotated(corner, theta), rotatedPivot)
+        if invalid = minX or landed.x < minX
+          minX = landed.x
+        end if
+        if invalid = minY or landed.y < minY
+          minY = landed.y
+        end if
+        if invalid = maxX or landed.x > maxX
+          maxX = landed.x
+        end if
+        if invalid = maxY or landed.y > maxY
+          maxY = landed.y
+        end if
+      end for
+      minX = Int(minX)
+      minY = Int(minY)
+      return {min: BGE.Math.VectorOps.create(minX, minY), width: Int(maxX - minX) + 2, height: Int(maxY - minY) + 2}
+    end function
+
+    ' The rotation drawRotatedImageWithCenterTo() applies to a source point.
+    private function rotateLikeDrawRotated(point as BGE.Math.Vector, theta as float) as BGE.Math.Vector
+      distance = BGE.Math.VectorOps.length(point)
+      if distance = 0
+        return BGE.Math.VectorOps.create()
+      end if
+      angle = theta - BGE.Math.GetAngle(BGE.Math.VectorOps.create(), point)
+      return BGE.Math.VectorOps.create(distance * cos(angle), -distance * sin(angle))
+    end function
+
     private function populatePerspectiveBmp(rendererObj as BGE.Renderer, cp as BGE.Math.CornerPoints, srcRegion as ifDraw2D, destRegion as ifDraw2D, anchorPoint as BGE.Math.Vector, ownScratchBmp = invalid as roBitmap, extraScale = 1.0 as float) as boolean
       if invalid = cp
         return false
@@ -533,18 +591,24 @@ namespace BGE
       horizScale = (destRegion.GetWidth() / distanceFromTopToBottom) * extraScale
       vertScale = (destRegion.GetHeight() / footInfo.distanceToPoint) * extraScale
 
-      usingOwnScratch = invalid <> ownScratchBmp
-      scratchRegionForPool = invalid
+      ' The rotate puts the quad's top left corner at the scratch origin.
+      rotateTranslation = BGE.Math.VectorOps.negative(anchorPoint)
+      scratchOffset = BGE.Math.VectorOps.create()
       scratchDrawTo = invalid as ifDraw2D
-      if usingOwnScratch
+      if invalid <> ownScratchBmp
         scratchDrawTo = ownScratchBmp
       else
-        scratchRegionForPool = rendererObj.bmpPool.getRegion(srcRegion.GetWidth(), srcRegion.GetHeight())
-        if scratchRegionForPool = invalid
-          print "failed to get scratch region from pool"
+        ' A finite decal: size the scratch to the rotated decal itself and shift it in,
+        ' since the quad's corner can be far outside the texture (issue #307).
+        bounds = m.getRotatedSourceBounds(srcRegion, anchorPoint, rotation)
+        m.decalScratchBmp = BGE.RendererHelpers.growOrClearBitmap(m.decalScratchBmp, bounds.width, bounds.height)
+        if invalid = m.decalScratchBmp
+          print "[BGE.SceneObjectPlane] warning: couldn't allocate the decal scratch bitmap - skipping this plane this frame"
           return false
         end if
-        scratchDrawTo = scratchRegionForPool.region
+        scratchDrawTo = m.decalScratchBmp
+        scratchOffset = bounds.min
+        rotateTranslation = BGE.Math.VectorOps.subtract(rotateTranslation, bounds.min)
       end if
 
       ' Scratch regions/bitmaps are reused and not auto-cleared - without this, a
@@ -552,13 +616,10 @@ namespace BGE
       scratchDrawTo.Clear(&h00000000)
       destRegion.Clear(&h00000000)
 
-      worked = rendererObj.drawRotatedImageWithCenterTo(scratchDrawTo, srcRegion, anchorPoint, rotation, BGE.Math.VectorOps.negative(anchorPoint))
-      worked = worked and rendererObj.drawScaledObjectTo(destRegion, 0, 0, horizScale, vertScale, scratchDrawTo)
+      worked = rendererObj.drawRotatedImageWithCenterTo(scratchDrawTo, srcRegion, anchorPoint, rotation, rotateTranslation)
+      worked = worked and rendererObj.drawScaledObjectTo(destRegion, scratchOffset.x * horizScale, scratchOffset.y * vertScale, horizScale, vertScale, scratchDrawTo)
       if not worked
         print "failed to draw perspective bmp"
-      end if
-      if not usingOwnScratch
-        rendererObj.bmpPool.returnRegion(scratchRegionForPool)
       end if
 
       return worked

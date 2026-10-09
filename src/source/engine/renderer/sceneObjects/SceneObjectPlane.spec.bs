@@ -371,6 +371,99 @@ namespace tests
       m.assertTrue(true)
     end function
 
+    @describe("far edge matches the object far-clip (issue #307)")
+
+    ' Adds a color-fill ground plane, points the camera, renders a few settled frames
+    ' and returns the plane's scene object.
+    private function renderGround(cameraTarget as BGE.Math.Vector) as object
+      colorDrawable = new BGE.DrawablePlane(m.testScene, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: BGE.ColorsRGB.Green})
+      m.testScene.addDrawable("Ground", colorDrawable)
+      renderer = m.game.canvas.renderer
+      camera = renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      camera.setTarget(cameraTarget)
+      for i = 1 to 4
+        m.testScene.updateTransformationMatrix()
+        renderer.setupCameraForFrame()
+        renderer.render()
+      end for
+      return colorDrawable.getSceneObjects()[0] as object
+    end function
+
+    @it("reaches the forward depth objects are clipped at, so an object near the limit stands on the ground")
+    function _()
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.maxDrawDistance = 500
+      plane = m.renderGround(BGE.Math.VectorOps.create(0, 50, -100))
+      objectBase = BGE.Math.VectorOps.create(0, 0, -450)
+      m.assertTrue(camera.isInView(objectBase))
+      edgeY = camera.worldPointToCanvasPoint(plane.perspectivePoints.actual.topLeft).y
+      baseY = camera.worldPointToCanvasPoint(objectBase).y
+      m.assertTrue(edgeY <= baseY, `ground edge at y=${edgeY} is below the object's base at y=${baseY}`)
+    end function
+
+    @it("stops at the far-clip depth when the camera is pitched down far enough for the top rays to hit the ground")
+    function _()
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.maxDrawDistance = 500
+      ' 47 degrees down: the top rays hit the ground ~1400 units out
+      plane = m.renderGround(BGE.Math.VectorOps.create(0, 50 - 107.2, -100))
+      farCorner = plane.perspectivePoints.actual.topLeft
+      depth = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(farCorner, camera.position), camera.orientation)
+      m.assertTrue(depth <= camera.getPlaneDrawDistance() + 1, `far edge at depth ${depth}`)
+    end function
+
+    @it("reaches far enough at Ultra that an object near the Ultra limit stands on the ground")
+    function _()
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      camera.maxDrawDistance = 500
+      m.game.setQualityLevel(BGE.RenderQualityLevel.ultra)
+      plane = m.renderGround(BGE.Math.VectorOps.create(0, 50, -100))
+      objectBase = BGE.Math.VectorOps.create(0, 0, -700)
+      m.assertTrue(camera.isInView(objectBase))
+      edgeY = camera.worldPointToCanvasPoint(plane.perspectivePoints.actual.topLeft).y
+      baseY = camera.worldPointToCanvasPoint(objectBase).y
+      m.assertTrue(edgeY <= baseY, `ground edge at y=${edgeY} is below the object's base at y=${baseY}`)
+    end function
+
+    ' The ground now reaches farther, which puts the quad's far corner well outside a
+    ' decal's own texture bounds - the whole decal must still make it into the top-down
+    ' bitmap, not just the part within a texture-sized scratch area of that corner.
+    @it("keeps all of a static decal when the far corner is far outside the texture")
+    function _()
+      decalBmp = CreateObject("roBitmap", {width: 1024, height: 1024, AlphaEnable: true})
+      decalBmp.Clear(&hFF0000FF)
+      decalRegion = CreateObject("roRegion", decalBmp, 0, 0, 1024, 1024)
+      decal = new BGE.DrawablePlane(m.testScene, decalRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.staticImage})
+      m.testScene.addDrawable("Decal", decal)
+      renderer = m.game.canvas.renderer
+      camera = renderer.camera as BGE.Camera3d
+      camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      camera.setTarget(BGE.Math.VectorOps.create(0, 50, -100))
+      for i = 1 to 4
+        m.testScene.updateTransformationMatrix()
+        renderer.setupCameraForFrame()
+        renderer.render()
+      end for
+      plane = decal.getSceneObjects()[0] as object
+      bmp = plane.prePerspectiveBmp
+      m.assertNotInvalid(bmp)
+      ' world x = 400 is inside the decal (-512..512) and far right of the far corner;
+      ' the bitmap maps world x linearly from the far edge's left corner
+      farLeft = plane.perspectivePoints.actual.topLeft
+      farRight = plane.perspectivePoints.actual.topRight
+      column = Int((400 - farLeft.x) / (farRight.x - farLeft.x) * bmp.GetWidth())
+      foundRed = false
+      for row = 0 to bmp.GetHeight() - 1 step 8
+        pixel = bmp.GetByteArray(column, row, 1, 1)
+        if pixel[0] > 200 and pixel[3] > 200
+          foundRed = true
+          exit for
+        end if
+      end for
+      m.assertTrue(foundRed, `no decal pixels in column ${column} of a ${bmp.GetWidth()}x${bmp.GetHeight()} bitmap`)
+    end function
+
   end class
 
 end namespace
