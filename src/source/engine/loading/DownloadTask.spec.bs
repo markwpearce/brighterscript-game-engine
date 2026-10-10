@@ -129,6 +129,35 @@ namespace tests
       m.assertEqual(1, m.fs.GetDirectoryListing(BGE.DOWNLOAD_CACHE_FOLDER).count())
     end function
 
+    @it("uses the last content-type line after a redirect")
+    function _()
+      url = "https://example.com/redirected"
+      headerLines = [{"Content-Type": "text/html"}, {"Location": "https://cdn.example.com/a"}, {"Content-Type": "image/png"}]
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "x", headers: {"content-type": "text/html"}, headersArray: headerLines}])
+      tests.runDownload(task)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".png", task.localPath)
+    end function
+
+    @it("falls back to the merged headers without GetResponseHeadersArray()")
+    function _()
+      url = "https://example.com/legacy"
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "x", headers: {"content-type": "image/gif"}, legacyEvent: true}])
+      tests.runDownload(task)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".gif", task.localPath)
+    end function
+
+    @it("deletes a copy saved with another extension option")
+    function _()
+      url = "https://example.com/retyped"
+      first = new tests.ScriptedDownloadTask(url, {extension: ".jpg"}, [{code: 200, body: "a"}])
+      tests.runDownload(first)
+      second = new tests.ScriptedDownloadTask(url, {extension: ".png"}, [{code: 200, body: "b"}])
+      tests.runDownload(second)
+      m.assertEqual(1, second.transfersCreated)
+      m.assertFalse(m.fs.Exists(first.localPath))
+      m.assertEqual(1, m.fs.GetDirectoryListing(BGE.DOWNLOAD_CACHE_FOLDER).count())
+    end function
+
     @it("doesn't take another download's partial file for a cached copy")
     function _()
       url = "https://example.com/partial"
@@ -309,16 +338,24 @@ namespace tests
     end function
   end class
 
+  ' A completion event. GetResponseHeadersArray() returns `headersArray` (one AA per header
+  ' line), or [] when the response didn't give one.
   class FakeUrlEvent
     eventType as integer
     code as integer
     headers as roAssociativeArray
+    headersArray as roArray
 
     sub new(eventType as integer, code as integer, headers as roAssociativeArray)
       m.eventType = eventType
       m.code = code
       m.headers = headers
+      m.headersArray = []
     end sub
+
+    function GetResponseHeadersArray() as roArray
+      return m.headersArray
+    end function
 
     function GetInt() as integer
       return m.eventType
@@ -330,6 +367,33 @@ namespace tests
 
     function GetFailureReason() as string
       return "fake failure"
+    end function
+
+    function GetResponseHeaders() as roAssociativeArray
+      return m.headers
+    end function
+  end class
+
+  ' A completion event without GetResponseHeadersArray().
+  class FakeLegacyUrlEvent
+    code as integer
+    headers as roAssociativeArray
+
+    sub new(code as integer, headers as roAssociativeArray)
+      m.code = code
+      m.headers = headers
+    end sub
+
+    function GetInt() as integer
+      return 1
+    end function
+
+    function GetResponseCode() as integer
+      return m.code
+    end function
+
+    function GetFailureReason() as string
+      return ""
     end function
 
     function GetResponseHeaders() as roAssociativeArray
@@ -386,7 +450,15 @@ namespace tests
       else
         WriteAsciiFile(filePath, m.response.body)
       end if
+      if m.response.legacyEvent <> invalid and m.response.legacyEvent
+        legacyEvent = new tests.FakeLegacyUrlEvent(m.response.code, headers)
+        m.port.queue.push(legacyEvent)
+        return true
+      end if
       completeEvent = new tests.FakeUrlEvent(1, m.response.code, headers)
+      if m.response.headersArray <> invalid
+        completeEvent.headersArray = m.response.headersArray
+      end if
       m.port.queue.push(completeEvent)
       return true
     end function
