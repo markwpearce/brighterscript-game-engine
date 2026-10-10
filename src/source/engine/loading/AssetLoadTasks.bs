@@ -3,26 +3,91 @@ import "../drawables/Model3d.bs"
 import "../../utils/parsers/ModelParseTask.bs"
 import "../../utils/parsers/OBJParseTask.bs"
 import "../../utils/parsers/STLParseTask.bs"
+import "../../utils/urls.bs"
+import "DownloadTask.bs"
 import "LoadTask.bs"
 
 namespace BGE
 
-  ' Loads one bitmap with Game.loadBitmap(). One native decode, so a single step.
-  class BitmapLoadTask extends LoadTask
+  ' Base for the built-in loads. Given a URL, the AssetLoader attaches a `download`; this task
+  ' runs it first, then loads the downloaded file. Subclasses override `loadFile()` (and
+  ' `getFileProgress()` if loading takes more than one step) rather than `step()`.
+  class FileLoadTask extends LoadTask
 
-    private game as BGE.Game
-    private bitmapName as string
-    private path as string
+    ' The file to load - the download's local file once downloaded
+    path as string
+    ' Downloads `path` first when it's a URL (invalid for a local file)
+    download as BGE.DownloadTask = invalid
+    ' Share of this task's progress that the download counts for
+    downloadShare as float = 0.8
 
-    sub new(game as BGE.Game, bitmapName as string, path as string)
+    private downloaded as boolean = false
+
+    sub new(path as string)
       super()
-      m.name = "bitmap " + path
-      m.game = game
-      m.bitmapName = bitmapName
       m.path = path
     end sub
 
     override function step(budgetMs as integer) as boolean
+      if m.download <> invalid and not m.downloaded
+        if not m.download.step(budgetMs)
+          m.waitingForNextFrame = true
+          return false
+        end if
+        m.downloaded = true
+        if m.download.error <> invalid
+          m.error = m.download.error
+          return true
+        end if
+        m.path = m.download.localPath
+      end if
+      return m.loadFile(budgetMs)
+    end function
+
+    override function getProgress() as float
+      if m.done
+        return 1.0
+      end if
+      if m.download = invalid
+        return m.getFileProgress()
+      end if
+      if not m.downloaded
+        return m.download.getProgress() * m.downloadShare
+      end if
+      return m.downloadShare + (1 - m.downloadShare) * m.getFileProgress()
+    end function
+
+    ' Loads the local file at `path`. Called repeatedly until it returns true.
+    '
+    ' @param {integer} budgetMs
+    ' @return {boolean} true when finished (set `error` on failure)
+    function loadFile(budgetMs as integer) as boolean
+      return true
+    end function
+
+    ' How far `loadFile()` has got, 0 to 1.
+    '
+    ' @return {float}
+    function getFileProgress() as float
+      return 0.0
+    end function
+
+  end class
+
+  ' Loads one bitmap with Game.loadBitmap(). One native decode, so a single step.
+  class BitmapLoadTask extends FileLoadTask
+
+    private game as BGE.Game
+    private bitmapName as string
+
+    sub new(game as BGE.Game, bitmapName as string, path as string)
+      super(path)
+      m.name = "bitmap " + path
+      m.game = game
+      m.bitmapName = bitmapName
+    end sub
+
+    override function loadFile(budgetMs as integer) as boolean
       if not m.game.loadBitmap(m.bitmapName, m.path)
         m.error = "could not load bitmap " + m.path
       end if
@@ -32,21 +97,19 @@ namespace BGE
   end class
 
   ' Loads one sound with Game.loadSound().
-  class SoundLoadTask extends LoadTask
+  class SoundLoadTask extends FileLoadTask
 
     private game as BGE.Game
     private soundName as string
-    private path as string
 
     sub new(game as BGE.Game, soundName as string, path as string)
-      super()
+      super(path)
       m.name = "sound " + path
       m.game = game
       m.soundName = soundName
-      m.path = path
     end sub
 
-    override function step(budgetMs as integer) as boolean
+    override function loadFile(budgetMs as integer) as boolean
       if not CreateObject("roFileSystem").Exists(m.path)
         m.error = "sound file not found: " + m.path
         return true
@@ -58,19 +121,17 @@ namespace BGE
   end class
 
   ' Registers one font file with Game.registerFont().
-  class FontLoadTask extends LoadTask
+  class FontLoadTask extends FileLoadTask
 
     private game as BGE.Game
-    private path as string
 
     sub new(game as BGE.Game, path as string)
-      super()
+      super(path)
       m.name = "font " + path
       m.game = game
-      m.path = path
     end sub
 
-    override function step(budgetMs as integer) as boolean
+    override function loadFile(budgetMs as integer) as boolean
       if not m.game.registerFont(m.path)
         m.error = "could not register font " + m.path
       end if

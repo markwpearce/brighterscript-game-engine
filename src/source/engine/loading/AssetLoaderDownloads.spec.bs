@@ -1,0 +1,156 @@
+import "pkg:/source/engine/loading/AssetLoader.bs"
+
+namespace tests
+
+  @suite("BGE.AssetLoader downloads")
+  class AssetLoaderDownloadsTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as tests.ServedAssetLoader
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.loader = new tests.ServedAssetLoader(m.game)
+      bitmap = CreateObject("roBitmap", {width: 4, height: 2, AlphaEnable: true})
+      bitmap.GetPng(0, 0, 4, 2).WriteFile("tmp:/bge_served.png")
+    end function
+
+    @describe("URL loads")
+
+    @it("downloads then loads a bitmap from a URL")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_served.png"
+      task = m.loader.loadBitmap("remote", "https://example.com/a.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(4, m.game.getBitmap("remote").GetWidth())
+      fileTask = task as BGE.FileLoadTask
+      m.assertEqual("https://example.com/a.png", fileTask.download.url)
+    end function
+
+    @it("fails the load when its download fails")
+    function _()
+      task = m.loader.loadBitmap("remote", "https://example.com/missing.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertTrue(task.error.Instr("404") >= 0)
+      m.assertInvalid(m.game.Bitmaps["remote"])
+    end function
+
+    @it("fails a sound load when its download fails")
+    function _()
+      m.loader.loadSound("remote", "https://example.com/missing.wav")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+    end function
+
+    @it("still loads local paths without a download")
+    function _()
+      task = m.loader.loadBitmap("local", "tmp:/bge_served.png")
+      tests.runLoader(m.loader)
+      fileTask = task as BGE.FileLoadTask
+      m.assertInvalid(fileTask.download)
+      m.assertEqual(0, m.loader.requested.count())
+    end function
+
+    @it("reports download progress before the file loads")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_served.png"
+      m.loader.stepsPerDownload = 3
+      task = m.loader.loadBitmap("remote", "https://example.com/a.png")
+      m.loader.update(12)
+      progress = m.loader.getProgress()
+      m.assertTrue(progress > 0)
+      m.assertTrue(progress < 0.8)
+      tests.runLoader(m.loader)
+      m.assertEqual(1.0, task.getProgress())
+    end function
+
+    @describe("download and the cache")
+
+    @it("queues a plain download with the loader's slots")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_served.png"
+      m.loader.maxConcurrentDownloads = 2
+      task = m.loader.download("https://example.com/a.png")
+      tests.runLoader(m.loader)
+      m.assertNotInvalid(task.slots)
+      m.assertEqual(2, task.slots.max)
+      m.assertNotEqual("", task.localPath)
+    end function
+
+    @it("clears the download cache")
+    function _()
+      fs = CreateObject("roFileSystem")
+      fs.CreateDirectory(BGE.DOWNLOAD_CACHE_FOLDER)
+      WriteAsciiFile(BGE.DOWNLOAD_CACHE_FOLDER + "/stale.png", "x")
+      m.loader.clearCache()
+      m.assertFalse(fs.Exists(BGE.DOWNLOAD_CACHE_FOLDER + "/stale.png"))
+    end function
+
+  end class
+
+  ' Runs a loader until it's done (or 50 updates pass).
+  sub runLoader(loader as BGE.AssetLoader)
+    for i = 1 to 50
+      loader.update(12)
+      if loader.isDone()
+        return
+      end if
+    end for
+  end sub
+
+  ' An AssetLoader whose downloads are served from local files instead of the network.
+  ' A URL missing from `files` fails with HTTP 404.
+  class ServedAssetLoader extends BGE.AssetLoader
+    files as roAssociativeArray
+    requested as roArray
+    stepsPerDownload as integer = 1
+
+    sub new(game as BGE.Game)
+      super(game)
+      m.files = {}
+      m.requested = []
+    end sub
+
+    override function newDownloadTask(url as string, options as BGE.DownloadOptions) as BGE.DownloadTask
+      m.requested.push(url)
+      task = new tests.ServedDownloadTask(url, m.files[url], m.stepsPerDownload)
+      task.slots = m.getDownloadSlots()
+      return task
+    end function
+  end class
+
+  class ServedDownloadTask extends BGE.DownloadTask
+    sourcePath as dynamic
+    stepsLeft as integer
+
+    sub new(url as string, sourcePath as dynamic, steps as integer)
+      super(url, {cache: false})
+      m.sourcePath = sourcePath
+      m.stepsLeft = steps
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      m.stepsLeft--
+      if m.stepsLeft > 0
+        m.waitingForNextFrame = true
+        return false
+      end if
+      if m.sourcePath = invalid
+        m.error = "HTTP 404 downloading " + m.url
+        return true
+      end if
+      m.localPath = m.sourcePath
+      return true
+    end function
+
+    override function getProgress() as float
+      if m.localPath <> ""
+        return 1.0
+      end if
+      return 0.5
+    end function
+  end class
+
+end namespace
