@@ -1,3 +1,5 @@
+import "strings.bs"
+
 namespace BGE
 
   ' Where downloads are cached between launches (the OS may clear it when space runs low)
@@ -40,8 +42,8 @@ namespace BGE
   ' @return {string}
   function urlFileExtension(url as string) as string
     urlPath = BGE.stripUrlQuery(url)
-    fileName = urlPath.Mid(BGE.lastIndexOfChar(urlPath, "/") + 1)
-    dotIndex = BGE.lastIndexOfChar(fileName, ".")
+    fileName = urlPath.Mid(BGE.lastInStr(urlPath, "/") + 1)
+    dotIndex = BGE.lastInStr(fileName, ".")
     if dotIndex < 0
       return ""
     end if
@@ -54,6 +56,7 @@ namespace BGE
   end function
 
   ' Resolves a path found inside a downloaded file (e.g. an .obj's `mtllib`) against that file's URL.
+  ' "./" and "../" are resolved, and a "//host/path" URL takes the base URL's scheme.
   '
   ' @param {string} baseUrl - the URL of the file the path came from
   ' @param {string} relativePath - a relative path, a root-relative path ("/a/b.png") or a full URL
@@ -63,18 +66,51 @@ namespace BGE
       return relativePath
     end if
     base = BGE.stripUrlQuery(baseUrl)
-    if relativePath.StartsWith("/")
-      hostStart = base.Instr("://") + 3
-      pathStart = base.Instr(hostStart, "/")
-      if pathStart < 0
-        return base + relativePath
+    schemeEnd = base.Instr("://")
+    if relativePath.StartsWith("//")
+      return base.Left(schemeEnd + 1) + relativePath
+    end if
+    hostStart = schemeEnd + 3
+    pathStart = base.Instr(hostStart, "/")
+    origin = base
+    basePath = "/"
+    if pathStart >= 0
+      origin = base.Left(pathStart)
+      basePath = base.Mid(pathStart)
+    end if
+    ' the relative part's own query/fragment is kept as is
+    relativeUrlPath = BGE.stripUrlQuery(relativePath)
+    suffix = relativePath.Mid(Len(relativeUrlPath))
+    fullPath = relativeUrlPath
+    if not relativeUrlPath.StartsWith("/")
+      fullPath = basePath.Left(BGE.lastInStr(basePath, "/") + 1) + relativeUrlPath
+    end if
+    return origin + BGE.normalizeUrlPath(fullPath) + suffix
+  end function
+
+  ' Collapses "." and ".." segments in a URL path that starts with "/", never going above the root.
+  '
+  ' @param {string} urlPath
+  ' @return {string}
+  function normalizeUrlPath(urlPath as string) as string
+    segments = urlPath.Split("/")
+    output = []
+    lastIndex = segments.count() - 1
+    for i = 1 to lastIndex
+      segment = segments[i]
+      if segment = "." or segment = ".."
+        if segment = ".." and output.count() > 0
+          output.Pop()
+        end if
+        if i = lastIndex
+          ' "a/b/.." is the folder "a/"
+          output.Push("")
+        end if
+      else
+        output.Push(segment)
       end if
-      return base.Left(pathStart) + relativePath
-    end if
-    if relativePath.StartsWith("./")
-      relativePath = relativePath.Mid(2)
-    end if
-    return base.Left(BGE.lastIndexOfChar(base, "/") + 1) + relativePath
+    end for
+    return "/" + output.Join("/")
   end function
 
   ' The folder downloads are written to.
@@ -88,32 +124,29 @@ namespace BGE
     return BGE.DOWNLOAD_TEMP_FOLDER
   end function
 
-  ' The local file a URL downloads to: the MD5 of the URL plus its extension, so the same URL
-  ' always maps to the same file and the loaders can still tell the file type.
+  ' The local file a URL downloads to when its own extension is used: the MD5 of the URL plus
+  ' the URL's extension, so the same URL always maps to the same file and the loaders can still
+  ' tell the file type.
   '
   ' @param {string} url
   ' @param {boolean} useCache - true for the cachefs: cache, false for tmp:
   ' @return {string}
   function getDownloadPath(url as string, useCache as boolean) as string
+    return BGE.getDownloadBasePath(url, useCache) + BGE.urlFileExtension(url)
+  end function
+
+  ' The local file a URL downloads to, without an extension: the download folder plus the MD5
+  ' of the URL. The downloaded file is this plus the extension of its type.
+  '
+  ' @param {string} url
+  ' @param {boolean} useCache - true for the cachefs: cache, false for tmp:
+  ' @return {string}
+  function getDownloadBasePath(url as string, useCache as boolean) as string
     digest = CreateObject("roEVPDigest")
     digest.Setup("md5")
     bytes = CreateObject("roByteArray")
     bytes.FromAsciiString(url)
-    return BGE.getDownloadFolder(useCache) + "/" + LCase(digest.Process(bytes)) + BGE.urlFileExtension(url)
-  end function
-
-  ' Index of the last occurrence of a single character in a string, or -1.
-  '
-  ' @param {string} text
-  ' @param {string} character
-  ' @return {integer}
-  function lastIndexOfChar(text as string, character as string) as integer
-    for i = Len(text) - 1 to 0 step -1
-      if text.Mid(i, 1) = character
-        return i
-      end if
-    end for
-    return -1
+    return BGE.getDownloadFolder(useCache) + "/" + LCase(digest.Process(bytes))
   end function
 
 end namespace

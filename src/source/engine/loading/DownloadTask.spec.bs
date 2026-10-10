@@ -61,6 +61,85 @@ namespace tests
       m.assertTrue(task.localPath.StartsWith("tmp:/bge/"))
     end function
 
+    @describe("file types")
+
+    @it("saves an extensionless URL with the Content-Type's extension and finds it in the cache")
+    function _()
+      url = "https://example.com/photo"
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "jpeg", headers: {"content-type": "image/jpeg"}}])
+      tests.runDownload(task)
+      m.assertInvalid(task.error)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".jpg", task.localPath)
+      again = new tests.ScriptedDownloadTask(url, {}, [])
+      m.assertTrue(again.step(12))
+      m.assertTrue(again.fromCache)
+      m.assertEqual(task.localPath, again.localPath)
+      m.assertEqual(0, again.transfersCreated)
+    end function
+
+    @it("sniffs an octet-stream download's type from its bytes")
+    function _()
+      url = "https://example.com/download"
+      bitmap = CreateObject("roBitmap", {width: 2, height: 2, AlphaEnable: true})
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, bodyBytes: bitmap.GetPng(0, 0, 2, 2), headers: {"content-type": "application/octet-stream"}}])
+      tests.runDownload(task)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".png", task.localPath)
+    end function
+
+    @it("uses options.extension over everything else")
+    function _()
+      url = "https://example.com/wrong.png"
+      task = new tests.ScriptedDownloadTask(url, {extension: ".jpg"}, [{code: 200, body: "x", headers: {"content-type": "image/png"}}])
+      tests.runDownload(task)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".jpg", task.localPath)
+    end function
+
+    @it("saves a script URL with the Content-Type's extension")
+    function _()
+      url = "https://example.com/image.php?id=5"
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "x", headers: {"content-type": "image/png"}}])
+      tests.runDownload(task)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".png", task.localPath)
+    end function
+
+    @it("falls back to the URL's own extension, then none")
+    function _()
+      jsonUrl = "https://example.com/data.json"
+      json = new tests.ScriptedDownloadTask(jsonUrl, {}, [{code: 200, body: "{}", headers: {"content-type": "application/json"}}])
+      tests.runDownload(json)
+      m.assertEqual(BGE.getDownloadBasePath(jsonUrl, true) + ".json", json.localPath)
+      plainUrl = "https://example.com/plain"
+      plain = new tests.ScriptedDownloadTask(plainUrl, {}, [{code: 200, body: "text"}])
+      tests.runDownload(plain)
+      m.assertEqual(BGE.getDownloadBasePath(plainUrl, true), plain.localPath)
+      plainAgain = new tests.ScriptedDownloadTask(plainUrl, {}, [])
+      m.assertTrue(plainAgain.step(12))
+      m.assertTrue(plainAgain.fromCache)
+    end function
+
+    @it("replaces a cached copy of another type on refresh")
+    function _()
+      url = "https://example.com/changes"
+      first = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "a", headers: {"content-type": "image/gif"}}])
+      tests.runDownload(first)
+      second = new tests.ScriptedDownloadTask(url, {refresh: true}, [{code: 200, body: "b", headers: {"content-type": "image/png"}}])
+      tests.runDownload(second)
+      m.assertEqual(BGE.getDownloadBasePath(url, true) + ".png", second.localPath)
+      m.assertFalse(m.fs.Exists(first.localPath))
+      m.assertEqual(1, m.fs.GetDirectoryListing(BGE.DOWNLOAD_CACHE_FOLDER).count())
+    end function
+
+    @it("doesn't take another download's partial file for a cached copy")
+    function _()
+      url = "https://example.com/partial"
+      m.fs.CreateDirectory(BGE.DOWNLOAD_CACHE_FOLDER)
+      WriteAsciiFile(BGE.getDownloadBasePath(url, true) + ".123.part", "half")
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "x", headers: {"content-type": "image/png"}}])
+      tests.runDownload(task)
+      m.assertFalse(task.fromCache)
+      m.assertEqual(1, task.transfersCreated)
+    end function
+
     @describe("requests")
 
     @it("sets up certificates for https only")
@@ -185,7 +264,7 @@ namespace tests
   end function
 
   ' A DownloadTask whose transfers play back `responses` in order, one per attempt. Each response
-  ' is {code, body} to finish, or {hang: true} to never finish; `partialBody` writes a partial file
+  ' is {code, body} (or {code, bodyBytes} for an roByteArray) to finish, or {hang: true} to never finish; `partialBody` writes a partial file
   ' and `headers` go on the event. A hanging response sends a non-completion (type 2) event, which
   ' a real Roku never sends but the task must ignore.
   class ScriptedDownloadTask extends BGE.DownloadTask
@@ -302,7 +381,11 @@ namespace tests
         m.port.queue.push(startedEvent)
         return true
       end if
-      WriteAsciiFile(filePath, m.response.body)
+      if m.response.bodyBytes <> invalid
+        m.response.bodyBytes.WriteFile(filePath)
+      else
+        WriteAsciiFile(filePath, m.response.body)
+      end if
       completeEvent = new tests.FakeUrlEvent(1, m.response.code, headers)
       m.port.queue.push(completeEvent)
       return true

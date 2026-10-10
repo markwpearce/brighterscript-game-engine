@@ -1,4 +1,5 @@
 import "../GameTimer.bs"
+import "../../utils/fileTypes.bs"
 import "../../utils/urls.bs"
 import "LoadTask.bs"
 
@@ -14,6 +15,10 @@ namespace BGE
     optional timeoutSeconds as integer
     ' how many more times a download is tried after a network/server error or timeout (default 1)
     optional retries as integer
+    ' the extension to save the file with (e.g. ".jpg"), for a server that sends the wrong type.
+    ' Without it, the type comes from the URL's extension, then the response's Content-Type, then
+    ' the file's first bytes.
+    optional extension as string
   end interface
 
   ' Limits how many downloads run at once. Each AssetLoader has one.
@@ -60,7 +65,11 @@ namespace BGE
     ' Times each attempt, for the timeout
     timer as BGE.GameTimer
 
-    private targetPath as string
+    ' The file's path without an extension
+    private basePath as string
+    ' The extension, if it's known before downloading ("" until then)
+    private extension as string = ""
+    private extensionKnown as boolean = false
     private partPath as string = ""
     private folder as string
     private refresh as boolean = false
@@ -96,7 +105,18 @@ namespace BGE
         m.retriesLeft = options.retries
       end if
       m.folder = BGE.getDownloadFolder(useCache)
-      m.targetPath = BGE.getDownloadPath(url, useCache)
+      m.basePath = BGE.getDownloadBasePath(url, useCache)
+      urlExtension = BGE.urlFileExtension(url)
+      if options.extension <> invalid and options.extension <> ""
+        m.extension = LCase(options.extension)
+        if not m.extension.StartsWith(".")
+          m.extension = "." + m.extension
+        end if
+        m.extensionKnown = true
+      else if BGE.isKnownAssetExtension(urlExtension)
+        m.extension = urlExtension
+        m.extensionKnown = true
+      end if
     end sub
 
     override function step(budgetMs as integer) as boolean
@@ -105,10 +125,13 @@ namespace BGE
         if not BGE.isUrl(m.url)
           return m.finish("not an http(s) URL: " + m.url)
         end if
-        if not m.refresh and m.filesystem.Exists(m.targetPath)
-          m.localPath = m.targetPath
-          m.fromCache = true
-          return m.finish(invalid)
+        if not m.refresh
+          cachedPath = m.findCachedFile()
+          if cachedPath <> ""
+            m.localPath = cachedPath
+            m.fromCache = true
+            return m.finish(invalid)
+          end if
         end if
         m.totalTimer.mark()
       end if
@@ -162,6 +185,57 @@ namespace BGE
       end if
     end sub
 
+    ' The cached copy of this URL, or "".
+    private function findCachedFile() as string
+      if m.extensionKnown
+        if m.filesystem.Exists(m.basePath + m.extension)
+          return m.basePath + m.extension
+        end if
+        return ""
+      end if
+      matches = m.findFilesWithBasePath()
+      if matches.count() = 0
+        return ""
+      end if
+      return matches[0]
+    end function
+
+    ' Every finished download of this URL whatever its extension: "<md5>" or "<md5>.<ext>".
+    private function findFilesWithBasePath() as string[]
+      matches = [] as string[]
+      fileNames = m.filesystem.GetDirectoryListing(m.folder)
+      if fileNames = invalid
+        return matches
+      end if
+      baseName = m.basePath.Mid(Len(m.folder) + 1)
+      for each fileName in fileNames
+        if fileName = baseName or (fileName.StartsWith(baseName + ".") and not fileName.EndsWith(".part"))
+          matches.push(m.folder + "/" + fileName)
+        end if
+      end for
+      return matches
+    end function
+
+    ' The extension to save a finished download with: the one known up front, then the response's
+    ' Content-Type, then the file's first bytes, then the URL's extension whatever it is.
+    private function decideExtension(msg as dynamic) as string
+      if m.extensionKnown
+        return m.extension
+      end if
+      headers = msg.GetResponseHeaders()
+      if headers <> invalid and headers["content-type"] <> invalid
+        fromHeader = BGE.extensionForContentType(headers["content-type"])
+        if fromHeader <> ""
+          return fromHeader
+        end if
+      end if
+      sniffed = BGE.sniffFileExtension(m.partPath)
+      if sniffed <> ""
+        return sniffed
+      end if
+      return BGE.urlFileExtension(m.url)
+    end function
+
     private function startAttempt() as boolean
       if not m.holdingSlot
         if m.slots <> invalid and not m.slots.tryTake()
@@ -172,7 +246,7 @@ namespace BGE
       end if
       m.filesystem.CreateDirectory(m.folder)
       ' a random suffix so two downloads of the same URL don't write the same file
-      m.partPath = m.targetPath + "." + Rnd(1000000000).ToStr() + ".part"
+      m.partPath = m.basePath + m.extension + "." + Rnd(1000000000).ToStr() + ".part"
       m.port = m.createPort()
       m.transfer = m.createTransfer()
       m.transfer.SetMessagePort(m.port)
@@ -209,12 +283,20 @@ namespace BGE
     private function finishAttempt(msg as dynamic) as boolean
       code = msg.GetResponseCode()
       if code >= 200 and code < 300
-        m.filesystem.Delete(m.targetPath)
-        if not m.filesystem.Rename(m.partPath, m.targetPath)
-          m.filesystem.Delete(m.partPath)
-          return m.finish("could not save " + m.url + " to " + m.targetPath)
+        targetPath = m.basePath + m.decideExtension(msg)
+        if m.extensionKnown
+          m.filesystem.Delete(targetPath)
+        else
+          ' a refresh may have found a different type than the copy it replaces
+          for each oldPath in m.findFilesWithBasePath()
+            m.filesystem.Delete(oldPath)
+          end for
         end if
-        m.localPath = m.targetPath
+        if not m.filesystem.Rename(m.partPath, targetPath)
+          m.filesystem.Delete(m.partPath)
+          return m.finish("could not save " + m.url + " to " + targetPath)
+        end if
+        m.localPath = targetPath
         return m.finish(invalid)
       end if
       message = "HTTP " + code.ToStr() + " downloading " + m.url

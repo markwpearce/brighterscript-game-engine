@@ -1,6 +1,9 @@
 import "../Game.bs"
+import "../debug/LogLevel.bs"
 import "../drawables/Model3d.bs"
+import "../../utils/fileTypes.bs"
 import "../../utils/parsers/ModelParseTask.bs"
+import "../../utils/parsers/OBJParser.bs"
 import "../../utils/parsers/OBJParseTask.bs"
 import "../../utils/parsers/STLParseTask.bs"
 import "../../utils/urls.bs"
@@ -48,11 +51,20 @@ namespace BGE
       if not m.loadFile(budgetMs)
         return false
       end if
-      if m.error <> invalid and m.download <> invalid and m.download.localPath <> ""
+      if m.error <> invalid and m.download <> invalid and m.download.localPath <> "" and m.isDownloadedFileBad()
         ' e.g. a captive-portal page served with a 200 - don't keep failing on the cached copy
         CreateObject("roFileSystem").Delete(m.download.localPath)
         m.error = m.error + "; the downloaded copy was discarded"
       end if
+      return true
+    end function
+
+    ' Whether a downloaded file that failed to load is broken, so it's deleted rather than kept
+    ' in the cache. A load can fail with a good file, e.g. when texture memory runs out, so
+    ' override this to check the file itself. The default says it's broken.
+    '
+    ' @return {boolean}
+    function isDownloadedFileBad() as boolean
       return true
     end function
 
@@ -109,8 +121,16 @@ namespace BGE
     override function loadFile(budgetMs as integer) as boolean
       if not m.game.loadBitmap(m.bitmapName, m.path)
         m.error = "could not load bitmap " + m.source
+        if m.download <> invalid and not m.isDownloadedFileBad()
+          m.error = m.error + " (the file is a valid image - out of texture memory?)"
+        end if
       end if
       return true
+    end function
+
+    ' Bad only if it isn't an image.
+    override function isDownloadedFileBad() as boolean
+      return not BGE.isImageExtension(BGE.sniffFileExtension(m.path))
     end function
 
   end class
@@ -137,6 +157,12 @@ namespace BGE
       return true
     end function
 
+    ' Bad only if it isn't a .wav or .mp3.
+    override function isDownloadedFileBad() as boolean
+      sniffed = BGE.sniffFileExtension(m.path)
+      return sniffed <> ".wav" and sniffed <> ".mp3"
+    end function
+
   end class
 
   ' Registers one font file with Game.registerFont().
@@ -155,6 +181,12 @@ namespace BGE
         m.error = "could not register font " + m.source
       end if
       return true
+    end function
+
+    ' Bad only if it isn't a .ttf or .otf.
+    override function isDownloadedFileBad() as boolean
+      sniffed = BGE.sniffFileExtension(m.path)
+      return sniffed <> ".ttf" and sniffed <> ".otf"
     end function
 
   end class
@@ -240,11 +272,8 @@ namespace BGE
         m.error = "model file not found: " + m.source
         return true
       end if
-      ' a downloaded file's name is a hash, so take the type from the original path/URL
+      ' a download is saved with the extension of its detected type
       extensionLower = LCase(CreateObject("roPath", m.path).Split().extension)
-      if m.modelUrl <> ""
-        extensionLower = BGE.urlFileExtension(m.modelUrl)
-      end if
       if extensionLower = ".obj"
         m.isObj = true
         content = ReadAsciiFile(m.path)
@@ -301,7 +330,13 @@ namespace BGE
           m.warnUntextured(mtl.error)
           return true
         end if
-        mapKdPath = BGE.Parsers.extractMapKdPath(ReadAsciiFile(mtl.localPath))
+        mtlContent = ReadAsciiFile(mtl.localPath)
+        if not m.isMtl(mtlContent)
+          CreateObject("roFileSystem").Delete(mtl.localPath)
+          m.warnUntextured(mtl.url + " isn't a .mtl file; the downloaded copy was discarded")
+          return true
+        end if
+        mapKdPath = BGE.Parsers.extractMapKdPath(mtlContent)
         if mapKdPath = ""
           m.warnUntextured(mtl.url + " has no map_Kd texture")
           return true
@@ -316,6 +351,11 @@ namespace BGE
         m.textureDownload = invalid
         if texture.error <> invalid
           m.warnUntextured(texture.error)
+          return true
+        end if
+        if not BGE.isImageExtension(BGE.sniffFileExtension(texture.localPath))
+          CreateObject("roFileSystem").Delete(texture.localPath)
+          m.warnUntextured(texture.url + " isn't an image; the downloaded copy was discarded")
           return true
         end if
         m.localTexturePath = texture.localPath
@@ -355,6 +395,16 @@ namespace BGE
       end if
       task = new BGE.DownloadTask(url, m.downloadOptions)
       return task
+    end function
+
+    ' A .mtl file has at least one `newmtl` line.
+    private function isMtl(content as string) as boolean
+      for each rawLine in content.Split(chr(10))
+        if rawLine.Trim().StartsWith("newmtl")
+          return true
+        end if
+      end for
+      return false
     end function
 
     private sub warnUntextured(reason as string)

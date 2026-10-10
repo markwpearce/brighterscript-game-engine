@@ -110,20 +110,26 @@ clear the cache when it needs space, so the game must still work when everything
 again. A URL is assumed to always serve the same file, so when a file changes, give it a new
 URL (`level2.png?v=2` or `v2/level2.png`).
 
-The URL's path must end in the file's extension (`.png`, `.obj`, `.wav` and so on), because the
-downloaded file is named with it and the loaders choose how to read a file by its extension. A
-query string after it is fine, but `https://example.com/image?id=5` can't be loaded as a
-bitmap - serve the file from a path that ends in its extension instead.
+The loaders choose how to read a file by its extension, so a download is saved with one. It's
+the URL's own extension when that's a type the engine loads (`.png`, `.obj`, `.wav` and so on),
+otherwise the type the server reports (its `Content-Type`), otherwise the type the file's first
+bytes show. So `https://example.com/image.php?id=5` loads as a bitmap if the server says it's an
+image. For a server that sends the wrong type, set the `extension` download option:
+
+```brightscript
+loader.loadBitmap("avatar", "https://example.com/avatar?user=7", {extension: ".jpg"})
+```
 
 A file that downloads but then won't load (say a Wi-Fi sign-in page served in place of an image)
-is deleted rather than cached, so the next load downloads it again.
+is deleted rather than cached, so the next load downloads it again. A real image that fails to
+load (when texture memory runs out, say) is kept.
 
 An `.obj` from a URL downloads its `.mtl` and texture too, found relative to the model's URL.
 `texturePath` may also be a URL.
 
 Each load takes download options: `cache: false` keeps the file only until the channel exits,
-`refresh: true` downloads again over a cached copy, and `timeoutSeconds` (30) and `retries` (1)
-control failures. Within one launch a `cache: false` file is reused from `tmp:` like a cached
+`refresh: true` downloads again over a cached copy, `extension` sets the saved file's type, and
+`timeoutSeconds` (30) and `retries` (1) control failures. Within one launch a `cache: false` file is reused from `tmp:` like a cached
 one, so add `refresh: true` to download it every time. A 404 isn't retried; a network error, a server error or a timeout is.
 `timeoutSeconds` limits each whole attempt, not the time without data, so raise it for big files
 on slow connections.
@@ -134,7 +140,8 @@ loader.load3dModel("boss", base + "boss.obj", {}, {refresh: true})
 ```
 
 `loader.download(url)` downloads without loading anything, and its task's `localPath` is the
-file once done. At most `loader.maxConcurrentDownloads` (4) downloads run at once.
+file once done. At most `loader.maxConcurrentDownloads` (4) downloads run at once, counted per
+loader (`game.assets` has its own limit).
 `game.assets.clearCache()` deletes every cached download.
 
 A download reports no progress while it runs, because the device only shows the file once it's
