@@ -1,0 +1,172 @@
+import "../Game.bs"
+import "../drawables/Model3d.bs"
+import "../../utils/parsers/ModelParseTask.bs"
+import "../../utils/parsers/OBJParseTask.bs"
+import "../../utils/parsers/STLParseTask.bs"
+import "LoadTask.bs"
+
+namespace BGE
+
+  ' Loads one bitmap with Game.loadBitmap(). One native decode, so a single step.
+  class BitmapLoadTask extends LoadTask
+
+    private game as BGE.Game
+    private bitmapName as string
+    private path as string
+
+    sub new(game as BGE.Game, bitmapName as string, path as string)
+      super()
+      m.name = "bitmap " + path
+      m.game = game
+      m.bitmapName = bitmapName
+      m.path = path
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if not m.game.loadBitmap(m.bitmapName, m.path)
+        m.error = "could not load bitmap " + m.path
+      end if
+      return true
+    end function
+
+  end class
+
+  ' Loads one sound with Game.loadSound().
+  class SoundLoadTask extends LoadTask
+
+    private game as BGE.Game
+    private soundName as string
+    private path as string
+
+    sub new(game as BGE.Game, soundName as string, path as string)
+      super()
+      m.name = "sound " + path
+      m.game = game
+      m.soundName = soundName
+      m.path = path
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if not CreateObject("roFileSystem").Exists(m.path)
+        m.error = "sound file not found: " + m.path
+        return true
+      end if
+      m.game.loadSound(m.soundName, m.path)
+      return true
+    end function
+
+  end class
+
+  ' Registers one font file with Game.registerFont().
+  class FontLoadTask extends LoadTask
+
+    private game as BGE.Game
+    private path as string
+
+    sub new(game as BGE.Game, path as string)
+      super()
+      m.name = "font " + path
+      m.game = game
+      m.path = path
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if not m.game.registerFont(m.path)
+        m.error = "could not register font " + m.path
+      end if
+      return true
+    end function
+
+  end class
+
+  ' Loads a .obj or .stl model a slice at a time: reads the file, parses it over as many steps
+  ' as it needs, then adds it to the game (loading an .obj's texture).
+  class ModelLoadTask extends LoadTask
+
+    private game as BGE.Game
+    private modelName as string
+    private path as string
+    private options as BGE.Model3dLoadOptions
+    private parseTask as BGE.Parsers.ModelParseTask = invalid
+    private isObj as boolean = false
+    private parsed as boolean = false
+
+    sub new(game as BGE.Game, modelName as string, path as string, options as BGE.Model3dLoadOptions)
+      super()
+      m.name = "model " + path
+      m.game = game
+      m.modelName = modelName
+      m.path = path
+      m.options = options
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if m.parsed
+        return true
+      end if
+      if m.parseTask = invalid
+        return m.startParse()
+      end if
+      if not m.parseTask.step(budgetMs)
+        return false
+      end if
+      if m.parseTask.error <> invalid
+        m.error = m.parseTask.error + " (" + m.path + ")"
+        return true
+      end if
+      if not m.game.addLoadedModel(m.modelName, m.parseTask.model, m.options, m.isObj)
+        m.error = "could not parse model " + m.path
+      end if
+      ' the model is registered, so drop the parse task (and its source text/bytes)
+      m.parseTask = invalid
+      m.parsed = true
+      return true
+    end function
+
+    override function getProgress() as float
+      if m.parsed
+        return 1.0
+      end if
+      if m.parseTask = invalid
+        return 0.0
+      end if
+      return m.parseTask.getProgress() * 0.95
+    end function
+
+    ' Reads the file and creates the parse task. Returns true only if that failed.
+    private function startParse() as boolean
+      if not CreateObject("roFileSystem").Exists(m.path)
+        m.error = "model file not found: " + m.path
+        return true
+      end if
+      parts = CreateObject("roPath", m.path).Split()
+      extensionLower = LCase(parts.extension)
+      if extensionLower = ".obj"
+        m.isObj = true
+        content = ReadAsciiFile(m.path)
+        objTask = new BGE.Parsers.OBJParseTask(content, parts.parent)
+        m.parseTask = objTask
+      else if extensionLower = ".stl"
+        content = ReadAsciiFile(m.path)
+        if LCase(content.Left(5)) = "solid"
+          asciiTask = new BGE.Parsers.STLAsciiParseTask(content)
+          m.parseTask = asciiTask
+        else
+          bytes = CreateObject("roByteArray")
+          if not bytes.ReadFile(m.path)
+            m.error = "could not read model " + m.path
+            return true
+          end if
+          binaryTask = new BGE.Parsers.STLBinaryParseTask(bytes)
+          m.parseTask = binaryTask
+        end if
+      else
+        m.error = "model " + m.path + " must be .stl or .obj"
+        return true
+      end if
+      return false
+    end function
+
+  end class
+
+end namespace

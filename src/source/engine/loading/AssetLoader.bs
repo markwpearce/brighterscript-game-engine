@@ -1,0 +1,236 @@
+import "../Game.bs"
+import "../GameTimer.bs"
+import "../../math/math.bs"
+import "LoadTask.bs"
+import "StepTask.bs"
+import "AssetLoadTasks.bs"
+
+namespace BGE
+
+  ' Runs LoadTasks a little at a time, within a per-frame time budget, so long loads don't freeze
+  ' the game. A scene gets one in `GameScene.onLoad()`; `game.assets` is one you can use at any
+  ' time for background loading.
+  '
+  ' Once every queued task has finished, `onComplete(loader)` is called. Adding a task after
+  ' that starts a new batch: progress and errors start again from scratch.
+  class AssetLoader
+
+    ' Called once when the queue drains, with this loader
+    onComplete as sub(loader as AssetLoader) as void = invalid
+    ' Measures each update()'s budget
+    timer as BGE.GameTimer
+
+    private game as BGE.Game
+    private tasks as BGE.LoadTask[]
+    private errors as string[]
+    private completeFired as boolean = true
+
+    sub new(game as BGE.Game)
+      m.game = game
+      m.timer = new BGE.GameTimer()
+      m.tasks = []
+      m.errors = []
+    end sub
+
+    ' Queues a task.
+    '
+    ' @param {BGE.LoadTask} task
+    ' @return {BGE.LoadTask} the same task
+    function addTask(task as BGE.LoadTask) as BGE.LoadTask
+      if m.completeFired
+        m.tasks = []
+        m.errors = []
+        m.completeFired = false
+      end if
+      m.tasks.push(task)
+      return task
+    end function
+
+    ' Queues a function to be called once per step until it's done. It's passed `context` and
+    ' returns true when done, or a number from 0 to 1 for its progress (done at 1). Anything else
+    ' means "not done yet".
+    '
+    ' @param {function} stepFunction - called as stepFunction(context)
+    ' @param {dynamic} [context=invalid] - passed to every call
+    ' @param {float} [weight=1.0] - its share of overall progress
+    ' @return {BGE.LoadTask} the queued task
+    function addStep(stepFunction as function(context as dynamic) as dynamic, context = invalid as dynamic, weight = 1.0 as float) as BGE.LoadTask
+      task = new BGE.StepTask(stepFunction, context)
+      task.weight = weight
+      return m.addTask(task)
+    end function
+
+    ' Queues loading a bitmap from a local path, as `game.loadBitmap()` would.
+    '
+    ' @param {string} bitmapName - the name to get it by later (`game.getBitmap()`)
+    ' @param {string} path - local file path
+    ' @return {BGE.LoadTask} the queued task
+    function loadBitmap(bitmapName as string, path as string) as BGE.LoadTask
+      task = new BGE.BitmapLoadTask(m.game, bitmapName, path)
+      return m.addTask(task)
+    end function
+
+    ' Queues loading a sound from a local path, as `game.loadSound()` would.
+    '
+    ' @param {string} soundName - the name to play it by later (`game.playSound()`)
+    ' @param {string} path - local file path
+    ' @return {BGE.LoadTask} the queued task
+    function loadSound(soundName as string, path as string) as BGE.LoadTask
+      task = new BGE.SoundLoadTask(m.game, soundName, path)
+      return m.addTask(task)
+    end function
+
+    ' Queues loading a .obj or .stl model, parsed a slice at a time so a big model doesn't
+    ' freeze the screen. Set the returned task's `weight` higher than other tasks' for a big
+    ' model, so the progress bar reflects how long it takes.
+    '
+    ' @param {string} modelName - the name to get it by later (`game.get3dModel()`)
+    ' @param {string} path - local file path
+    ' @param {BGE.Model3dLoadOptions} [options={}] - same options as `game.load3dModel()`
+    ' @return {BGE.LoadTask} the queued task
+    function load3dModel(modelName as string, path as string, options = {} as BGE.Model3dLoadOptions) as BGE.LoadTask
+      task = new BGE.ModelLoadTask(m.game, modelName, path, options)
+      return m.addTask(task)
+    end function
+
+    ' Queues registering a font file, as `game.registerFont()` would.
+    '
+    ' @param {string} path - local .ttf/.otf path
+    ' @return {BGE.LoadTask} the queued task
+    function registerFont(path as string) as BGE.LoadTask
+      task = new BGE.FontLoadTask(m.game, path)
+      return m.addTask(task)
+    end function
+
+    ' Whether any tasks are queued in the current batch.
+    '
+    ' @return {boolean}
+    function hasTasks() as boolean
+      return m.tasks.count() > 0
+    end function
+
+    ' Whether every queued task has finished (true when nothing is queued).
+    '
+    ' @return {boolean}
+    function isDone() as boolean
+      for each task in m.tasks
+        if not task.done
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    ' Overall progress of the current batch, weighted by each task's `weight`.
+    '
+    ' @return {float} 0 to 1 (1 when nothing is queued)
+    function getProgress() as float
+      totalWeight = 0.0
+      weighted = 0.0
+      for each task in m.tasks
+        totalWeight += task.weight
+        if task.done
+          weighted += task.weight
+        else
+          weighted += task.weight * task.progressHighWater
+        end if
+      end for
+      if totalWeight <= 0
+        return 1.0
+      end if
+      return weighted / totalWeight
+    end function
+
+    ' Error messages from tasks in the current batch that failed.
+    '
+    ' @return {string[]}
+    function getErrors() as string[]
+      return m.errors
+    end function
+
+    ' Runs task steps until every task is done or `budgetMs` has been used. Called by Game.
+    '
+    ' @param {integer} budgetMs
+    sub update(budgetMs as integer)
+      if m.tasks.count() = 0
+        return
+      end if
+      m.timer.mark()
+      for each task in m.tasks
+        task.waitingForNextFrame = false
+      end for
+
+      outOfTime = false
+      ranAny = true
+      while ranAny and not outOfTime
+        ranAny = false
+        for each task in m.tasks
+          if not task.done and not task.waitingForNextFrame and m.dependenciesReady(task)
+            remaining = budgetMs - m.timer.totalMilliseconds()
+            if remaining <= 0 and ranAny
+              outOfTime = true
+              exit for
+            end if
+            m.runStep(task, remaining)
+            ranAny = true
+          end if
+        end for
+        if m.timer.totalMilliseconds() >= budgetMs
+          outOfTime = true
+        end if
+      end while
+
+      if not m.completeFired and m.isDone()
+        m.completeFired = true
+        if m.onComplete <> invalid
+          onCompleteFn = m.onComplete
+          onCompleteFn(m)
+        end if
+      end if
+    end sub
+
+    ' True when every dependency is done. A failed dependency fails this task.
+    private function dependenciesReady(task as BGE.LoadTask) as boolean
+      for each dependency in task.dependsOn
+        if not dependency.done
+          return false
+        end if
+        if dependency.error <> invalid
+          m.finishTask(task, "dependency " + dependency.name + " failed")
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    private sub runStep(task as BGE.LoadTask, budgetMs as integer)
+      finished = false
+      try
+        finished = task.step(budgetMs)
+      catch e
+        task.error = task.name + " threw: " + e.message
+        finished = true
+      end try
+      if finished
+        m.finishTask(task, task.error)
+      else
+        progress = BGE.Math.Clamp(task.getProgress(), 0, 1)
+        if progress > task.progressHighWater
+          task.progressHighWater = progress
+        end if
+      end if
+    end sub
+
+    private sub finishTask(task as BGE.LoadTask, errorMessage as dynamic)
+      task.done = true
+      task.progressHighWater = 1.0
+      if errorMessage <> invalid
+        task.error = errorMessage
+        m.errors.push(errorMessage)
+        m.game.log("BGE.AssetLoader - " + errorMessage, BGE.Debug.LogLevel.error)
+      end if
+    end sub
+
+  end class
+
+end namespace

@@ -27,7 +27,7 @@ the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `pl
 | Piece | What it is |
 | --- | --- |
 | `Game` | The top-level engine object - one per app. Owns the main loop (`Play()`), the current `GameScene`, every other `GameEntity`, both canvases, and the asset registries (`Bitmaps`, `Sounds`, `Fonts`, `Models`, `Scenes`, `Interfaces`, `Statics`). |
-| `GameScene` | A `GameEntity` subclass that represents one state of your game - a title screen, a menu, a level. Only one is current at a time; switching scenes via `Game.changeScene()` destroys non-`persistent` entities. |
+| `GameScene` | A `GameEntity` subclass that represents one state of your game - a title screen, a menu, a level. Only one is current at a time; switching scenes via `Game.changeScene()` destroys non-`persistent` entities. A scene can load its assets over several frames in `onLoad()`, before `onCreate()` runs (see [Loading Assets](/loading-assets)). |
 | `GameEntity` | The base class for anything in your game world - a player, an enemy, a bullet. Exposes lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, `onInput`, …) meant to be overridden, plus `position`/`velocity`/`rotation`/`scale`. |
 | `Drawable` | **The recommended way to put anything on screen** - see below. A visual attachment on a `GameEntity` (`Image`, `Sprite`, `AnimatedImage`, `DrawableRectangle`, `DrawableLine`, `DrawablePolygon`, `DrawableText`, `Model3d`) that moves/rotates/scales with the entity automatically. |
 | `Collider` | A `CircleCollider` or `RectangleCollider` attached to a `GameEntity`, wrapping a `roCompositor`/`roSprite` region. Collision checks run through the compositor, not manual math. |
@@ -86,6 +86,20 @@ class MainScene extends BGE.GameScene
   end sub
 end class
 ```
+
+If a scene has a lot to load - big models, large images, a level built from thousands of
+pieces - load it in `onLoad(loader, args)` instead of `onCreate`. The engine spreads that work
+over several frames behind a loading screen, then calls `onCreate` once it's done:
+
+```
+override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+  loader.load3dModel("ship", "pkg:/models/ship.obj")
+  loader.loadBitmap("sky", "pkg:/images/sky.png")
+end sub
+```
+
+See [Loading Assets](/loading-assets) for custom loading work, loading screens and background
+loading.
 
 ## Adding a sprite to an entity
 
@@ -348,6 +362,8 @@ A few things fall out of this that matter in practice:
   `Drawable`s/`Collider`s, with no direct `Renderer` calls in gameplay code.
 - Read `examples/breakout` or `examples/pong` for a complete, small, real game with comments
   explaining the collider-offset and velocity choices made for each entity.
+- Loading lots of assets, or building a big level? See [Loading Assets](/loading-assets) for
+  `onLoad()`, loading screens and background loading, and `examples/loading` for a runnable demo.
 - Building a level out of tiles? See [Tile Maps](/tile-maps) for baking the ground, tile
   collision for side-scrolling and top-down games, and auto-tiling.
 - See [Engine Internals](/engine-internals) for how the renderer, camera, and collision
