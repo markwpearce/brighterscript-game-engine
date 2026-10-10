@@ -30,7 +30,7 @@ end class
 
 When you call `changeScene()`, the old scene and its entities are removed first, then `onLoad()` runs. If it queued anything, the engine works through the queue each frame, within `game.loadingBudgetMs` (12ms by default). A loading screen appears if loading takes longer than a quarter of a second. When the queue is empty, `onCreate()` runs at the end of that frame and the fade-in starts. If `onLoad()` queues nothing, `onCreate()` runs straight away, as it always did.
 
-While loading, the scene and any entities it added get no `onUpdate()`, `onInput()` and so on. If something calls `changeScene()` meanwhile, the change waits and happens right after the loading scene's `onCreate()`.
+While loading, the scene and any non-persistent entities it added get no `onUpdate()`, `onInput()` and so on. Persistent entities and `gameUi` keep updating, so check `game.isLoading()` if they read the new scene's state. UI buttons can't be activated while loading, so a menu button can't be pressed again under the loading screen. If something calls `changeScene()` meanwhile, the change waits and happens right after the loading scene's `onCreate()`.
 
 `loader.getProgress()` weights each task by its `weight` (default 1). Set a higher weight on a task you know is big so the progress bar moves at a believable rate:
 
@@ -88,7 +88,7 @@ class SpawnEnemiesTask extends BGE.LoadTask
 end class
 ```
 
-Queue it with `loader.addTask(new SpawnEnemiesTask(m))`. If a task needs another to finish first, chain `task.after(otherTask)`. When the first one fails, the dependent task fails without running. A task that sets `error` or throws counts as finished, so one bad file doesn't stall the scene.
+Queue it with `task = new SpawnEnemiesTask(m)` and then `loader.addTask(task)`. If a task needs another to finish first, chain `task.after(otherTask)`. When the first one fails, the dependent task fails without running. A task that sets `error` or throws counts as finished, so one bad file doesn't stall the scene.
 
 ## Errors
 
