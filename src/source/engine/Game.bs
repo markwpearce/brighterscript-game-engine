@@ -74,6 +74,7 @@ namespace BGE
     ' ****BEGIN - For Internal Use, Do Not Manually Alter****
     private sceneLoader as BGE.AssetLoader = invalid
     private sceneLoading as boolean = false
+    private sceneLoadFinished as boolean = false
     private sceneLoadingSeconds as float = 0.0
     private activeLoadingScreen as BGE.LoadingScreen = invalid
     private loadingScreenShown as boolean = false
@@ -380,8 +381,8 @@ namespace BGE
       m.running = true
 
       while m.running
-        m.sceneChangedThisFrame = false
-
+        ' sceneChangedThisFrame is NOT reset here: a change requested while a scene loads stays pending
+        ' until handleSceneChange() applies it.
         m.clearStaleInputCapture()
         m.compositor.draw() ' For some reason this has to be called or the colliders don't remove themselves from the compositor ¯\(°_°)/¯
 
@@ -601,9 +602,7 @@ namespace BGE
           m.garbageCollectionTimer.mark()
         end if
 
-        if m.sceneChangedThisFrame
-          m.handleSceneChange()
-        end if
+        m.applyEndOfFrameSceneWork()
 
       end while
     end sub
@@ -2155,7 +2154,8 @@ namespace BGE
     end sub
 
 
-    ' Whether a scene change was requested this frame and hasn't been applied yet.
+    ' Whether a scene change was requested and hasn't been applied yet (a change requested
+    ' while a scene is loading waits for that load to finish).
     '
     ' @return {boolean}
     function isSceneChanging() as boolean
@@ -2276,7 +2276,9 @@ namespace BGE
     end sub
 
     ' Test-only: one frame of scene transition work with a given dt - fade, loading stage,
-    ' background assets, then any scene change requested this frame, as Play() does.
+    ' background assets, then the end-of-frame scene work (onCreate of a scene that finished
+    ' loading, then any pending scene change), in the same order as Play(). Entity updates
+    ' and drawing are not run; use `processEntitiesPreDrawForTest()` for those.
     '
     ' @param {float} dt
     sub runSceneTransitionFrameForTest(dt as float)
@@ -2284,9 +2286,20 @@ namespace BGE
       m.updateFadeTransition()
       m.updateSceneLoading()
       m.assets.update(m.assetsBudgetMs)
-      if m.sceneChangedThisFrame
-        m.handleSceneChange()
-      end if
+      m.applyEndOfFrameSceneWork()
+    end sub
+
+    ' Test-only: just the loading-stage update Play() runs mid-frame (no end-of-frame work).
+    '
+    ' @param {float} dt
+    sub runLoadingUpdateForTest(dt as float)
+      m.dt = dt
+      m.updateSceneLoading()
+    end sub
+
+    ' Test-only: the end-of-frame scene work Play() runs (onCreate of a finished load, then any pending change).
+    sub runEndOfFrameForTest()
+      m.applyEndOfFrameSceneWork()
     end sub
 
     ' Test-only: one update pass over the scene and entities with no input.
@@ -2359,7 +2372,8 @@ namespace BGE
       m.sceneLoader.update(m.loadingBudgetMs)
       m.sceneLoadingSeconds += m.dt
       if m.sceneLoader.isDone()
-        m.finishSceneLoading()
+        ' onCreate() waits for the end of the frame, so the scene updates before it first draws
+        m.sceneLoadFinished = true
         return
       end if
       if not m.loadingScreenShown and m.sceneLoadingSeconds >= m.activeLoadingScreen.showAfterSeconds
@@ -2368,7 +2382,19 @@ namespace BGE
       end if
     end sub
 
+    ' End of a frame: finish a scene load that completed this frame (onCreate), then apply any
+    ' scene change requested meanwhile (during loading, in onLoad or onCreate).
+    private sub applyEndOfFrameSceneWork()
+      if m.sceneLoading and m.sceneLoadFinished
+        m.finishSceneLoading()
+      end if
+      if m.sceneChangedThisFrame
+        m.handleSceneChange()
+      end if
+    end sub
+
     private sub finishSceneLoading()
+      m.sceneLoadFinished = false
       if m.loadingScreenShown
         m.activeLoadingScreen.onHide()
       end if
