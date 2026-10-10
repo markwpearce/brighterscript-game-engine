@@ -110,12 +110,21 @@ clear the cache when it needs space, so the game must still work when everything
 again. A URL is assumed to always serve the same file, so when a file changes, give it a new
 URL (`level2.png?v=2` or `v2/level2.png`).
 
+The URL's path must end in the file's extension (`.png`, `.obj`, `.wav` and so on), because the
+downloaded file is named with it and the loaders choose how to read a file by its extension. A
+query string after it is fine, but `https://example.com/image?id=5` can't be loaded as a
+bitmap - serve the file from a path that ends in its extension instead.
+
+A file that downloads but then won't load (say a Wi-Fi sign-in page served in place of an image)
+is deleted rather than cached, so the next load downloads it again.
+
 An `.obj` from a URL downloads its `.mtl` and texture too, found relative to the model's URL.
 `texturePath` may also be a URL.
 
 Each load takes download options: `cache: false` keeps the file only until the channel exits,
 `refresh: true` downloads again over a cached copy, and `timeoutSeconds` (30) and `retries` (1)
-control failures. A 404 isn't retried; a network error, a server error or a timeout is.
+control failures. Within one launch a `cache: false` file is reused from `tmp:` like a cached
+one, so add `refresh: true` to download it every time. A 404 isn't retried; a network error, a server error or a timeout is.
 `timeoutSeconds` limits each whole attempt, not the time without data, so raise it for big files
 on slow connections.
 
@@ -198,4 +207,4 @@ end sub
 
 One native call can't be split up, so reading a huge file, decoding one big image or loading one sound still takes a single frame and will hitch the frame it lands in. Models are the exception: `.obj` and `.stl` files are parsed a slice at a time. Splitting a big image into a few smaller ones spreads the cost across frames.
 
-See examples/loading for a runnable example: one scene loads every model and some large textures under a loading screen with a timing readout, one downloads an image, a textured model and a sound and shows which came from the cache, one shows failed loads, and another builds a tile grid a row per frame under a custom screen.
+See `examples/loading` for a runnable example: one scene loads every model and some large textures under a loading screen with a timing readout, one downloads an image, a textured model and a sound and shows which came from the cache, one shows failed loads, and another builds a tile grid a row per frame under a custom screen.
