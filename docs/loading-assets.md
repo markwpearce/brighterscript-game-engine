@@ -90,6 +90,52 @@ end class
 
 Queue it with `task = new SpawnEnemiesTask(m)` and then `loader.addTask(task)`. If a task needs another to finish first, chain `task.after(otherTask)`. When the first one fails, the dependent task fails without running. A task that sets `error` or throws counts as finished, so one bad file doesn't stall the scene.
 
+## Loading from URLs
+
+The built-in loads also take `http://` and `https://` URLs. The file is downloaded first, then
+loaded as if it were local:
+
+```brightscript
+override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+  base = "https://example.com/game/"
+  loader.loadBitmap("level2", base + "images/level2.png")
+  loader.load3dModel("boss", base + "models/boss.obj")
+  loader.loadSound("roar", base + "sounds/roar.wav")
+end sub
+```
+
+Downloads are saved in the device's `cachefs:` cache, so the next time the same URL is loaded,
+even after the channel is relaunched, the saved file is used and no request is made. The OS can
+clear the cache when it needs space, so the game must still work when everything downloads
+again. A URL is assumed to always serve the same file, so when a file changes, give it a new
+URL (`level2.png?v=2` or `v2/level2.png`).
+
+An `.obj` from a URL downloads its `.mtl` and texture too, found relative to the model's URL.
+`texturePath` may also be a URL.
+
+Each load takes download options: `cache: false` keeps the file only until the channel exits,
+`refresh: true` downloads again over a cached copy, and `timeoutSeconds` (30) and `retries` (1)
+control failures. A 404 isn't retried; a network error, a server error or a timeout is.
+`timeoutSeconds` limits each whole attempt, not the time without data, so raise it for big files
+on slow connections.
+
+```brightscript
+loader.loadBitmap("news", "https://example.com/news.png", {cache: false})
+loader.load3dModel("boss", base + "boss.obj", {}, {refresh: true})
+```
+
+`loader.download(url)` downloads without loading anything, and its task's `localPath` is the
+file once done. At most `loader.maxConcurrentDownloads` (4) downloads run at once.
+`game.assets.clearCache()` deletes every cached download.
+
+A download reports no progress while it runs, because the device only shows the file once it's
+complete. Its share of the progress bar jumps from 0 to done, so give a big download a higher
+`weight` to keep the bar's pace believable.
+
+`game.loadBitmap()` and the other synchronous loaders only take local files, since waiting for a
+download would freeze the game. Given a URL they log an error and return false.
+`game.musicPlay()` does take a URL - the music player streams it.
+
 ## Errors
 
 A failed task is logged and its message kept. Check for them in `onCreate()`:
@@ -101,6 +147,8 @@ override sub onCreate(args as roAssociativeArray)
   end for
 end sub
 ```
+
+A failed download's message says why, e.g. "HTTP 404 downloading https://...".
 
 ## Loading screens
 
@@ -150,4 +198,4 @@ end sub
 
 One native call can't be split up, so reading a huge file, decoding one big image or loading one sound still takes a single frame and will hitch the frame it lands in. Models are the exception: `.obj` and `.stl` files are parsed a slice at a time. Splitting a big image into a few smaller ones spreads the cost across frames.
 
-See `examples/loading` for a runnable example: one scene loads every model and some large textures under a loading screen with a timing readout, and another builds a tile grid a row per frame under a custom screen.
+See examples/loading for a runnable example: one scene loads every model and some large textures under a loading screen with a timing readout, one downloads an image, a textured model and a sound and shows which came from the cache, one shows failed loads, and another builds a tile grid a row per frame under a custom screen.

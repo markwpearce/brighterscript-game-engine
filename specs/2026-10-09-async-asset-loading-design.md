@@ -153,8 +153,8 @@ depending on it.
 - `AsyncGetToFile()` into a temporary `<target>.part`, renamed on success, deleted on failure.
 - HTTPS: `SetCertificatesFile("common:/certs/ca-bundle.crt")` + `InitClientCertificates()`
   for `https://` URLs.
-- Progress from `Content-Length` vs bytes on disk when the server sends it; otherwise 0
-  until done.
+- Progress is 0 until done, then 1: on a real Roku the file only appears, complete, when the
+  download finishes, and no "started" event is sent.
 - `timeoutSeconds` (default 30) and `retries` (default 1).
 - Failure (non-2xx, timeout, network error) sets `error` and logs it.
 - The `roUrlTransfer` is created through an overridable factory (`createTransfer()`), so tests
