@@ -68,7 +68,6 @@ namespace BGE
     private retriesLeft as integer = 1
     private checkedCache as boolean = false
     private holdingSlot as boolean = false
-    private contentLength as integer = 0
     private transfer as dynamic = invalid
     private port as dynamic = invalid
     private totalTimer as BGE.GameTimer
@@ -117,22 +116,16 @@ namespace BGE
       return m.poll()
     end function
 
+    ' Progress is 0 until the download finishes, then 1. Roku reports nothing while a transfer
+    ' runs, so a download can't show partial progress - give a big one a higher `weight` and put
+    ' other work in the same batch so the bar still moves.
+    '
+    ' @return {float} 0 while downloading, 1 when done
     override function getProgress() as float
       if m.localPath <> ""
         return 1.0
       end if
-      if m.contentLength <= 0 or m.partPath = ""
-        return 0.0
-      end if
-      info = m.filesystem.Stat(m.partPath)
-      if info = invalid or info.size = invalid
-        return 0.0
-      end if
-      progress = info.size / m.contentLength
-      if progress > 0.99
-        return 0.99
-      end if
-      return progress
+      return 0.0
     end function
 
     ' Creates the roUrlTransfer for each attempt. Override to customise requests (headers etc).
@@ -160,7 +153,6 @@ namespace BGE
       m.filesystem.CreateDirectory(m.folder)
       ' a random suffix so two downloads of the same URL don't write the same file
       m.partPath = m.targetPath + "." + Rnd(1000000000).ToStr() + ".part"
-      m.contentLength = 0
       m.port = m.createPort()
       m.transfer = m.createTransfer()
       m.transfer.SetMessagePort(m.port)
@@ -180,10 +172,8 @@ namespace BGE
     private function poll() as boolean
       msg = m.port.GetMessage()
       while msg <> invalid
-        eventType = msg.GetInt()
-        if eventType = 2
-          m.readContentLength(msg.GetResponseHeaders())
-        else if eventType = 1
+        ' 1 = complete. Roku sends no "started" event and writes the file only at the end.
+        if msg.GetInt() = 1
           return m.finishAttempt(msg)
         end if
         msg = m.port.GetMessage()
@@ -195,16 +185,6 @@ namespace BGE
       m.waitingForNextFrame = true
       return false
     end function
-
-    private sub readContentLength(headers as dynamic)
-      if headers = invalid
-        return
-      end if
-      length = headers["content-length"]
-      if length <> invalid
-        m.contentLength = length.ToInt()
-      end if
-    end sub
 
     private function finishAttempt(msg as dynamic) as boolean
       code = msg.GetResponseCode()
