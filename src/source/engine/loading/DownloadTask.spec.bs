@@ -1,0 +1,319 @@
+import "pkg:/source/engine/loading/DownloadTask.bs"
+
+namespace tests
+
+  @suite("BGE.DownloadTask")
+  class DownloadTaskTests extends rooibos.BaseTestSuite
+
+    fs as roFileSystem
+
+    protected override function beforeEach()
+      m.fs = CreateObject("roFileSystem")
+      for each folder in [BGE.DOWNLOAD_CACHE_FOLDER, BGE.DOWNLOAD_TEMP_FOLDER]
+        for each fileName in m.fs.GetDirectoryListing(folder)
+          m.fs.Delete(folder + "/" + fileName)
+        end for
+      end for
+    end function
+
+    @describe("cache")
+
+    @it("uses a cached file without a request")
+    function _()
+      url = "https://example.com/cached.png"
+      m.fs.CreateDirectory(BGE.DOWNLOAD_CACHE_FOLDER)
+      WriteAsciiFile(BGE.getDownloadPath(url, true), "cached")
+      task = new tests.ScriptedDownloadTask(url, {}, [])
+      m.assertTrue(task.step(12))
+      m.assertTrue(task.fromCache)
+      m.assertEqual(BGE.getDownloadPath(url, true), task.localPath)
+      m.assertEqual(0, task.transfersCreated)
+      m.assertInvalid(task.error)
+    end function
+
+    @it("downloads into the cache")
+    function _()
+      url = "https://example.com/fresh.png"
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 200, body: "fresh"}])
+      m.assertTrue(tests.runDownload(task))
+      m.assertInvalid(task.error)
+      m.assertFalse(task.fromCache)
+      m.assertEqual(BGE.getDownloadPath(url, true), task.localPath)
+      m.assertEqual("fresh", ReadAsciiFile(task.localPath))
+      m.assertEqual(1, m.fs.GetDirectoryListing(BGE.DOWNLOAD_CACHE_FOLDER).count())
+    end function
+
+    @it("downloads again over a cached file with refresh")
+    function _()
+      url = "https://example.com/refresh.png"
+      m.fs.CreateDirectory(BGE.DOWNLOAD_CACHE_FOLDER)
+      WriteAsciiFile(BGE.getDownloadPath(url, true), "old")
+      task = new tests.ScriptedDownloadTask(url, {refresh: true}, [{code: 200, body: "new"}])
+      tests.runDownload(task)
+      m.assertEqual(1, task.transfersCreated)
+      m.assertEqual("new", ReadAsciiFile(task.localPath))
+    end function
+
+    @it("downloads to tmp with cache false")
+    function _()
+      task = new tests.ScriptedDownloadTask("https://example.com/temp.png", {cache: false}, [{code: 200, body: "t"}])
+      tests.runDownload(task)
+      m.assertTrue(task.localPath.StartsWith("tmp:/bge/"))
+    end function
+
+    @describe("requests")
+
+    @it("sets up certificates for https only")
+    function _()
+      secure = new tests.ScriptedDownloadTask("https://example.com/s.png", {}, [{code: 200, body: "s"}])
+      tests.runDownload(secure)
+      m.assertEqual("common:/certs/ca-bundle.crt", secure.lastTransfer.certificatesFile)
+      m.assertEqual("https://example.com/s.png", secure.lastTransfer.url)
+      plain = new tests.ScriptedDownloadTask("http://example.com/p.png", {}, [{code: 200, body: "p"}])
+      tests.runDownload(plain)
+      m.assertEqual("", plain.lastTransfer.certificatesFile)
+    end function
+
+    @it("fails a URL-less path without a request")
+    function _()
+      task = new tests.ScriptedDownloadTask("pkg:/images/a.png", {}, [])
+      m.assertTrue(task.step(12))
+      m.assertNotInvalid(task.error)
+      m.assertEqual(0, task.transfersCreated)
+    end function
+
+    @it("gives two downloads of the same URL their own temporary files")
+    function _()
+      first = new tests.ScriptedDownloadTask("https://example.com/same.png", {}, [{hang: true}])
+      second = new tests.ScriptedDownloadTask("https://example.com/same.png", {}, [{hang: true}])
+      first.step(12)
+      second.step(12)
+      m.assertNotEqual(first.lastTransfer.toFilePath, second.lastTransfer.toFilePath)
+    end function
+
+    @describe("failures")
+
+    @it("fails a 404 without retrying and leaves nothing behind")
+    function _()
+      url = "https://example.com/missing.png"
+      task = new tests.ScriptedDownloadTask(url, {}, [{code: 404, body: "not found"}, {code: 200, body: "never"}])
+      tests.runDownload(task)
+      m.assertNotInvalid(task.error)
+      m.assertTrue(task.error.Instr("404") >= 0)
+      m.assertEqual(1, task.transfersCreated)
+      m.assertEqual("", task.localPath)
+      m.assertEqual(0, m.fs.GetDirectoryListing(BGE.DOWNLOAD_CACHE_FOLDER).count())
+    end function
+
+    @it("retries a server error")
+    function _()
+      task = new tests.ScriptedDownloadTask("https://example.com/flaky.png", {}, [{code: 503, body: "busy"}, {code: 200, body: "ok"}])
+      tests.runDownload(task)
+      m.assertInvalid(task.error)
+      m.assertEqual(2, task.transfersCreated)
+      m.assertEqual("ok", ReadAsciiFile(task.localPath))
+    end function
+
+    @it("gives up on a network error once its retries are used")
+    function _()
+      task = new tests.ScriptedDownloadTask("https://example.com/down.png", {retries: 1}, [{code: -6, body: ""}, {code: -6, body: ""}, {code: 200, body: "late"}])
+      tests.runDownload(task)
+      m.assertNotInvalid(task.error)
+      m.assertEqual(2, task.transfersCreated)
+    end function
+
+    @it("times out a stalled download and cancels it")
+    function _()
+      task = new tests.ScriptedDownloadTask("https://example.com/slow.png", {timeoutSeconds: 1, retries: 0}, [{hang: true, partialBody: "half"}])
+      m.assertFalse(task.step(12))
+      stalled = task.lastTransfer
+      task.timer.addTime(1000)
+      m.assertTrue(task.step(12))
+      m.assertTrue(stalled.cancelled)
+      m.assertTrue(task.error.Instr("timed out") >= 0)
+      m.assertEqual(0, m.fs.GetDirectoryListing(BGE.DOWNLOAD_CACHE_FOLDER).count())
+    end function
+
+    @describe("progress")
+
+    @it("reports bytes written against content-length")
+    function _()
+      task = new tests.ScriptedDownloadTask("https://example.com/big.png", {}, [{hang: true, partialBody: "12345", headers: {"content-length": "10"}}])
+      task.step(12)
+      ' the "started" event (with the headers) is read on the next poll
+      task.step(12)
+      m.assertEqual(0.5, task.getProgress())
+    end function
+
+    @it("reports 0 without content-length, then 1 when done")
+    function _()
+      task = new tests.ScriptedDownloadTask("https://example.com/nolength.png", {}, [{hang: true, partialBody: "12345"}])
+      task.step(12)
+      m.assertEqual(0.0, task.getProgress())
+      done = new tests.ScriptedDownloadTask("https://example.com/nolength2.png", {}, [{code: 200, body: "x"}])
+      tests.runDownload(done)
+      m.assertEqual(1.0, done.getProgress())
+    end function
+
+    @describe("slots")
+
+    @it("waits for a free slot")
+    function _()
+      slots = new BGE.DownloadSlots()
+      slots.max = 1
+      first = new tests.ScriptedDownloadTask("https://example.com/one.png", {}, [{code: 200, body: "1"}])
+      first.slots = slots
+      second = new tests.ScriptedDownloadTask("https://example.com/two.png", {}, [{code: 200, body: "2"}])
+      second.slots = slots
+      first.step(12)
+      m.assertFalse(second.step(12))
+      m.assertTrue(second.waitingForNextFrame)
+      m.assertEqual(0, second.transfersCreated)
+      tests.runDownload(first)
+      m.assertEqual(0, slots.active)
+      tests.runDownload(second)
+      m.assertInvalid(second.error)
+    end function
+
+  end class
+
+  ' Steps a download until it finishes (or 20 steps pass). Returns whether it finished.
+  function runDownload(task as BGE.DownloadTask) as boolean
+    for i = 1 to 20
+      if task.step(12)
+        return true
+      end if
+    end for
+    return false
+  end function
+
+  ' A DownloadTask whose transfers play back `responses` in order, one per attempt. Each response
+  ' is {code, body} to finish, or {hang: true} to never finish; `partialBody` and `headers` also
+  ' write a partial file and send a "started" event first.
+  class ScriptedDownloadTask extends BGE.DownloadTask
+    responses as roArray
+    transfersCreated as integer = 0
+    lastTransfer as dynamic = invalid
+
+    sub new(url as string, options as BGE.DownloadOptions, responses as roArray)
+      super(url, options)
+      m.responses = responses
+    end sub
+
+    override function createTransfer() as dynamic
+      m.transfersCreated++
+      response = invalid
+      if m.responses.count() > 0
+        response = m.responses.Shift()
+      end if
+      transfer = new tests.FakeTransfer(response)
+      m.lastTransfer = transfer
+      return transfer
+    end function
+
+    override function createPort() as dynamic
+      port = new tests.FakePort()
+      return port
+    end function
+  end class
+
+  class FakePort
+    queue as roArray
+
+    sub new()
+      m.queue = []
+    end sub
+
+    function GetMessage() as dynamic
+      if m.queue.count() = 0
+        return invalid
+      end if
+      return m.queue.Shift()
+    end function
+  end class
+
+  class FakeUrlEvent
+    eventType as integer
+    code as integer
+    headers as roAssociativeArray
+
+    sub new(eventType as integer, code as integer, headers as roAssociativeArray)
+      m.eventType = eventType
+      m.code = code
+      m.headers = headers
+    end sub
+
+    function GetInt() as integer
+      return m.eventType
+    end function
+
+    function GetResponseCode() as integer
+      return m.code
+    end function
+
+    function GetFailureReason() as string
+      return "fake failure"
+    end function
+
+    function GetResponseHeaders() as roAssociativeArray
+      return m.headers
+    end function
+  end class
+
+  class FakeTransfer
+    response as dynamic
+    port as dynamic = invalid
+    url as string = ""
+    certificatesFile as string = ""
+    toFilePath as string = ""
+    cancelled as boolean = false
+
+    sub new(response as dynamic)
+      m.response = response
+    end sub
+
+    sub SetMessagePort(port as dynamic)
+      m.port = port
+    end sub
+
+    sub SetUrl(url as string)
+      m.url = url
+    end sub
+
+    sub SetCertificatesFile(path as string)
+      m.certificatesFile = path
+    end sub
+
+    sub InitClientCertificates()
+    end sub
+
+    function AsyncGetToFile(filePath as string) as boolean
+      m.toFilePath = filePath
+      if m.response = invalid
+        return false
+      end if
+      headers = {}
+      if m.response.headers <> invalid
+        headers = m.response.headers
+      end if
+      if m.response.hang <> invalid and m.response.hang
+        if m.response.partialBody <> invalid
+          WriteAsciiFile(filePath, m.response.partialBody)
+        end if
+        startedEvent = new tests.FakeUrlEvent(2, 0, headers)
+        m.port.queue.push(startedEvent)
+        return true
+      end if
+      WriteAsciiFile(filePath, m.response.body)
+      completeEvent = new tests.FakeUrlEvent(1, m.response.code, headers)
+      m.port.queue.push(completeEvent)
+      return true
+    end function
+
+    function AsyncCancel() as boolean
+      m.cancelled = true
+      return true
+    end function
+  end class
+
+end namespace

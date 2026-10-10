@@ -1,0 +1,259 @@
+import "../GameTimer.bs"
+import "../../utils/urls.bs"
+import "LoadTask.bs"
+
+namespace BGE
+
+  ' Options for downloading a URL - see `AssetLoader.download()` and the built-in loads.
+  interface DownloadOptions extends roAssociativeArray
+    ' false downloads to tmp: for this launch only, instead of the cachefs: cache (default true)
+    optional cache as boolean
+    ' true downloads again even when a cached copy exists (default false)
+    optional refresh as boolean
+    ' seconds a download may take before it's abandoned (default 30)
+    optional timeoutSeconds as integer
+    ' how many more times a download is tried after a network/server error or timeout (default 1)
+    optional retries as integer
+  end interface
+
+  ' Limits how many downloads run at once. Each AssetLoader has one.
+  class DownloadSlots
+    ' Most downloads at once
+    max as integer = 4
+    ' Downloads running now
+    active as integer = 0
+
+    ' Takes a slot if one is free.
+    '
+    ' @return {boolean} true if a slot was taken
+    function tryTake() as boolean
+      if m.active >= m.max
+        return false
+      end if
+      m.active++
+      return true
+    end function
+
+    ' Gives back a slot taken with tryTake().
+    sub give()
+      if m.active > 0
+        m.active--
+      end if
+    end sub
+  end class
+
+  ' Downloads a URL to a local file. A copy cached by an earlier download (even in an earlier
+  ' launch) is used without a request. Queue one with `AssetLoader.download()`; once it's done
+  ' without an `error`, `localPath` is the file.
+  class DownloadTask extends LoadTask
+
+    ' The URL being downloaded
+    url as string
+    ' The local file, once done
+    localPath as string = ""
+    ' True if the file was already cached, so no request was made
+    fromCache as boolean = false
+    ' How long the download took, in milliseconds (0 for a cached file)
+    elapsedMs as integer = 0
+    ' Shared with the other downloads in the same loader, to limit how many run at once
+    slots as BGE.DownloadSlots = invalid
+    ' Times each attempt, for the timeout
+    timer as BGE.GameTimer
+
+    private targetPath as string
+    private partPath as string = ""
+    private folder as string
+    private refresh as boolean = false
+    private timeoutMs as integer = 30000
+    private retriesLeft as integer = 1
+    private checkedCache as boolean = false
+    private holdingSlot as boolean = false
+    private contentLength as integer = 0
+    private transfer as dynamic = invalid
+    private port as dynamic = invalid
+    private totalTimer as BGE.GameTimer
+    private filesystem as roFileSystem
+
+    sub new(url as string, options = {} as BGE.DownloadOptions)
+      super()
+      m.name = "download " + url
+      m.url = url
+      m.timer = new BGE.GameTimer()
+      m.totalTimer = new BGE.GameTimer()
+      m.filesystem = CreateObject("roFileSystem")
+      useCache = true
+      if options.cache <> invalid
+        useCache = options.cache
+      end if
+      if options.refresh <> invalid
+        m.refresh = options.refresh
+      end if
+      if options.timeoutSeconds <> invalid
+        m.timeoutMs = options.timeoutSeconds * 1000
+      end if
+      if options.retries <> invalid
+        m.retriesLeft = options.retries
+      end if
+      m.folder = BGE.getDownloadFolder(useCache)
+      m.targetPath = BGE.getDownloadPath(url, useCache)
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if not m.checkedCache
+        m.checkedCache = true
+        if not BGE.isUrl(m.url)
+          return m.finish("not an http(s) URL: " + m.url)
+        end if
+        if not m.refresh and m.filesystem.Exists(m.targetPath)
+          m.localPath = m.targetPath
+          m.fromCache = true
+          return m.finish(invalid)
+        end if
+        m.totalTimer.mark()
+      end if
+      if m.transfer = invalid
+        return m.startAttempt()
+      end if
+      return m.poll()
+    end function
+
+    override function getProgress() as float
+      if m.localPath <> ""
+        return 1.0
+      end if
+      if m.contentLength <= 0 or m.partPath = ""
+        return 0.0
+      end if
+      info = m.filesystem.Stat(m.partPath)
+      if info = invalid or info.size = invalid
+        return 0.0
+      end if
+      progress = info.size / m.contentLength
+      if progress > 0.99
+        return 0.99
+      end if
+      return progress
+    end function
+
+    ' Creates the roUrlTransfer for each attempt. Override to customise requests (headers etc).
+    '
+    ' @return {dynamic} an roUrlTransfer
+    function createTransfer() as dynamic
+      return CreateObject("roUrlTransfer")
+    end function
+
+    ' Creates the message port each attempt's events arrive on.
+    '
+    ' @return {dynamic} an roMessagePort
+    function createPort() as dynamic
+      return CreateObject("roMessagePort")
+    end function
+
+    private function startAttempt() as boolean
+      if not m.holdingSlot
+        if m.slots <> invalid and not m.slots.tryTake()
+          m.waitingForNextFrame = true
+          return false
+        end if
+        m.holdingSlot = true
+      end if
+      m.filesystem.CreateDirectory(m.folder)
+      ' a random suffix so two downloads of the same URL don't write the same file
+      m.partPath = m.targetPath + "." + Rnd(1000000000).ToStr() + ".part"
+      m.contentLength = 0
+      m.port = m.createPort()
+      m.transfer = m.createTransfer()
+      m.transfer.SetMessagePort(m.port)
+      m.transfer.SetUrl(m.url)
+      if LCase(m.url).StartsWith("https://")
+        m.transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+        m.transfer.InitClientCertificates()
+      end if
+      m.timer.mark()
+      if not m.transfer.AsyncGetToFile(m.partPath)
+        return m.failAttempt("could not start downloading " + m.url, false)
+      end if
+      m.waitingForNextFrame = true
+      return false
+    end function
+
+    private function poll() as boolean
+      msg = m.port.GetMessage()
+      while msg <> invalid
+        eventType = msg.GetInt()
+        if eventType = 2
+          m.readContentLength(msg.GetResponseHeaders())
+        else if eventType = 1
+          return m.finishAttempt(msg)
+        end if
+        msg = m.port.GetMessage()
+      end while
+      if m.timer.totalMilliseconds() >= m.timeoutMs
+        m.transfer.AsyncCancel()
+        return m.failAttempt("timed out after " + Int(m.timeoutMs / 1000).ToStr() + "s downloading " + m.url, true)
+      end if
+      m.waitingForNextFrame = true
+      return false
+    end function
+
+    private sub readContentLength(headers as dynamic)
+      if headers = invalid
+        return
+      end if
+      length = headers["content-length"]
+      if length <> invalid
+        m.contentLength = length.ToInt()
+      end if
+    end sub
+
+    private function finishAttempt(msg as dynamic) as boolean
+      code = msg.GetResponseCode()
+      if code >= 200 and code < 300
+        m.filesystem.Delete(m.targetPath)
+        if not m.filesystem.Rename(m.partPath, m.targetPath)
+          m.filesystem.Delete(m.partPath)
+          return m.finish("could not save " + m.url + " to " + m.targetPath)
+        end if
+        m.localPath = m.targetPath
+        return m.finish(invalid)
+      end if
+      message = "HTTP " + code.ToStr() + " downloading " + m.url
+      if code <= 0
+        message = "network error (" + msg.GetFailureReason() + ") downloading " + m.url
+      end if
+      return m.failAttempt(message, code <= 0 or code >= 500)
+    end function
+
+    ' Retries next frame if allowed, otherwise fails the task.
+    private function failAttempt(message as string, canRetry as boolean) as boolean
+      m.filesystem.Delete(m.partPath)
+      m.transfer = invalid
+      m.port = invalid
+      if canRetry and m.retriesLeft > 0
+        m.retriesLeft--
+        m.waitingForNextFrame = true
+        return false
+      end if
+      return m.finish(message)
+    end function
+
+    private function finish(errorMessage as dynamic) as boolean
+      if m.holdingSlot and m.slots <> invalid
+        m.slots.give()
+      end if
+      m.holdingSlot = false
+      m.transfer = invalid
+      m.port = invalid
+      if not m.fromCache and m.checkedCache
+        m.elapsedMs = m.totalTimer.totalMilliseconds()
+      end if
+      if errorMessage <> invalid
+        m.error = errorMessage
+      end if
+      return true
+    end function
+
+  end class
+
+
+end namespace
