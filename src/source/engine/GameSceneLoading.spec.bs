@@ -1,0 +1,287 @@
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/loading/AssetLoader.bs"
+
+namespace tests
+
+  @suite("BGE.Game scene loading stage")
+  class GameSceneLoadingTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Plain"}))
+      loading = new LoadingTestScene(m.game, "Loading", 3)
+      m.game.defineScene(loading)
+    end function
+
+    @describe("a scene without onLoad work")
+
+    @it("gets onCreate in the same call, with no loading stage")
+    function _()
+      m.game.changeScene("Plain")
+      m.assertEqual("Plain", m.game.currentScene.name)
+      m.assertFalse(m.game.isLoading())
+      m.assertEqual(1.0, m.game.getLoadingProgress())
+    end function
+
+    @describe("a scene with onLoad work")
+
+    @it("runs onLoad, loads over frames, then calls onCreate once")
+    function _()
+      m.game.changeScene("Loading")
+      scene = m.game.currentScene as LoadingTestScene
+      m.assertEqual(1, scene.loadCalls)
+      m.assertEqual(0, scene.createCalls)
+      m.assertTrue(m.game.isLoading())
+      m.assertTrue(m.game.isTransitioning())
+
+      m.game.runSceneTransitionFrameForTest(0.016)
+      m.assertTrue(m.game.getLoadingProgress() > 0)
+      m.assertEqual(0, scene.createCalls)
+
+      m.runFrames(5)
+      m.assertFalse(m.game.isLoading())
+      m.assertEqual(1, scene.createCalls)
+      m.assertEqual("ok", scene.createdWithArg)
+    end function
+
+    @it("destroys the old scene's entities before onLoad runs")
+    function _()
+      m.game.changeScene("Plain")
+      entity = new BGE.GameEntity(m.game, {name: "Old"})
+      m.game.addEntity(entity)
+      m.game.changeScene("Loading")
+      ' the game is "running" (Play() never started), so the change waits for the frame end
+      m.game.runSceneTransitionFrameForTest(0.016)
+      scene = m.game.currentScene as LoadingTestScene
+      m.assertEqual(0, scene.oldEntitiesSeenInLoad)
+    end function
+
+    @it("doesn't run the loading scene or entities added in onLoad until onCreate")
+    function _()
+      m.game.changeScene("Loading")
+      scene = m.game.currentScene as LoadingTestScene
+      m.game.processEntitiesPreDrawForTest()
+      m.assertEqual(0, scene.updateCalls)
+      m.assertEqual(0, scene.addedEntity.updateCalls)
+      m.runFrames(6)
+      m.game.processEntitiesPreDrawForTest()
+      m.assertEqual(1, scene.updateCalls)
+      m.assertEqual(1, scene.addedEntity.updateCalls)
+    end function
+
+    @it("keeps updating persistent entities while loading")
+    function _()
+      keeper = new CountingEntity(m.game, "Keeper")
+      keeper.persistent = true
+      m.game.addEntity(keeper)
+      m.game.changeScene("Loading")
+      m.game.processEntitiesPreDrawForTest()
+      m.assertEqual(1, keeper.updateCalls)
+    end function
+
+    @it("records errors on the scene loader for onCreate to check")
+    function _()
+      scene = m.game.Scenes["Loading"]
+      scene.failOneTask = true
+      m.game.changeScene("Loading")
+      m.runFrames(6)
+      m.assertEqual(1, m.game.getSceneLoader().getErrors().count())
+      m.assertEqual(1, scene.createCalls)
+    end function
+
+    @it("runs the loading stage again on resetScene")
+    function _()
+      m.game.changeScene("Loading")
+      m.runFrames(6)
+      m.game.resetScene()
+      m.runFrames(6)
+      scene = m.game.currentScene as LoadingTestScene
+      m.assertEqual(2, scene.loadCalls)
+      m.assertEqual(2, scene.createCalls)
+    end function
+
+    @describe("scene changes requested while loading")
+
+    @it("defers a changeScene made during loading until loading ends")
+    function _()
+      m.game.changeScene("Loading")
+      loadingScene = m.game.currentScene as LoadingTestScene
+      m.game.changeScene("Plain")
+      m.assertEqual("Loading", m.game.currentScene.name)
+      m.runFrames(6)
+      m.assertEqual(1, loadingScene.createCalls)
+      m.assertEqual("Plain", m.game.currentScene.name)
+    end function
+
+    @it("handles changeScene called from inside onLoad")
+    function _()
+      scene = m.game.Scenes["Loading"]
+      scene.changeToInLoad = "Plain"
+      m.game.changeScene("Loading")
+      m.runFrames(6)
+      m.assertEqual(1, scene.loadCalls)
+      m.assertEqual(1, scene.createCalls)
+      m.assertEqual("Plain", m.game.currentScene.name)
+    end function
+
+    @describe("loading screen")
+
+    @it("only shows once loading has run for showAfterSeconds")
+    function _()
+      m.game.Scenes["Loading"].taskSteps = 100
+      m.game.changeScene("Loading")
+      m.game.runSceneTransitionFrameForTest(0.1)
+      m.assertFalse(m.game.isLoadingScreenShown())
+      m.game.runSceneTransitionFrameForTest(0.2)
+      m.assertTrue(m.game.isLoadingScreenShown())
+    end function
+
+    @it("uses the scene's loading screen over the game's")
+    function _()
+      gameScreen = new CountingLoadingScreen()
+      gameScreen.tag = "game"
+      m.game.loadingScreen = gameScreen
+      sceneScreen = new CountingLoadingScreen()
+      sceneScreen.tag = "scene"
+      sceneScreen.showAfterSeconds = 0
+      scene = m.game.Scenes["Loading"]
+      scene.screen = sceneScreen
+      m.game.changeScene("Loading")
+      m.game.runSceneTransitionFrameForTest(0.016)
+      m.assertEqual(1, sceneScreen.showCalls)
+      m.assertEqual(0, gameScreen.showCalls)
+      m.runFrames(6)
+      m.assertEqual(1, sceneScreen.hideCalls)
+    end function
+
+    @describe("with changeSceneWithFade")
+
+    @it("fades out, loads, creates, then fades in")
+    function _()
+      m.game.changeScene("Plain")
+      m.game.changeSceneWithFade("Loading", {}, 0.05)
+      m.runFrames(4)
+      m.assertEqual("Loading", m.game.currentScene.name)
+      m.assertTrue(m.game.isLoading())
+      m.assertEqual(1.0, m.game.screenFade.opacity)
+      m.runFrames(6)
+      m.assertFalse(m.game.isLoading())
+      created = m.game.currentScene as LoadingTestScene
+      m.assertEqual(1, created.createCalls)
+      m.runFrames(10)
+      m.assertEqual(0.0, m.game.screenFade.opacity)
+      m.assertFalse(m.game.isTransitioning())
+    end function
+
+    @describe("game.assets")
+
+    @it("is ticked every frame for background loads")
+    function _()
+      context = {calls: 0}
+      m.game.assets.addStep(function(ctx as object) as dynamic
+        ctx.calls = ctx.calls + 1
+        return ctx.calls >= 2
+      end function, context)
+      m.game.runSceneTransitionFrameForTest(0.016)
+      m.assertEqual(2, context.calls)
+      m.assertTrue(m.game.assets.isDone())
+    end function
+
+    private sub runFrames(count as integer)
+      for i = 1 to count
+        m.game.runSceneTransitionFrameForTest(0.016)
+      end for
+    end sub
+
+  end class
+
+  ' Queues one task that takes `taskSteps` frames (one step per frame), and records calls.
+  class LoadingTestScene extends BGE.GameScene
+    loadCalls as integer = 0
+    createCalls as integer = 0
+    updateCalls as integer = 0
+    taskSteps as integer = 3
+    failOneTask as boolean = false
+    changeToInLoad as string = ""
+    createdWithArg as string = ""
+    oldEntitiesSeenInLoad as integer = -1
+    addedEntity as dynamic = invalid
+    screen as dynamic = invalid
+
+    sub new(game as BGE.Game, name as string, taskSteps as integer)
+      super(game, {name: name})
+      m.taskSteps = taskSteps
+    end sub
+
+    override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+      m.loadCalls++
+      m.oldEntitiesSeenInLoad = m.game.getAllEntities("Old").count()
+      entity = new CountingEntity(m.game, "AddedInLoad")
+      m.game.addEntity(entity)
+      m.addedEntity = entity
+      ' one step per frame: the step function asks to wait for the next frame each call
+      context = {remaining: m.taskSteps, total: m.taskSteps}
+      task = loader.addStep(function(ctx as object) as dynamic
+        ctx.remaining = ctx.remaining - 1
+        ctx.task.waitingForNextFrame = true
+        ' a float result is the task's progress (1.0 = done); a boolean would leave it at 0 until done
+        return 1.0 - ctx.remaining / ctx.total
+      end function, context)
+      context.task = task
+      if m.failOneTask
+        loader.addStep(function(ctx as object) as dynamic
+          return ctx.missing.field
+        end function, {})
+      end if
+      if m.changeToInLoad <> ""
+        m.game.changeScene(m.changeToInLoad)
+      end if
+    end sub
+
+    override sub onCreate(args as roAssociativeArray)
+      m.createCalls++
+      m.createdWithArg = "ok"
+    end sub
+
+    override sub onUpdate(dt as float)
+      m.updateCalls++
+    end sub
+
+    override function getLoadingScreen() as BGE.LoadingScreen
+      return m.screen
+    end function
+  end class
+
+  class CountingEntity extends BGE.GameEntity
+    updateCalls as integer = 0
+
+    sub new(game as BGE.Game, name as string)
+      super(game, {name: name})
+    end sub
+
+    override sub onUpdate(dt as float)
+      m.updateCalls++
+    end sub
+  end class
+
+  class CountingLoadingScreen extends BGE.LoadingScreen
+    tag as string = ""
+    showCalls as integer = 0
+    hideCalls as integer = 0
+
+    sub new()
+      super()
+    end sub
+
+    override sub onShow()
+      m.showCalls++
+    end sub
+
+    override sub onHide()
+      m.hideCalls++
+    end sub
+  end class
+
+end namespace

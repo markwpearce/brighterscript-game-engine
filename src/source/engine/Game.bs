@@ -24,6 +24,8 @@ import "GameInput.bs"
 import "interfaces.bs"
 import "renderer/cameras/Camera.bs"
 import "GameScene.bs"
+import "loading/AssetLoader.bs"
+import "loading/LoadingScreen.bs"
 import "quality/DeviceQualitySeed.bs"
 import "quality/QualityController.bs"
 import "quality/RenderQualityLevel.bs"
@@ -70,6 +72,12 @@ namespace BGE
   class Game
 
     ' ****BEGIN - For Internal Use, Do Not Manually Alter****
+    private sceneLoader as BGE.AssetLoader = invalid
+    private sceneLoading as boolean = false
+    private sceneLoadingSeconds as float = 0.0
+    private activeLoadingScreen as BGE.LoadingScreen = invalid
+    private loadingScreenShown as boolean = false
+    private defaultLoadingScreen as BGE.DefaultLoadingScreen = invalid
     private debugging = new BGE.Debug.DebugOptions()
     private logHistory as object[] = []
     private maxLogHistory = 100
@@ -185,6 +193,16 @@ namespace BGE
 
     ' Default theme for all UI widgets, set in new()
     defaultTheme as BGE.UI.Theme
+    ' Background loader you can use at any time, e.g. to fetch the next level's assets while
+    ' this one plays. Ticked once per frame within `assetsBudgetMs`.
+    assets as BGE.AssetLoader
+    ' Milliseconds per frame `assets` may spend on its tasks
+    assetsBudgetMs as integer = 4
+    ' Milliseconds per frame a scene's loading stage may spend on its tasks
+    loadingBudgetMs as integer = 12
+    ' Loading screen for scenes that don't provide one (`GameScene.getLoadingScreen()`).
+    ' `invalid` uses the engine's default.
+    loadingScreen as BGE.LoadingScreen = invalid
 
     ' Default Game.loadSound() keys played by every BGE.UI.Button on focus/click (see
     ' Button.onFocus()/onClick()) unless that button sets its own focusSoundKey/
@@ -325,6 +343,7 @@ namespace BGE
       m.fonts["default"] = m.fontRegistry.GetDefaultFont(28, false, false)
       m.defaultTheme = new BGE.UI.Theme()
       m.defaultTheme.font = m.fonts["default"]
+      m.assets = new BGE.AssetLoader(m)
       m.fonts["debugUi"] = m.fontRegistry.GetDefaultFont(20, false, false)
       m.fonts["debugUiSmall"] = m.fontRegistry.GetDefaultFont(10, false, false)
       m.fonts["debugUiXSmall"] = m.fontRegistry.GetDefaultFont(7, false, false)
@@ -490,6 +509,8 @@ namespace BGE
 
         ' ----------------------Handle entity interactions (collisions, etc)--------------------
         m.processEntitiesPreDraw(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
+        m.updateSceneLoading()
+        m.assets.update(m.assetsBudgetMs)
         updateAndCollisionTime = 0
         if m.debugging.print_perf_stats
           updateAndCollisionTime = m.dtTimer.TotalMilliseconds() - uiInputTime
@@ -730,7 +751,7 @@ namespace BGE
         else
           entity = m.sortedEntities[i]
         end if
-        if not m.isValidEntity(entity) or not entity.enabled or (startedPaused and entity.pauseable)
+        if not m.isValidEntity(entity) or not entity.enabled or (startedPaused and entity.pauseable) or m.isHeldForLoading(entity, i = m.sortedEntities.Count())
           ' no need to process this entity
         else
 
@@ -801,7 +822,7 @@ namespace BGE
           entity = m.sortedEntities[i]
         end if
 
-        if not m.isValidEntity(entity) or not entity.enabled or (startedPaused and entity.pauseable) or entity.colliders.count() = 0
+        if not m.isValidEntity(entity) or not entity.enabled or (startedPaused and entity.pauseable) or entity.colliders.count() = 0 or m.isHeldForLoading(entity, i = m.sortedEntities.Count())
           ' no need to process this entity
         else
 
@@ -838,6 +859,12 @@ namespace BGE
     ' @return {boolean}
     private function isValidEntity(entity as GameEntity) as boolean
       return BGE.isValidEntity(entity)
+    end function
+
+    ' While a scene loads, only persistent entities run - not the loading scene itself, and not
+    ' entities it added in onLoad().
+    private function isHeldForLoading(entity as GameEntity, isScene as boolean) as boolean
+      return m.sceneLoading and (isScene or not entity.persistent)
     end function
 
 
@@ -1179,20 +1206,24 @@ namespace BGE
     private sub drawEntities()
       m.canvas.renderer.setupCameraForFrame()
 
-      if invalid <> m.currentScene
+      if invalid <> m.currentScene and not m.sceneLoading
         m.processEntityPreDraw(m.currentScene)
       end if
       for each entity in m.sortedEntities
-        m.processEntityPreDraw(entity)
+        if not m.isHeldForLoading(entity, false)
+          m.processEntityPreDraw(entity)
+        end if
       end for
 
       m.canvas.renderer.render()
 
-      if invalid <> m.currentScene
+      if invalid <> m.currentScene and not m.sceneLoading
         m.processEntityPostDraw(m.currentScene)
       end if
       for each entity in m.sortedEntities
-        m.processEntityPostDraw(entity)
+        if not m.isHeldForLoading(entity, false)
+          m.processEntityPostDraw(entity)
+        end if
       end for
     end sub
 
@@ -1463,6 +1494,9 @@ namespace BGE
         m.focusManager.draw(m.uiCanvas, m.gameUi.effectiveTheme())
       end if
       m.screenFade.draw(m.uiCanvas.renderer)
+      if m.loadingScreenShown
+        m.activeLoadingScreen.draw(m.uiCanvas.renderer, m.sceneLoader.getProgress(), m.dt)
+      end if
     end sub
 
     ' Function to handle all input and updates and draws for UI layer
@@ -2180,12 +2214,43 @@ namespace BGE
       return true
     end function
 
-    ' Whether a changeSceneWithFade() transition is running (fading out, changing scene, or
-    ' fading back in).
+    ' Whether a changeSceneWithFade() transition or a scene's loading stage is running.
     '
     ' @return {boolean}
     function isTransitioning() as boolean
-      return m.fadeTransitionPhase <> ""
+      return m.fadeTransitionPhase <> "" or m.sceneLoading
+    end function
+
+    ' Whether a scene is in its loading stage (after `changeScene()`, before its `onCreate()`).
+    '
+    ' @return {boolean}
+    function isLoading() as boolean
+      return m.sceneLoading
+    end function
+
+    ' The current scene's loading progress, 0 to 1 (1 when not loading).
+    '
+    ' @return {float}
+    function getLoadingProgress() as float
+      if m.sceneLoading
+        return m.sceneLoader.getProgress()
+      end if
+      return 1.0
+    end function
+
+    ' The loader from the current scene's loading stage, e.g. to check
+    ' `getSceneLoader().getErrors()` in `onCreate()`. Kept until the next scene change.
+    '
+    ' @return {BGE.AssetLoader}
+    function getSceneLoader() as BGE.AssetLoader
+      return m.sceneLoader
+    end function
+
+    ' Whether the loading screen is currently showing.
+    '
+    ' @return {boolean}
+    function isLoadingScreenShown() as boolean
+      return m.loadingScreenShown
     end function
 
     private sub updateFadeTransition()
@@ -2207,14 +2272,33 @@ namespace BGE
     '
     ' @param {float} dt
     sub updateFadeTransitionForTest(dt as float)
+      m.runSceneTransitionFrameForTest(dt)
+    end sub
+
+    ' Test-only: one frame of scene transition work with a given dt - fade, loading stage,
+    ' background assets, then any scene change requested this frame, as Play() does.
+    '
+    ' @param {float} dt
+    sub runSceneTransitionFrameForTest(dt as float)
       m.dt = dt
       m.updateFadeTransition()
+      m.updateSceneLoading()
+      m.assets.update(m.assetsBudgetMs)
       if m.sceneChangedThisFrame
         m.handleSceneChange()
       end if
     end sub
 
+    ' Test-only: one update pass over the scene and entities with no input.
+    sub processEntitiesPreDrawForTest()
+      m.processEntitiesPreDraw([] as roUniversalControlEvent[], [] as GameInput[], [] as GameInput[], invalid, invalid, invalid)
+    end sub
+
     private sub handleSceneChange()
+      ' a change requested while a scene loads waits for that load to finish
+      if m.sceneLoading
+        return
+      end if
       if m.sceneChangedThisFrame and m.sceneChangeDetails <> invalid and m.sceneChangeDetails.scene <> invalid
         thisScene = m.sceneChangeDetails.scene
         args = {}
@@ -2245,18 +2329,77 @@ namespace BGE
 
         m.currentScene = thisScene
         m.currentSceneArgs = args
-        m.currentScene.onCreate(args)
-        m.renderQuality.notifySceneChanged()
         m.sceneChangedThisFrame = false
-        if m.fadeTransitionPhase = "out"
-          m.fadeTransitionPhase = "in"
-          m.screenFade.fadeTo(0, m.fadeTransitionSeconds)
-        end if
-
-        m.lastGarbageCollection = runGarbageCollector()
-        m.garbageCollectionTimer.mark()
+        m.startSceneLoading()
+      end if
+      ' changeScene() from onLoad/onCreate while the loop isn't running has nothing else to apply it
+      if not m.running and m.sceneChangedThisFrame and not m.sceneLoading
+        m.handleSceneChange()
       end if
     end sub
+
+    private sub startSceneLoading()
+      m.sceneLoader = new BGE.AssetLoader(m)
+      ' set before onLoad so a changeScene() inside it is deferred, not applied mid-setup
+      m.sceneLoading = true
+      m.currentScene.onLoad(m.sceneLoader, m.currentSceneArgs)
+      if not m.sceneLoader.hasTasks()
+        m.finishSceneLoading()
+        return
+      end if
+      m.sceneLoadingSeconds = 0.0
+      m.loadingScreenShown = false
+      m.activeLoadingScreen = m.resolveLoadingScreen()
+    end sub
+
+    private sub updateSceneLoading()
+      if not m.sceneLoading
+        return
+      end if
+      m.sceneLoader.update(m.loadingBudgetMs)
+      m.sceneLoadingSeconds += m.dt
+      if m.sceneLoader.isDone()
+        m.finishSceneLoading()
+        return
+      end if
+      if not m.loadingScreenShown and m.sceneLoadingSeconds >= m.activeLoadingScreen.showAfterSeconds
+        m.loadingScreenShown = true
+        m.activeLoadingScreen.onShow()
+      end if
+    end sub
+
+    private sub finishSceneLoading()
+      if m.loadingScreenShown
+        m.activeLoadingScreen.onHide()
+      end if
+      m.loadingScreenShown = false
+      m.activeLoadingScreen = invalid
+      m.sceneLoading = false
+      m.currentScene.onCreate(m.currentSceneArgs)
+      m.renderQuality.notifySceneChanged()
+      if m.fadeTransitionPhase = "out"
+        m.fadeTransitionPhase = "in"
+        m.screenFade.fadeTo(0, m.fadeTransitionSeconds)
+      end if
+      m.lastGarbageCollection = runGarbageCollector()
+      m.garbageCollectionTimer.mark()
+    end sub
+
+    private function resolveLoadingScreen() as BGE.LoadingScreen
+      sceneScreen = m.currentScene.getLoadingScreen()
+      if sceneScreen <> invalid
+        return sceneScreen
+      end if
+      if m.loadingScreen <> invalid
+        return m.loadingScreen
+      end if
+      if m.defaultLoadingScreen = invalid
+        m.defaultLoadingScreen = new BGE.DefaultLoadingScreen(m.defaultTheme.font)
+        m.defaultLoadingScreen.barColor = m.defaultTheme.foregroundColor
+        m.defaultLoadingScreen.barBackgroundColor = m.defaultTheme.backgroundColor
+      end if
+      return m.defaultLoadingScreen
+    end function
 
 
 
