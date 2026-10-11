@@ -128,17 +128,26 @@ namespace BGE.Parsers
   ' `parseSTLBinaryFile()`.
   class STLBinaryParseTask extends ModelParseTask
 
-    private fileBytes as roByteArray
+    private fileBytes as dynamic
     private faceCount as integer = 0
     private faceIndex as integer = 0
     private byteIndex as integer = 84
     private faces as BGE.Model3dFace[]
     private sliceTimer as roTimespan
+    ' simulator only: the bytes as hex, copied into byteValues a slice at a time
+    private hexBytes as string = ""
+    private byteValues as integer[]
 
     sub new(fileBytes as roByteArray)
       super()
       m.name = "parse .stl"
       m.fileBytes = fileBytes
+      if CreateObject("roDeviceInfo").HasFeature("simulation_engine")
+        ' the simulator copies the whole roByteArray on every bytes[i] (lvcabral/brs-engine#1249)
+        ' and its for each is broken (#1251), so copy it to a plain array from hex first
+        m.hexBytes = fileBytes.ToHexString()
+        m.byteValues = []
+      end if
       m.faces = []
       m.sliceTimer = CreateObject("roTimespan")
       ' 80-byte title + 4-byte triangle count + 50 bytes per triangle
@@ -152,6 +161,9 @@ namespace BGE.Parsers
         return true
       end if
       m.sliceTimer.Mark()
+      if m.hexBytes <> "" and not m.copyHexSlice(budgetMs)
+        return false
+      end if
       while m.faceIndex < m.faceCount
         m.parseFace()
         m.faceIndex++
@@ -171,6 +183,22 @@ namespace BGE.Parsers
         return 1.0
       end if
       return m.faceIndex / m.faceCount
+    end function
+
+    ' Copies hexBytes into byteValues until done or out of time.
+    '
+    ' @return {boolean} true when the copy is finished
+    private function copyHexSlice(budgetMs as integer) as boolean
+      byteCount = Len(m.hexBytes) / 2
+      while m.byteValues.count() < byteCount
+        m.byteValues.push(Val(m.hexBytes.Mid(m.byteValues.count() * 2, 2), 16))
+        if (m.byteValues.count() mod 256) = 0 and m.sliceTimer.TotalMilliseconds() >= budgetMs
+          return false
+        end if
+      end while
+      m.fileBytes = m.byteValues
+      m.hexBytes = ""
+      return true
     end function
 
     private sub parseFace()

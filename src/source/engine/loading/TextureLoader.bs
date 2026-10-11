@@ -1,0 +1,148 @@
+namespace BGE
+
+  ' The outcome of a texture request: `ok` with a `bitmap`, or not ok.
+  interface TextureResult extends roAssociativeArray
+    ok as boolean
+    ' the decoded bitmap, invalid unless ok
+    bitmap as dynamic
+    ' true if the texture manager didn't answer within `TextureLoader.timeoutMs`
+    optional timedOut as boolean
+  end interface
+
+  ' Decodes images with one roTextureManager. On a Roku the decode runs off the BrightScript
+  ' thread, so a large image doesn't stall a frame the way CreateObject("roBitmap", path) does.
+  ' Bitmaps it makes can't be drawn into before Roku OS 16. The game owns one
+  ' (`game.getTextureLoader()`), and `BGE.AssetLoader.loadBitmap()` uses it.
+  class TextureLoader
+
+    ' How long a request may take before getResult() gives up on it
+    timeoutMs as integer = 10000
+
+    private manager as roTextureManager = invalid
+    private port as roMessagePort
+    ' request id -> roTimespan, for requests not yet collected
+    private pending as roAssociativeArray = {}
+    ' request id -> TextureResult, for finished requests not yet collected
+    private finished as roAssociativeArray = {}
+
+    sub new()
+      m.port = CreateObject("roMessagePort")
+      m.manager = CreateObject("roTextureManager")
+      if m.manager <> invalid
+        m.manager.SetMessagePort(m.port)
+      end if
+    end sub
+
+    ' Whether this device has a texture manager to decode with.
+    '
+    ' @return {boolean}
+    function isAvailable() as boolean
+      return m.manager <> invalid
+    end function
+
+    ' Starts decoding an image file.
+    '
+    ' @param {string} path - a local image file (pkg:, tmp:, cachefs:, ...)
+    ' @param {integer} [width=0] - resize to this width while decoding (needs height too)
+    ' @param {integer} [height=0] - resize to this height while decoding
+    ' @param {boolean} [smooth=true] - false resizes with nearest neighbour (crisp pixel art)
+    ' @return {roTextureRequest} pass it to getResult() each frame
+    function request(path as string, width = 0 as integer, height = 0 as integer, smooth = true as boolean) as roTextureRequest
+      textureRequest = CreateObject("roTextureRequest", path)
+      if width > 0 and height > 0
+        textureRequest.SetSize(width, height)
+        if smooth
+          textureRequest.SetScaleMode(1)
+        else
+          textureRequest.SetScaleMode(0)
+        end if
+      end if
+      m.manager.RequestTexture(textureRequest)
+      timer = CreateObject("roTimespan")
+      m.pending[textureRequest.GetId().toStr()] = timer
+      return textureRequest
+    end function
+
+    ' The result of a request, once it has finished.
+    '
+    ' @param {roTextureRequest} textureRequest
+    ' @return {BGE.TextureResult} invalid while still decoding; not ok (and `timedOut`) if it took longer than `timeoutMs`
+    function getResult(textureRequest as roTextureRequest) as BGE.TextureResult
+      m.poll()
+      key = textureRequest.GetId().toStr()
+      result = m.finished[key]
+      if result <> invalid
+        m.finished.Delete(key)
+        m.pending.Delete(key)
+        return result
+      end if
+      timer = m.pending[key]
+      if timer <> invalid and timer.TotalMilliseconds() >= m.timeoutMs
+        m.cancel(textureRequest)
+        timedOut = {ok: false, bitmap: invalid, timedOut: true} as BGE.TextureResult
+        return timedOut
+      end if
+      return invalid
+    end function
+
+    ' Stops a request that hasn't finished.
+    '
+    ' @param {roTextureRequest} textureRequest
+    sub cancel(textureRequest as roTextureRequest)
+      m.manager.CancelRequest(textureRequest)
+      key = textureRequest.GetId().toStr()
+      m.pending.Delete(key)
+      m.finished.Delete(key)
+    end sub
+
+    ' Drops the texture manager's copy of a file's bitmap, so its memory is freed once nothing
+    ' else holds it, and the next request decodes the file again.
+    '
+    ' @param {string} path
+    sub unload(path as string)
+      if m.manager <> invalid
+        m.manager.UnloadBitmap(path)
+      end if
+    end sub
+
+    private sub poll()
+      msg = m.port.GetMessage()
+      while msg <> invalid
+        if type(msg) = "roTextureRequestEvent"
+          key = msg.GetId().toStr()
+          ' 3 = ready, 4 = failed; 0-2 are still in progress and 5 (cancelled) has no one waiting
+          state = msg.GetState()
+          if (state = 3 or state = 4) and m.pending.DoesExist(key)
+            bitmap = msg.GetBitmap()
+            m.finished[key] = {ok: state = 3 and type(bitmap) = "roBitmap", bitmap: bitmap}
+          end if
+        end if
+        msg = m.port.GetMessage()
+      end while
+    end sub
+
+  end class
+
+  ' A copy of a bitmap at a new size, for when the texture manager can't do the resize.
+  '
+  ' @param {roBitmap} bitmap
+  ' @param {integer} width
+  ' @param {integer} height
+  ' @param {boolean} [smooth=true] - false scales with nearest neighbour
+  ' @return {roBitmap} invalid if the new bitmap couldn't be made (e.g. out of texture memory)
+  function resizeBitmap(bitmap as roBitmap, width as integer, height as integer, smooth = true as boolean) as roBitmap
+    resized = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: false})
+    if resized = invalid
+      return invalid
+    end if
+    region = CreateObject("roRegion", bitmap, 0, 0, bitmap.GetWidth(), bitmap.GetHeight())
+    if smooth
+      region.SetScaleMode(1)
+    end if
+    ' alpha off while copying, so transparent pixels are copied rather than blended
+    resized.DrawScaledObject(0, 0, width / bitmap.GetWidth(), height / bitmap.GetHeight(), region)
+    resized.SetAlphaEnable(true)
+    return resized
+  end function
+
+end namespace

@@ -1,0 +1,160 @@
+import "pkg:/source/engine/loading/TextureLoader.bs"
+
+namespace tests
+
+  ' Uses brs-engine's real roTextureManager, which decodes when its port is read.
+  @suite("BGE.TextureLoader")
+  class TextureLoaderTests extends rooibos.BaseTestSuite
+
+    textureLoader as BGE.TextureLoader
+
+    protected override function beforeEach()
+      m.textureLoader = new BGE.TextureLoader()
+      bitmap = CreateObject("roBitmap", {width: 4, height: 2, AlphaEnable: true})
+      bitmap.GetPng(0, 0, 4, 2).WriteFile("tmp:/bge_texture.png")
+      m.textureLoader.unload("tmp:/bge_texture.png")
+    end function
+
+    @describe("requests")
+
+    @it("decodes an image")
+    function _()
+      m.assertTrue(m.textureLoader.isAvailable())
+      result = tests.waitForTexture(m.textureLoader, m.textureLoader.request("tmp:/bge_texture.png"))
+      m.assertTrue(result.ok)
+      m.assertEqual(4, result.bitmap.GetWidth())
+      m.assertEqual(2, result.bitmap.GetHeight())
+    end function
+
+    @it("resizes while decoding")
+    function _()
+      result = tests.waitForTexture(m.textureLoader, m.textureLoader.request("tmp:/bge_texture.png", 8, 6, false))
+      m.assertTrue(result.ok)
+      m.assertEqual(8, result.bitmap.GetWidth())
+      m.assertEqual(6, result.bitmap.GetHeight())
+    end function
+
+    @it("fails for a missing file")
+    function _()
+      result = tests.waitForTexture(m.textureLoader, m.textureLoader.request("tmp:/bge_no_such_texture.png"))
+      m.assertFalse(result.ok)
+    end function
+
+    @it("gives each result once")
+    function _()
+      textureRequest = m.textureLoader.request("tmp:/bge_texture.png")
+      tests.waitForTexture(m.textureLoader, textureRequest)
+      m.assertInvalid(m.textureLoader.getResult(textureRequest))
+    end function
+
+    @it("gives up on a request that isn't answered in time")
+    function _()
+      m.textureLoader.timeoutMs = 0
+      textureRequest = m.textureLoader.request("tmp:/bge_texture.png")
+      ' another texture manager user takes the port, so this request's answer never arrives
+      otherLoader = new BGE.TextureLoader()
+      result = m.textureLoader.getResult(textureRequest)
+      m.assertFalse(result.ok)
+      m.assertTrue(result.timedOut)
+      m.assertInvalid(otherLoader.getResult(textureRequest))
+    end function
+
+    @it("has no result for a cancelled request")
+    function _()
+      textureRequest = m.textureLoader.request("tmp:/bge_texture.png")
+      m.textureLoader.cancel(textureRequest)
+      m.assertInvalid(m.textureLoader.getResult(textureRequest))
+    end function
+
+    @describe("resizeBitmap")
+
+    @it("copies a bitmap at a new size")
+    function _()
+      bitmap = CreateObject("roBitmap", {width: 4, height: 2, AlphaEnable: true})
+      resized = BGE.resizeBitmap(bitmap, 2, 1)
+      m.assertEqual(2, resized.GetWidth())
+      m.assertEqual(1, resized.GetHeight())
+    end function
+
+  end class
+
+  ' Polls a request until it finishes (or 20 polls pass).
+  function waitForTexture(textureLoader as BGE.TextureLoader, textureRequest as roTextureRequest) as BGE.TextureResult
+    for i = 1 to 20
+      result = textureLoader.getResult(textureRequest)
+      if result <> invalid
+        return result
+      end if
+    end for
+    return {ok: false, bitmap: invalid}
+  end function
+
+  ' A TextureLoader that decodes with CreateObject("roBitmap") and records what it was asked to do.
+  class FakeTextureLoader extends BGE.TextureLoader
+    ' {path, width, height, smooth} for each request
+    requests as roArray
+    unloaded as roArray
+    cancelled as integer = 0
+    ' paths whose requests fail
+    failPaths as roAssociativeArray
+    ' paths whose requests time out
+    timeOutPaths as roAssociativeArray
+    ' getResult() calls that return invalid before each request finishes
+    pendingPolls as integer = 0
+    ' returns the image at its own size, like a Roku that already holds the file
+    ignoreSize as boolean = false
+
+    private fakePending as roAssociativeArray
+
+    sub new()
+      super()
+      m.requests = []
+      m.unloaded = []
+      m.failPaths = {}
+      m.timeOutPaths = {}
+      m.fakePending = {}
+    end sub
+
+    override function request(path as string, width = 0 as integer, height = 0 as integer, smooth = true as boolean) as roTextureRequest
+      textureRequest = CreateObject("roTextureRequest", path)
+      m.requests.push({path: path, width: width, height: height, smooth: smooth})
+      m.fakePending[textureRequest.GetId().toStr()] = {path: path, width: width, height: height, pollsLeft: m.pendingPolls}
+      return textureRequest
+    end function
+
+    override function getResult(textureRequest as roTextureRequest) as BGE.TextureResult
+      key = textureRequest.GetId().toStr()
+      details = m.fakePending[key]
+      if details = invalid
+        return invalid
+      end if
+      if details.pollsLeft > 0
+        details.pollsLeft--
+        return invalid
+      end if
+      m.fakePending.Delete(key)
+      if m.timeOutPaths.DoesExist(details.path)
+        timedOut = {ok: false, bitmap: invalid, timedOut: true} as BGE.TextureResult
+        return timedOut
+      end if
+      if m.failPaths.DoesExist(details.path)
+        return {ok: false, bitmap: invalid}
+      end if
+      bitmap = CreateObject("roBitmap", details.path)
+      if details.width > 0 and not m.ignoreSize
+        bitmap = BGE.resizeBitmap(bitmap, details.width, details.height)
+      end if
+      return {ok: true, bitmap: bitmap}
+    end function
+
+    override sub cancel(textureRequest as roTextureRequest)
+      m.cancelled++
+      m.fakePending.Delete(textureRequest.GetId().toStr())
+    end sub
+
+    override sub unload(path as string)
+      m.unloaded.push(path)
+    end sub
+  end class
+
+end namespace
