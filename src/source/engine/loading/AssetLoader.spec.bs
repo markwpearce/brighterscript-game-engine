@@ -135,6 +135,71 @@ namespace tests
       m.assertEqual(2, m.loader.getErrors().count())
     end function
 
+    @describe("scheduling")
+
+    @it("starts each update one task further along, so a slow task can't starve the rest")
+    function _()
+      slow = new FakeLoadTask(10, 20)
+      slow.loaderTimer = m.loader.timer
+      fast = new FakeLoadTask(1, 0)
+      m.loader.addTask(slow)
+      m.loader.addTask(fast)
+      m.loader.update(12)
+      m.assertEqual(0, fast.stepCount)
+      m.loader.update(12)
+      m.assertTrue(fast.done)
+    end function
+
+    @it("fails tasks whose dependencies wait on each other")
+    function _()
+      first = new FakeLoadTask(1, 0)
+      second = new FakeLoadTask(1, 0)
+      first.after(second)
+      second.after(first)
+      m.loader.addTask(first)
+      m.loader.addTask(second)
+      m.loader.update(12)
+      m.assertTrue(m.loader.isDone())
+      m.assertEqual(2, m.loader.getErrors().count())
+      m.assertTrue(first.error.Instr("wait on each other") >= 0)
+      m.assertEqual(0, first.stepCount)
+    end function
+
+    @it("waits, with a warning, on a task in another loader")
+    function _()
+      other = new BGE.AssetLoader(m.game)
+      dependency = new FakeLoadTask(1, 0)
+      dependency.name = "other loader's task"
+      other.addTask(dependency)
+      task = new FakeLoadTask(1, 0)
+      task.after(dependency)
+      m.loader.addTask(task)
+      m.loader.stallWarningSeconds = 0
+      m.loader.update(12)
+      m.loader.update(12)
+      m.assertFalse(task.done)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertTrue(m.lastLogMessage().Instr("other loader's task, which is in another loader") >= 0)
+      other.update(12)
+      m.loader.update(12)
+      m.assertTrue(task.done)
+      m.assertInvalid(task.error)
+    end function
+
+    @it("warns about a dependency that was never queued")
+    function _()
+      dependency = new FakeLoadTask(1, 0)
+      dependency.name = "lost task"
+      task = new FakeLoadTask(1, 0)
+      task.after(dependency)
+      m.loader.addTask(task)
+      m.loader.stallWarningSeconds = 0
+      m.loader.update(12)
+      m.loader.update(12)
+      m.assertFalse(task.done)
+      m.assertTrue(m.lastLogMessage().Instr("lost task, which is in no loader - it was never queued") >= 0)
+    end function
+
     @describe("failures")
 
     @it("treats a task that throws as failed and done")
@@ -174,6 +239,21 @@ namespace tests
       m.assertTrue(m.loader.isDone())
     end function
 
+    @it("calls a step at most once a frame with oncePerFrame")
+    function _()
+      context = {calls: 0}
+      m.loader.addStep(function(ctx as object) as dynamic
+        ctx.calls = ctx.calls + 1
+        return ctx.calls >= 3
+      end function, context, 1.0, true)
+      m.loader.update(1000)
+      m.assertEqual(1, context.calls)
+      m.loader.update(1000)
+      m.loader.update(1000)
+      m.assertEqual(3, context.calls)
+      m.assertTrue(m.loader.isDone())
+    end function
+
     @it("fails a step function that throws")
     function _()
       m.loader.addStep(function(ctx as object) as dynamic
@@ -182,6 +262,14 @@ namespace tests
       m.loader.update(1000)
       m.assertTrue(m.loader.isDone())
       m.assertEqual(1, m.loader.getErrors().count())
+    end function
+
+    private function lastLogMessage() as string
+      history = m.game.getLogHistory()
+      if history.count() = 0
+        return ""
+      end if
+      return history[history.count() - 1].message
     end function
 
   end class

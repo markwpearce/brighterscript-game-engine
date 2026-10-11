@@ -80,7 +80,6 @@ namespace BGE
     private sceneLoadingSeconds as float = 0.0
     private activeLoadingScreen as BGE.LoadingScreen = invalid
     private loadingScreenShown as boolean = false
-    private defaultLoadingScreen as BGE.DefaultLoadingScreen = invalid
     private debugging = new BGE.Debug.DebugOptions()
     private logHistory as object[] = []
     private maxLogHistory = 100
@@ -2438,12 +2437,11 @@ namespace BGE
       if m.loadingScreen <> invalid
         return m.loadingScreen
       end if
-      if m.defaultLoadingScreen = invalid
-        m.defaultLoadingScreen = new BGE.DefaultLoadingScreen(m.defaultTheme.font)
-        m.defaultLoadingScreen.barColor = m.defaultTheme.foregroundColor
-        m.defaultLoadingScreen.barBackgroundColor = m.defaultTheme.backgroundColor
-      end if
-      return m.defaultLoadingScreen
+      ' built each time, so it follows changes to defaultTheme
+      defaultScreen = new BGE.DefaultLoadingScreen(m.defaultTheme.font)
+      defaultScreen.barColor = m.defaultTheme.foregroundColor
+      defaultScreen.barBackgroundColor = m.defaultTheme.backgroundColor
+      return defaultScreen
     end function
 
 
@@ -2493,28 +2491,42 @@ namespace BGE
       else if BGE.Urls.isUrl(path)
         m.logSyncUrlError("loadBitmap", path)
         return false
-      else if m.filesystem.Exists(path)
-        path_object = CreateObject("roPath", path)
-        parts = path_object.Split()
-        extensionLower = lcase(parts.extension)
-        ' Formats confirmed to decode via roBitmap on a real device (Roku Ultra, OS 15.3)
-        supportedExtensions = {".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".bmp": true, ".gif": true}
-        if not supportedExtensions.DoesExist(extensionLower)
-          m.log("Game.loadBitmap() - Bitmap " + path + " not loaded, file must be of type .png/.jpg/.jpeg/.webp/.bmp/.gif", BGE.Debug.LogLevel.error)
+      else if GetInterface(path, "ifString") <> invalid
+        reason = m.loadBitmapFile(bitmapName, path)
+        if reason <> ""
+          m.log("Game.loadBitmap() - Bitmap " + path + ": " + reason, BGE.Debug.LogLevel.error)
           return false
         end if
-        bitmap = CreateObject("roBitmap", path)
-        if invalid = bitmap
-          m.log("Game.loadBitmap() - Bitmap " + path + " could not be decoded", BGE.Debug.LogLevel.error)
-          return false
-        end if
-        m.releaseTexture(bitmapName)
-        m.Bitmaps[bitmapName] = bitmap
         return true
       else
         m.log("Game.loadBitmap() - Bitmap not created, invalid path or object properties provided", BGE.Debug.LogLevel.error)
         return false
       end if
+    end function
+
+    ' Loads a local image file like loadBitmap(), but returns why it failed instead of logging it.
+    ' Used by BGE.AssetLoader.
+    '
+    ' @param {string} bitmapName - the name this bitmap will be referenced by later
+    ' @param {string} path - a local image file
+    ' @return {string} "" when loaded, otherwise the reason it wasn't
+    function loadBitmapFile(bitmapName as string, path as string) as string
+      if not m.filesystem.Exists(path)
+        return "file not found"
+      end if
+      extensionLower = LCase(CreateObject("roPath", path).Split().extension)
+      ' Formats confirmed to decode via roBitmap on a real device (Roku Ultra, OS 15.3)
+      supportedExtensions = {".png": true, ".jpg": true, ".jpeg": true, ".webp": true, ".bmp": true, ".gif": true}
+      if not supportedExtensions.DoesExist(extensionLower)
+        return "file must be of type .png/.jpg/.jpeg/.webp/.bmp/.gif"
+      end if
+      bitmap = CreateObject("roBitmap", path)
+      if invalid = bitmap
+        return "could not be decoded"
+      end if
+      m.releaseTexture(bitmapName)
+      m.Bitmaps[bitmapName] = bitmap
+      return ""
     end function
 
 
@@ -2715,21 +2727,29 @@ namespace BGE
         m.logSyncUrlError("registerFont", path)
         return false
       end if
-      if m.filesystem.Exists(path)
-        path_object = CreateObject("roPath", path)
-        parts = path_object.Split()
-        extensionLower = lcase(parts.extension)
-        if extensionLower = ".ttf" or extensionLower = ".otf"
-          m.fontRegistry.register(path)
-          return true
-        else
-          m.log("Game.registerFont() - Font must be of type .ttf or .otf", BGE.Debug.LogLevel.error)
-          return false
-        end if
-      else
-        m.log("Game.registerFont() - File at path " + path + " doesn't exist", BGE.Debug.LogLevel.error)
+      reason = m.registerFontFile(path)
+      if reason <> ""
+        m.log("Game.registerFont() - Font " + path + ": " + reason, BGE.Debug.LogLevel.error)
         return false
       end if
+      return true
+    end function
+
+    ' Registers a local font file like registerFont(), but returns why it failed instead of
+    ' logging it. Used by BGE.AssetLoader.
+    '
+    ' @param {string} path - a local .ttf or .otf file
+    ' @return {string} "" when registered, otherwise the reason it wasn't
+    function registerFontFile(path as string) as string
+      if not m.filesystem.Exists(path)
+        return "file not found"
+      end if
+      extensionLower = LCase(CreateObject("roPath", path).Split().extension)
+      if extensionLower <> ".ttf" and extensionLower <> ".otf"
+        return "font must be of type .ttf or .otf"
+      end if
+      m.fontRegistry.register(path)
+      return ""
     end function
 
 
@@ -2981,11 +3001,11 @@ namespace BGE
     sub postGameEvent(eventName as string, data = {} as roAssociativeArray)
       for i = 0 to m.sortedEntities.Count() - 1
         entity = m.sortedEntities[i]
-        if m.isValidEntity(entity) and entity.onGameEvent <> invalid
+        if m.isValidEntity(entity) and entity.onGameEvent <> invalid and not m.isHeldForLoading(entity, false)
           entity.onGameEvent(eventName, data)
         end if
       end for
-      if invalid <> m.currentScene
+      if invalid <> m.currentScene and not m.isHeldForLoading(m.currentScene, true)
         m.currentScene.onGameEvent(eventName, data)
       end if
 
@@ -3028,11 +3048,11 @@ namespace BGE
       level = m.renderQuality.getLevel()
       for i = 0 to m.sortedEntities.Count() - 1
         entity = m.sortedEntities[i]
-        if m.isValidEntity(entity) and entity.onQualityChanged <> invalid
+        if m.isValidEntity(entity) and entity.onQualityChanged <> invalid and not m.isHeldForLoading(entity, false)
           entity.onQualityChanged(level)
         end if
       end for
-      if m.isValidEntity(m.currentScene)
+      if m.isValidEntity(m.currentScene) and not m.isHeldForLoading(m.currentScene, true)
         m.currentScene.onQualityChanged(level)
       end if
       if invalid <> m.gameUi

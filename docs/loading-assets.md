@@ -62,19 +62,19 @@ Give both `width` and `height`. `game.unloadBitmap(name)` frees the texture mana
 ```brightscript
 override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
   m.rowsBuilt = 0
-  context = {scene: m}
-  task = loader.addStep(buildRowStep, context)
-  context.task = task
+  ' context, weight, oncePerFrame
+  loader.addStep(buildRowStep, {scene: m}, 1.0, true)
 end sub
 
 function buildRowStep(context as object) as dynamic
-  context.task.waitingForNextFrame = true
   context.scene.buildNextRow()
   return context.scene.rowsBuilt / 20.0
 end function
 ```
 
-Setting `waitingForNextFrame` tells the loader not to call this task again until next frame, so you get one step per frame and the loading screen can show each row appearing. Leave it off and the loader keeps calling the step until the frame's budget runs out.
+`oncePerFrame` (the last argument) calls the step at most once a frame, so the loading screen can show each row appearing. Leave it off and the loader keeps calling the step until the frame's budget runs out.
+
+The loader takes turns between tasks: each frame starts one task further along the queue, so a slow task can't hold up the others.
 
 For something more involved, extend `BGE.LoadTask`. `step(budgetMs)` does a bit of work and returns `true` when finished, and `getProgress()` reports 0 to 1:
 
@@ -104,7 +104,7 @@ class SpawnEnemiesTask extends BGE.LoadTask
 end class
 ```
 
-Queue it with `task = new SpawnEnemiesTask(m)` and then `loader.addTask(task)`. If a task needs another to finish first, chain `task.after(otherTask)`. When the first one fails, the dependent task fails without running. A task that sets `error` or throws counts as finished, so one bad file doesn't stall the scene.
+Queue it with `task = new SpawnEnemiesTask(m)` and then `loader.addTask(task)`. If a task needs another to finish first, chain `task.after(otherTask)`. When the first one fails, the dependent task fails without running. A task that sets `error` or throws counts as finished, so one bad file doesn't stall the scene. Tasks that wait on each other in a cycle fail with an error instead of leaving the loading screen up forever. A task can also wait on one in another loader (e.g. `game.assets`); if that, or a task that was never queued, holds everything up for `loader.stallWarningSeconds` (10 by default), a warning is logged.
 
 ## Loading from URLs
 

@@ -25,6 +25,8 @@ namespace BGE
     onComplete as sub(loader as AssetLoader) as void = invalid
     ' Measures each update()'s budget
     timer as BGE.GameTimer
+    ' Seconds a task can wait on a task in another loader, with nothing else to do, before a warning is logged
+    stallWarningSeconds as float = 10.0
     ' Most downloads this loader runs at once (each loader, including game.assets, has its own
     ' limit). Less than 1 counts as 1.
     maxConcurrentDownloads as integer = 4
@@ -34,6 +36,13 @@ namespace BGE
     private errors as string[]
     private completeFired as boolean = true
     private downloadSlots as BGE.DownloadSlots
+    ' where the next update() starts in `tasks`, so a slow task can't starve the ones after it
+    private startIndex as integer = 0
+    ' set on every task this loader queues
+    private id as string
+    ' how long nothing has been able to run, while waiting on another loader's task
+    private stallTimer as roTimespan = invalid
+    private stallWarned as boolean = false
 
     sub new(game as BGE.Game)
       m.game = game
@@ -41,6 +50,7 @@ namespace BGE
       m.tasks = []
       m.errors = []
       m.downloadSlots = new BGE.DownloadSlots()
+      m.id = CreateObject("roDeviceInfo").GetRandomUUID()
     end sub
 
     ' Queues a task.
@@ -53,6 +63,7 @@ namespace BGE
         m.errors = []
         m.completeFired = false
       end if
+      task.queuedIn = m.id
       m.tasks.push(task)
       return task
     end function
@@ -64,9 +75,10 @@ namespace BGE
     ' @param {function} stepFunction - called as stepFunction(context)
     ' @param {dynamic} [context=invalid] - passed to every call
     ' @param {float} [weight=1.0] - its share of overall progress
+    ' @param {boolean} [oncePerFrame=false] - call it at most once a frame (e.g. to show a level building), instead of as often as the frame's budget allows
     ' @return {BGE.LoadTask} the queued task
-    function addStep(stepFunction as function(context as dynamic) as dynamic, context = invalid as dynamic, weight = 1.0 as float) as BGE.LoadTask
-      task = new BGE.StepTask(stepFunction, context)
+    function addStep(stepFunction as function(context as dynamic) as dynamic, context = invalid as dynamic, weight = 1.0 as float, oncePerFrame = false as boolean) as BGE.LoadTask
+      task = new BGE.StepTask(stepFunction, context, oncePerFrame)
       task.weight = weight
       return m.addTask(task)
     end function
@@ -235,11 +247,18 @@ namespace BGE
         task.waitingForNextFrame = false
       end for
 
+      taskCount = m.tasks.count()
+      m.startIndex = m.startIndex mod taskCount
+      firstIndex = m.startIndex
+      m.startIndex++
+      doneBefore = m.countDone()
       outOfTime = false
       ranAny = true
+      ranThisUpdate = false
       while ranAny and not outOfTime
         ranAny = false
-        for each task in m.tasks
+        for offset = 0 to taskCount - 1
+          task = m.tasks[(firstIndex + offset) mod taskCount]
           if not task.done and not task.waitingForNextFrame and m.dependenciesReady(task)
             remaining = budgetMs - m.timer.totalMilliseconds()
             if remaining <= 0 and ranAny
@@ -248,12 +267,20 @@ namespace BGE
             end if
             m.runStep(task, remaining)
             ranAny = true
+            ranThisUpdate = true
           end if
         end for
         if m.timer.totalMilliseconds() >= budgetMs
           outOfTime = true
         end if
       end while
+
+      if ranThisUpdate or m.countDone() <> doneBefore or m.isDone()
+        m.stallTimer = invalid
+        m.stallWarned = false
+      else
+        m.handleStall()
+      end if
 
       if not m.completeFired and m.isDone()
         m.completeFired = true
@@ -263,6 +290,50 @@ namespace BGE
         end if
       end if
     end sub
+
+    ' Nothing could run this update. If every waiting task waits only on tasks in this loader,
+    ' they're waiting on each other and never will: fail them. Otherwise they may be waiting on
+    ' another loader (or a task that was never queued), so warn if that goes on too long.
+    private sub handleStall()
+      outsideDependency = invalid
+      for each task in m.tasks
+        if not task.done
+          for each dependency in task.dependsOn
+            if not dependency.done and dependency.queuedIn <> m.id
+              outsideDependency = dependency
+            end if
+          end for
+        end if
+      end for
+      if outsideDependency = invalid
+        for each task in m.tasks
+          if not task.done
+            m.finishTask(task, task.name + " can never start: its dependencies wait on each other")
+          end if
+        end for
+        return
+      end if
+      if m.stallTimer = invalid
+        m.stallTimer = CreateObject("roTimespan")
+      else if not m.stallWarned and m.stallTimer.TotalMilliseconds() >= m.stallWarningSeconds * 1000
+        m.stallWarned = true
+        where = "another loader"
+        if outsideDependency.queuedIn = ""
+          where = "no loader - it was never queued"
+        end if
+        m.game.log("BGE.AssetLoader - still waiting on " + outsideDependency.name + ", which is in " + where, BGE.Debug.LogLevel.warning)
+      end if
+    end sub
+
+    private function countDone() as integer
+      doneCount = 0
+      for each task in m.tasks
+        if task.done
+          doneCount++
+        end if
+      end for
+      return doneCount
+    end function
 
     ' True when every dependency is done. A failed dependency fails this task.
     private function dependenciesReady(task as BGE.LoadTask) as boolean
