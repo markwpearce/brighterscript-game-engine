@@ -30,7 +30,7 @@ end class
 
 When you call `changeScene()`, the old scene and its entities are removed first, then `onLoad()` runs. If it queued anything, the engine works through the queue each frame, within `game.loadingBudgetMs` (12ms by default). A loading screen appears if loading takes longer than a quarter of a second. When the queue is empty, `onCreate()` runs at the end of that frame and the fade-in starts. If `onLoad()` queues nothing, `onCreate()` runs straight away, as it always did.
 
-While loading, the scene and any non-persistent entities it added get no `onUpdate()`, `onInput()` and so on. Persistent entities and `gameUi` keep updating, so check `game.isLoading()` if they read the new scene's state. UI buttons can't be activated while loading, so a menu button can't be pressed again under the loading screen. If something calls `changeScene()` meanwhile, the change waits and happens right after the loading scene's `onCreate()`.
+While loading, the scene and any non-persistent entities it added get no `onUpdate()`, `onInput()` and so on. That includes `onGameEvent()` and `onQualityChanged()`: events posted during loading are skipped, not saved for later, so read anything you need (e.g. `game.renderQuality.getLevel()`) in `onCreate()`. Persistent entities and `gameUi` keep updating, so check `game.isLoading()` if they read the new scene's state. UI buttons can't be activated while loading, so a menu button can't be pressed again under the loading screen. If something calls `changeScene()` meanwhile, the change waits and happens right after the loading scene's `onCreate()`.
 
 `loader.getProgress()` weights each task by its `weight` (default 1). Set a higher weight on a task you know is big so the progress bar moves at a believable rate:
 

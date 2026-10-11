@@ -62,8 +62,10 @@ namespace BGE
         m.tasks = []
         m.errors = []
         m.completeFired = false
+        m.startIndex = 0
       end if
       task.queuedIn = m.id
+      task.queueNumber = m.tasks.count()
       m.tasks.push(task)
       return task
     end function
@@ -248,9 +250,8 @@ namespace BGE
       end for
 
       taskCount = m.tasks.count()
-      m.startIndex = m.startIndex mod taskCount
-      firstIndex = m.startIndex
-      m.startIndex++
+      firstIndex = m.startIndex mod taskCount
+      firstRunIndex = -1
       doneBefore = m.countDone()
       outOfTime = false
       ranAny = true
@@ -258,12 +259,16 @@ namespace BGE
       while ranAny and not outOfTime
         ranAny = false
         for offset = 0 to taskCount - 1
-          task = m.tasks[(firstIndex + offset) mod taskCount]
+          taskIndex = (firstIndex + offset) mod taskCount
+          task = m.tasks[taskIndex]
           if not task.done and not task.waitingForNextFrame and m.dependenciesReady(task)
             remaining = budgetMs - m.timer.totalMilliseconds()
             if remaining <= 0 and ranAny
               outOfTime = true
               exit for
+            end if
+            if firstRunIndex < 0
+              firstRunIndex = taskIndex
             end if
             m.runStep(task, remaining)
             ranAny = true
@@ -274,6 +279,11 @@ namespace BGE
           outOfTime = true
         end if
       end while
+
+      if firstRunIndex >= 0
+        ' next update starts after the task that went first this time, skipping finished ones
+        m.startIndex = firstRunIndex + 1
+      end if
 
       if ranThisUpdate or m.countDone() <> doneBefore or m.isDone()
         m.stallTimer = invalid
@@ -291,26 +301,22 @@ namespace BGE
       end if
     end sub
 
-    ' Nothing could run this update. If every waiting task waits only on tasks in this loader,
-    ' they're waiting on each other and never will: fail them. Otherwise they may be waiting on
-    ' another loader (or a task that was never queued), so warn if that goes on too long.
+    ' Nothing could run this update. A task whose unfinished dependencies all lead back into this
+    ' loader is waiting on a cycle and never will start: it fails. A task that leads to another
+    ' loader's task (or one never queued) may still start, so that only warns if it goes on.
     private sub handleStall()
       outsideDependency = invalid
       for each task in m.tasks
         if not task.done
-          for each dependency in task.dependsOn
-            if not dependency.done and dependency.queuedIn <> m.id
-              outsideDependency = dependency
-            end if
-          end for
+          found = m.findOutsideDependency(task, {})
+          if found = invalid
+            m.finishTask(task, task.name + " can never start: its dependencies wait on each other")
+          else
+            outsideDependency = found
+          end if
         end if
       end for
       if outsideDependency = invalid
-        for each task in m.tasks
-          if not task.done
-            m.finishTask(task, task.name + " can never start: its dependencies wait on each other")
-          end if
-        end for
         return
       end if
       if m.stallTimer = invalid
@@ -324,6 +330,29 @@ namespace BGE
         m.game.log("BGE.AssetLoader - still waiting on " + outsideDependency.name + ", which is in " + where, BGE.Debug.LogLevel.warning)
       end if
     end sub
+
+    ' The first unfinished task outside this loader that `task` waits on, directly or through
+    ' other tasks here, or invalid if every path leads back into this loader.
+    '
+    ' @param {roAssociativeArray} visited - queueNumbers already followed
+    private function findOutsideDependency(task as BGE.LoadTask, visited as roAssociativeArray) as BGE.LoadTask
+      for each dependency in task.dependsOn
+        if not dependency.done
+          if dependency.queuedIn <> m.id
+            return dependency
+          end if
+          key = dependency.queueNumber.toStr()
+          if not visited.DoesExist(key)
+            visited[key] = true
+            found = m.findOutsideDependency(dependency, visited)
+            if found <> invalid
+              return found
+            end if
+          end if
+        end if
+      end for
+      return invalid
+    end function
 
     private function countDone() as integer
       doneCount = 0
