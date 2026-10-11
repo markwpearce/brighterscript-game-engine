@@ -129,26 +129,29 @@ namespace BGE
     private height as integer = 0
     private smooth as boolean = true
     private drawable as boolean = false
-    private textureRequest as dynamic = invalid
+    private textureRequest as roTextureRequest = invalid
 
     sub new(game as BGE.Game, bitmapName as string, path as string, options = invalid as BGE.BitmapLoadOptions)
       super(path)
       m.name = "bitmap " + path
       m.game = game
       m.bitmapName = bitmapName
-      if options <> invalid
-        if options.width <> invalid and options.height <> invalid and options.width > 0 and options.height > 0
-          m.width = options.width
-          m.height = options.height
-        else if options.width <> invalid or options.height <> invalid
-          game.log("BGE.AssetLoader.loadBitmap() - " + path + ": resizing needs both width and height, loading it at its own size", BGE.Debug.LogLevel.warning)
-        end if
-        if options.smooth = false
-          m.smooth = false
-        end if
-        if options.drawable = true
-          m.drawable = true
-        end if
+      if options = invalid
+        return
+      end if
+      width = m.toPixelSize(options.width)
+      height = m.toPixelSize(options.height)
+      if width > 0 and height > 0
+        m.width = width
+        m.height = height
+      else if options.width <> invalid or options.height <> invalid
+        game.log("BGE.AssetLoader.loadBitmap() - " + path + ": resizing needs a width and height above 0, loading it at its own size", BGE.Debug.LogLevel.warning)
+      end if
+      if options.smooth = false
+        m.smooth = false
+      end if
+      if options.drawable = true
+        m.drawable = true
       end if
     end sub
 
@@ -171,17 +174,24 @@ namespace BGE
         return false
       end if
       m.textureRequest = invalid
-      if result.ok
-        bitmap = result.bitmap
-        if m.width > 0 and (bitmap.GetWidth() <> m.width or bitmap.GetHeight() <> m.height)
-          ' a Roku decoding the same file for another request at the same time ignores the size
-          m.game.Bitmaps[m.bitmapName] = BGE.resizeBitmap(bitmap, m.width, m.height, m.smooth)
+      if not result.ok
+        if result.timedOut = true
+          m.game.log("BGE.AssetLoader - the texture manager didn't answer for " + m.source + ", loading it on the main thread", BGE.Debug.LogLevel.warning)
+        end if
+        return m.loadOnMainThread()
+      end if
+      bitmap = result.bitmap
+      if m.width > 0 and (bitmap.GetWidth() <> m.width or bitmap.GetHeight() <> m.height)
+        ' a Roku decoding the same file for another request at the same time ignores the size
+        bitmap = m.resize(bitmap)
+        if bitmap = invalid
+          m.game.releaseTexturePath(m.path)
           return true
         end if
-        m.game.addTextureBitmap(m.bitmapName, bitmap, m.path)
-        return true
       end if
-      return m.loadOnMainThread()
+      ' recorded even for our own resized copy, so unloadBitmap() frees the manager's full-size one
+      m.game.addTextureBitmap(m.bitmapName, bitmap, m.path)
+      return true
     end function
 
     override sub abort()
@@ -189,6 +199,8 @@ namespace BGE
       if m.textureRequest <> invalid
         m.game.getTextureLoader().cancel(m.textureRequest)
         m.textureRequest = invalid
+        ' the decode may already have finished into the manager's cache
+        m.game.releaseTexturePath(m.path)
       end if
     end sub
 
@@ -212,10 +224,33 @@ namespace BGE
       if m.width > 0
         bitmap = m.game.getBitmap(m.bitmapName)
         if bitmap.GetWidth() <> m.width or bitmap.GetHeight() <> m.height
-          m.game.Bitmaps[m.bitmapName] = BGE.resizeBitmap(bitmap, m.width, m.height, m.smooth)
+          resized = m.resize(bitmap)
+          if resized = invalid
+            m.game.unloadBitmap(m.bitmapName)
+          else
+            m.game.Bitmaps[m.bitmapName] = resized
+          end if
         end if
       end if
       return true
+    end function
+
+    ' A resized copy, or invalid with `error` set.
+    private function resize(bitmap as roBitmap) as roBitmap
+      resized = BGE.resizeBitmap(bitmap, m.width, m.height, m.smooth)
+      if resized = invalid
+        m.error = "could not resize bitmap " + m.source + " to " + m.width.toStr() + "x" + m.height.toStr() + " (out of texture memory?)"
+      end if
+      return resized
+    end function
+
+    ' A width or height option as whole pixels, or 0 if it isn't a number.
+    private function toPixelSize(value as dynamic) as integer
+      numberTypes = {"Integer": true, "roInt": true, "roInteger": true, "LongInteger": true, "roLongInteger": true, "Float": true, "roFloat": true, "Double": true, "roDouble": true}
+      if not numberTypes.DoesExist(type(value))
+        return 0
+      end if
+      return Int(value)
     end function
 
   end class

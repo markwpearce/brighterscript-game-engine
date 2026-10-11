@@ -47,6 +47,25 @@ namespace tests
       m.assertInvalid(m.textureLoader.getResult(textureRequest))
     end function
 
+    @it("gives up on a request that isn't answered in time")
+    function _()
+      m.textureLoader.timeoutMs = 0
+      textureRequest = m.textureLoader.request("tmp:/bge_texture.png")
+      ' another texture manager user takes the port, so this request's answer never arrives
+      otherLoader = new BGE.TextureLoader()
+      result = m.textureLoader.getResult(textureRequest)
+      m.assertFalse(result.ok)
+      m.assertTrue(result.timedOut)
+      m.assertInvalid(otherLoader.getResult(textureRequest))
+    end function
+
+    @it("has no result for a cancelled request")
+    function _()
+      textureRequest = m.textureLoader.request("tmp:/bge_texture.png")
+      m.textureLoader.cancel(textureRequest)
+      m.assertInvalid(m.textureLoader.getResult(textureRequest))
+    end function
+
     @describe("resizeBitmap")
 
     @it("copies a bitmap at a new size")
@@ -78,31 +97,34 @@ namespace tests
     cancelled as integer = 0
     ' paths whose requests fail
     failPaths as roAssociativeArray
+    ' paths whose requests time out
+    timeOutPaths as roAssociativeArray
     ' getResult() calls that return invalid before each request finishes
     pendingPolls as integer = 0
     ' returns the image at its own size, like a Roku that already holds the file
     ignoreSize as boolean = false
 
-    private pending as roAssociativeArray
+    private fakePending as roAssociativeArray
 
     sub new()
       super()
       m.requests = []
       m.unloaded = []
       m.failPaths = {}
-      m.pending = {}
+      m.timeOutPaths = {}
+      m.fakePending = {}
     end sub
 
     override function request(path as string, width = 0 as integer, height = 0 as integer, smooth = true as boolean) as roTextureRequest
       textureRequest = CreateObject("roTextureRequest", path)
       m.requests.push({path: path, width: width, height: height, smooth: smooth})
-      m.pending[textureRequest.GetId().toStr()] = {path: path, width: width, height: height, pollsLeft: m.pendingPolls}
+      m.fakePending[textureRequest.GetId().toStr()] = {path: path, width: width, height: height, pollsLeft: m.pendingPolls}
       return textureRequest
     end function
 
     override function getResult(textureRequest as roTextureRequest) as BGE.TextureResult
       key = textureRequest.GetId().toStr()
-      details = m.pending[key]
+      details = m.fakePending[key]
       if details = invalid
         return invalid
       end if
@@ -110,7 +132,11 @@ namespace tests
         details.pollsLeft--
         return invalid
       end if
-      m.pending.Delete(key)
+      m.fakePending.Delete(key)
+      if m.timeOutPaths.DoesExist(details.path)
+        timedOut = {ok: false, bitmap: invalid, timedOut: true} as BGE.TextureResult
+        return timedOut
+      end if
       if m.failPaths.DoesExist(details.path)
         return {ok: false, bitmap: invalid}
       end if
@@ -123,7 +149,7 @@ namespace tests
 
     override sub cancel(textureRequest as roTextureRequest)
       m.cancelled++
-      m.pending.Delete(textureRequest.GetId().toStr())
+      m.fakePending.Delete(textureRequest.GetId().toStr())
     end sub
 
     override sub unload(path as string)
