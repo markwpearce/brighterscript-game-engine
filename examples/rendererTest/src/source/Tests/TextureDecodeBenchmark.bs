@@ -1,0 +1,238 @@
+' Decodes the same large images with CreateObject("roBitmap", path) and with an async
+' roTextureRequest, while a square bounces across the screen, and reports how long each
+' frame took during each load (issue #301). If the texture manager decodes off the
+' BrightScript thread, its loads should leave the frame times alone; if it decodes when
+' its port is read (as brs-engine does), the hitch just moves to the GetMessage() call.
+'
+' Results are drawn on screen and printed to the console.
+class TextureDecodeBenchmark extends RendererTest
+
+  private rounds = 3
+  ' frames to wait between trials, so one trial's hitch can't leak into the next
+  private gapFrames = 20
+
+  private trials as object = []
+  private trialIndex = -1
+  private gapLeft = 0
+
+  ' the running trial
+  private trial as object = invalid
+  private trialTimer as roTimespan
+  private textureManager as object = invalid
+  private texturePort as roMessagePort
+  private request as object = invalid
+
+  ' per method/file totals, keyed by trial label
+  private results as object = {}
+  private labels as string[] = []
+  private done = false
+  private font as roFont
+
+  private squareX = 0.0
+  private squareDirection = 1.0
+  private worstIdleMs = 0.0
+
+  sub new()
+    super("Texture Decode Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(18, false, false)
+    m.trialTimer = CreateObject("roTimespan")
+    m.texturePort = CreateObject("roMessagePort")
+    m.textureManager = CreateObject("roTextureManager")
+    m.textureManager.SetMessagePort(m.texturePort)
+    files = ["pkg:/images/decode/decode-2048.png", "pkg:/images/decode/decode-2048.jpg"]
+    for round = 1 to m.rounds
+      for each file in files
+        extension = file.Mid(BGE.lastInStr(file, "."))
+        m.trials.push({method: "roBitmap", file: file, label: "roBitmap " + extension})
+        m.trials.push({method: "textureManager", file: file, label: "texture mgr " + extension})
+        m.trials.push({method: "textureManager", file: file, label: "texture mgr " + extension + " -> 512x256", width: 512, height: 256})
+      end for
+    end for
+    ' does the manager honour SetSize() for a file it already holds at full size?
+    png = files[0]
+    m.trials.push({method: "textureManager", file: png, label: "texture mgr .png, kept cached", keepCached: true})
+    m.trials.push({method: "textureManager", file: png, label: "texture mgr .png -> 512x256 while cached", width: 512, height: 256})
+    m.gapLeft = m.gapFrames
+  end sub
+
+  override sub update(dt as float)
+    frameMs = dt * 1000
+    m.squareX += m.squareDirection * dt * 400
+    if m.squareX > 1000
+      m.squareDirection = -1.0
+    else if m.squareX < 0
+      m.squareDirection = 1.0
+    end if
+
+    if m.trial <> invalid
+      m.stepTrial(frameMs)
+    else if not m.done
+      if m.trialIndex >= 0 and frameMs > m.worstIdleMs
+        m.worstIdleMs = frameMs
+      end if
+      m.gapLeft--
+      if m.gapLeft <= 0
+        m.startNextTrial()
+      end if
+    end if
+  end sub
+
+  private sub startNextTrial()
+    m.trialIndex++
+    if m.trialIndex >= m.trials.count()
+      m.done = true
+      m.printResults()
+      return
+    end if
+    m.trial = m.trials[m.trialIndex]
+    m.trial.frames = 0
+    m.trial.worstFrameMs = 0.0
+    m.trial.totalFrameMs = 0.0
+    m.trial.callMs = 0
+    m.trial.ok = false
+    ' frames to keep measuring after the load, since a hitch shows in the next frame's dt
+    m.trial.tailFrames = 2
+    m.trial.loaded = false
+    m.trialTimer.Mark()
+    if m.trial.method = "roBitmap"
+      bitmap = CreateObject("roBitmap", m.trial.file)
+      m.trial.callMs = m.trialTimer.TotalMilliseconds()
+      m.trial.ok = bitmap <> invalid
+      m.trial.latencyMs = m.trial.callMs
+      m.trial.loaded = true
+    else
+      m.request = CreateObject("roTextureRequest", m.trial.file)
+      if m.trial.width <> invalid
+        m.request.SetSize(m.trial.width, m.trial.height)
+        m.request.SetScaleMode(1)
+      end if
+      m.textureManager.RequestTexture(m.request)
+      m.trial.callMs = m.trialTimer.TotalMilliseconds()
+    end if
+  end sub
+
+  private sub stepTrial(frameMs as float)
+    m.trial.frames++
+    m.trial.totalFrameMs += frameMs
+    if frameMs > m.trial.worstFrameMs
+      m.trial.worstFrameMs = frameMs
+    end if
+
+    if not m.trial.loaded
+      pollTimer = CreateObject("roTimespan")
+      msg = m.texturePort.GetMessage()
+      pollMs = pollTimer.TotalMilliseconds()
+      if pollMs > m.trial.callMs
+        m.trial.callMs = pollMs
+      end if
+      if type(msg) = "roTextureRequestEvent"
+        state = msg.GetState()
+        ' 3 = ready, 4 = failed, 5 = cancelled
+        if state >= 3
+          bitmap = msg.GetBitmap()
+          m.trial.ok = state = 3 and bitmap <> invalid
+          if m.trial.ok and m.trial.width <> invalid
+            m.trial.ok = bitmap.GetWidth() = m.trial.width and bitmap.GetHeight() = m.trial.height
+          end if
+          m.trial.latencyMs = m.trialTimer.TotalMilliseconds()
+          m.trial.loaded = true
+          m.request = invalid
+          if m.trial.width <> invalid and bitmap <> invalid
+            m.trial.size = bitmap.GetWidth().toStr() + "x" + bitmap.GetHeight().toStr()
+          end if
+          if m.trial.keepCached <> true
+            ' drop the manager's cached copy, or the next trial is a cache hit
+            m.textureManager.UnloadBitmap(m.trial.file)
+          end if
+        end if
+      end if
+      return
+    end if
+
+    m.trial.tailFrames--
+    if m.trial.tailFrames <= 0
+      m.recordTrial()
+      m.trial = invalid
+      m.gapLeft = m.gapFrames
+    end if
+  end sub
+
+  private sub recordTrial()
+    label = m.trial.label
+    result = m.results[label]
+    if result = invalid
+      result = {count: 0, failures: 0, worstFrameMs: 0.0, worstFrameTotal: 0.0, callMsTotal: 0, latencyMsTotal: 0, frameMsTotal: 0.0, frames: 0}
+      m.results[label] = result
+      m.labels.push(label)
+    end if
+    result.count++
+    if m.trial.size <> invalid
+      result.size = m.trial.size
+    end if
+    if not m.trial.ok
+      result.failures++
+    end if
+    result.worstFrameTotal += m.trial.worstFrameMs
+    if m.trial.worstFrameMs > result.worstFrameMs
+      result.worstFrameMs = m.trial.worstFrameMs
+    end if
+    result.callMsTotal += m.trial.callMs
+    result.latencyMsTotal += m.trial.latencyMs
+    result.frameMsTotal += m.trial.totalFrameMs
+    result.frames += m.trial.frames
+    print "[TextureDecodeBenchmark] "; label; ": ok="; m.trial.ok; " worstFrameMs="; Int(m.trial.worstFrameMs); " longestCallMs="; m.trial.callMs; " latencyMs="; m.trial.latencyMs; " frames="; m.trial.frames
+  end sub
+
+  private function resultLines() as string[]
+    lines = [] as string[]
+    for each label in m.labels
+      result = m.results[label]
+      line = label + ": worst frame " + Int(result.worstFrameMs).toStr() + "ms (avg " + Int(result.worstFrameTotal / result.count).toStr() + ")"
+      line += ", longest call " + Int(result.callMsTotal / result.count).toStr() + "ms"
+      line += ", ready in " + Int(result.latencyMsTotal / result.count).toStr() + "ms"
+      if result.frames > 0
+        line += ", avg frame " + Int(result.frameMsTotal / result.frames).toStr() + "ms"
+      end if
+      if result.failures > 0
+        line += ", " + result.failures.toStr() + " FAILED"
+      end if
+      if result.size <> invalid
+        line += ", got " + result.size
+      end if
+      lines.push(line)
+    end for
+    return lines
+  end function
+
+  private sub printResults()
+    print "[TextureDecodeBenchmark] results (worst idle frame " + Int(m.worstIdleMs).toStr() + "ms)"
+    for each line in m.resultLines()
+      print "[TextureDecodeBenchmark] "; line
+    end for
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.drawRectangle(140 + m.squareX, 90, 40, 40, BGE.Colors.Cyan)
+    status = "Running trial " + (m.trialIndex + 1).toStr() + " of " + m.trials.count().toStr()
+    if m.done
+      status = "Done. Worst idle frame " + Int(m.worstIdleMs).toStr() + "ms"
+    end if
+    renderer.drawText(status, 140, 150, BGE.Colors.White, m.font)
+    y = 200
+    for each line in m.resultLines()
+      renderer.drawText(line, 140, y, BGE.Colors.Lime, m.font)
+      y += 26
+    end for
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    if m.request <> invalid
+      m.textureManager.CancelRequest(m.request)
+    end if
+    m.textureManager.Cleanup()
+  end sub
+
+end class

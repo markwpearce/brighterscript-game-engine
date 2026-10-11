@@ -39,6 +39,22 @@ task = loader.load3dModel("terrain", "pkg:/models/terrain.stl")
 task.weight = 10
 ```
 
+## Images
+
+`loader.loadBitmap()` decodes an image with Roku's texture manager, which on a Roku runs off the main thread. Even a large image loads without dropping a frame. In testing, a 2048x1024 PNG that stalls a frame for 160ms with `game.loadBitmap()` didn't drop a single frame this way, and was ready about 10 frames later.
+
+The loader can also resize an image as it loads, so only the smaller copy uses texture memory:
+
+```brightscript
+loader.loadBitmap("mapThumb", "pkg:/images/worldMap.png", {width: 320, height: 180})
+' pixel art: resize without smoothing
+loader.loadBitmap("hero", "pkg:/images/hero.png", {width: 64, height: 64, smooth: false})
+```
+
+Give both `width` and `height`. `game.unloadBitmap(name)` frees the texture manager's copy too, so unload a scene's big images when you leave it.
+
+> Before Roku OS 16, you can't draw into a bitmap from the texture manager. If you'll draw into a loaded image, pass `drawable: true`. That image is decoded the slower way, in a single frame. Drawing *from* a loaded bitmap (regions, sprites, `DrawObject`) works either way.
+
 ## Your own work
 
 `loader.addStep()` calls a function once per step until it says it's done. Return `true` when finished, or a number from 0 to 1 for progress (done at 1). This builds a level one row at a time:
@@ -212,6 +228,6 @@ end sub
 
 `onComplete` is called once when the queue empties. Adding more tasks afterwards starts a new batch, with progress and errors starting over.
 
-One native call can't be split up, so reading a huge file, decoding one big image or loading one sound still takes a single frame and will hitch the frame it lands in. Models are the exception: `.obj` and `.stl` files are parsed a slice at a time. Splitting a big image into a few smaller ones spreads the cost across frames.
+One native call can't be split up, so reading a huge file or loading one sound still takes a single frame and will hitch the frame it lands in. Models are parsed a slice at a time, and images decode off the main thread (see [Images](#images)). On the BrightScript Simulator, though, the texture manager decodes on the main thread, so images hitch there just as `game.loadBitmap()` does.
 
-See `examples/loading` for a runnable example: one scene loads every model and some large textures under a loading screen with a timing readout, one downloads an image, a textured model and a sound and shows which came from the cache, one shows failed loads, and another builds a tile grid a row per frame under a custom screen.
+See `examples/loading` for a runnable example: one scene loads every model and some large textures (one resized as it loads) under a loading screen with a timing readout, one downloads an image, a textured model and a sound and shows which came from the cache, one shows failed loads, and another builds a tile grid a row per frame under a custom screen.

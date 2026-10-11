@@ -209,6 +209,27 @@ polled, so only a device can tell.
 
 The public API is the same either way.
 
+### Result (PR 3)
+
+`texture-decode-benchmark`, 2048x1024 images, 3 runs each:
+
+| | Roku Ultra 4850CA (OS 15.3.4) | Simulator |
+|---|---|---|
+| roBitmap .png | 160ms frame | 81ms |
+| texture manager .png | 17ms frame, ready in ~175ms | 67ms (decoded inside GetMessage) |
+| roBitmap .jpg | 79ms frame | 87ms |
+| texture manager .jpg | 17ms frame, ready in ~90ms | 81ms |
+| texture manager, resized to 512x256 | 17ms frame | ~80ms |
+
+The device decodes off-thread, so `BitmapLoadTask` uses one shared `BGE.TextureLoader`
+(`game.getTextureLoader()`) for every load, local or downloaded. The simulator is no worse than
+roBitmap, so it isn't gated (lvcabral/brs-engine#1250). Nothing in the engine draws into a loaded
+bitmap; `BitmapLoadOptions.drawable` keeps the roBitmap path for a game that does. A request for
+a file another request is decoding at the same time comes back at the other request's size on a
+device, so the task checks the size and resizes itself. A failed decode falls back to roBitmap.
+
+Model textures (`.obj` `map_Kd`) still decode with roBitmap inside `addLoadedModel()`.
+
 ## Loading screen
 
 ```brighterscript

@@ -1,11 +1,13 @@
-' Loads every model in pkg:/models/ through onLoad(), parsed a slice at a time, then lists what
-' loaded and how long the whole load took.
+' Loads every model in pkg:/models/ through onLoad(), parsed a slice at a time, plus some large
+' textures (decoded off the main thread on a Roku, one of them resized as it loads), then lists
+' what loaded, how long the whole load took and the longest frame while loading.
 class LocalAssetsScene extends BGE.GameScene
 
   private loadTimer as roTimespan
   private loadSeconds as float = 0.0
   private modelNames as string[]
   private bitmapNames as string[]
+  private loadingScreen as TimedLoadingScreen = invalid
 
   sub new(game as BGE.Game)
     super(game)
@@ -31,7 +33,7 @@ class LocalAssetsScene extends BGE.GameScene
         m.modelNames.push(fileName)
       end if
     end for
-    ' large textures: each PNG decode is a single native call that can't be split across frames
+    ' large textures: on a Roku these decode off the main thread, so the frame time stays steady
     for each fileName in CreateObject("roFileSystem").GetDirectoryListing("pkg:/images/big/")
       bitmapTask = loader.loadBitmap(fileName, "pkg:/images/big/" + fileName)
       stat = CreateObject("roFileSystem").Stat("pkg:/images/big/" + fileName)
@@ -40,41 +42,49 @@ class LocalAssetsScene extends BGE.GameScene
       end if
       m.bitmapNames.push(fileName)
     end for
+    ' resized while it loads, so only the small copy takes texture memory
+    loader.loadBitmap("worldMap thumbnail", "pkg:/images/big/worldMap.png", {width: 320, height: 180})
+    m.bitmapNames.push("worldMap thumbnail")
   end sub
 
   override function getLoadingScreen() as BGE.LoadingScreen
-    screen = new TimedLoadingScreen(m.game.getFont("debugUI"))
-    return screen
+    m.loadingScreen = new TimedLoadingScreen(m.game.getFont("debugUI"))
+    return m.loadingScreen
   end function
 
   override sub onCreate(args as roAssociativeArray)
     m.loadSeconds = m.loadTimer.TotalMilliseconds() / 1000.0
     m.game.gameUi.clearChildren()
-    width = m.game.uiCanvas.getWidth()
-    height = m.game.uiCanvas.getHeight()
-    lines = [`Loaded ${m.modelNames.count()} models + ${m.bitmapNames.count()} textures in ${m.loadSeconds}s - Back for the menu`]
+    lines = [`Loaded ${m.modelNames.count()} models + ${m.bitmapNames.count()} textures in ${m.loadSeconds}s - Back for the menu`] as string[]
+    if m.loadingScreen <> invalid
+      lines.push(`Longest frame while loading: ${Int(m.loadingScreen.worstFrameMs)}ms`)
+    end if
+    models = [] as string[]
     for each modelName in m.modelNames
       model = m.game.Models[modelName]
       if model <> invalid
-        lines.push(`${modelName}: ${model.faces.count()} faces`)
+        models.push(`${modelName} ${model.faces.count()}`)
       end if
     end for
+    lines.push("Models (faces): " + models.join(", "))
+    textures = [] as string[]
     for each bitmapName in m.bitmapNames
       bitmap = m.game.Bitmaps[bitmapName]
       if bitmap <> invalid
-        lines.push(`${bitmapName}: ${bitmap.getWidth()}x${bitmap.getHeight()}`)
+        textures.push(`${bitmapName} ${bitmap.getWidth()}x${bitmap.getHeight()}`)
       end if
     end for
+    lines.push("Textures: " + textures.join(", "))
     for each errorMessage in m.game.getSceneLoader().getErrors()
       lines.push("ERROR " + errorMessage)
     end for
-    for i = 0 to lines.count() - 1
-      label = new BGE.UI.Label(m.game)
-      label.setText(lines[i])
-      label.customPosition = true
-      label.customX = width * 0.11
-      label.customY = height * 0.11 + i * height * 0.045
-      m.game.gameUi.addChild(label)
+    showLabelLines(m.game, lines)
+  end sub
+
+  override sub onDestroy()
+    ' frees the texture memory, including the texture manager's copies
+    for each bitmapName in m.bitmapNames
+      m.game.unloadBitmap(bitmapName)
     end for
   end sub
 

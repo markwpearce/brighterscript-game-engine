@@ -1,0 +1,124 @@
+namespace BGE
+
+  ' The outcome of a texture request: `ok` with a `bitmap`, or not ok.
+  interface TextureResult extends roAssociativeArray
+    ok as boolean
+    bitmap as dynamic
+  end interface
+
+  ' Decodes images with one roTextureManager. On a Roku the decode runs off the BrightScript
+  ' thread, so a large image doesn't stall a frame the way CreateObject("roBitmap", path) does.
+  ' Bitmaps it makes can't be drawn into before Roku OS 16. The game owns one
+  ' (`game.getTextureLoader()`), and `BGE.AssetLoader.loadBitmap()` uses it.
+  class TextureLoader
+
+    private manager as dynamic = invalid
+    private port as roMessagePort
+    ' request id -> TextureResult, for finished requests not yet collected
+    private finished as roAssociativeArray = {}
+
+    sub new()
+      m.port = CreateObject("roMessagePort")
+      m.manager = CreateObject("roTextureManager")
+      if m.manager <> invalid
+        m.manager.SetMessagePort(m.port)
+      end if
+    end sub
+
+    ' Whether this device has a texture manager to decode with.
+    '
+    ' @return {boolean}
+    function isAvailable() as boolean
+      return m.manager <> invalid
+    end function
+
+    ' Starts decoding an image file.
+    '
+    ' @param {string} path - a local image file (pkg:, tmp:, cachefs:, ...)
+    ' @param {integer} [width=0] - resize to this width while decoding (needs height too)
+    ' @param {integer} [height=0] - resize to this height while decoding
+    ' @param {boolean} [smooth=true] - false resizes with nearest neighbour (crisp pixel art)
+    ' @return {roTextureRequest} pass it to getResult() each frame
+    function request(path as string, width = 0 as integer, height = 0 as integer, smooth = true as boolean) as roTextureRequest
+      textureRequest = CreateObject("roTextureRequest", path)
+      if width > 0 and height > 0
+        textureRequest.SetSize(width, height)
+        if smooth
+          textureRequest.SetScaleMode(1)
+        else
+          textureRequest.SetScaleMode(0)
+        end if
+      end if
+      m.manager.RequestTexture(textureRequest)
+      return textureRequest
+    end function
+
+    ' The result of a request, once it has finished.
+    '
+    ' @param {roTextureRequest} textureRequest
+    ' @return {BGE.TextureResult} invalid while still decoding
+    function getResult(textureRequest as roTextureRequest) as BGE.TextureResult
+      m.poll()
+      key = textureRequest.GetId().toStr()
+      result = m.finished[key]
+      if result <> invalid
+        m.finished.Delete(key)
+      end if
+      return result
+    end function
+
+    ' Stops a request that hasn't finished.
+    '
+    ' @param {roTextureRequest} textureRequest
+    sub cancel(textureRequest as roTextureRequest)
+      m.manager.CancelRequest(textureRequest)
+      m.finished.Delete(textureRequest.GetId().toStr())
+    end sub
+
+    ' Drops the texture manager's copy of a file's bitmap, so its memory is freed once nothing
+    ' else holds it, and the next request decodes the file again.
+    '
+    ' @param {string} path
+    sub unload(path as string)
+      if m.manager <> invalid
+        m.manager.UnloadBitmap(path)
+      end if
+    end sub
+
+    private sub poll()
+      msg = m.port.GetMessage()
+      while msg <> invalid
+        if type(msg) = "roTextureRequestEvent"
+          ' 3 = ready, 4 = failed, 5 = cancelled; the rest are still in progress
+          state = msg.GetState()
+          if state >= 3
+            bitmap = msg.GetBitmap()
+            m.finished[msg.GetId().toStr()] = {ok: state = 3 and type(bitmap) = "roBitmap", bitmap: bitmap}
+          end if
+        end if
+        msg = m.port.GetMessage()
+      end while
+    end sub
+
+  end class
+
+  ' A copy of a bitmap at a new size, for when the texture manager can't do the resize.
+  '
+  ' @param {roBitmap} bitmap
+  ' @param {integer} width
+  ' @param {integer} height
+  ' @param {boolean} [smooth=true] - false scales with nearest neighbour
+  ' @return {roBitmap}
+  function resizeBitmap(bitmap as roBitmap, width as integer, height as integer, smooth = true as boolean) as roBitmap
+    resized = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: false})
+    region = CreateObject("roRegion", bitmap, 0, 0, bitmap.GetWidth(), bitmap.GetHeight())
+    if smooth
+      region.SetScaleMode(1)
+    end if
+    ' alpha off while copying, so transparent pixels are copied rather than blended
+    resized.DrawScaledObject(0, 0, width / bitmap.GetWidth(), height / bitmap.GetHeight(), region)
+    resized.SetAlphaEnable(true)
+    return resized
+  end function
+
+end namespace

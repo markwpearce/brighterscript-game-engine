@@ -1,0 +1,161 @@
+import "pkg:/source/engine/loading/AssetLoader.bs"
+
+namespace tests
+
+  @suite("BGE.AssetLoader bitmaps through the texture loader")
+  class AssetLoaderTexturesTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as tests.ServedAssetLoader
+    textureLoader as tests.FakeTextureLoader
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.textureLoader = new tests.FakeTextureLoader()
+      m.game.textureLoader = m.textureLoader
+      m.loader = new tests.ServedAssetLoader(m.game)
+      bitmap = CreateObject("roBitmap", {width: 4, height: 2, AlphaEnable: true})
+      bitmap.GetPng(0, 0, 4, 2).WriteFile("tmp:/bge_tex.png")
+    end function
+
+    @describe("loading")
+
+    @it("decodes through the texture loader")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(1, m.textureLoader.requests.count())
+      m.assertEqual("tmp:/bge_tex.png", m.textureLoader.requests[0].path)
+      m.assertEqual(4, m.game.getBitmap("a").GetWidth())
+    end function
+
+    @it("passes the resize options to the request")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png", {width: 2, height: 1, smooth: false})
+      tests.runLoader(m.loader)
+      request = m.textureLoader.requests[0]
+      m.assertEqual(2, request.width)
+      m.assertEqual(1, request.height)
+      m.assertFalse(request.smooth)
+      m.assertEqual(2, m.game.getBitmap("a").GetWidth())
+      m.assertEqual(1, m.game.getBitmap("a").GetHeight())
+    end function
+
+    @it("resizes the bitmap itself when the texture manager ignores the size")
+    function _()
+      m.textureLoader.ignoreSize = true
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png", {width: 2, height: 1})
+      tests.runLoader(m.loader)
+      m.assertEqual(2, m.game.getBitmap("a").GetWidth())
+      m.assertEqual(1, m.game.getBitmap("a").GetHeight())
+    end function
+
+    @it("ignores a width without a height")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png", {width: 2})
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.textureLoader.requests[0].width)
+      m.assertEqual(4, m.game.getBitmap("a").GetWidth())
+    end function
+
+    @it("waits for the decode across frames")
+    function _()
+      m.textureLoader.pendingPolls = 2
+      task = m.loader.loadBitmap("a", "tmp:/bge_tex.png")
+      m.loader.update(12)
+      m.assertFalse(task.done)
+      m.assertInvalid(m.game.Bitmaps["a"])
+      tests.runLoader(m.loader)
+      m.assertTrue(task.done)
+      m.assertEqual(4, m.game.getBitmap("a").GetWidth())
+    end function
+
+    @it("loads a drawable bitmap on the main thread, resized")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png", {width: 2, height: 1, drawable: true})
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.textureLoader.requests.count())
+      m.assertEqual(2, m.game.getBitmap("a").GetWidth())
+      m.assertEqual(1, m.game.getBitmap("a").GetHeight())
+    end function
+
+    @it("falls back to the main thread when the texture loader fails")
+    function _()
+      m.textureLoader.failPaths["tmp:/bge_tex.png"] = true
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png", {width: 2, height: 1})
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(2, m.game.getBitmap("a").GetWidth())
+    end function
+
+    @it("reports a missing file without asking the texture loader")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_no_such_file.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertEqual(0, m.textureLoader.requests.count())
+    end function
+
+    @it("cancels its request when aborted")
+    function _()
+      m.textureLoader.pendingPolls = 5
+      task = m.loader.loadBitmap("a", "tmp:/bge_tex.png")
+      m.loader.update(12)
+      task.abort()
+      m.assertEqual(1, m.textureLoader.cancelled)
+    end function
+
+    @it("drops the texture manager's copy before decoding a fresh download")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_tex.png"
+      task = m.loader.loadBitmap("a", "https://example.com/a.png")
+      tests.runLoader(m.loader)
+      fileTask = task as BGE.FileLoadTask
+      m.assertEqual(1, m.textureLoader.unloaded.count())
+      m.assertEqual(fileTask.path, m.textureLoader.unloaded[0])
+    end function
+
+    @describe("unloading")
+
+    @it("unloadBitmap drops the texture manager's copy")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png")
+      tests.runLoader(m.loader)
+      m.game.unloadBitmap("a")
+      m.assertInvalid(m.game.Bitmaps["a"])
+      m.assertEqual(1, m.textureLoader.unloaded.count())
+      m.assertEqual("tmp:/bge_tex.png", m.textureLoader.unloaded[0])
+    end function
+
+    @it("keeps the copy while another name still uses the file")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png")
+      m.loader.loadBitmap("b", "tmp:/bge_tex.png")
+      tests.runLoader(m.loader)
+      m.game.unloadBitmap("a")
+      m.assertEqual(0, m.textureLoader.unloaded.count())
+      m.game.unloadBitmap("b")
+      m.assertEqual(1, m.textureLoader.unloaded.count())
+    end function
+
+    @it("drops the copy when the name is loaded again another way")
+    function _()
+      m.loader.loadBitmap("a", "tmp:/bge_tex.png")
+      tests.runLoader(m.loader)
+      m.game.loadBitmap("a", "tmp:/bge_tex.png")
+      m.assertEqual(1, m.textureLoader.unloaded.count())
+      m.game.unloadBitmap("a")
+      m.assertEqual(1, m.textureLoader.unloaded.count())
+    end function
+
+    @it("doesn't touch the texture loader for other bitmaps")
+    function _()
+      m.game.loadBitmap("a", "tmp:/bge_tex.png")
+      m.game.unloadBitmap("a")
+      m.assertEqual(0, m.textureLoader.unloaded.count())
+    end function
+
+  end class
+
+end namespace

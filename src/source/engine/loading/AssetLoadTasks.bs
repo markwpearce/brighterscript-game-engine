@@ -10,6 +10,7 @@ import "../../utils/urls.bs"
 import "AssetLoader.bs"
 import "DownloadTask.bs"
 import "LoadTask.bs"
+import "TextureLoader.bs"
 
 namespace BGE
 
@@ -105,32 +106,116 @@ namespace BGE
 
   end class
 
-  ' Loads one bitmap with Game.loadBitmap(). One native decode, so a single step.
+  ' Options for `BGE.AssetLoader.loadBitmap()`.
+  interface BitmapLoadOptions extends DownloadOptions
+    ' resize to this width while loading (give height too)
+    optional width as integer
+    ' resize to this height while loading (give width too)
+    optional height as integer
+    ' false resizes with nearest neighbour, for crisp pixel art (default true, smooth)
+    optional smooth as boolean
+    ' true if you'll draw into this bitmap. It's decoded the slower way, in one frame, since
+    ' before Roku OS 16 the texture manager's bitmaps can't be drawn into (default false)
+    optional drawable as boolean
+  end interface
+
+  ' Loads one bitmap. Decodes with the game's TextureLoader, so a large image doesn't stall a
+  ' frame, falling back to Game.loadBitmap() for a drawable bitmap or a file it can't decode.
   class BitmapLoadTask extends FileLoadTask
 
     private game as BGE.Game
     private bitmapName as string
+    private width as integer = 0
+    private height as integer = 0
+    private smooth as boolean = true
+    private drawable as boolean = false
+    private textureRequest as dynamic = invalid
 
-    sub new(game as BGE.Game, bitmapName as string, path as string)
+    sub new(game as BGE.Game, bitmapName as string, path as string, options = invalid as BGE.BitmapLoadOptions)
       super(path)
       m.name = "bitmap " + path
       m.game = game
       m.bitmapName = bitmapName
+      if options <> invalid
+        if options.width <> invalid and options.height <> invalid and options.width > 0 and options.height > 0
+          m.width = options.width
+          m.height = options.height
+        else if options.width <> invalid or options.height <> invalid
+          game.log("BGE.AssetLoader.loadBitmap() - " + path + ": resizing needs both width and height, loading it at its own size", BGE.Debug.LogLevel.warning)
+        end if
+        if options.smooth = false
+          m.smooth = false
+        end if
+        if options.drawable = true
+          m.drawable = true
+        end if
+      end if
     end sub
 
     override function loadFile(budgetMs as integer) as boolean
+      textureLoader = m.game.getTextureLoader()
+      if m.textureRequest = invalid
+        if m.drawable or not textureLoader.isAvailable() or not m.isDecodableFile()
+          ' also gives the usual error for a missing or unsupported file
+          return m.loadOnMainThread()
+        end if
+        if m.download <> invalid and not m.download.fromCache
+          ' a fresh download may have replaced a file the texture manager still holds
+          textureLoader.unload(m.path)
+        end if
+        m.textureRequest = textureLoader.request(m.path, m.width, m.height, m.smooth)
+      end if
+      result = textureLoader.getResult(m.textureRequest)
+      if result = invalid
+        m.waitingForNextFrame = true
+        return false
+      end if
+      m.textureRequest = invalid
+      if result.ok
+        bitmap = result.bitmap
+        if m.width > 0 and (bitmap.GetWidth() <> m.width or bitmap.GetHeight() <> m.height)
+          ' a Roku decoding the same file for another request at the same time ignores the size
+          m.game.Bitmaps[m.bitmapName] = BGE.resizeBitmap(bitmap, m.width, m.height, m.smooth)
+          return true
+        end if
+        m.game.addTextureBitmap(m.bitmapName, bitmap, m.path)
+        return true
+      end if
+      return m.loadOnMainThread()
+    end function
+
+    override sub abort()
+      super.abort()
+      if m.textureRequest <> invalid
+        m.game.getTextureLoader().cancel(m.textureRequest)
+        m.textureRequest = invalid
+      end if
+    end sub
+
+    ' Bad only if it isn't an image.
+    override function isDownloadedFileBad() as boolean
+      return not BGE.FileTypes.isImageExtension(BGE.FileTypes.sniffExtension(m.path))
+    end function
+
+    private function isDecodableFile() as boolean
+      return BGE.FileTypes.isImageExtension(BGE.Urls.fileExtension(m.path)) and CreateObject("roFileSystem").Exists(m.path)
+    end function
+
+    private function loadOnMainThread() as boolean
       if not m.game.loadBitmap(m.bitmapName, m.path)
         m.error = "could not load bitmap " + m.source
         if m.download <> invalid and not m.isDownloadedFileBad()
           m.error = m.error + " (the file is a valid image - out of texture memory?)"
         end if
+        return true
+      end if
+      if m.width > 0
+        bitmap = m.game.getBitmap(m.bitmapName)
+        if bitmap.GetWidth() <> m.width or bitmap.GetHeight() <> m.height
+          m.game.Bitmaps[m.bitmapName] = BGE.resizeBitmap(bitmap, m.width, m.height, m.smooth)
+        end if
       end if
       return true
-    end function
-
-    ' Bad only if it isn't an image.
-    override function isDownloadedFileBad() as boolean
-      return not BGE.FileTypes.isImageExtension(BGE.FileTypes.sniffExtension(m.path))
     end function
 
   end class
