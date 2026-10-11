@@ -1,150 +1,289 @@
 import "../Game.bs"
+import "../debug/LogLevel.bs"
 import "../drawables/Model3d.bs"
+import "../../utils/fileTypes.bs"
 import "../../utils/parsers/ModelParseTask.bs"
+import "../../utils/parsers/OBJParser.bs"
 import "../../utils/parsers/OBJParseTask.bs"
 import "../../utils/parsers/STLParseTask.bs"
+import "../../utils/urls.bs"
+import "AssetLoader.bs"
+import "DownloadTask.bs"
 import "LoadTask.bs"
 
 namespace BGE
 
-  ' Loads one bitmap with Game.loadBitmap(). One native decode, so a single step.
-  class BitmapLoadTask extends LoadTask
+  ' Base for the built-in loads. Given a URL, the AssetLoader attaches a `download`; this task
+  ' runs it first, then loads the downloaded file. Subclasses override `loadFile()` (and
+  ' `getFileProgress()` if loading takes more than one step) rather than `step()`.
+  class FileLoadTask extends LoadTask
 
-    private game as BGE.Game
-    private bitmapName as string
-    private path as string
+    ' The file to load - the download's local file once downloaded
+    path as string
+    ' The path or URL this task was given, for messages
+    source as string
+    ' Downloads `path` first when it's a URL (invalid for a local file)
+    download as BGE.DownloadTask = invalid
+    ' Share of this task's progress that the download counts for
+    downloadShare as float = 0.8
 
-    sub new(game as BGE.Game, bitmapName as string, path as string)
+    private downloaded as boolean = false
+
+    sub new(path as string)
       super()
-      m.name = "bitmap " + path
-      m.game = game
-      m.bitmapName = bitmapName
       m.path = path
+      m.source = path
     end sub
 
     override function step(budgetMs as integer) as boolean
-      if not m.game.loadBitmap(m.bitmapName, m.path)
-        m.error = "could not load bitmap " + m.path
+      if m.download <> invalid and not m.downloaded
+        if not m.download.step(budgetMs)
+          m.waitingForNextFrame = true
+          return false
+        end if
+        m.downloaded = true
+        if m.download.error <> invalid
+          m.error = m.download.error
+          return true
+        end if
+        m.path = m.download.localPath
+      end if
+      if not m.loadFile(budgetMs)
+        return false
+      end if
+      if m.error <> invalid and m.download <> invalid and m.download.localPath <> "" and m.isDownloadedFileBad()
+        ' e.g. a captive-portal page served with a 200 - don't keep failing on the cached copy
+        CreateObject("roFileSystem").Delete(m.download.localPath)
+        m.error = m.error + "; the downloaded copy was discarded"
       end if
       return true
+    end function
+
+    ' Whether a downloaded file that failed to load is broken, so it's deleted rather than kept
+    ' in the cache. A load can fail with a good file, e.g. when texture memory runs out, so
+    ' override this to check the file itself. The default says it's broken.
+    '
+    ' @return {boolean}
+    function isDownloadedFileBad() as boolean
+      return true
+    end function
+
+    ' Releases the download's slot if step() threw.
+    override sub abort()
+      if m.download <> invalid
+        m.download.abort()
+      end if
+    end sub
+
+    override function getProgress() as float
+      if m.done
+        return 1.0
+      end if
+      if m.download = invalid
+        return m.getFileProgress()
+      end if
+      if not m.downloaded
+        return m.download.getProgress() * m.downloadShare
+      end if
+      return m.downloadShare + (1 - m.downloadShare) * m.getFileProgress()
+    end function
+
+    ' Loads the local file at `path`. Called repeatedly until it returns true.
+    '
+    ' @param {integer} budgetMs
+    ' @return {boolean} true when finished (set `error` on failure)
+    function loadFile(budgetMs as integer) as boolean
+      return true
+    end function
+
+    ' How far `loadFile()` has got, 0 to 1.
+    '
+    ' @return {float}
+    function getFileProgress() as float
+      return 0.0
+    end function
+
+  end class
+
+  ' Loads one bitmap with Game.loadBitmap(). One native decode, so a single step.
+  class BitmapLoadTask extends FileLoadTask
+
+    private game as BGE.Game
+    private bitmapName as string
+
+    sub new(game as BGE.Game, bitmapName as string, path as string)
+      super(path)
+      m.name = "bitmap " + path
+      m.game = game
+      m.bitmapName = bitmapName
+    end sub
+
+    override function loadFile(budgetMs as integer) as boolean
+      if not m.game.loadBitmap(m.bitmapName, m.path)
+        m.error = "could not load bitmap " + m.source
+        if m.download <> invalid and not m.isDownloadedFileBad()
+          m.error = m.error + " (the file is a valid image - out of texture memory?)"
+        end if
+      end if
+      return true
+    end function
+
+    ' Bad only if it isn't an image.
+    override function isDownloadedFileBad() as boolean
+      return not BGE.FileTypes.isImageExtension(BGE.FileTypes.sniffExtension(m.path))
     end function
 
   end class
 
   ' Loads one sound with Game.loadSound().
-  class SoundLoadTask extends LoadTask
+  class SoundLoadTask extends FileLoadTask
 
     private game as BGE.Game
     private soundName as string
-    private path as string
 
     sub new(game as BGE.Game, soundName as string, path as string)
-      super()
+      super(path)
       m.name = "sound " + path
       m.game = game
       m.soundName = soundName
-      m.path = path
     end sub
 
-    override function step(budgetMs as integer) as boolean
+    override function loadFile(budgetMs as integer) as boolean
       if not CreateObject("roFileSystem").Exists(m.path)
-        m.error = "sound file not found: " + m.path
+        m.error = "sound file not found: " + m.source
         return true
       end if
       m.game.loadSound(m.soundName, m.path)
       return true
     end function
 
+    ' Bad only if it isn't a .wav or .mp3.
+    override function isDownloadedFileBad() as boolean
+      sniffed = BGE.FileTypes.sniffExtension(m.path)
+      return sniffed <> ".wav" and sniffed <> ".mp3"
+    end function
+
   end class
 
   ' Registers one font file with Game.registerFont().
-  class FontLoadTask extends LoadTask
+  class FontLoadTask extends FileLoadTask
 
     private game as BGE.Game
-    private path as string
 
     sub new(game as BGE.Game, path as string)
-      super()
+      super(path)
       m.name = "font " + path
       m.game = game
-      m.path = path
     end sub
 
-    override function step(budgetMs as integer) as boolean
+    override function loadFile(budgetMs as integer) as boolean
       if not m.game.registerFont(m.path)
-        m.error = "could not register font " + m.path
+        m.error = "could not register font " + m.source
       end if
       return true
+    end function
+
+    ' Bad only if it isn't a .ttf or .otf.
+    override function isDownloadedFileBad() as boolean
+      sniffed = BGE.FileTypes.sniffExtension(m.path)
+      return sniffed <> ".ttf" and sniffed <> ".otf"
     end function
 
   end class
 
-  ' Loads a .obj or .stl model a slice at a time: reads the file, parses it over as many steps
-  ' as it needs, then adds it to the game (loading an .obj's texture).
-  class ModelLoadTask extends LoadTask
+  ' Loads a .obj or .stl model a slice at a time: downloads it if it's a URL, reads the file,
+  ' parses it over as many steps as it needs, downloads a remote texture if there is one, then
+  ' adds it to the game (loading an .obj's texture).
+  class ModelLoadTask extends FileLoadTask
+
+    ' Makes this model's texture downloads. Set by AssetLoader.
+    loader as BGE.AssetLoader = invalid
+    ' Options for this model's texture downloads. Set by AssetLoader.
+    downloadOptions as BGE.DownloadOptions
 
     private game as BGE.Game
     private modelName as string
-    private path as string
     private options as BGE.Model3dLoadOptions
     private parseTask as BGE.Parsers.ModelParseTask = invalid
+    private model as BGE.Model3d = invalid
     private isObj as boolean = false
     private parsed as boolean = false
+    private modelUrl as string = ""
+    private textureDownload as BGE.DownloadTask = invalid
+    private mtlDownload as BGE.DownloadTask = invalid
+    private localTexturePath as string = ""
+    private unknownExtension as boolean = false
 
     sub new(game as BGE.Game, modelName as string, path as string, options as BGE.Model3dLoadOptions)
-      super()
+      super(path)
       m.name = "model " + path
       m.game = game
       m.modelName = modelName
-      m.path = path
       m.options = options
+      m.downloadOptions = {}
+      m.downloadShare = 0.5
+      if BGE.Urls.isUrl(path)
+        m.modelUrl = path
+      end if
     end sub
 
-    override function step(budgetMs as integer) as boolean
-      if m.parsed
-        return true
+    override function loadFile(budgetMs as integer) as boolean
+      if not m.parsed
+        if m.parseTask = invalid
+          return m.startParse()
+        end if
+        if not m.parseTask.step(budgetMs)
+          return false
+        end if
+        if m.parseTask.error <> invalid
+          m.error = m.parseTask.error + " (" + m.source + ")"
+          return true
+        end if
+        m.model = m.parseTask.model
+        mtllibName = ""
+        if m.isObj
+          objTask = m.parseTask as BGE.Parsers.OBJParseTask
+          mtllibName = objTask.mtllibName
+        end if
+        ' the source text isn't needed once parsed
+        m.parseTask = invalid
+        m.parsed = true
+        m.startTextureDownloads(mtllibName)
       end if
-      if m.parseTask = invalid
-        return m.startParse()
-      end if
-      if not m.parseTask.step(budgetMs)
+      if not m.stepTextureDownloads(budgetMs)
+        m.waitingForNextFrame = true
         return false
       end if
-      if m.parseTask.error <> invalid
-        m.error = m.parseTask.error + " (" + m.path + ")"
-        return true
-      end if
-      if not m.game.addLoadedModel(m.modelName, m.parseTask.model, m.options, m.isObj)
-        m.error = "could not parse model " + m.path
-      end if
-      ' the model is registered, so drop the parse task (and its source text/bytes)
-      m.parseTask = invalid
-      m.parsed = true
-      return true
+      return m.addModel()
     end function
 
-    override function getProgress() as float
+    override function getFileProgress() as float
       if m.parsed
-        return 1.0
+        return 0.95
       end if
       if m.parseTask = invalid
         return 0.0
       end if
-      return m.parseTask.getProgress() * 0.95
+      return m.parseTask.getProgress() * 0.9
     end function
 
     ' Reads the file and creates the parse task. Returns true only if that failed.
     private function startParse() as boolean
       if not CreateObject("roFileSystem").Exists(m.path)
-        m.error = "model file not found: " + m.path
+        m.error = "model file not found: " + m.source
         return true
       end if
-      parts = CreateObject("roPath", m.path).Split()
-      extensionLower = LCase(parts.extension)
+      ' a download is saved with the extension of its detected type
+      extensionLower = LCase(CreateObject("roPath", m.path).Split().extension)
       if extensionLower = ".obj"
         m.isObj = true
         content = ReadAsciiFile(m.path)
-        objTask = new BGE.Parsers.OBJParseTask(content, parts.parent)
+        ' a remote .obj's .mtl is resolved against its URL after parsing, not the cache folder
+        baseDir = ""
+        if m.modelUrl = ""
+          baseDir = CreateObject("roPath", m.path).Split().parent
+        end if
+        objTask = new BGE.Parsers.OBJParseTask(content, baseDir)
         m.parseTask = objTask
       else if extensionLower = ".stl"
         content = ReadAsciiFile(m.path)
@@ -154,18 +293,134 @@ namespace BGE
         else
           bytes = CreateObject("roByteArray")
           if not bytes.ReadFile(m.path)
-            m.error = "could not read model " + m.path
+            m.error = "could not read model " + m.source
             return true
           end if
           binaryTask = new BGE.Parsers.STLBinaryParseTask(bytes)
           m.parseTask = binaryTask
         end if
       else
-        m.error = "model " + m.path + " must be .stl or .obj"
+        m.error = "model " + m.source + " must be .stl or .obj"
+        if m.download <> invalid
+          m.error = m.error + " (set the download option extension: "".obj"" or "".stl"")"
+          ' the file may be fine - it just needs the extension option
+          m.unknownExtension = true
+        end if
         return true
       end if
       return false
     end function
+
+    ' Bad unless it failed only because its type wasn't known.
+    override function isDownloadedFileBad() as boolean
+      return not m.unknownExtension
+    end function
+
+    ' Starts whichever download the texture needs, if any.
+    private sub startTextureDownloads(mtllibName as string)
+      texturePath = ""
+      if m.options <> invalid and m.options.texturePath <> invalid
+        texturePath = m.options.texturePath
+      end if
+      if BGE.Urls.isUrl(texturePath)
+        m.textureDownload = m.newDownload(texturePath)
+      else if texturePath = "" and m.isObj and m.modelUrl <> "" and mtllibName <> ""
+        m.mtlDownload = m.newDownload(BGE.Urls.resolveRelative(m.modelUrl, mtllibName))
+      end if
+    end sub
+
+    ' Steps the .mtl then texture download. Returns true when there's nothing left to download.
+    private function stepTextureDownloads(budgetMs as integer) as boolean
+      if m.mtlDownload <> invalid
+        if not m.mtlDownload.step(budgetMs)
+          return false
+        end if
+        mtl = m.mtlDownload
+        m.mtlDownload = invalid
+        if mtl.error <> invalid
+          m.warnUntextured(mtl.error)
+          return true
+        end if
+        mtlContent = ReadAsciiFile(mtl.localPath)
+        if not m.isMtl(mtlContent)
+          CreateObject("roFileSystem").Delete(mtl.localPath)
+          m.warnUntextured(mtl.url + " isn't a .mtl file; the downloaded copy was discarded")
+          return true
+        end if
+        mapKdPath = BGE.Parsers.extractMapKdPath(mtlContent)
+        if mapKdPath = ""
+          m.warnUntextured(mtl.url + " has no map_Kd texture")
+          return true
+        end if
+        m.textureDownload = m.newDownload(BGE.Urls.resolveRelative(m.modelUrl, mapKdPath))
+      end if
+      if m.textureDownload <> invalid
+        if not m.textureDownload.step(budgetMs)
+          return false
+        end if
+        texture = m.textureDownload
+        m.textureDownload = invalid
+        if texture.error <> invalid
+          m.warnUntextured(texture.error)
+          return true
+        end if
+        if not BGE.FileTypes.isImageExtension(BGE.FileTypes.sniffExtension(texture.localPath))
+          CreateObject("roFileSystem").Delete(texture.localPath)
+          m.warnUntextured(texture.url + " isn't an image; the downloaded copy was discarded")
+          return true
+        end if
+        m.localTexturePath = texture.localPath
+      end if
+      return true
+    end function
+
+    ' Also releases a texture or .mtl download's slot.
+    override sub abort()
+      super.abort()
+      if m.mtlDownload <> invalid
+        m.mtlDownload.abort()
+      end if
+      if m.textureDownload <> invalid
+        m.textureDownload.abort()
+      end if
+    end sub
+
+    private function addModel() as boolean
+      addOptions = m.options
+      if m.localTexturePath <> ""
+        addOptions = {texturePath: m.localTexturePath}
+      else if m.options <> invalid and BGE.Urls.isUrl(m.options.texturePath)
+        ' the URL texture failed - don't let addLoadedModel try it as a path
+        addOptions = {}
+      end if
+      if not m.game.addLoadedModel(m.modelName, m.model, addOptions, m.isObj)
+        m.error = "could not parse model " + m.source
+      end if
+      m.model = invalid
+      return true
+    end function
+
+    private function newDownload(url as string) as BGE.DownloadTask
+      if m.loader <> invalid
+        return m.loader.newDownloadTask(url, m.downloadOptions)
+      end if
+      task = new BGE.DownloadTask(url, m.downloadOptions)
+      return task
+    end function
+
+    ' A .mtl file has at least one `newmtl` line.
+    private function isMtl(content as string) as boolean
+      for each rawLine in content.Split(chr(10))
+        if rawLine.Trim().StartsWith("newmtl")
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    private sub warnUntextured(reason as string)
+      m.game.log("BGE.AssetLoader - " + reason + ", model " + m.modelName + " will render untextured", BGE.Debug.LogLevel.warning)
+    end sub
 
   end class
 

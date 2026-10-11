@@ -1,0 +1,364 @@
+import "DownloadPaths.bs"
+import "../GameTimer.bs"
+import "../../utils/fileTypes.bs"
+import "../../utils/urls.bs"
+import "LoadTask.bs"
+
+namespace BGE
+
+  ' Options for downloading a URL - see `AssetLoader.download()` and the built-in loads.
+  interface DownloadOptions extends roAssociativeArray
+    ' false downloads to tmp: for this launch only, instead of the cachefs: cache (default true)
+    optional cache as boolean
+    ' true downloads again even when a cached copy exists (default false)
+    optional refresh as boolean
+    ' seconds a download may take before it's abandoned (default 30)
+    optional timeoutSeconds as integer
+    ' how many more times a download is tried after a network/server error or timeout (default 1)
+    optional retries as integer
+    ' the extension to save the file with (e.g. ".jpg"), for a server that sends the wrong type.
+    ' Without it, the type comes from the URL's extension, then the response's Content-Type, then
+    ' the file's first bytes.
+    optional extension as string
+  end interface
+
+  ' Limits how many downloads run at once. Each AssetLoader has one.
+  class DownloadSlots
+    ' Most downloads at once
+    max as integer = 4
+    ' Downloads running now
+    active as integer = 0
+
+    ' Takes a slot if one is free.
+    '
+    ' @return {boolean} true if a slot was taken
+    function tryTake() as boolean
+      if m.active >= m.max
+        return false
+      end if
+      m.active++
+      return true
+    end function
+
+    ' Gives back a slot taken with tryTake().
+    sub give()
+      if m.active > 0
+        m.active--
+      end if
+    end sub
+  end class
+
+  ' Downloads a URL to a local file. A copy cached by an earlier download (even in an earlier
+  ' launch) is used without a request. Queue one with `AssetLoader.download()`; once it's done
+  ' without an `error`, `localPath` is the file.
+  class DownloadTask extends LoadTask
+
+    ' The URL being downloaded
+    url as string
+    ' The local file, once done
+    localPath as string = ""
+    ' True if the file was already cached, so no request was made
+    fromCache as boolean = false
+    ' How long the download took, in milliseconds (0 for a cached file)
+    elapsedMs as integer = 0
+    ' Shared with the other downloads in the same loader, to limit how many run at once
+    slots as BGE.DownloadSlots = invalid
+    ' Times each attempt, for the timeout
+    timer as BGE.GameTimer
+
+    ' The file's path without an extension
+    private basePath as string
+    ' The extension, if it's known before downloading ("" until then)
+    private extension as string = ""
+    private extensionKnown as boolean = false
+    private partPath as string = ""
+    private folder as string
+    private refresh as boolean = false
+    private timeoutMs as integer = 30000
+    private retriesLeft as integer = 1
+    private checkedCache as boolean = false
+    private holdingSlot as boolean = false
+    ' dynamic so tests can substitute fakes
+    private transfer as dynamic = invalid
+    ' dynamic so tests can substitute fakes
+    private port as dynamic = invalid
+    private totalTimer as BGE.GameTimer
+    private filesystem as roFileSystem
+
+    sub new(url as string, options = {} as BGE.DownloadOptions)
+      super()
+      m.name = "download " + url
+      m.url = url
+      m.timer = new BGE.GameTimer()
+      m.totalTimer = new BGE.GameTimer()
+      m.filesystem = CreateObject("roFileSystem")
+      useCache = true
+      if options.cache <> invalid
+        useCache = options.cache
+      end if
+      if options.refresh <> invalid
+        m.refresh = options.refresh
+      end if
+      if options.timeoutSeconds <> invalid
+        m.timeoutMs = options.timeoutSeconds * 1000
+      end if
+      if options.retries <> invalid
+        m.retriesLeft = options.retries
+      end if
+      m.folder = BGE.Downloads.getFolder(useCache)
+      m.basePath = BGE.Downloads.getBasePath(url, useCache)
+      urlExtension = BGE.Urls.fileExtension(url)
+      if options.extension <> invalid and options.extension <> ""
+        m.extension = LCase(options.extension)
+        if not m.extension.StartsWith(".")
+          m.extension = "." + m.extension
+        end if
+        m.extensionKnown = true
+      else if BGE.FileTypes.isKnownAssetExtension(urlExtension)
+        m.extension = urlExtension
+        m.extensionKnown = true
+      end if
+    end sub
+
+    override function step(budgetMs as integer) as boolean
+      if not m.checkedCache
+        m.checkedCache = true
+        if not BGE.Urls.isUrl(m.url)
+          return m.finish("not an http(s) URL: " + m.url)
+        end if
+        if not m.refresh
+          cachedPath = m.findCachedFile()
+          if cachedPath <> ""
+            m.localPath = cachedPath
+            m.fromCache = true
+            return m.finish(invalid)
+          end if
+        end if
+        m.totalTimer.mark()
+      end if
+      if m.transfer = invalid
+        return m.startAttempt()
+      end if
+      return m.poll()
+    end function
+
+    ' Progress is 0 until the download finishes, then 1. Roku reports nothing while a transfer
+    ' runs, so a download can't show partial progress - give a big one a higher `weight` and put
+    ' other work in the same batch so the bar still moves.
+    '
+    ' @return {float} 0 while downloading, 1 when done
+    override function getProgress() as float
+      if m.localPath <> ""
+        return 1.0
+      end if
+      return 0.0
+    end function
+
+    ' Creates the roUrlTransfer for each attempt. Override to customise requests (headers etc).
+    '
+    ' @return {dynamic} an roUrlTransfer
+    function createTransfer() as dynamic
+      ' dynamic so tests can substitute fakes
+      return CreateObject("roUrlTransfer")
+    end function
+
+    ' Creates the message port each attempt's events arrive on.
+    '
+    ' @return {dynamic} an roMessagePort
+    function createPort() as dynamic
+      ' dynamic so tests can substitute fakes
+      return CreateObject("roMessagePort")
+    end function
+
+    ' Gives back this download's slot and drops its transfer, if step() threw.
+    override sub abort()
+      if m.holdingSlot and m.slots <> invalid
+        m.slots.give()
+      end if
+      m.holdingSlot = false
+      if m.transfer <> invalid
+        m.transfer.AsyncCancel()
+      end if
+      m.transfer = invalid
+      m.port = invalid
+      if m.partPath <> ""
+        m.filesystem.Delete(m.partPath)
+      end if
+    end sub
+
+    ' The cached copy of this URL, or "".
+    private function findCachedFile() as string
+      if m.extensionKnown
+        if m.filesystem.Exists(m.basePath + m.extension)
+          return m.basePath + m.extension
+        end if
+        return ""
+      end if
+      matches = m.findFilesWithBasePath()
+      if matches.count() = 0
+        return ""
+      end if
+      return matches[0]
+    end function
+
+    ' Every finished download of this URL whatever its extension: "<md5>" or "<md5>.<ext>".
+    private function findFilesWithBasePath() as string[]
+      matches = [] as string[]
+      fileNames = m.filesystem.GetDirectoryListing(m.folder)
+      if fileNames = invalid
+        return matches
+      end if
+      baseName = m.basePath.Mid(Len(m.folder) + 1)
+      for each fileName in fileNames
+        if fileName = baseName or (fileName.StartsWith(baseName + ".") and not fileName.EndsWith(".part"))
+          matches.push(m.folder + "/" + fileName)
+        end if
+      end for
+      return matches
+    end function
+
+    ' The extension to save a finished download with: the one known up front, then the response's
+    ' Content-Type, then the file's first bytes, then the URL's extension whatever it is.
+    private function decideExtension(msg as dynamic) as string
+      if m.extensionKnown
+        return m.extension
+      end if
+      fromHeader = BGE.FileTypes.forContentType(m.getContentType(msg))
+      if fromHeader <> ""
+        return fromHeader
+      end if
+      sniffed = BGE.FileTypes.sniffExtension(m.partPath)
+      if sniffed <> ""
+        return sniffed
+      end if
+      return BGE.Urls.fileExtension(m.url)
+    end function
+
+    ' The response's Content-Type, or "". After a redirect GetResponseHeaders() merges every
+    ' response's headers, so the last content-type line (the final response's) is preferred.
+    private function getContentType(msg as dynamic) as string
+      contentType = invalid
+      headerLines = invalid
+      try
+        headerLines = msg.GetResponseHeadersArray()
+      catch e
+        headerLines = invalid
+      end try
+      if headerLines <> invalid
+        for each headerLine in headerLines
+          if headerLine <> invalid and headerLine["content-type"] <> invalid
+            contentType = headerLine["content-type"]
+          end if
+        end for
+      end if
+      if contentType = invalid
+        headers = msg.GetResponseHeaders()
+        if headers <> invalid and headers["content-type"] <> invalid
+          contentType = headers["content-type"]
+        end if
+      end if
+      if contentType = invalid
+        return ""
+      end if
+      return contentType
+    end function
+
+    private function startAttempt() as boolean
+      if not m.holdingSlot
+        if m.slots <> invalid and not m.slots.tryTake()
+          m.waitingForNextFrame = true
+          return false
+        end if
+        m.holdingSlot = true
+      end if
+      m.filesystem.CreateDirectory(m.folder)
+      ' a random suffix so two downloads of the same URL don't write the same file
+      m.partPath = m.basePath + m.extension + "." + Rnd(1000000000).ToStr() + ".part"
+      m.port = m.createPort()
+      m.transfer = m.createTransfer()
+      m.transfer.SetMessagePort(m.port)
+      m.transfer.SetUrl(m.url)
+      if LCase(m.url).StartsWith("https://")
+        m.transfer.SetCertificatesFile("common:/certs/ca-bundle.crt")
+        m.transfer.InitClientCertificates()
+      end if
+      m.timer.mark()
+      if not m.transfer.AsyncGetToFile(m.partPath)
+        return m.failAttempt("could not start downloading " + m.url, false)
+      end if
+      m.waitingForNextFrame = true
+      return false
+    end function
+
+    private function poll() as boolean
+      msg = m.port.GetMessage()
+      while msg <> invalid
+        ' 1 = complete. Roku sends no "started" event and writes the file only at the end.
+        if msg.GetInt() = 1
+          return m.finishAttempt(msg)
+        end if
+        msg = m.port.GetMessage()
+      end while
+      if m.timer.totalMilliseconds() >= m.timeoutMs
+        m.transfer.AsyncCancel()
+        return m.failAttempt("timed out after " + Int(m.timeoutMs / 1000).ToStr() + "s downloading " + m.url, true)
+      end if
+      m.waitingForNextFrame = true
+      return false
+    end function
+
+    private function finishAttempt(msg as dynamic) as boolean
+      code = msg.GetResponseCode()
+      if code >= 200 and code < 300
+        targetPath = m.basePath + m.decideExtension(msg)
+        ' every older copy of this URL, whatever its type, so a lookup can't find a stale one
+        for each oldPath in m.findFilesWithBasePath()
+          m.filesystem.Delete(oldPath)
+        end for
+        if not m.filesystem.Rename(m.partPath, targetPath)
+          m.filesystem.Delete(m.partPath)
+          return m.finish("could not save " + m.url + " to " + targetPath)
+        end if
+        m.localPath = targetPath
+        return m.finish(invalid)
+      end if
+      message = "HTTP " + code.ToStr() + " downloading " + m.url
+      if code <= 0
+        message = "network error (" + msg.GetFailureReason() + ") downloading " + m.url
+      end if
+      return m.failAttempt(message, code <= 0 or code >= 500)
+    end function
+
+    ' Retries next frame if allowed, otherwise fails the task.
+    private function failAttempt(message as string, canRetry as boolean) as boolean
+      m.filesystem.Delete(m.partPath)
+      m.transfer = invalid
+      m.port = invalid
+      if canRetry and m.retriesLeft > 0
+        m.retriesLeft--
+        m.waitingForNextFrame = true
+        return false
+      end if
+      return m.finish(message)
+    end function
+
+    private function finish(errorMessage as dynamic) as boolean
+      if m.holdingSlot and m.slots <> invalid
+        m.slots.give()
+      end if
+      m.holdingSlot = false
+      m.transfer = invalid
+      m.port = invalid
+      if not m.fromCache and m.checkedCache
+        m.elapsedMs = m.totalTimer.totalMilliseconds()
+      end if
+      if errorMessage <> invalid
+        m.error = errorMessage
+      end if
+      return true
+    end function
+
+  end class
+
+
+end namespace

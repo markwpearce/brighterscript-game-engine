@@ -1,6 +1,10 @@
+import "DownloadPaths.bs"
 import "../Game.bs"
+import "../debug/LogLevel.bs"
 import "../GameTimer.bs"
 import "../../math/math.bs"
+import "../../utils/urls.bs"
+import "DownloadTask.bs"
 import "LoadTask.bs"
 import "StepTask.bs"
 import "AssetLoadTasks.bs"
@@ -13,23 +17,30 @@ namespace BGE
   '
   ' Once every queued task has finished, `onComplete(loader)` is called. Adding a task after
   ' that starts a new batch: progress and errors start again from scratch.
+  '
+  ' A built-in load given a http(s):// URL downloads it first, caching it in cachefs: (see download()).
   class AssetLoader
 
     ' Called once when the queue drains, with this loader
     onComplete as sub(loader as AssetLoader) as void = invalid
     ' Measures each update()'s budget
     timer as BGE.GameTimer
+    ' Most downloads this loader runs at once (each loader, including game.assets, has its own
+    ' limit). Less than 1 counts as 1.
+    maxConcurrentDownloads as integer = 4
 
     private game as BGE.Game
     private tasks as BGE.LoadTask[]
     private errors as string[]
     private completeFired as boolean = true
+    private downloadSlots as BGE.DownloadSlots
 
     sub new(game as BGE.Game)
       m.game = game
       m.timer = new BGE.GameTimer()
       m.tasks = []
       m.errors = []
+      m.downloadSlots = new BGE.DownloadSlots()
     end sub
 
     ' Queues a task.
@@ -60,47 +71,106 @@ namespace BGE
       return m.addTask(task)
     end function
 
-    ' Queues loading a bitmap from a local path, as `game.loadBitmap()` would.
+    ' Queues loading a bitmap, as `game.loadBitmap()` would. A http(s):// URL is downloaded first
+    ' (see `download()` for caching).
     '
     ' @param {string} bitmapName - the name to get it by later (`game.getBitmap()`)
-    ' @param {string} path - local file path
+    ' @param {string} pathOrUrl - local file path or URL
+    ' @param {BGE.DownloadOptions} [options={}] - for a URL: caching, timeout and retries
     ' @return {BGE.LoadTask} the queued task
-    function loadBitmap(bitmapName as string, path as string) as BGE.LoadTask
-      task = new BGE.BitmapLoadTask(m.game, bitmapName, path)
+    function loadBitmap(bitmapName as string, pathOrUrl as string, options = {} as BGE.DownloadOptions) as BGE.LoadTask
+      task = new BGE.BitmapLoadTask(m.game, bitmapName, pathOrUrl)
+      m.attachDownload(task, pathOrUrl, options)
       return m.addTask(task)
     end function
 
-    ' Queues loading a sound from a local path, as `game.loadSound()` would.
+    ' Queues loading a sound, as `game.loadSound()` would. A http(s):// URL is downloaded first
+    ' (see `download()` for caching).
     '
     ' @param {string} soundName - the name to play it by later (`game.playSound()`)
-    ' @param {string} path - local file path
+    ' @param {string} pathOrUrl - local file path or URL
+    ' @param {BGE.DownloadOptions} [options={}] - for a URL: caching, timeout and retries
     ' @return {BGE.LoadTask} the queued task
-    function loadSound(soundName as string, path as string) as BGE.LoadTask
-      task = new BGE.SoundLoadTask(m.game, soundName, path)
+    function loadSound(soundName as string, pathOrUrl as string, options = {} as BGE.DownloadOptions) as BGE.LoadTask
+      task = new BGE.SoundLoadTask(m.game, soundName, pathOrUrl)
+      m.attachDownload(task, pathOrUrl, options)
       return m.addTask(task)
     end function
 
     ' Queues loading a .obj or .stl model, parsed a slice at a time so a big model doesn't
-    ' freeze the screen. Set the returned task's `weight` higher than other tasks' for a big
-    ' model, so the progress bar reflects how long it takes.
+    ' freeze the screen. A http(s):// URL is downloaded first; an .obj from a URL also downloads
+    ' its .mtl and texture, found relative to the model's URL. Set the returned task's `weight`
+    ' higher than other tasks' for a big model, so the progress bar reflects how long it takes.
     '
     ' @param {string} modelName - the name to get it by later (`game.get3dModel()`)
-    ' @param {string} path - local file path
-    ' @param {BGE.Model3dLoadOptions} [options={}] - same options as `game.load3dModel()`
+    ' @param {string} pathOrUrl - local file path or URL
+    ' @param {BGE.Model3dLoadOptions} [options={}] - same options as `game.load3dModel()`; `texturePath` may be a URL
+    ' @param {BGE.DownloadOptions} [downloadOptions={}] - caching, timeout and retries for every download this model needs
     ' @return {BGE.LoadTask} the queued task
-    function load3dModel(modelName as string, path as string, options = {} as BGE.Model3dLoadOptions) as BGE.LoadTask
-      task = new BGE.ModelLoadTask(m.game, modelName, path, options)
+    function load3dModel(modelName as string, pathOrUrl as string, options = {} as BGE.Model3dLoadOptions, downloadOptions = {} as BGE.DownloadOptions) as BGE.LoadTask
+      task = new BGE.ModelLoadTask(m.game, modelName, pathOrUrl, options)
+      task.loader = m
+      task.downloadOptions = downloadOptions
+      m.attachDownload(task, pathOrUrl, downloadOptions)
       return m.addTask(task)
     end function
 
-    ' Queues registering a font file, as `game.registerFont()` would.
+    ' Queues registering a font, as `game.registerFont()` would. A http(s):// URL is downloaded first
+    ' (see `download()` for caching).
     '
-    ' @param {string} path - local .ttf/.otf path
+    ' @param {string} pathOrUrl - local file path or URL
+    ' @param {BGE.DownloadOptions} [options={}] - for a URL: caching, timeout and retries
     ' @return {BGE.LoadTask} the queued task
-    function registerFont(path as string) as BGE.LoadTask
-      task = new BGE.FontLoadTask(m.game, path)
+    function registerFont(pathOrUrl as string, options = {} as BGE.DownloadOptions) as BGE.LoadTask
+      task = new BGE.FontLoadTask(m.game, pathOrUrl)
+      m.attachDownload(task, pathOrUrl, options)
       return m.addTask(task)
     end function
+
+    ' Queues a download of a URL to a local file. It's saved in the cachefs: cache, so a later
+    ' download of the same URL (even after a relaunch) uses that file without a request. The
+    ' OS may clear the cache when space runs low. Once done, the task's `localPath` is the file.
+    '
+    ' @param {string} url - a http:// or https:// URL
+    ' @param {BGE.DownloadOptions} [options={}] - `cache: false` for tmp: instead, `refresh: true` to download again, `timeoutSeconds`, `retries`
+    ' @return {BGE.DownloadTask} the queued task
+    function download(url as string, options = {} as BGE.DownloadOptions) as BGE.DownloadTask
+      task = m.newDownloadTask(url, options)
+      m.addTask(task)
+      return task
+    end function
+
+    ' Creates (but doesn't queue) the DownloadTask for a URL. Used by every download this loader
+    ' makes - override it to change how downloads are made.
+    '
+    ' @param {string} url
+    ' @param {BGE.DownloadOptions} options
+    ' @return {BGE.DownloadTask}
+    function newDownloadTask(url as string, options as BGE.DownloadOptions) as BGE.DownloadTask
+      task = new BGE.DownloadTask(url, options)
+      task.slots = m.downloadSlots
+      return task
+    end function
+
+    ' The slots this loader's downloads share, for a `newDownloadTask()` override.
+    '
+    ' @return {BGE.DownloadSlots}
+    function getDownloadSlots() as BGE.DownloadSlots
+      return m.downloadSlots
+    end function
+
+    ' Deletes every file in the download cache, so later downloads make a fresh request. Don't
+    ' call it while downloads are running.
+    sub clearCache()
+      filesystem = CreateObject("roFileSystem")
+      fileNames = filesystem.GetDirectoryListing(BGE.Downloads.CACHE_FOLDER)
+      if fileNames = invalid
+        return
+      end if
+      for each fileName in fileNames
+        filesystem.Delete(BGE.Downloads.CACHE_FOLDER + "/" + fileName)
+      end for
+    end sub
 
     ' Whether any tasks are queued in the current batch.
     '
@@ -152,6 +222,10 @@ namespace BGE
     '
     ' @param {integer} budgetMs
     sub update(budgetMs as integer)
+      m.downloadSlots.max = m.maxConcurrentDownloads
+      if m.downloadSlots.max < 1
+        m.downloadSlots.max = 1
+      end if
       if m.tasks.count() = 0
         return
       end if
@@ -203,12 +277,19 @@ namespace BGE
       return true
     end function
 
+    private sub attachDownload(task as BGE.FileLoadTask, pathOrUrl as string, options as BGE.DownloadOptions)
+      if BGE.Urls.isUrl(pathOrUrl)
+        task.download = m.newDownloadTask(pathOrUrl, options)
+      end if
+    end sub
+
     private sub runStep(task as BGE.LoadTask, budgetMs as integer)
       finished = false
       try
         finished = task.step(budgetMs)
       catch e
         task.error = task.name + " threw: " + e.message
+        task.abort()
         finished = true
       end try
       if finished

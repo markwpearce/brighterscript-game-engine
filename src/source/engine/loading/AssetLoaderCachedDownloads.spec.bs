@@ -1,0 +1,222 @@
+import "pkg:/source/engine/loading/DownloadPaths.bs"
+import "pkg:/source/engine/loading/AssetLoader.bs"
+
+namespace tests
+
+  ' Runs real DownloadTasks (with scripted transfers) through an AssetLoader, so files land at
+  ' their real hashed cachefs: paths.
+  @suite("BGE.AssetLoader cached downloads")
+  class AssetLoaderCachedDownloadsTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as tests.ScriptedAssetLoader
+    fs as roFileSystem
+
+    protected override function beforeEach()
+      m.fs = CreateObject("roFileSystem")
+      for each folder in [BGE.Downloads.CACHE_FOLDER, BGE.Downloads.TEMP_FOLDER]
+        fileNames = m.fs.GetDirectoryListing(folder)
+        if fileNames <> invalid
+          for each fileName in fileNames
+            m.fs.Delete(folder + "/" + fileName)
+          end for
+        end if
+      end for
+      m.game = new BGE.Game(320, 240)
+      m.loader = new tests.ScriptedAssetLoader(m.game)
+    end function
+
+    @describe("through the real cache")
+
+    @it("loads a model from its hashed cache file, typed by the URL's extension")
+    function _()
+      url = "https://example.com/models/tri.obj"
+      objLines = ["v 0 0 0", "v 1 0 0", "v 0 1 0", "f 1 2 3"]
+      m.loader.responses[url] = {code: 200, body: objLines.join(chr(10))}
+      task = m.loader.load3dModel("tri", url)
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      fileTask = task as BGE.FileLoadTask
+      m.assertEqual(BGE.Downloads.getPath(url, true), fileTask.path)
+      m.assertTrue(fileTask.path.StartsWith("cachefs:/bge/"))
+      m.assertFalse(fileTask.path.EndsWith("tri.obj"))
+      m.assertTrue(m.fs.Exists(fileTask.path))
+      m.assertEqual(1, m.game.Models["tri"].faces.count())
+    end function
+
+    @it("discards a downloaded file that doesn't load, and names the URL")
+    function _()
+      url = "https://example.com/portal.png"
+      m.loader.responses[url] = {code: 200, body: "<html>sign in to the wifi</html>"}
+      task = m.loader.loadBitmap("portal", url)
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertTrue(task.error.Instr("could not load bitmap " + url) >= 0)
+      m.assertTrue(task.error.Instr("the downloaded copy was discarded") >= 0)
+      m.assertFalse(m.fs.Exists(BGE.Downloads.getPath(url, true)))
+    end function
+
+    @it("loads a bitmap from a URL without an extension, then from the cache")
+    function _()
+      url = "https://example.com/picture/200"
+      bitmap = CreateObject("roBitmap", {width: 3, height: 5, AlphaEnable: true})
+      m.loader.responses[url] = {code: 200, bodyBytes: bitmap.GetPng(0, 0, 3, 5), headers: {"Content-Type": "image/png"}}
+      task = m.loader.loadBitmap("pic", url)
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(3, m.game.getBitmap("pic").GetWidth())
+      fileTask = task as BGE.FileLoadTask
+      m.assertEqual(BGE.Downloads.getBasePath(url, true) + ".png", fileTask.path)
+      m.loader.responses.Delete(url)
+      again = m.loader.loadBitmap("picAgain", url)
+      tests.runLoader(m.loader)
+      againTask = again as BGE.FileLoadTask
+      m.assertInvalid(again.error)
+      m.assertTrue(againTask.download.fromCache)
+      m.assertEqual(5, m.game.getBitmap("picAgain").GetHeight())
+    end function
+
+    @it("keeps an extensionless model it can't type, and says to set the extension")
+    function _()
+      url = "https://example.com/model?id=3"
+      objLines = ["v 0 0 0", "v 1 0 0", "v 0 1 0", "f 1 2 3"]
+      m.loader.responses[url] = {code: 200, body: objLines.join(chr(10)), headers: {"content-type": "text/plain"}}
+      task = m.loader.load3dModel("untyped", url)
+      tests.runLoader(m.loader)
+      m.assertTrue(task.error.Instr("set the download option extension") >= 0)
+      m.assertEqual(-1, task.error.Instr("discarded"))
+      m.assertTrue(m.fs.Exists(BGE.Downloads.getBasePath(url, true)))
+      m.loader.responses[url] = {code: 200, body: objLines.join(chr(10)), headers: {"content-type": "text/plain"}}
+      typed = m.loader.load3dModel("typed", url, {}, {extension: ".obj"})
+      tests.runLoader(m.loader)
+      m.assertInvalid(typed.error)
+      m.assertEqual(1, m.game.Models["typed"].faces.count())
+      m.assertFalse(m.fs.Exists(BGE.Downloads.getBasePath(url, true)))
+    end function
+
+    @it("still discards a model download that doesn't parse")
+    function _()
+      modelTask = new BGE.ModelLoadTask(m.game, "m", "tmp:/missing.obj", {})
+      m.assertTrue(modelTask.isDownloadedFileBad())
+    end function
+
+    @it("keeps a downloaded image that fails to load, and says it's valid")
+    function _()
+      url = "https://example.com/good.png"
+      bitmap = CreateObject("roBitmap", {width: 2, height: 2, AlphaEnable: true})
+      m.loader.responses[url] = {code: 200, bodyBytes: bitmap.GetPng(0, 0, 2, 2)}
+      m.stub(m.game as roAssociativeArray, "loadBitmap", false)
+      task = m.loader.loadBitmap("good", url)
+      tests.runLoader(m.loader)
+      m.assertEqual("could not load bitmap " + url + " (the file is a valid image - out of texture memory?)", task.error)
+      m.assertTrue(m.fs.Exists(BGE.Downloads.getPath(url, true)))
+    end function
+
+    @it("judges a downloaded file bad by its type, except a model")
+    function _()
+      WriteAsciiFile("tmp:/bge_bad_file", "<html>no</html>")
+      bitmap = CreateObject("roBitmap", {width: 2, height: 2, AlphaEnable: true})
+      bitmap.GetPng(0, 0, 2, 2).WriteFile("tmp:/bge_good_png")
+      bitmapTask = new BGE.BitmapLoadTask(m.game, "b", "tmp:/bge_good_png")
+      m.assertFalse(bitmapTask.isDownloadedFileBad())
+      bitmapTask.path = "tmp:/bge_bad_file"
+      m.assertTrue(bitmapTask.isDownloadedFileBad())
+      fontTask = new BGE.FontLoadTask(m.game, "tmp:/bge_bad_file")
+      m.assertTrue(fontTask.isDownloadedFileBad())
+      fontTask.path = "tmp:/bge_good_png"
+      m.assertTrue(fontTask.isDownloadedFileBad())
+      soundTask = new BGE.SoundLoadTask(m.game, "s", "tmp:/bge_bad_file")
+      m.assertTrue(soundTask.isDownloadedFileBad())
+      WriteAsciiFile("tmp:/bge_wav_file", "RIFF1234WAVEfmt ")
+      soundTask.path = "tmp:/bge_wav_file"
+      m.assertFalse(soundTask.isDownloadedFileBad())
+      WriteAsciiFile("tmp:/bge_otf_file", "OTTO1234")
+      fontTask.path = "tmp:/bge_otf_file"
+      m.assertFalse(fontTask.isDownloadedFileBad())
+      modelTask = new BGE.ModelLoadTask(m.game, "m", "tmp:/bge_good_png", {})
+      m.assertTrue(modelTask.isDownloadedFileBad())
+    end function
+
+    @describe("download limit")
+
+    @it("treats a limit below 1 as 1")
+    function _()
+      m.loader.maxConcurrentDownloads = 0
+      m.loader.responses["https://example.com/one.png"] = {code: 200, body: "1"}
+      task = m.loader.download("https://example.com/one.png")
+      tests.runLoader(m.loader)
+      m.assertInvalid(task.error)
+      m.assertEqual(1, m.loader.getDownloadSlots().max)
+    end function
+
+    @describe("a step that throws")
+
+    @it("gives back a download's slot so later downloads still run")
+    function _()
+      m.loader.maxConcurrentDownloads = 1
+      m.loader.throwingUrls["https://example.com/throws.png"] = true
+      m.loader.responses["https://example.com/after.png"] = {code: 200, body: "after"}
+      failed = m.loader.download("https://example.com/throws.png")
+      tests.runLoader(m.loader)
+      m.assertTrue(failed.error.Instr("threw") >= 0)
+      m.assertEqual(0, m.loader.getDownloadSlots().active)
+      second = m.loader.download("https://example.com/after.png")
+      tests.runLoader(m.loader)
+      m.assertInvalid(second.error)
+      m.assertEqual("after", ReadAsciiFile(second.localPath))
+      m.assertEqual(0, m.loader.getDownloadSlots().active)
+    end function
+
+    @it("gives back a load's download slot when it throws")
+    function _()
+      m.loader.maxConcurrentDownloads = 1
+      m.loader.throwingUrls["https://example.com/throws.png"] = true
+      m.loader.loadBitmap("broken", "https://example.com/throws.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertEqual(0, m.loader.getDownloadSlots().active)
+    end function
+
+  end class
+
+  ' An AssetLoader whose downloads are real DownloadTasks with scripted transfers: `responses`
+  ' maps a URL to its {code, body} (a missing URL gets a 404), and a URL in `throwingUrls`
+  ' throws when its transfer is created.
+  class ScriptedAssetLoader extends BGE.AssetLoader
+    responses as roAssociativeArray
+    throwingUrls as roAssociativeArray
+
+    sub new(game as BGE.Game)
+      super(game)
+      m.responses = {}
+      m.throwingUrls = {}
+    end sub
+
+    override function newDownloadTask(url as string, options as BGE.DownloadOptions) as BGE.DownloadTask
+      response = m.responses[url]
+      if response = invalid
+        response = {code: 404, body: "not found"}
+      end if
+      if m.throwingUrls.DoesExist(url)
+        throwing = new tests.ThrowingDownloadTask(url, options)
+        throwing.slots = m.getDownloadSlots()
+        return throwing
+      end if
+      task = new tests.ScriptedDownloadTask(url, options, [response])
+      task.slots = m.getDownloadSlots()
+      return task
+    end function
+  end class
+
+  ' A DownloadTask whose transfer can't be created.
+  class ThrowingDownloadTask extends BGE.DownloadTask
+    sub new(url as string, options as BGE.DownloadOptions)
+      super(url, options)
+    end sub
+
+    override function createTransfer() as dynamic
+      throw "no transfer for " + m.url
+    end function
+  end class
+
+end namespace
