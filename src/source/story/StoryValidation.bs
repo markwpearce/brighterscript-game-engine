@@ -1,0 +1,189 @@
+import "ValueKinds.bs"
+import "StoryTypes.bs"
+import "StoryState.bs"
+import "Selection.bs"
+
+namespace BGE.Story
+
+  ' Checks a story for mistakes: jumps to nodes that don't exist, conditions and effects nothing
+  ' handles, empty or malformed nodes. Run it in a test over your real story data.
+  '
+  ' @param {dynamic} story
+  ' @param {StoryState} state - with your game's conditions and effects registered
+  ' @return {string[]} one message per problem; empty when the story is fine
+  function validateStory(story as dynamic, state as StoryState) as string[]
+    errors = [] as string[]
+    if type(story) <> "roAssociativeArray"
+      errors.push("the story isn't an object")
+      return errors
+    end if
+    if type(story.nodes) <> "roAssociativeArray"
+      errors.push("the story has no nodes object")
+      return errors
+    end if
+    for each id in story.nodes
+      where = "node '" + id + "'"
+      if Instr(1, id, "#") > 0 or Instr(1, id, "/") > 0
+        errors.push(where + ": ids can't contain # or /")
+      end if
+      entry = story.nodes[id]
+      candidates = getCandidates(entry)
+      if candidates <> invalid
+        mode = getSelectMode(entry)
+        if mode <> "first" and mode <> "random"
+          errors.push(where + ": unknown select " + FormatJson(entry.select))
+        end if
+        if candidates.count() = 0
+          errors.push(where + " has no candidates")
+        end if
+        for i = 0 to candidates.count() - 1
+          validateStoryNode(where + " candidate " + i.toStr(), candidates[i], story, state, errors)
+        end for
+      else
+        validateStoryNode(where, entry, story, state, errors)
+      end if
+    end for
+    if story.rules <> invalid
+      if type(story.rules) <> "roArray"
+        errors.push("rules must be a list")
+      else
+        for i = 0 to story.rules.count() - 1
+          rule = story.rules[i]
+          ruleWhere = "rule " + i.toStr()
+          if type(rule) <> "roAssociativeArray"
+            errors.push(ruleWhere + " isn't an object")
+          else
+            if valueKind(rule.event) <> "string"
+              errors.push(ruleWhere + " has no event")
+            end if
+            validateStoryConditions(ruleWhere, rule.when, state, errors)
+            validateStoryEffects(ruleWhere, rule.effects, state, errors)
+          end if
+        end for
+      end if
+    end if
+    if story.items <> invalid
+      if type(story.items) <> "roAssociativeArray"
+        errors.push("items must be an object")
+      else
+        for each itemId in story.items
+          definition = story.items[itemId]
+          itemWhere = "item '" + itemId + "'"
+          if type(definition) <> "roAssociativeArray"
+            errors.push(itemWhere + " isn't an object")
+          else
+            if valueKind(definition.max) <> "integer"
+              errors.push(itemWhere + " needs an integer max")
+            end if
+            validateStoryEffects(itemWhere + " onAcquire", definition.onAcquire, state, errors)
+          end if
+        end for
+      end if
+    end if
+    return errors
+  end function
+
+  sub validateStoryNode(where as string, node as dynamic, story as StoryData, state as StoryState, errors as string[])
+    if type(node) <> "roAssociativeArray"
+      errors.push(where + " isn't a node, a list of nodes or a {select, candidates} group")
+      return
+    end if
+    hasLines = false
+    if node.lines <> invalid
+      if type(node.lines) <> "roArray"
+        errors.push(where + ": lines must be a list")
+      else
+        hasLines = node.lines.count() > 0
+        for i = 0 to node.lines.count() - 1
+          line = node.lines[i]
+          if valueKind(line) <> "string"
+            lineOk = false
+            if type(line) = "roAssociativeArray"
+              lineOk = valueKind(line.text) = "string"
+            end if
+            if not lineOk
+              errors.push(where + " line " + i.toStr() + " needs text")
+            end if
+          end if
+        end for
+      end if
+    end if
+    hasChoices = false
+    if node.choices <> invalid
+      if type(node.choices) <> "roArray"
+        errors.push(where + ": choices must be a list")
+      else
+        hasChoices = node.choices.count() > 0
+        for i = 0 to node.choices.count() - 1
+          choice = node.choices[i]
+          choiceWhere = where + " choice " + i.toStr()
+          if type(choice) <> "roAssociativeArray"
+            errors.push(choiceWhere + " isn't an object")
+          else
+            validateStoryConditions(choiceWhere, choice.when, state, errors)
+            validateStoryEffects(choiceWhere, choice.effects, state, errors)
+            validateStoryTarget(choiceWhere, choice["call"], story, errors)
+            validateStoryTarget(choiceWhere, choice["goto"], story, errors)
+          end if
+        end for
+      end if
+    end if
+    hasJump = valueKind(node["call"]) <> "invalid" or valueKind(node["goto"]) <> "invalid" or isTrue(node["end"])
+    if not hasLines and not hasChoices and not hasJump
+      errors.push(where + " has nothing to do (no lines, choices, call, goto or end)")
+    end if
+    validateStoryConditions(where, node.when, state, errors)
+    validateStoryEffects(where, node.effects, state, errors)
+    validateStoryTarget(where, node["call"], story, errors)
+    validateStoryTarget(where, node["goto"], story, errors)
+  end sub
+
+  sub validateStoryTarget(where as string, target as dynamic, story as StoryData, errors as string[])
+    kind = valueKind(target)
+    if kind = "invalid"
+      return
+    end if
+    if kind <> "string"
+      errors.push(where + " goes to " + FormatJson(target) + ", which isn't a node id")
+    else if not story.nodes.DoesExist(target)
+      errors.push(where + " goes to unknown node '" + target + "'")
+    end if
+  end sub
+
+  sub validateStoryConditions(where as string, conditions as dynamic, state as StoryState, errors as string[])
+    if conditions = invalid
+      return
+    end if
+    if type(conditions) <> "roArray"
+      errors.push(where + ": when must be a list")
+      return
+    end if
+    for each condition in conditions
+      if type(condition) <> "roAssociativeArray"
+        errors.push(where + " has a condition that isn't an object")
+      else if condition.DoesExist("any")
+        validateStoryConditions(where, condition.any, state, errors)
+      else if not state.isKnownCondition(condition)
+        errors.push(where + " has an unknown condition " + FormatJson(condition))
+      end if
+    end for
+  end sub
+
+  sub validateStoryEffects(where as string, effects as dynamic, state as StoryState, errors as string[])
+    if effects = invalid
+      return
+    end if
+    if type(effects) <> "roArray"
+      errors.push(where + ": effects must be a list")
+      return
+    end if
+    for each effect in effects
+      if type(effect) <> "roAssociativeArray"
+        errors.push(where + " has an effect that isn't an object")
+      else if not state.isKnownEffect(effect)
+        errors.push(where + " has an unknown effect " + FormatJson(effect))
+      end if
+    end for
+  end sub
+
+end namespace
