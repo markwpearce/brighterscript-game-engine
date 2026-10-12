@@ -167,6 +167,26 @@ no difference. In a BrighterScript AA literal write them quoted
 {"when": [{"visited": "shipTalk"}], "goto": "confrontation"}
 ```
 
+If a fallback's `call` names a node that can't be entered, the runner moves on
+to the node's own `call`/`goto`, or finishes it.
+
+To show the choices together with the last line (as the rpg's dialogue box
+does), check `choicesFollow()` once a line is on screen:
+
+```brighterscript
+line = m.runner.currentLine()
+m.lineLabel.setText(line.text)
+if m.runner.choicesFollow()
+  ' the last line of a node with choices: show it, then bring up the choices under it
+  m.runner.advance()
+  m.addButtons()
+end if
+```
+
+Draw the line first, because `advance()` runs the node's effects at that point,
+and if none of its choices turn out to be available the runner carries on to
+the node's `call`/`goto`/`end` (so check `isChoosing()` before adding buttons).
+
 Any other key on a choice (`open: "shop"`, say) is yours to read from
 `choices()[i].choice` after you call `choose()`.
 
@@ -217,7 +237,7 @@ integers, floats and booleans. Conditions test them. All of these go in a
 |---|---|
 | `{flag}` | the flag is set |
 | `{flag, eq}` | the flag equals `eq` |
-| `{flag, gte}` / `{flag, lt}` | the flag is at least / below the number |
+| `{flag, gte}` / `{flag, lt}` | the flag, read as an integer (a float is truncated), is at least / below the number |
 | `{notFlag}` | the flag is not set |
 | `{hasItem}` / `{notItem}` | the item is carried / not carried |
 | `{visited}` / `{visited, gte}` / `{notVisited}` | the node was entered (at least n times) / never |
@@ -342,11 +362,14 @@ fields (`name`, `icon`) stay on the definition in `story.items` for you to read.
 State and position are saved separately, and both are plain data:
 
 ```brighterscript
-' Save
-BGE.registryWrite("my-game", "save", {
-  state: m.state.toSaveData(),
-  position: m.runner.getPosition()
-})
+' Save (getPosition() is invalid when no conversation is active or a startNode() one-off is playing)
+position = m.runner.getPosition()
+if position <> invalid
+  BGE.registryWrite("my-game", "save", {
+    state: m.state.toSaveData(),
+    position: position
+  })
+end if
 
 ' Load
 saved = BGE.registryRead("my-game", "save", invalid)
