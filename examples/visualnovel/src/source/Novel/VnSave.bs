@@ -1,0 +1,123 @@
+' examples/visualnovel/src/source/Novel/VnSave.bs
+import "pkg:/source/story/StoryState.bs"
+import "pkg:/source/story/DialogueRunner.bs"
+
+const VN_SAVE_VERSION = 1
+const VN_SAVE_SECTION = "bge-visualnovel"
+const VN_ENDING_COUNT = 3
+
+' What's on screen: background and portrait ids ("" for none).
+interface VnStage
+  background as string
+  left as string
+  right as string
+end interface
+
+interface VnSave extends roAssociativeArray
+  version as integer
+  state as BGE.Story.StorySaveData
+  position as BGE.Story.RunnerPosition
+  ' {text, speaker, isChoice} per entry
+  backlog as roAssociativeArray[]
+  stage as VnStage
+end interface
+
+' @return {VnSave} or invalid if there's nothing to resume (no conversation, or a one-off node)
+function buildVnSave(state as BGE.Story.StoryState, runner as BGE.Story.DialogueRunner, stage as VnStage) as VnSave
+  position = runner.getPosition()
+  if position = invalid
+    return invalid
+  end if
+  return {
+    version: VN_SAVE_VERSION,
+    state: state.toSaveData(),
+    position: position,
+    backlog: backlogToSave(runner.backlog),
+    stage: {background: stage.background, left: stage.left, right: stage.right}
+  }
+end function
+
+' @return {VnSave} the save if it has the right shape and version, else invalid
+function validateVnSave(data as dynamic) as VnSave
+  if type(data) <> "roAssociativeArray"
+    return invalid
+  end if
+  if BGE.Story.valueKind(data.version) <> "integer"
+    return invalid
+  end if
+  if data.version <> VN_SAVE_VERSION
+    return invalid
+  end if
+  if type(data.state) <> "roAssociativeArray" or type(data.position) <> "roAssociativeArray" or type(data.stage) <> "roAssociativeArray"
+    return invalid
+  end if
+  for each key in ["background", "left", "right"]
+    if BGE.Story.valueKind(data.stage[key]) <> "string"
+      data.stage[key] = ""
+    end if
+  end for
+  return data
+end function
+
+' Loads a save into the state and runner.
+'
+' @return {boolean} false if the saved position doesn't fit the story any more - start over
+function applyVnSave(save as VnSave, state as BGE.Story.StoryState, runner as BGE.Story.DialogueRunner) as boolean
+  if save = invalid
+    return false
+  end if
+  state.loadSaveData(save.state)
+  if not runner.restore(save.position)
+    state.reset()
+    return false
+  end if
+  runner.backlog = backlogFromSave(save.backlog)
+  return true
+end function
+
+function backlogToSave(backlog as BGE.Story.StoryLineView[]) as roAssociativeArray[]
+  entries = [] as roAssociativeArray[]
+  for each view in backlog
+    entries.push({text: view.text, speaker: view.speaker, isChoice: view.isChoice})
+  end for
+  return entries
+end function
+
+function backlogFromSave(data as dynamic) as BGE.Story.StoryLineView[]
+  views = [] as BGE.Story.StoryLineView[]
+  if type(data) <> "roArray"
+    return views
+  end if
+  for each entry in data
+    if type(entry) = "roAssociativeArray"
+      if BGE.Story.valueKind(entry.text) = "string" and BGE.Story.valueKind(entry.speaker) = "string"
+        views.push({text: entry.text, speaker: entry.speaker, line: {text: entry.text}, isChoice: BGE.Story.isTrue(entry.isChoice)})
+      end if
+    end if
+  end for
+  return views
+end function
+
+function addEndingSeen(seen as roAssociativeArray, endingId as string) as roAssociativeArray
+  result = {}
+  if type(seen) = "roAssociativeArray"
+    result.Append(seen)
+  end if
+  result[endingId] = true
+  return result
+end function
+
+' @return {string} "Endings found: n of 3", or "" before the first
+function endingsSeenText(seen as roAssociativeArray) as string
+  if type(seen) <> "roAssociativeArray" or seen.Count() = 0
+    return ""
+  end if
+  return "Endings found: " + seen.Count().toStr() + " of " + VN_ENDING_COUNT.toStr()
+end function
+
+' Removes the saved game, e.g. when the player picks New Game or finishes.
+sub deleteVnSave()
+  section = CreateObject("roRegistrySection", VN_SAVE_SECTION)
+  section.Delete("save")
+  section.Flush()
+end sub
