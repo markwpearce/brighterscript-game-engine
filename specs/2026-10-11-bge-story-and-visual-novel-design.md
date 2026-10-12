@@ -136,6 +136,7 @@ runner.cancel()                          ' ends the conversation; nothing furthe
 runner.isActive() as boolean
 runner.currentLine() as StoryLineView    ' {text (interpolated), speaker, line (the raw StoryLine AA)}, or invalid while choosing
 runner.advance() as StoryResult          ' next line; at the node's end, see below
+runner.choicesFollow() as boolean        ' last line of a node with choices: advance() at once to show them with it
 runner.isChoosing() as boolean
 runner.choices() as ChoiceView[]         ' {label (interpolated), enabled, choice (raw AA)}
 runner.choose(index) as StoryResult
