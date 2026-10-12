@@ -115,6 +115,10 @@ state.loadSaveData(data)                         ' sanitizes like StoryFlags.loa
 
 `StoryResult` is unchanged: `{changed, posts, messages}`.
 
+`interpolate` replaces each `${key}` with the flag's value: a string as-is, an integer/float via `toStr()`,
+a boolean as `true`/`false`, and a **missing flag as `""`** (the rpg's version used `0`; set a counter to 0
+explicitly if text shows it before it's first counted). A `${` with no closing `}` is left as written.
+
 ### `DialogueRunner`
 
 A UI-free state machine that plays nodes. A game's dialogue box asks it what to show and tells it what the
@@ -211,6 +215,8 @@ CLAUDE.md gains a `BGE.Story` bullet; the rpg bullet stops saying the story laye
   per story stage as `select: "random"` groups - the showcase for random selection.
 - **Save data** goes to version 2, adding `visits`. A version 1 save still loads (empty visits) - the rpg's
   only story state that would care is dialogue `once`, which it doesn't use yet.
+- **Missing flags interpolate as `""` now:** Bram's quest-start page also sets `rats.kills` to 0, so "Still
+  rats about. ${rats.kills} of 4" reads "0 of 4" before the first kill, as it does today.
 - **One behavior change:** a page's effects now run when its last line is read, before its choices show,
   rather than after the choice. Backing out of a choice list no longer undoes them. Only Bram's final page
   has both effects and choices; its "The End" choice is the only one, so nothing is lost.
