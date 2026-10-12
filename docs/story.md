@@ -346,8 +346,9 @@ end function, player)
 ```
 
 A registered key wins over a built-in one with the same name. An unknown key
-logs a single `[BGE.Story] warning` and fails the condition (or does nothing,
-for an effect). The `examples/rpg` story registers `coinsGte`, `giveCoins`,
+logs a `[BGE.Story] warning` every time it's evaluated and fails the condition
+(or does nothing, for an effect) - `validateStory()` finds these up front.
+The `examples/rpg` story registers `coinsGte`, `giveCoins`,
 `takeCoins`, `heal` and `addMaxHealth` this way.
 
 ## Items
