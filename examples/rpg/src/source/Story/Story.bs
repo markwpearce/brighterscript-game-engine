@@ -1,12 +1,12 @@
 ' examples/rpg/src/source/Story/Story.bs
 import "pkg:/source/utils/registry.bs"
-import "StoryFlags.bs"
-import "Inventory.bs"
+import "pkg:/source/story/ValueKinds.bs"
+import "pkg:/source/story/StoryTypes.bs"
+import "pkg:/source/story/StoryState.bs"
+import "pkg:/source/story/DialogueRunner.bs"
 import "Items.bs"
-import "Conditions.bs"
-import "Effects.bs"
-import "RpgEventRules.bs"
-import "DialogueData.bs"
+import "StoryData.bs"
+import "RpgVocabulary.bs"
 import "QuestData.bs"
 import "ShopData.bs"
 import "SaveData.bs"
@@ -25,8 +25,14 @@ import "../Audio/PlayAudio.bs"
 ' working while a panel has the game paused.
 class Story extends BGE.GameEntity
 
-  flags as StoryFlags = invalid
-  inventory as Inventory = invalid
+  state as BGE.Story.StoryState = invalid
+  runner as BGE.Story.DialogueRunner = invalid
+  ' Kept as aliases of the state's, which never replaces them.
+  flags as BGE.Story.StoryFlags = invalid
+  inventory as BGE.Story.Inventory = invalid
+  private vocab as RpgVocabularyContext = invalid
+  ' A choice's open ("shop", "credits") to act on when the dialogue closes.
+  private pendingOpen as string = ""
   ' Off while a --param deep link is active, so testing never overwrites a real save.
   savingEnabled as boolean = true
   private sceneName as string = ""
@@ -40,7 +46,7 @@ class Story extends BGE.GameEntity
   ' Deep-link testing: a panel to open once the first area has faded in ("inventory").
   openOnArrival as string = ""
   ' message effects waiting for every panel to close
-  private pendingMessages as StoryMessage[] = []
+  private pendingMessages as BGE.Story.StoryMessage[] = []
   ' A scripted conversation waiting for every panel to close (see startScripted).
   private pendingScripted as string = ""
   private pendingCredits as boolean = false
@@ -53,25 +59,33 @@ class Story extends BGE.GameEntity
     m.name = "Story"
     m.persistent = true
     m.pauseable = false
-    m.flags = new StoryFlags()
-    m.inventory = new Inventory(getItemDefinitions())
+    m.vocab = {player: invalid}
+    m.state = newRpgStoryState(m.vocab)
+    m.runner = new BGE.Story.DialogueRunner(m.state, getStoryData())
+    m.flags = m.state.flags
+    m.inventory = m.state.inventory
   end sub
 
-  function context() as StoryContext
-    return newStoryContext(m.flags, m.inventory, m.getPlayer())
+  ' The story state, with the rpg's vocabulary pointed at the current Player. Use this, not m.state,
+  ' for anything that evaluates conditions or applies effects.
+  function storyState() as BGE.Story.StoryState
+    m.vocab.player = m.getPlayer()
+    return m.state
   end function
 
   sub newGame()
-    m.flags.clear()
-    m.inventory.clear()
+    m.storyState().reset()
     m.getPlayer().resetForNewGame()
     m.syncPlayer()
   end sub
 
   ' @param {SaveData} save - from readSave()
   sub loadSave(save as SaveData)
-    m.flags.loadAA(save.flags)
-    m.inventory.loadAA(save.inventory)
+    m.storyState().loadSaveData({flags: save.flags, inventory: save.inventory, visits: save.visits})
+    ' Saves from before rats.kills was always set would read "Kill rats (/4)".
+    if m.flags.getInt("rats.stage") >= 1 and BGE.Story.valueKind(m.flags.get("rats.kills")) = "invalid"
+      m.flags.set("rats.kills", 0)
+    end if
     m.getPlayer().applySavedStats(save.player)
     m.syncPlayer()
   end sub
@@ -118,7 +132,7 @@ class Story extends BGE.GameEntity
     if not m.savingEnabled or m.sceneName = ""
       return
     end if
-    BGE.registryWrite(SAVE_SECTION, SAVE_KEY, buildSaveData(m.sceneName, m.spawn, m.flags, m.inventory, m.getPlayer()))
+    BGE.registryWrite(SAVE_SECTION, SAVE_KEY, buildSaveData(m.sceneName, m.spawn, m.state, m.getPlayer()))
     m.game.postGameEvent("storySaved")
   end sub
 
@@ -128,13 +142,13 @@ class Story extends BGE.GameEntity
     else if eventName = "inventoryRequested"
       m.openInventory()
     else if eventName = "enemyKilled" or eventName = "roomCleared" or eventName = "switchPressed"
-      m.applyResult(runEventRules(getEventRules(), eventName, data, m.context()))
+      m.applyResult(m.storyState().runEvent(eventName, data))
     end if
   end sub
 
   ' Runs story effects for something in the world (a pickup, a switch, a door).
-  sub runEffects(effects as StoryEffect[])
-    m.applyResult(applyEffects(effects, m.context()))
+  sub runEffects(effects as BGE.Story.StoryEffect[])
+    m.applyResult(m.storyState().applyEffects(effects))
   end sub
 
   ' Called when the player walks into a gate: runs its effects if its conditions pass, or says
@@ -143,7 +157,7 @@ class Story extends BGE.GameEntity
     if m.isModalOpen()
       return
     end if
-    if evaluateConditions(unlock.when, m.context())
+    if m.storyState().evaluate(unlock.when)
       m.runEffects(unlock.effects)
     else
       m.showMessage(unlock.lockedMessage)
@@ -155,29 +169,29 @@ class Story extends BGE.GameEntity
     m.pendingMessages.push({text: text, speaker: speaker})
   end sub
 
-  ' Called by the DialogueBox when the last page is read (choice is invalid without choices).
-  sub finishDialogue(page as DialoguePage, choice as DialogueChoice)
+  ' Called by the DialogueBox after advance(): settles, saves and posts what the step did.
+  sub dialogueStepped(result as BGE.Story.StoryResult)
+    m.applyResult(result)
+  end sub
+
+  ' Called by the DialogueBox after choose(). open is the choice's "open" key ("" for none).
+  sub dialogueChose(result as BGE.Story.StoryResult, open as string)
+    if open <> ""
+      m.pendingOpen = open
+    end if
+    m.applyResult(result)
+  end sub
+
+  ' Called by the DialogueBox once the runner is no longer active.
+  sub dialogueEnded()
     m.openPanel = invalid
-    ' One merged result: a single settle, save and batch of posts.
-    effects = [] as StoryEffect[]
-    if page.effects <> invalid
-      effects.append(page.effects)
-    end if
-    opensShop = false
-    opensCredits = false
-    if choice <> invalid
-      if choice.effects <> invalid
-        effects.append(choice.effects)
-      end if
-      opensShop = choice.open <> invalid and choice.open = "shop"
-      opensCredits = choice.open <> invalid and choice.open = "credits"
-    end if
-    m.applyResult(applyEffects(effects, m.context()))
-    if opensCredits
+    opens = m.pendingOpen
+    m.pendingOpen = ""
+    if opens = "credits"
       m.pendingCredits = true
     end if
     ' Open the shop before releasing the dialogue's modal so the game never resumes in between.
-    if opensShop
+    if opens = "shop"
       m.openShop()
     end if
     m.endTalking()
@@ -186,6 +200,8 @@ class Story extends BGE.GameEntity
 
   ' Called by the DialogueBox when the player backs out: no effects run.
   sub cancelDialogue()
+    m.runner.cancel()
+    m.pendingOpen = ""
     m.openPanel = invalid
     m.endTalking()
     m.releaseModalLater()
@@ -233,8 +249,8 @@ class Story extends BGE.GameEntity
       m.game.changeSceneWithFade("CreditsScene", {})
     else if canOpen and m.pendingMessages.count() > 0
       message = m.pendingMessages.Shift()
-      page = {speaker: message.speaker, lines: [message.text]} as DialoguePage
-      m.openDialogue(page)
+      m.runner.startNode({speaker: message.speaker, lines: [message.text]})
+      m.openDialogue()
     else if canOpen and m.pendingScripted <> ""
       npcId = m.pendingScripted
       m.pendingScripted = ""
@@ -274,8 +290,8 @@ class Story extends BGE.GameEntity
   end function
 
   function buy(itemId as string) as ActionResult
-    ctx = m.context()
-    result = buyItem(itemId, m.priceOf(itemId), ctx)
+    state = m.storyState()
+    result = buyItem(itemId, m.priceOf(itemId), state, m.getPlayer())
     if result.ok
       playSfx(m.game, "purchase")
       m.applyResult({changed: true, posts: [], messages: []})
@@ -284,7 +300,8 @@ class Story extends BGE.GameEntity
   end function
 
   function use(itemId as string) as ActionResult
-    result = useItem(itemId, m.context())
+    state = m.storyState()
+    result = useItem(itemId, state, m.getPlayer())
     if result.ok
       m.applyResult({changed: true, posts: [], messages: []})
     end if
@@ -318,11 +335,11 @@ class Story extends BGE.GameEntity
 
   ' Settles the story after a change, posts what the rules asked for, keeps the player's
   ' sword in step with the inventory, and saves.
-  private sub applyResult(result as StoryResult)
+  private sub applyResult(result as BGE.Story.StoryResult)
     if not result.changed and result.posts.count() = 0 and result.messages.count() = 0
       return
     end if
-    settled = settleStory(getEventRules(), m.context())
+    settled = m.storyState().settle()
     m.syncPlayer()
     posts = [] as string[]
     posts.append(result.posts)
@@ -349,8 +366,9 @@ class Story extends BGE.GameEntity
     if m.isModalOpen()
       return
     end if
-    page = selectDialoguePage(getDialogueData()[npcId] as DialoguePage[], m.context())
-    if page = invalid
+    result = m.runner.start(npcId)
+    if not m.runner.isActive()
+      m.applyResult(result)
       return
     end if
     for each entity in m.game.getEntitiesByTag("npc")
@@ -364,12 +382,13 @@ class Story extends BGE.GameEntity
       m.talkingNpc.setTalking(true)
       m.talkingNpc.faceToward(playerEntity.position.x, playerEntity.position.y)
     end if
-    m.openDialogue(page)
+    m.openDialogue()
+    m.applyResult(result)
   end sub
 
-  private sub openDialogue(page as DialoguePage)
+  private sub openDialogue()
     m.openModal()
-    dialogue = new DialogueBox(m.game, page, m.flags)
+    dialogue = new DialogueBox(m.game, m.runner)
     m.openPanel = dialogue
     dialogue.open(m.game.gameUi)
   end sub
