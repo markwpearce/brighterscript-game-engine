@@ -1,0 +1,402 @@
+import "ValueKinds.bs"
+import "StoryTypes.bs"
+import "StoryState.bs"
+import "Effects.bs"
+import "Selection.bs"
+
+namespace BGE.Story
+
+  ' Stops a story whose nodes keep jumping without ever showing a line or a choice.
+  const RUNNER_MAX_STEPS = 200
+
+  ' Plays a story's nodes - lines, then choices or jumps - for your dialogue UI to show. It draws
+  ' nothing: ask it for currentLine() or choices(), and tell it advance() or choose(index).
+  ' Each of start/advance/choose returns a StoryResult: settle the story (StoryState.settle()),
+  ' save and act on its posts and messages as your game needs.
+  class DialogueRunner
+
+    ' Lines shown so far, oldest first, with each choice taken (isChoice true).
+    backlog as StoryLineView[] = []
+    ' The most entries kept in the backlog.
+    backlogLimit as integer = 100
+    ' Picks the index (0 to count - 1) of a random candidate. Replace it for repeatable tests.
+    random as function(count as integer) as integer = invalid
+
+    private state as StoryState = invalid
+    private story as StoryData = invalid
+    ' The node playing now is last; the frames below it wait for a call to return.
+    private stack as RunnerFrame[] = []
+
+    ' @param {StoryState} state
+    ' @param {StoryData} story - the same story the state was built from
+    sub new(state as StoryState, story as StoryData)
+      m.state = state
+      m.story = story
+      m.random = BGE.Story.defaultRandom
+    end sub
+
+    ' Starts a conversation at a node id (a single node or a candidate group). Afterwards
+    ' isActive() is false if no candidate passed, or the node ended straight away.
+    '
+    ' @param {string} id
+    ' @return {StoryResult}
+    function start(id as string) as StoryResult
+      m.cancel()
+      result = newStoryResult()
+      if m.enter(id, false)
+        m.pump(result)
+      end if
+      return result
+    end function
+
+    ' Plays a node that isn't in the story, e.g. a one-off message. It records no visits, and
+    ' getPosition() returns invalid while it plays.
+    '
+    ' @param {StoryNode} node
+    ' @return {StoryResult}
+    function startNode(node as StoryNode) as StoryResult
+      m.cancel()
+      result = newStoryResult()
+      m.stack.push(newFrame("", node))
+      m.pump(result)
+      return result
+    end function
+
+    ' Ends the conversation. Effects of the node being read don't run.
+    sub cancel()
+      m.stack = []
+    end sub
+
+    function isActive() as boolean
+      return m.stack.count() > 0
+    end function
+
+    ' @return {boolean} true while waiting for choose()
+    function isChoosing() as boolean
+      if not m.isActive()
+        return false
+      end if
+      return m.top().phase = "choosing"
+    end function
+
+    ' @return {StoryLineView} the line to show, or invalid while choosing or when inactive
+    function currentLine() as StoryLineView
+      if not m.isActive()
+        return invalid
+      end if
+      frame = m.top()
+      if frame.phase <> "lines"
+        return invalid
+      end if
+      return m.lineView(frame)
+    end function
+
+    ' Moves past the current line. After a node's last line its effects run, then its choices
+    ' show, or it calls, jumps or ends.
+    '
+    ' @return {StoryResult}
+    function advance() as StoryResult
+      result = newStoryResult()
+      if not m.isActive()
+        return result
+      end if
+      frame = m.top()
+      if frame.phase <> "lines"
+        return result
+      end if
+      frame.line = frame.line + 1
+      m.pump(result)
+      return result
+    end function
+
+    ' @return {ChoiceView[]} the choices to show while choosing (empty otherwise)
+    function choices() as ChoiceView[]
+      if not m.isChoosing()
+        return []
+      end if
+      return m.choiceViews(m.top())
+    end function
+
+    ' Takes a choice from choices(). A disabled or out-of-range index does nothing.
+    '
+    ' @param {integer} index - into choices()
+    ' @return {StoryResult}
+    function choose(index as integer) as StoryResult
+      result = newStoryResult()
+      if not m.isChoosing()
+        return result
+      end if
+      views = m.choiceViews(m.top())
+      if index < 0 or index >= views.count()
+        return result
+      end if
+      if not views[index].enabled
+        return result
+      end if
+      m.takeChoice(m.top(), views[index].index, result)
+      m.pump(result)
+      return result
+    end function
+
+    ' @return {RunnerPosition} where the conversation is, to save; invalid if inactive or playing startNode()
+    function getPosition() as RunnerPosition
+      if not m.isActive()
+        return invalid
+      end if
+      frames = [] as RunnerFrameData[]
+      for each frame in m.stack
+        if frame.key = ""
+          return invalid
+        end if
+        frames.push({key: frame.key, line: frame.line, phase: frame.phase})
+      end for
+      return {stack: frames}
+    end function
+
+    ' Resumes a saved conversation. The backlog isn't part of the position - save and restore it
+    ' yourself if you show one.
+    '
+    ' @param {dynamic} position - from getPosition()
+    ' @return {boolean} false (and inactive) if it doesn't fit this story any more
+    function restore(position as dynamic) as boolean
+      m.cancel()
+      if type(position) <> "roAssociativeArray"
+        return false
+      end if
+      if type(position.stack) <> "roArray"
+        return false
+      end if
+      if position.stack.count() = 0
+        return false
+      end if
+      frames = [] as RunnerFrame[]
+      for each saved in position.stack
+        if type(saved) <> "roAssociativeArray"
+          return false
+        end if
+        if valueKind(saved.key) <> "string" or valueKind(saved.line) <> "integer" or valueKind(saved.phase) <> "string"
+          return false
+        end if
+        node = resolveNodeKey(saved.key, m.story)
+        if node = invalid
+          return false
+        end if
+        frame = newFrame(saved.key, node)
+        frame.line = saved.line
+        frame.shownLine = saved.line
+        frame.phase = saved.phase
+        frames.push(frame)
+      end for
+      top = frames[frames.count() - 1]
+      if top.phase = "lines"
+        if top.line < 0 or top.line >= lineCount(top.node)
+          return false
+        end if
+      else if top.phase <> "choosing"
+        return false
+      end if
+      for i = 0 to frames.count() - 2
+        if frames[i].phase <> "choiceCall" and frames[i].phase <> "afterCall"
+          return false
+        end if
+      end for
+      m.stack = frames
+      return true
+    end function
+
+    private function top() as RunnerFrame
+      return m.stack[m.stack.count() - 1]
+    end function
+
+    ' Selects and pushes a node. warn: log when nothing passes (a goto or call into a dead end).
+    private function enter(id as string, warn as boolean) as boolean
+      selected = selectNode(id, m.story, m.state, m.random)
+      if selected = invalid
+        if warn
+          print "[BGE.Story] warning: no node passes for '" + id + "'"
+        end if
+        return false
+      end if
+      m.state.recordVisit(id)
+      if selected.key <> id
+        m.state.recordVisit(selected.key)
+      end if
+      m.stack.push(newFrame(selected.key, selected.node))
+      return true
+    end function
+
+    ' Runs the story on until it needs the player (a line or a choice) or the conversation ends.
+    private sub pump(result as StoryResult)
+      for steps = 1 to RUNNER_MAX_STEPS
+        if m.stack.count() = 0
+          return
+        end if
+        frame = m.top()
+        node = frame.node
+        if frame.phase = "lines"
+          if frame.line < lineCount(node)
+            if frame.shownLine <> frame.line
+              frame.shownLine = frame.line
+              m.addToBacklog(m.lineView(frame))
+            end if
+            return
+          end if
+          mergeStoryResult(result, m.state.applyEffects(node.effects))
+          frame.phase = "choices"
+        else if frame.phase = "choices"
+          if m.hasEnabledChoice(frame)
+            frame.phase = "choosing"
+            return
+          end if
+          fallback = m.findFallback(frame)
+          if fallback >= 0
+            m.takeChoice(frame, fallback, result)
+          else
+            frame.phase = "call"
+          end if
+        else if frame.phase = "call"
+          frame.phase = "afterCall"
+          target = node["call"]
+          if valueKind(target) = "string"
+            m.enter(target, true)
+          end if
+        else if frame.phase = "afterCall"
+          target = node["goto"]
+          if isTrue(node["end"])
+            m.cancel()
+            return
+          else if valueKind(target) = "string"
+            m.stack.pop()
+            m.enter(target, true)
+          else
+            frame.phase = "runOut"
+          end if
+        else if frame.phase = "runOut"
+          m.stack.pop()
+          if m.stack.count() > 0
+            caller = m.top()
+            if caller.phase = "choiceCall"
+              caller.phase = "choices"
+            end if
+          end if
+        else
+          ' choosing: wait for the player
+          return
+        end if
+      end for
+      print "[BGE.Story] warning: the story ran " + RUNNER_MAX_STEPS.toStr() + " steps without a line or choice; stopping"
+      m.cancel()
+    end sub
+
+    private sub takeChoice(frame as RunnerFrame, index as integer, result as StoryResult)
+      choice = frame.node.choices[index]
+      if frame.key <> ""
+        m.state.recordVisit(choiceKey(frame.key, choice, index))
+      end if
+      if isLabelled(choice)
+        m.addToBacklog({text: m.state.interpolate(choice.label), speaker: "", line: choice, isChoice: true})
+      end if
+      mergeStoryResult(result, m.state.applyEffects(choice.effects))
+      callTarget = choice["call"]
+      gotoTarget = choice["goto"]
+      if valueKind(callTarget) = "string"
+        frame.phase = "choiceCall"
+        if not m.enter(callTarget, true)
+          frame.phase = "choices"
+        end if
+      else if valueKind(gotoTarget) = "string"
+        m.stack.pop()
+        m.enter(gotoTarget, true)
+      else
+        frame.phase = "runOut"
+      end if
+    end sub
+
+    private function choiceViews(frame as RunnerFrame) as ChoiceView[]
+      views = [] as ChoiceView[]
+      list = frame.node.choices
+      if type(list) <> "roArray"
+        return views
+      end if
+      for i = 0 to list.count() - 1
+        choice = list[i]
+        if type(choice) = "roAssociativeArray"
+          if isLabelled(choice) and not m.isUsedUp(frame, choice, i)
+            enabled = m.state.evaluate(choice.when)
+            if enabled or isTrue(choice.showDisabled)
+              views.push({label: m.state.interpolate(choice.label), enabled: enabled, choice: choice, index: i})
+            end if
+          end if
+        end if
+      end for
+      return views
+    end function
+
+    private function hasEnabledChoice(frame as RunnerFrame) as boolean
+      for each view in m.choiceViews(frame)
+        if view.enabled
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' @return {integer} the index of the first passing unlabelled choice, or -1
+    private function findFallback(frame as RunnerFrame) as integer
+      list = frame.node.choices
+      if type(list) <> "roArray"
+        return -1
+      end if
+      for i = 0 to list.count() - 1
+        choice = list[i]
+        if type(choice) = "roAssociativeArray"
+          if not isLabelled(choice) and not m.isUsedUp(frame, choice, i) and m.state.evaluate(choice.when)
+            return i
+          end if
+        end if
+      end for
+      return -1
+    end function
+
+    private function isUsedUp(frame as RunnerFrame, choice as StoryChoice, index as integer) as boolean
+      if not isTrue(choice.once)
+        return false
+      end if
+      return m.state.visitCount(choiceKey(frame.key, choice, index)) > 0
+    end function
+
+    private function lineView(frame as RunnerFrame) as StoryLineView
+      raw = frame.node.lines[frame.line]
+      speaker = ""
+      if valueKind(frame.node.speaker) = "string"
+        speaker = frame.node.speaker
+      end if
+      text = ""
+      line = {}
+      if type(raw) = "roAssociativeArray"
+        line = raw
+        if valueKind(raw.speaker) = "string"
+          speaker = raw.speaker
+        end if
+        if valueKind(raw.text) = "string"
+          text = raw.text
+        end if
+      else
+        if valueKind(raw) = "string"
+          text = raw
+        end if
+        line = {text: text}
+      end if
+      return {text: m.state.interpolate(text), speaker: speaker, line: line, isChoice: false}
+    end function
+
+    private sub addToBacklog(view as StoryLineView)
+      m.backlog.push(view)
+      while m.backlog.count() > m.backlogLimit
+        m.backlog.Shift()
+      end while
+    end sub
+
+  end class
+
+end namespace
