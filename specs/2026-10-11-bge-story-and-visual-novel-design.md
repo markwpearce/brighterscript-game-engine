@@ -284,7 +284,7 @@ game records as an ending seen.
 ### Screen
 
 Game canvas 1280x720; everything drawn in `gameUi` (keeping UI-canvas text crisp).
-- **Background** - a full-screen image, cross-faded when a line's `background` changes.
+- **Background** - a full-screen image that fades through black when a line's `background` changes.
 - **Portraits** - up to two framed cards, left and right (the art has flat grey backdrops, so a frame suits
   it; one pose per character, no expressions). The speaker is full brightness, the other dimmed.
 - **Text box** - bottom of the screen, title-safe, with a name tab. Text types out; OK completes the line,
