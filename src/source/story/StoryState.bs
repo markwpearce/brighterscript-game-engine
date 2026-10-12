@@ -1,0 +1,192 @@
+import "ValueKinds.bs"
+import "StoryFlags.bs"
+import "Inventory.bs"
+import "Text.bs"
+import "StoryTypes.bs"
+import "Conditions.bs"
+import "Effects.bs"
+import "EventRules.bs"
+
+namespace BGE.Story
+
+  ' A story's state - flags, the inventory and how often each node was visited - and the
+  ' conditions and effects its data can use. Built-in vocabulary is in the Story guide; add your
+  ' game's own with registerCondition() and registerEffect().
+  class StoryState
+
+    flags as StoryFlags = invalid
+    inventory as Inventory = invalid
+    ' item id -> ItemDefinition, from the story's items
+    items as roAssociativeArray = invalid
+    rules as EventRule[] = []
+    ' node/choice visit key -> count (case-insensitive, like node ids)
+    private visits as roAssociativeArray = invalid
+    ' key -> StoryHandler
+    private conditionHandlers as roAssociativeArray = invalid
+    private effectHandlers as roAssociativeArray = invalid
+
+    ' @param {StoryData} story - its items and rules are used; may be invalid
+    sub new(story = invalid as StoryData)
+      m.items = {}
+      m.rules = []
+      if type(story) = "roAssociativeArray"
+        if type(story.items) = "roAssociativeArray"
+          m.items = story.items
+        end if
+        if type(story.rules) = "roArray"
+          m.rules = story.rules
+        end if
+      end if
+      m.flags = new StoryFlags()
+      m.inventory = new Inventory(m.items)
+      m.visits = {}
+      m.conditionHandlers = {}
+      m.conditionHandlers.SetModeCaseSensitive()
+      m.effectHandlers = {}
+      m.effectHandlers.SetModeCaseSensitive()
+    end sub
+
+    ' Adds a condition key, e.g. coinsGte. A registered key takes priority over a built-in one.
+    '
+    ' @param {string} key - the condition's identifying key
+    ' @param {function} handler - function(condition, state, context) as boolean: true if it passes
+    ' @param {dynamic} context - passed to the handler (BrightScript functions can't capture variables)
+    sub registerCondition(key as string, handler as function(item as roAssociativeArray, state as object, context as dynamic) as boolean, context = invalid as dynamic)
+      m.conditionHandlers[key] = {fn: handler, context: context}
+    end sub
+
+    ' Adds an effect key, e.g. heal.
+    '
+    ' @param {string} key - the effect's identifying key
+    ' @param {function} handler - function(effect, state, context) as boolean: true if story state changed
+    ' @param {dynamic} context - passed to the handler
+    sub registerEffect(key as string, handler as function(item as roAssociativeArray, state as object, context as dynamic) as boolean, context = invalid as dynamic)
+      m.effectHandlers[key] = {fn: handler, context: context}
+    end sub
+
+    ' @return {dynamic} the StoryHandler for a registered key of this condition, or invalid
+    function findConditionHandler(condition as roAssociativeArray) as dynamic
+      for each key in m.conditionHandlers
+        if condition.DoesExist(key)
+          return m.conditionHandlers[key]
+        end if
+      end for
+      return invalid
+    end function
+
+    ' @return {dynamic} the StoryHandler for a registered key of this effect, or invalid
+    function findEffectHandler(effect as roAssociativeArray) as dynamic
+      for each key in m.effectHandlers
+        if effect.DoesExist(key)
+          return m.effectHandlers[key]
+        end if
+      end for
+      return invalid
+    end function
+
+    ' @return {boolean} true if a key of this condition is built in or registered
+    function isKnownCondition(condition as roAssociativeArray) as boolean
+      for each key in condition
+        if isBuiltInConditionKey(key) or m.conditionHandlers.DoesExist(key)
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' @return {boolean} true if a key of this effect is built in or registered
+    function isKnownEffect(effect as roAssociativeArray) as boolean
+      for each key in effect
+        if isBuiltInEffectKey(key) or m.effectHandlers.DoesExist(key)
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' @param {StoryCondition[]} conditions - or invalid (passes)
+    ' @return {boolean} true if every condition passes
+    function evaluate(conditions as StoryCondition[]) as boolean
+      return BGE.Story.evaluateConditions(conditions, m)
+    end function
+
+    ' @param {StoryEffect[]} effects - or invalid
+    ' @return {StoryResult}
+    function applyEffects(effects as StoryEffect[]) as StoryResult
+      return BGE.Story.applyEffects(effects, m)
+    end function
+
+    ' Runs every event rule for this event whose match and when pass.
+    '
+    ' @param {string} eventName
+    ' @param {roAssociativeArray} data - the event's data, matched against each rule's match
+    ' @return {StoryResult}
+    function runEvent(eventName as string, data = {} as roAssociativeArray) as StoryResult
+      return BGE.Story.runEventRules(m.rules, eventName, data, m)
+    end function
+
+    ' Runs "storyChanged" rules until nothing more changes. Call it after anything changes the story.
+    '
+    ' @return {StoryResult}
+    function settle() as StoryResult
+      return BGE.Story.settleRules(m.rules, m)
+    end function
+
+    ' @param {string} key - a node id, a candidate's "<id>#<index>", or a choice's "<node>/<id or label>"
+    ' @return {integer}
+    function visitCount(key as string) as integer
+      count = m.visits[key]
+      if valueKind(count) = "integer"
+        return count
+      end if
+      return 0
+    end function
+
+    sub recordVisit(key as string)
+      m.visits[key] = m.visitCount(key) + 1
+    end sub
+
+    ' @return {string} text with each ${flag} filled in
+    function interpolate(text as string) as string
+      return interpolateFlags(text, m.flags)
+    end function
+
+    ' Clears flags, the inventory and visits (for a new game). Registered vocabulary stays.
+    sub reset()
+      m.flags.clear()
+      m.inventory.clear()
+      m.visits = {}
+    end sub
+
+    ' @return {StorySaveData}
+    function toSaveData() as StorySaveData
+      visitsCopy = {}
+      visitsCopy.Append(m.visits)
+      return {flags: m.flags.toAA(), inventory: m.inventory.toAA(), visits: visitsCopy}
+    end function
+
+    ' Loads toSaveData()'s output. Anything malformed is dropped, so a bad save gives a fresh state.
+    '
+    ' @param {dynamic} data
+    sub loadSaveData(data as dynamic)
+      m.reset()
+      if type(data) <> "roAssociativeArray"
+        return
+      end if
+      m.flags.loadAA(data.flags)
+      m.inventory.loadAA(data.inventory)
+      if type(data.visits) = "roAssociativeArray"
+        for each key in data.visits
+          count = data.visits[key]
+          if valueKind(count) = "integer"
+            if count > 0
+              m.visits[key] = count
+            end if
+          end if
+        end for
+      end if
+    end sub
+
+  end class
+
+end namespace
