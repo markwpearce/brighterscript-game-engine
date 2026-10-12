@@ -57,7 +57,11 @@ EventRule:  {event, match?, when?, effects}  ' unchanged from the rpg
 - `speaker` on a node is the default for its lines; a line object can override it.
 - Keys the engine doesn't know (a line's `portrait`, a choice's `open: "shop"`) are left alone for the game
   to read. The engine never strips or validates them.
-- `then` is a BrightScript reserved word, so nothing uses it as a key (unchanged from the rpg).
+- `then` is a BrightScript reserved word, so nothing uses it as a key (unchanged from the rpg). `goto`, `call`
+  and `end` are reserved words too, but they're the established names, so they stay: bsc and brs-engine
+  accept them as AA keys (checked), and to be safe on device the engine only reads them with brackets
+  (`node["goto"]`) and code writes them quoted in AA literals (`{"goto": "hub"}`). JSON is unaffected.
+- Node ids can't contain `#` or `/` (used in visit keys), and are case-insensitive like any AA key.
 
 ### Conditions and effects
 
@@ -126,7 +130,9 @@ player did.
 
 ```brighterscript
 runner = new BGE.Story.DialogueRunner(state, storyData)
-runner.start(nodeId) as boolean          ' false if no candidate passes
+runner.start(nodeId) as StoryResult      ' then isActive() is false if no candidate passed (or it ended at once)
+runner.startNode(node) as StoryResult    ' plays a one-off node not in the story (no visits, can't be saved)
+runner.cancel()                          ' ends the conversation; nothing further runs
 runner.isActive() as boolean
 runner.currentLine() as StoryLineView    ' {text (interpolated), speaker, line (the raw StoryLine AA)}, or invalid while choosing
 runner.advance() as StoryResult          ' next line; at the node's end, see below
@@ -188,15 +194,23 @@ registering the game's vocabulary. Both games run it in a spec over their real s
 
 ### Files
 
-`src/source/story/`: `ValueKinds.bs`, `StoryFlags.bs`, `Inventory.bs`, `StoryTypes.bs`, `Conditions.bs`,
-`Effects.bs`, `StoryState.bs`, `Selection.bs`, `DialogueRunner.bs`, `StoryLoader.bs`, `StoryValidation.bs`,
+`src/source/story/`: `ValueKinds.bs`, `StoryFlags.bs`, `Inventory.bs`, `Text.bs`, `StoryTypes.bs`, `Conditions.bs`,
+`Effects.bs`, `EventRules.bs`, `StoryState.bs`, `Selection.bs`, `DialogueRunner.bs`, `StoryLoader.bs`, `StoryValidation.bs`,
 each with a colocated `*.spec.bs` (one `@suite` per file).
 
 ### Docs
 
-A new published guide, `docs/story.md` (group Guides): flags and conditions first, then a talking NPC (rpg
-style), then a branching scene (visual novel style), then registering your own vocabulary and saving.
+A new published guide, `docs/story.md` (group Guides): a first story (the `examples/story` knock-knock joke,
+start to finish), then flags and conditions, a talking NPC (rpg style), branching with `call` (visual novel
+style), registering your own vocabulary, and saving.
 CLAUDE.md gains a `BGE.Story` bullet; the rpg bullet stops saying the story layer stays in the example.
+
+## Part 1a: `examples/story` - the smallest story
+
+A text-only example in PR 1: the knock-knock joke (Husk telling jokes) as `src/story/jokes.json`, one
+`StoryScene` with a `Label` for the speaker and line and a column of `Button`s for choices, OK to advance,
+Back to quit. No art, no saving. It's what `docs/story.md` walks through, the first on-device check of the
+runner, and the template to copy. Its tests validate the JSON and play each joke through.
 
 ## Part 1b: moving the rpg onto `BGE.Story`
 
@@ -249,11 +263,12 @@ Outline:
 4. **Greyan bridge** - the data core (clue item).
 5. **Lab** - Voss decodes the signal: a warning, not a distress call. He asks you to keep it quiet.
 6. **Night shift** - Husk reports the nav log was altered (clue).
-7. **Interview hub** - Sato, Castell, Voss, Husk in any order. Each conversation is a choice `call` back to
-   the hub; clue questions are `once`; Husk's idle lines are a `random` group; `{visited}` unlocks "I've
-   heard enough".
-8. **Confrontation** - accuse someone. Accusations without enough clues are `showDisabled`; a fallback "Stand
-   down" is always there.
+7. **Interview hub** - Sato, Castell, Voss, Husk in any order. Each conversation is a `once` choice that
+   `call`s it and returns to the hub; Husk's status reports are a `random` group of `once` nodes; `{visited}`
+   unlocks "I've heard enough" while Husk still has reports; once everything's used up, the hub's fallback
+   choice moves on to the confrontation by itself.
+8. **Confrontation** - accuse someone. Accusations without enough clues are `showDisabled`; "Stand down" is
+   always available.
 
 Endings: **Accuse Castell with the clues** (mutiny stopped, the warning heeded - best); **accuse the wrong
 officer** (Castell takes the ship); **stand down** (jump away safe, never knowing). The story exercises every
@@ -261,8 +276,10 @@ engine feature: candidate groups both ways, `goto`, `call`, `once` nodes and cho
 as clues, `showDisabled`, a fallback choice, `${flag}` text, and event rules (a `storyChanged` rule that
 notices when all three clues are held).
 
-Written as `src/story/mutiny.json`. Lines carry `background` and `portrait` keys the game reads; `speaker`
-names the character.
+Written as `src/story/mutiny.json`. Line objects may carry `background`, `left` and `right` keys (a
+portrait id, or `""` to clear) that stay in effect until changed; `speaker` names the character, and the
+game maps speaker names to portraits to pick which card is lit. Each ending posts `ending:<id>`, which the
+game records as an ending seen.
 
 ### Screen
 
