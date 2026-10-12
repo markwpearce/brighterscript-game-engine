@@ -1,0 +1,137 @@
+import "ValueKinds.bs"
+import "StoryTypes.bs"
+import "StoryState.bs"
+
+namespace BGE.Story
+
+  ' @param {dynamic} entry - a story.nodes value
+  ' @return {dynamic} its candidate list, or invalid for a single node
+  function getCandidates(entry as dynamic) as dynamic
+    if type(entry) = "roArray"
+      return entry
+    end if
+    if type(entry) = "roAssociativeArray" and type(entry.candidates) = "roArray"
+      return entry.candidates
+    end if
+    return invalid
+  end function
+
+  ' @return {string} "first" (the default), "random", whatever string was written, or "" for a non-string
+  function getSelectMode(entry as dynamic) as string
+    if type(entry) = "roAssociativeArray" and entry.DoesExist("select")
+      if valueKind(entry.select) = "string"
+        return entry.select
+      end if
+      return ""
+    end if
+    return "first"
+  end function
+
+  function isEligibleNode(node as dynamic, key as string, state as StoryState) as boolean
+    if type(node) <> "roAssociativeArray"
+      return false
+    end if
+    if isTrue(node.once) and state.visitCount(key) > 0
+      return false
+    end if
+    return state.evaluate(node.when)
+  end function
+
+  ' Picks the node to play for an id: the node itself, or one of its candidates.
+  '
+  ' @return {SelectedNode} or invalid if nothing passes
+  function selectNode(id as string, story as StoryData, state as StoryState, random as function(count as integer) as integer) as SelectedNode
+    entry = story.nodes[id]
+    if entry = invalid
+      return invalid
+    end if
+    candidates = getCandidates(entry)
+    if candidates = invalid
+      if isEligibleNode(entry, id, state)
+        return {key: id, node: entry}
+      end if
+      return invalid
+    end if
+    eligible = [] as integer[]
+    for i = 0 to candidates.count() - 1
+      if isEligibleNode(candidates[i], id + "#" + i.toStr(), state)
+        eligible.push(i)
+      end if
+    end for
+    if eligible.count() = 0
+      return invalid
+    end if
+    chosen = eligible[0]
+    if getSelectMode(entry) = "random"
+      ' Least-visited first, so every line is heard before any repeats.
+      fewest = -1
+      pool = [] as integer[]
+      for each i in eligible
+        visits = state.visitCount(id + "#" + i.toStr())
+        if fewest = -1 or visits < fewest
+          fewest = visits
+          pool = [i]
+        else if visits = fewest
+          pool.push(i)
+        end if
+      end for
+      chosen = pool[random(pool.count())]
+    end if
+    return {key: id + "#" + chosen.toStr(), node: candidates[chosen]}
+  end function
+
+  ' @return {StoryNode} the node a visit key names, or invalid
+  function resolveNodeKey(key as string, story as StoryData) as StoryNode
+    hash = Instr(1, key, "#")
+    if hash = 0
+      entry = story.nodes[key]
+      if type(entry) <> "roAssociativeArray" or getCandidates(entry) <> invalid
+        return invalid
+      end if
+      return entry
+    end if
+    candidates = getCandidates(story.nodes[Left(key, hash - 1)])
+    index = Mid(key, hash + 1).toInt()
+    if candidates = invalid or index < 0 or index >= candidates.count()
+      return invalid
+    end if
+    return candidates[index]
+  end function
+
+  ' @return {integer} a random index from 0 to count - 1
+  function defaultRandom(count as integer) as integer
+    return Rnd(count) - 1
+  end function
+
+  function newFrame(key as string, node as StoryNode) as RunnerFrame
+    return {key: key, node: node, line: 0, shownLine: -1, phase: "lines"}
+  end function
+
+  function lineCount(node as StoryNode) as integer
+    if type(node.lines) = "roArray"
+      return node.lines.count()
+    end if
+    return 0
+  end function
+
+  function isLabelled(choice as StoryChoice) as boolean
+    if valueKind(choice.label) = "string"
+      return choice.label <> ""
+    end if
+    return false
+  end function
+
+  ' The visit key for a choice, used by `once`.
+  function choiceKey(nodeKey as string, choice as StoryChoice, index as integer) as string
+    if valueKind(choice.id) = "string"
+      if choice.id <> ""
+        return nodeKey + "/" + choice.id
+      end if
+    end if
+    if isLabelled(choice)
+      return nodeKey + "/" + choice.label
+    end if
+    return nodeKey + "/" + index.toStr()
+  end function
+
+end namespace
