@@ -1,0 +1,149 @@
+namespace tests
+  @suite("BGE.Story.DialogueRunner choices")
+  class DialogueRunnerChoicesTests extends rooibos.BaseTestSuite
+
+    private state as BGE.Story.StoryState
+    private runner as BGE.Story.DialogueRunner
+
+    protected override function beforeEach()
+      story = {
+        nodes: {
+          hub: {
+            lines: ["Who do you talk to?"],
+            effects: [{add: "hubReads", amount: 1}],
+            choices: [
+              {label: "Sato", once: true, "call": "sato"},
+              {label: "Locked", when: [{flag: "key"}], showDisabled: true, "goto": "vault"},
+              {label: "Hidden", when: [{flag: "key"}], "goto": "vault"},
+              {label: "Leave, ${who}", effects: [{set: "left", value: true}]},
+              {"goto": "vault"}
+            ]
+          },
+          sato: {lines: ["Sato here."]},
+          vault: {lines: ["The vault."]},
+          onlyFallback: {lines: ["..."], choices: [{label: "Gated", when: [{flag: "key"}], showDisabled: true}, {"goto": "vault"}], "goto": "sato"},
+          noneAvailable: {lines: ["..."], choices: [{label: "Gated", when: [{flag: "key"}], showDisabled: true}], "goto": "sato"}
+        },
+        items: {}
+      }
+      m.state = new BGE.Story.StoryState(story)
+      m.state.flags.set("who", "Captain")
+      m.runner = new BGE.Story.DialogueRunner(m.state, story)
+    end function
+
+    private function labels() as string[]
+      result = [] as string[]
+      for each view in m.runner.choices()
+        result.push(view.label)
+      end for
+      return result
+    end function
+
+    @describe("choices")
+
+    @it("lists labelled choices after the last line, hiding failed ones unless showDisabled")
+    function _()
+      m.runner.start("hub")
+      m.assertFalse(m.runner.isChoosing())
+      m.runner.advance()
+      m.assertTrue(m.runner.isChoosing())
+      m.assertInvalid(m.runner.currentLine())
+      m.assertEqual(["Sato", "Locked", "Leave, Captain"], m.labels())
+      m.assertFalse(m.runner.choices()[1].enabled)
+    end function
+
+    @it("says choices follow only on the last line of a node with choices")
+    function _()
+      m.assertFalse(m.runner.choicesFollow())
+      m.runner.start("hub")
+      m.assertTrue(m.runner.choicesFollow())
+      m.runner.advance()
+      m.assertTrue(m.runner.isChoosing())
+      m.assertFalse(m.runner.choicesFollow())
+      m.runner.choose(0)
+      m.assertEqual("Sato here.", m.runner.currentLine().text)
+      m.assertFalse(m.runner.choicesFollow())
+    end function
+
+    @it("doesn't say choices follow before a node's last line")
+    function _()
+      m.runner.startNode({lines: ["One", "Two"], choices: [{label: "Ok"}]})
+      m.assertFalse(m.runner.choicesFollow())
+      m.runner.advance()
+      m.assertTrue(m.runner.choicesFollow())
+    end function
+
+    @it("ignores choosing a disabled or out-of-range choice")
+    function _()
+      m.runner.start("hub")
+      m.runner.advance()
+      m.runner.choose(1)
+      m.runner.choose(9)
+      m.assertTrue(m.runner.isChoosing())
+    end function
+
+    @it("returns from a choice's call to the same choices, without re-running the node's effects, and drops a once choice")
+    function _()
+      m.runner.start("hub")
+      m.runner.advance()
+      m.runner.choose(0)
+      m.assertEqual("Sato here.", m.runner.currentLine().text)
+      m.runner.advance()
+      m.assertTrue(m.runner.isChoosing())
+      m.assertEqual(["Locked", "Leave, Captain"], m.labels())
+      m.assertEqual(1, m.state.flags.getInt("hubReads"))
+    end function
+
+    @it("runs a choice's effects and ends when it has no goto or call")
+    function _()
+      m.runner.start("hub")
+      m.runner.advance()
+      result = m.runner.choose(2)
+      m.assertTrue(result.changed)
+      m.assertTrue(m.state.flags.isSet("left"))
+      m.assertFalse(m.runner.isActive())
+    end function
+
+    @it("follows a choice's goto once its when passes")
+    function _()
+      m.state.flags.set("key", true)
+      m.runner.start("hub")
+      m.runner.advance()
+      m.assertEqual(["Sato", "Locked", "Hidden", "Leave, Captain"], m.labels())
+      m.runner.choose(1)
+      m.assertEqual("The vault.", m.runner.currentLine().text)
+    end function
+
+    @it("takes the fallback when no labelled choice is enabled")
+    function _()
+      m.runner.start("onlyFallback")
+      m.runner.advance()
+      m.assertEqual("The vault.", m.runner.currentLine().text)
+    end function
+
+    @it("carries on with the node's goto when nothing is choosable and there's no fallback")
+    function _()
+      m.runner.start("noneAvailable")
+      m.runner.advance()
+      m.assertEqual("Sato here.", m.runner.currentLine().text)
+    end function
+
+    @it("records lines and chosen labels in the backlog, capped at backlogLimit")
+    function _()
+      m.runner.backlogLimit = 3
+      m.runner.start("hub")
+      m.runner.advance()
+      m.runner.choose(0)
+      m.runner.advance()
+      m.assertEqual(3, m.runner.backlog.count())
+      m.assertEqual("Who do you talk to?", m.runner.backlog[0].text)
+      m.assertTrue(m.runner.backlog[1].isChoice)
+      m.assertEqual("Sato", m.runner.backlog[1].text)
+      m.assertEqual("Sato here.", m.runner.backlog[2].text)
+      m.runner.choose(1)
+      m.assertEqual(3, m.runner.backlog.count())
+      m.assertEqual("Sato", m.runner.backlog[0].text)
+    end function
+
+  end class
+end namespace

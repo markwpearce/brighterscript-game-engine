@@ -1,6 +1,6 @@
 # Art credits
 
-In-game credits (Story/CreditsData.bs) are kept in step with this file by hand.
+In-game credits (RpgStory/CreditsData.bs) are kept in step with this file by hand.
 
 ## PathAndObjects.png
 "RPG Tiles: Cobble Stone Paths & Town Objects" by Zabin, Daneeklu, Jetrel, Hyptosis, Redshrike, Bertram.

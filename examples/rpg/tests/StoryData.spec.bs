@@ -1,0 +1,210 @@
+' examples/rpg/tests/StoryData.spec.bs
+namespace tests
+  @suite("rpg story data")
+  class StoryDataTests extends rooibos.BaseTestSuite
+
+    private vocab as object
+    private state as BGE.Story.StoryState
+
+    protected override function beforeEach()
+      m.vocab = {player: {health: 6, maxHealth: 6, coins: 0}}
+      m.state = newRpgStoryState(m.vocab)
+    end function
+
+    ' A runner already started at an NPC's dialogue.
+    private function talkTo(npcId as string) as BGE.Story.DialogueRunner
+      runner = new BGE.Story.DialogueRunner(m.state, getStoryData())
+      runner.start(npcId)
+      return runner
+    end function
+
+    ' Reads every line until the dialogue ends or offers choices; returns the lines read.
+    private function readAll(runner as BGE.Story.DialogueRunner) as string[]
+      lines = [] as string[]
+      while runner.isActive() and not runner.isChoosing()
+        lines.push(runner.currentLine().text)
+        runner.advance()
+      end while
+      return lines
+    end function
+
+    private sub loadCheckpoint(checkpoint as integer)
+      cp = checkpointState(checkpoint)
+      m.vocab.player.coins = cp.coins
+      m.state.flags = cp.flags
+      m.state.inventory = cp.inventory
+    end sub
+
+    @describe("the story")
+
+    @it("validates")
+    function _()
+      m.assertEqual([], BGE.Story.validateStory(getStoryData(), m.state))
+    end function
+
+    @describe("Elder Bram")
+
+    @it("gives the quest on a new game")
+    function _()
+      runner = m.talkTo("bram")
+      m.assertEqual("Elder Bram", runner.currentLine().speaker)
+      m.readAll(runner)
+      m.assertEqual(1, m.state.flags.getInt("rats.stage"))
+    end function
+
+    @it("reports progress while hunting")
+    function _()
+      m.state.flags.set("rats.stage", 1)
+      m.state.flags.set("rats.kills", 2)
+      m.assertEqual("Still rats about. 2 of 4 so far.", m.talkTo("bram").currentLine().text)
+    end function
+
+    @it("shows 0 rat kills right after the quest starts")
+    function _()
+      runner = new BGE.Story.DialogueRunner(m.state, getStoryData())
+      runner.start("bram")
+      while runner.isActive()
+        runner.advance()
+      end while
+      runner.start("bram")
+      m.assertEqual("Still rats about. 0 of 4 so far.", runner.currentLine().text)
+    end function
+
+    @it("rewards and vouches when the rats are dealt with")
+    function _()
+      m.state.flags.set("rats.stage", 2)
+      m.readAll(m.talkTo("bram"))
+      m.assertEqual(10, m.vocab.player.coins)
+      m.assertEqual(3, m.state.flags.getInt("rats.stage"))
+      m.assertTrue(m.state.flags.isSet("bram.vouched"))
+    end function
+
+    @it("points at the sewer once the quest is done")
+    function _()
+      m.state.flags.set("rats.stage", 3)
+      m.assertTrue(Instr(1, m.talkTo("bram").currentLine().text, "sewer") > 0)
+    end function
+
+    @describe("the gate knight")
+
+    @it("turns you away before Bram vouches")
+    function _()
+      m.assertTrue(Instr(1, m.talkTo("knight").currentLine().text, "No one goes in") > 0)
+    end function
+
+    @it("wants a better sword once Bram vouches")
+    function _()
+      m.state.flags.set("bram.vouched", true)
+      m.assertTrue(Instr(1, m.talkTo("knight").currentLine().text, "rusty blade") > 0)
+    end function
+
+    @describe("Merchant Hilde")
+
+    @it("ends with a shop choice")
+    function _()
+      runner = m.talkTo("hilde")
+      m.readAll(runner)
+      m.assertTrue(runner.isChoosing())
+      choices = runner.choices()
+      m.assertEqual("shop", (choices[0].choice as RpgChoice).open)
+      m.assertEqual("Leave", choices[1].label)
+    end function
+
+    @describe("townsfolk")
+
+    @it("plays every idle townsfolk line before repeating one")
+    function _()
+      story = getStoryData()
+      runner = new BGE.Story.DialogueRunner(m.state, story)
+      seen = {}
+      for i = 1 to 3
+        runner.start("wanderPlaza")
+        seen[runner.currentLine().text] = true
+      end for
+      m.assertEqual(3, seen.Count())
+    end function
+
+    @it("plays every line of a story stage's group before repeating one")
+    function _()
+      m.state.flags.set("gate.open", true)
+      runner = new BGE.Story.DialogueRunner(m.state, getStoryData())
+      seen = {}
+      for i = 1 to 3
+        runner.start("wanderPlaza")
+        seen[runner.currentLine().text] = true
+      end for
+      m.assertEqual(3, seen.Count())
+      m.assertTrue(seen.DoesExist("They say the knight let someone through the gate!"))
+      m.assertFalse(seen.DoesExist("Mind the rats. One bit my boot clean through."))
+    end function
+
+    @it("says something story-specific before falling back to idle chatter")
+    function _()
+      m.state.flags.set("gate.open", true)
+      runner = new BGE.Story.DialogueRunner(m.state, getStoryData())
+      runner.random = function(count as integer) as integer
+        return 0
+      end function
+      runner.start("wanderPlaza")
+      m.assertEqual("They say the knight let someone through the gate!", runner.currentLine().text)
+    end function
+
+    @describe("every NPC")
+
+    @it("has a page for every story checkpoint")
+    @params(0)
+    @params(1)
+    @params(2)
+    @params(3)
+    @params(4)
+    @params(5)
+    @params(6)
+    @params(7)
+    @params(8)
+    function _(checkpoint)
+      m.loadCheckpoint(checkpoint)
+      for each npcId in ["bram", "knight", "hilde", "wanderPlaza", "wanderMarket", "child", "oldWoman", "servant"]
+        m.assertTrue(m.talkTo(npcId).isActive(), npcId + " has no page at checkpoint " + checkpoint.toStr())
+      end for
+    end function
+
+    @describe("the ending")
+
+    @it("has the witch speak once, on first entering the throne room")
+    function _()
+      m.loadCheckpoint(7)
+      runner = m.talkTo("witch")
+      m.assertEqual("The Witch", runner.currentLine().speaker)
+      m.readAll(runner)
+      m.assertFalse(m.talkTo("witch").isActive())
+    end function
+
+    @it("gives Bram the closing page, which completes the game and rolls the credits")
+    function _()
+      m.loadCheckpoint(8)
+      runner = m.talkTo("bram")
+      m.readAll(runner)
+      m.assertTrue(runner.isChoosing())
+      m.assertEqual("credits", (runner.choices()[0].choice as RpgChoice).open)
+      ' Backing out at "The End" must leave the ending to replay, so its effects wait for the choice.
+      m.assertFalse(m.state.flags.isSet("game.complete"))
+      m.assertEqual(4, m.state.flags.getInt("keep.stage"))
+      runner.choose(0)
+      m.assertTrue(m.state.flags.isSet("game.complete"))
+      m.assertEqual(5, m.state.flags.getInt("keep.stage"))
+      m.assertFalse(runner.isActive())
+      after = m.talkTo("bram")
+      m.assertTrue(Instr(1, after.currentLine().text, "The town owes you everything") > 0)
+      m.readAll(after)
+      m.assertFalse(after.isActive())
+    end function
+
+    @it("has Mara send the player to Bram after the witch")
+    function _()
+      m.loadCheckpoint(8)
+      lines = m.readAll(m.talkTo("servant"))
+      m.assertTrue(Instr(1, lines[0], "Bram") > 0 or Instr(1, lines[lines.count() - 1], "Bram") > 0)
+    end function
+
+  end class
+end namespace

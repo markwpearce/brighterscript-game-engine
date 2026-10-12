@@ -1,0 +1,427 @@
+' examples/rpg/src/source/RpgStory/Story.bs
+import "pkg:/source/utils/registry.bs"
+import "pkg:/source/story/ValueKinds.bs"
+import "pkg:/source/story/StoryTypes.bs"
+import "pkg:/source/story/StoryState.bs"
+import "pkg:/source/story/Effects.bs"
+import "pkg:/source/story/DialogueRunner.bs"
+import "Items.bs"
+import "StoryData.bs"
+import "RpgVocabulary.bs"
+import "QuestData.bs"
+import "ShopData.bs"
+import "SaveData.bs"
+import "Checkpoints.bs"
+import "RpgStoryTypes.bs"
+import "../Maps/MapTypes.bs"
+import "../Entities/Player.bs"
+import "../Entities/Npc.bs"
+import "../UI/DialogueBox.bs"
+import "../UI/ShopPanel.bs"
+import "../UI/InventoryPanel.bs"
+import "../Audio/PlayAudio.bs"
+
+' Owns the story state (flags, inventory) and runs it: answers game events with the event rules,
+' opens dialogue/shop/inventory panels, and autosaves. Persistent and never paused, so it keeps
+' working while a panel has the game paused.
+class Story extends BGE.GameEntity
+
+  state as BGE.Story.StoryState = invalid
+  runner as BGE.Story.DialogueRunner = invalid
+  ' Kept as aliases of the state's, which never replaces them.
+  flags as BGE.Story.StoryFlags = invalid
+  inventory as BGE.Story.Inventory = invalid
+  private vocab as RpgVocabularyContext = invalid
+  ' A choice's open ("shop", "credits") to act on when the dialogue closes.
+  private pendingOpen as string = ""
+  ' Off while a --param deep link is active, so testing never overwrites a real save.
+  savingEnabled as boolean = true
+  private sceneName as string = ""
+  private spawn as string = ""
+  private modalCount as integer = 0
+  ' Modal releases waiting out their delay (see releaseModalLater).
+  private pendingReleases as integer = 0
+  private releaseDelay as integer = 0
+  ' Deep-link testing: skip enemy placements (--param peaceful=1).
+  peaceful as boolean = false
+  ' Deep-link testing: a panel to open once the first area has faded in ("inventory").
+  openOnArrival as string = ""
+  ' message effects waiting for every panel to close
+  private pendingMessages as BGE.Story.StoryMessage[] = []
+  ' A scripted conversation waiting for every panel to close (see startScripted).
+  private pendingScripted as string = ""
+  private pendingCredits as boolean = false
+  private talkingNpc as Npc = invalid
+  ' The panel currently open (DialogueBox, ShopPanel or InventoryPanel), so button actions reach it.
+  private openPanel as StoryPanel = invalid
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Story"
+    m.persistent = true
+    m.pauseable = false
+    m.vocab = {player: invalid}
+    m.state = newRpgStoryState(m.vocab)
+    m.runner = new BGE.Story.DialogueRunner(m.state, getStoryData())
+    m.flags = m.state.flags
+    m.inventory = m.state.inventory
+  end sub
+
+  ' The story state, with the rpg's vocabulary pointed at the current Player. Use this, not m.state,
+  ' for anything that evaluates conditions or applies effects.
+  function storyState() as BGE.Story.StoryState
+    m.vocab.player = m.getPlayer()
+    return m.state
+  end function
+
+  sub newGame()
+    m.storyState().reset()
+    m.getPlayer().resetForNewGame()
+    m.syncPlayer()
+  end sub
+
+  ' @param {SaveData} save - from readSave()
+  sub loadSave(save as SaveData)
+    m.storyState().loadSaveData({flags: save.flags, inventory: save.inventory, visits: save.visits})
+    ' Saves from before rats.kills was always set would read "Kill rats (/4)".
+    if m.flags.getInt("rats.stage") >= 1 and BGE.Story.valueKind(m.flags.get("rats.kills")) = "invalid"
+      m.flags.set("rats.kills", 0)
+    end if
+    m.getPlayer().applySavedStats(save.player)
+    m.syncPlayer()
+  end sub
+
+  ' Jumps to a numbered story checkpoint (--param stage=N).
+  sub applyCheckpoint(n as integer)
+    m.newGame()
+    state = checkpointState(n)
+    m.flags.loadAA(state.flags.toAA())
+    m.inventory.loadAA(state.inventory.toAA())
+    m.getPlayer().coins = state.coins
+    m.syncPlayer()
+  end sub
+
+  ' @return {SaveData} the saved game, or invalid if there's none (or it's unreadable)
+  function readSave() as SaveData
+    save = validateSaveData(BGE.registryRead(SAVE_SECTION, SAVE_KEY))
+    if save = invalid
+      return invalid
+    end if
+    ' A save naming a scene that no longer exists is as good as none.
+    for each sceneName in m.game.getSceneNames()
+      if sceneName = save.scene
+        return save
+      end if
+    end for
+    return invalid
+  end function
+
+  sub deleteSave()
+    section = CreateObject("roRegistrySection", SAVE_SECTION)
+    section.Delete(SAVE_KEY)
+    section.Flush()
+  end sub
+
+  ' Called by an area once it's built: remembers where to resume, and saves.
+  sub arrivedAt(sceneName as string, spawn as string)
+    m.sceneName = sceneName
+    m.spawn = spawn
+    m.save()
+  end sub
+
+  sub save()
+    if not m.savingEnabled or m.sceneName = ""
+      return
+    end if
+    BGE.registryWrite(SAVE_SECTION, SAVE_KEY, buildSaveData(m.sceneName, m.spawn, m.state, m.getPlayer()))
+    m.game.postGameEvent("storySaved")
+  end sub
+
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    if eventName = "talkRequested"
+      m.startDialogue(data.npcId)
+    else if eventName = "inventoryRequested"
+      m.openInventory()
+    else if eventName = "enemyKilled" or eventName = "roomCleared" or eventName = "switchPressed"
+      m.applyResult(m.storyState().runEvent(eventName, data))
+    end if
+  end sub
+
+  ' Runs story effects for something in the world (a pickup, a switch, a door).
+  sub runEffects(effects as BGE.Story.StoryEffect[])
+    m.applyResult(m.storyState().applyEffects(effects))
+  end sub
+
+  ' Called when the player walks into a gate: runs its effects if its conditions pass, or says
+  ' why it won't open.
+  sub tryUnlock(unlock as GateUnlock)
+    if m.isModalOpen()
+      return
+    end if
+    if m.storyState().evaluate(unlock.when)
+      m.runEffects(unlock.effects)
+    else
+      m.showMessage(unlock.lockedMessage)
+    end if
+  end sub
+
+  ' Shows a dialogue box (with no speaker unless one is given) once nothing else is open.
+  sub showMessage(text as string, speaker = "" as string)
+    m.pendingMessages.push({text: text, speaker: speaker})
+  end sub
+
+  ' Called by the DialogueBox after advance(): settles, saves and posts what the step did.
+  sub dialogueStepped(result as BGE.Story.StoryResult)
+    m.applyResult(result)
+  end sub
+
+  ' Called by the DialogueBox after choose(). open is the choice's "open" key ("" for none).
+  sub dialogueChose(result as BGE.Story.StoryResult, open as string)
+    if open <> ""
+      m.pendingOpen = open
+    end if
+    m.applyResult(result)
+  end sub
+
+  ' Called by the DialogueBox once the runner is no longer active.
+  sub dialogueEnded()
+    m.openPanel = invalid
+    opens = m.pendingOpen
+    m.pendingOpen = ""
+    if opens = "credits"
+      m.pendingCredits = true
+    end if
+    ' Open the shop before releasing the dialogue's modal so the game never resumes in between.
+    if opens = "shop"
+      m.openShop()
+    end if
+    m.endTalking()
+    m.releaseModalLater()
+  end sub
+
+  ' Called by the DialogueBox when the player backs out. Nothing further runs, but the effects of
+  ' any node whose last line was already read have run.
+  sub cancelDialogue()
+    m.runner.cancel()
+    m.pendingOpen = ""
+    m.openPanel = invalid
+    m.endTalking()
+    m.releaseModalLater()
+  end sub
+
+  ' Called by the shop and inventory panels once they've closed themselves.
+  sub panelClosed()
+    m.openPanel = invalid
+    m.releaseModalLater()
+  end sub
+
+  ' Reopens the shop after a purchase so its labels show what's owned. The count stays above 0.
+  sub reopenShop()
+    m.openShop()
+  end sub
+
+  ' Called by panel buttons (see MenuPanel/ActionButton).
+  sub onMenuAction(actionId as string)
+    if m.openPanel <> invalid
+      m.openPanel.onAction(actionId)
+    end if
+  end sub
+
+  ' The press that closed a panel is still being dispatched this frame; resuming at once would
+  ' let the player see it (a talk or sword swing on OK, a quit on Back). Wait a couple of frames.
+  private sub releaseModalLater()
+    m.pendingReleases++
+    m.releaseDelay = 2
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    if m.pendingReleases > 0
+      m.releaseDelay--
+      if m.releaseDelay <= 0
+        releases = m.pendingReleases
+        m.pendingReleases = 0
+        for i = 1 to releases
+          m.closeModal()
+        end for
+      end if
+    end if
+    canOpen = not m.isModalOpen() and m.pendingReleases = 0 and not m.game.isTransitioning()
+    if canOpen and m.pendingCredits
+      m.pendingCredits = false
+      m.game.changeSceneWithFade("CreditsScene", {})
+    else if canOpen and m.pendingMessages.count() > 0
+      message = m.pendingMessages.Shift()
+      m.runner.startNode({speaker: message.speaker, lines: [message.text]})
+      m.openDialogue()
+    else if canOpen and m.pendingScripted <> ""
+      npcId = m.pendingScripted
+      m.pendingScripted = ""
+      m.startDialogue(npcId)
+    else if canOpen and m.openOnArrival = "inventory" and m.sceneName <> ""
+      m.openOnArrival = ""
+      m.openInventory()
+    end if
+  end sub
+
+  ' Starts a conversation without the player talking to anyone (a scene's cutscene line),
+  ' once nothing else is open and the area has faded in. Nothing happens if no page passes.
+  '
+  ' @param {string} npcId - a getDialogueData() id
+  sub startScripted(npcId as string)
+    m.pendingScripted = npcId
+  end sub
+
+  private sub endTalking()
+    if m.talkingNpc <> invalid and m.talkingNpc.isValid()
+      m.talkingNpc.setTalking(false)
+    end if
+    m.talkingNpc = invalid
+  end sub
+
+  function shopItems() as ShopItem[]
+    return getShopItems()
+  end function
+
+  function priceOf(itemId as string) as integer
+    for each row in getShopItems()
+      if row.itemId = itemId
+        return row.price
+      end if
+    end for
+    return 0
+  end function
+
+  function buy(itemId as string) as ActionResult
+    state = m.storyState()
+    result = buyItem(itemId, m.priceOf(itemId), state, m.getPlayer())
+    if result.ok
+      playSfx(m.game, "purchase")
+      m.applyActionResult(result)
+    end if
+    return result
+  end function
+
+  function use(itemId as string) as ActionResult
+    state = m.storyState()
+    result = useItem(itemId, state, m.getPlayer())
+    if result.ok
+      m.applyActionResult(result)
+    end if
+    return result
+  end function
+
+  ' A purchase or use always changes the story (coins, the inventory), whatever its effects did.
+  private sub applyActionResult(action as ActionResult)
+    result = BGE.Story.newStoryResult()
+    result.changed = true
+    BGE.Story.mergeStoryResult(result, action.result)
+    m.applyResult(result)
+  end sub
+
+  function objectives() as string[]
+    return currentObjectives(getQuestData(), m.flags)
+  end function
+
+  ' Panels call these so the game stays paused while any of them is open.
+  sub openModal()
+    if m.modalCount = 0
+      m.game.Pause()
+    end if
+    m.modalCount++
+  end sub
+
+  sub closeModal()
+    if m.modalCount > 0
+      m.modalCount--
+      if m.modalCount = 0
+        m.game.Resume()
+      end if
+    end if
+  end sub
+
+  function isModalOpen() as boolean
+    return m.modalCount > 0
+  end function
+
+  ' Settles the story after a change, posts what the rules asked for, keeps the player's
+  ' sword in step with the inventory, and saves.
+  private sub applyResult(result as BGE.Story.StoryResult)
+    if not result.changed and result.posts.count() = 0 and result.messages.count() = 0
+      return
+    end if
+    settled = m.storyState().settle()
+    m.syncPlayer()
+    posts = [] as string[]
+    posts.append(result.posts)
+    posts.append(settled.posts)
+    m.pendingMessages.append(result.messages)
+    m.pendingMessages.append(settled.messages)
+    if result.changed or settled.changed
+      m.save()
+    end if
+    for each eventName in posts
+      m.game.postGameEvent(eventName)
+    end for
+    if result.changed or settled.changed
+      ' Live map placements (gates, keys) re-check their conditions on this.
+      m.game.postGameEvent("storyUpdated")
+    end if
+  end sub
+
+  private sub syncPlayer()
+    m.getPlayer().swordDamage = swordDamageFor(m.inventory)
+  end sub
+
+  private sub startDialogue(npcId as string)
+    if m.isModalOpen()
+      return
+    end if
+    result = m.runner.start(npcId)
+    if not m.runner.isActive()
+      m.applyResult(result)
+      return
+    end if
+    for each entity in m.game.getEntitiesByTag("npc")
+      npcEntity = entity as Npc
+      if npcEntity.npcId = npcId
+        m.talkingNpc = npcEntity
+      end if
+    end for
+    playerEntity = m.getPlayer()
+    if m.talkingNpc <> invalid
+      m.talkingNpc.setTalking(true)
+      m.talkingNpc.faceToward(playerEntity.position.x, playerEntity.position.y)
+    end if
+    m.openDialogue()
+    m.applyResult(result)
+  end sub
+
+  private sub openDialogue()
+    m.openModal()
+    dialogue = new DialogueBox(m.game, m.runner)
+    m.openPanel = dialogue
+    dialogue.open(m.game.gameUi)
+  end sub
+
+  private sub openShop()
+    m.openModal()
+    panel = new ShopPanel(m.game)
+    m.openPanel = panel
+    panel.open(m.game.gameUi)
+  end sub
+
+  private sub openInventory()
+    if m.isModalOpen() or m.game.isTransitioning() or m.getPlayer().isDefeated()
+      return
+    end if
+    m.openModal()
+    panel = new InventoryPanel(m.game)
+    m.openPanel = panel
+    panel.open(m.game.gameUi)
+  end sub
+
+  private function getPlayer() as Player
+    return m.game.getEntityByName("Player") as Player
+  end function
+
+end class

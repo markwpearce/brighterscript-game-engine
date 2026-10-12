@@ -5,22 +5,26 @@ import "pkg:/source/engine/ui/TextWrap.bs"
 import "pkg:/source/engine/ui/Button.bs"
 import "UiSkin.bs"
 import "MenuPanel.bs"
-import "../Story/StoryFlags.bs"
-import "../Story/Text.bs"
-import "../Story/StoryTypes.bs"
-import "../Story/Story.bs"
+import "pkg:/source/story/ValueKinds.bs"
+import "pkg:/source/story/StoryTypes.bs"
+import "pkg:/source/story/DialogueRunner.bs"
+import "../RpgStory/RpgStoryTypes.bs"
+import "../RpgStory/Story.bs"
 import "../Audio/PlayAudio.bs"
 
 const DIALOGUE_LINES_PER_PAGE = 3
 ' Clears the 9-patch border (its corners are ~36px).
 const DIALOGUE_PADDING = 40.0
 
-' A conversation along the bottom of the screen: the speaker's name, then the text three lines at
-' a time. OK turns the page; on the last page OK finishes (or the choices appear, if any). Back
-' leaves without the page's effects. The Story pauses the game while it's open.
+' A conversation along the bottom of the screen, played by the Story's DialogueRunner: the
+' speaker's name, then each line three wrapped lines at a time. OK turns the page; on a line's last
+' page OK moves the runner on (to the next line, the choices, or the end). Back leaves before the
+' effects of the current node's remaining lines - but a node showing its choices has already run
+' its effects. The Story pauses the game while it's open.
 class DialogueBox extends BGE.UI.UiContainer
 
-  private page as DialoguePage = invalid
+  private runner as BGE.Story.DialogueRunner = invalid
+  private speakerLabel as BGE.UI.Label = invalid
   ' The text of each screen, up to DIALOGUE_LINES_PER_PAGE lines joined by newlines.
   private pages as string[] = []
   private pageIndex as integer = 0
@@ -31,13 +35,14 @@ class DialogueBox extends BGE.UI.UiContainer
   private choicesDelay as integer = -1
   private parentUi as BGE.UI.UiContainer = invalid
   private ninePatch as BGE.UI.NinePatchImage = invalid
+  ' The Story entity, looked up on first use (see getStory()).
+  private storyEntity as Story = invalid
 
-  ' @param {DialoguePage} page - a dialogue page (DialogueData.bs)
-  ' @param {StoryFlags} flags - for ${key} in the lines
-  sub new(game as BGE.Game, page as DialoguePage, flags as StoryFlags)
+  ' @param {BGE.Story.DialogueRunner} runner - already started
+  sub new(game as BGE.Game, runner as BGE.Story.DialogueRunner)
     super(game)
     m.name = "DialogueBox"
-    m.page = page
+    m.runner = runner
     m.customPosition = true
     m.backgroundRGBA = MENU_BACKGROUND_RGBA
     m.ninePatch = getDialogueSkin(game)
@@ -51,23 +56,6 @@ class DialogueBox extends BGE.UI.UiContainer
     m.height = DIALOGUE_PADDING * 2 + lineHeight * (DIALOGUE_LINES_PER_PAGE + 1) + MENU_BUTTON_GAP + 8
     m.customX = uiW * UI_SAFE
     m.customY = uiH * (1 - UI_SAFE) - m.height
-    ' Each entry in lines starts a new page; long ones spill onto more pages.
-    innerWidth = m.width - DIALOGUE_PADDING * 2
-    m.pages = [] as string[]
-    for each line in page.lines
-      wrapped = BGE.UI.wrapText(interpolateFlags(line, flags), font, innerWidth)
-      for i = 0 to wrapped.count() - 1 step DIALOGUE_LINES_PER_PAGE
-        lastIndex = i + DIALOGUE_LINES_PER_PAGE - 1
-        if lastIndex > wrapped.count() - 1
-          lastIndex = wrapped.count() - 1
-        end if
-        pageLines = [] as string[]
-        for j = i to lastIndex
-          pageLines.push(wrapped[j])
-        end for
-        m.pages.push(pageLines.join(Chr(10)))
-      end for
-    end for
   end sub
 
   sub onAction(actionId as string)
@@ -80,13 +68,12 @@ class DialogueBox extends BGE.UI.UiContainer
     m.parentUi = parent
     font = m.game.getFont("hud")
     lineHeight = font.GetOneLineHeight()
-    speaker = new BGE.UI.Label(m.game)
-    speaker.customPosition = true
-    speaker.customX = DIALOGUE_PADDING
-    speaker.customY = DIALOGUE_PADDING
-    speaker.setText(m.page.speaker)
-    speaker.drawableText.textColor = MENU_TITLE_RGBA
-    m.addChild(speaker)
+    m.speakerLabel = new BGE.UI.Label(m.game)
+    m.speakerLabel.customPosition = true
+    m.speakerLabel.customX = DIALOGUE_PADDING
+    m.speakerLabel.customY = DIALOGUE_PADDING
+    m.speakerLabel.drawableText.textColor = MENU_TITLE_RGBA
+    m.addChild(m.speakerLabel)
     m.body = new BGE.UI.Label(m.game)
     m.body.customPosition = true
     m.body.customX = DIALOGUE_PADDING
@@ -99,8 +86,13 @@ class DialogueBox extends BGE.UI.UiContainer
     m.more.customY = m.height - DIALOGUE_PADDING - lineHeight
     m.more.drawableText.textColor = MENU_TITLE_RGBA
     m.addChild(m.more)
-    m.showPage(0)
+    ' Attach first: loadLine()/afterStep() can end the conversation and close() the box straight away.
     parent.addChild(m)
+    if m.runner.isChoosing()
+      m.afterStep()
+    else
+      m.loadLine(false)
+    end if
   end sub
 
   override sub draw(parent = invalid as BGE.UI.UiWidget)
@@ -118,13 +110,13 @@ class DialogueBox extends BGE.UI.UiContainer
     end if
     if input.isButton("back")
       m.close()
-      storyEntity = m.game.getEntityByName("Story") as Story
-      storyEntity.cancelDialogue()
+      m.getStory().cancelDialogue()
     else if input.isButton("ok") and m.choicesDelay < 0 and m.choiceButtons.count() = 0
       if m.pageIndex < m.pages.count() - 1
         m.showPage(m.pageIndex + 1)
       else
-        m.finish(invalid)
+        m.getStory().dialogueStepped(m.runner.advance())
+        m.afterStep()
       end if
     end if
   end sub
@@ -140,8 +132,69 @@ class DialogueBox extends BGE.UI.UiContainer
   end sub
 
   ' Called by a choice button (through the Story's onMenuAction).
+  '
+  ' @param {integer} index - into runner.choices()
   sub chooseIndex(index as integer)
-    m.finish(m.page.choices[index])
+    view = m.runner.choices()[index]
+    choice = view.choice as RpgChoice
+    open = ""
+    if BGE.Story.valueKind(choice.open) = "string"
+      open = choice.open
+    end if
+    result = m.runner.choose(index)
+    m.getStory().dialogueChose(result, open)
+    m.afterStep()
+  end sub
+
+  private function getStory() as Story
+    if m.storyEntity = invalid
+      m.storyEntity = m.game.getEntityByName("Story") as Story
+    end if
+    return m.storyEntity
+  end function
+
+  ' Pages the runner's current line: each DIALOGUE_LINES_PER_PAGE wrapped lines is one page.
+  private sub loadLine(turned as boolean)
+    font = m.game.getFont("hud")
+    innerWidth = m.width - DIALOGUE_PADDING * 2
+    line = m.runner.currentLine()
+    m.speakerLabel.setText(line.speaker)
+    m.pages = [] as string[]
+    wrapped = BGE.UI.wrapText(line.text, font, innerWidth)
+    for i = 0 to wrapped.count() - 1 step DIALOGUE_LINES_PER_PAGE
+      lastIndex = i + DIALOGUE_LINES_PER_PAGE - 1
+      if lastIndex > wrapped.count() - 1
+        lastIndex = wrapped.count() - 1
+      end if
+      pageLines = [] as string[]
+      for j = i to lastIndex
+        pageLines.push(wrapped[j])
+      end for
+      m.pages.push(pageLines.join(Chr(10)))
+    end for
+    if m.pages.count() = 0
+      m.pages.push("")
+    end if
+    if turned
+      playSfx(m.game, "dialogue")
+    end if
+    m.showPage(0)
+  end sub
+
+  ' After advance() or choose(): shows the next line, the choices, or closes.
+  private sub afterStep()
+    m.removeChoiceButtons()
+    if not m.runner.isActive()
+      m.close()
+      m.getStory().dialogueEnded()
+    else if m.runner.isChoosing()
+      ' The FocusManager handles this frame's OK press after UI onInput, so a button added
+      ' now would be clicked by the press that turned the page. Wait a frame first.
+      m.choicesDelay = 1
+      m.more.setText("")
+    else
+      m.loadLine(true)
+    end if
   end sub
 
   private sub showPage(index as integer)
@@ -150,29 +203,40 @@ class DialogueBox extends BGE.UI.UiContainer
     end if
     m.pageIndex = index
     m.body.setText(m.pages[index])
-    isLast = index = m.pages.count() - 1
-    if isLast and m.page.choices <> invalid
-      ' The FocusManager handles this frame's OK press after UI onInput, so a button added
-      ' now would be clicked by the press that turned the page. Wait a frame first.
-      m.choicesDelay = 1
-      m.more.setText("")
-    else if not isLast
+    if index < m.pages.count() - 1
       m.more.setText("...")
     else
       m.more.setText("")
+      ' Show a node's choices with its last line rather than after another OK.
+      if m.runner.choicesFollow()
+        m.getStory().dialogueStepped(m.runner.advance())
+        m.afterStep()
+      end if
     end if
   end sub
 
-  ' A row of choice buttons along the bottom of the last page.
+  ' A row of buttons along the bottom, one per enabled choice, under the last line read.
   private sub showChoices()
-    buttonW = (m.width - DIALOGUE_PADDING * 2 - MENU_BUTTON_GAP * (m.page.choices.count() - 1)) / m.page.choices.count()
-    for i = 0 to m.page.choices.count() - 1
+    views = m.runner.choices()
+    enabledIndexes = [] as integer[]
+    for i = 0 to views.count() - 1
+      if views[i].enabled
+        enabledIndexes.push(i)
+      end if
+    end for
+    if enabledIndexes.count() = 0
+      return
+    end if
+    buttonW = (m.width - DIALOGUE_PADDING * 2 - MENU_BUTTON_GAP * (enabledIndexes.count() - 1)) / enabledIndexes.count()
+    for slot = 0 to enabledIndexes.count() - 1
+      viewIndex = enabledIndexes[slot]
       button = new ActionButton(m.game)
-      button.actionId = "choice" + i.toStr()
+      ' The actionId holds the index into runner.choices().
+      button.actionId = "choice" + viewIndex.toStr()
       button.listenerName = "Story"
-      button.setLabel(m.page.choices[i].label)
+      button.setLabel(views[viewIndex].label)
       button.customPosition = true
-      button.customX = DIALOGUE_PADDING + i * (buttonW + MENU_BUTTON_GAP)
+      button.customX = DIALOGUE_PADDING + slot * (buttonW + MENU_BUTTON_GAP)
       button.customY = m.height - DIALOGUE_PADDING - MENU_BUTTON_H
       button.width = buttonW
       button.height = MENU_BUTTON_H
@@ -182,10 +246,11 @@ class DialogueBox extends BGE.UI.UiContainer
     m.game.focusManager.focusWidget(m.choiceButtons[0])
   end sub
 
-  private sub finish(choice as DialogueChoice)
-    m.close()
-    storyEntity = m.game.getEntityByName("Story") as Story
-    storyEntity.finishDialogue(m.page, choice)
+  private sub removeChoiceButtons()
+    for each button in m.choiceButtons
+      m.removeChild(button)
+    end for
+    m.choiceButtons = []
   end sub
 
   private sub close()

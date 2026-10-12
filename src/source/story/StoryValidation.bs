@@ -1,0 +1,308 @@
+import "ValueKinds.bs"
+import "StoryTypes.bs"
+import "StoryState.bs"
+import "Selection.bs"
+
+namespace BGE.Story
+
+  ' Checks a story for mistakes: jumps to nodes that don't exist, conditions and effects nothing
+  ' handles (or with two keys, of which only one would run), items the story doesn't declare,
+  ' mistyped fields, empty or malformed nodes. Run it in a test over your real story data.
+  '
+  ' @param {dynamic} story
+  ' @param {StoryState} state - with your game's conditions and effects registered
+  ' @return {string[]} one message per problem; empty when the story is fine
+  function validateStory(story as dynamic, state as StoryState) as string[]
+    errors = [] as string[]
+    if type(story) <> "roAssociativeArray"
+      errors.push("the story isn't an object")
+      return errors
+    end if
+    if type(story.nodes) <> "roAssociativeArray"
+      errors.push("the story has no nodes object")
+      return errors
+    end if
+    for each id in story.nodes
+      where = "node '" + id + "'"
+      if Instr(1, id, "#") > 0 or Instr(1, id, "/") > 0
+        errors.push(where + ": ids can't contain # or /")
+      end if
+      entry = story.nodes[id]
+      candidates = getCandidates(entry)
+      if candidates <> invalid
+        mode = getSelectMode(entry)
+        if mode <> "first" and mode <> "random"
+          errors.push(where + ": unknown select " + FormatJson(entry.select))
+        end if
+        if candidates.count() = 0
+          errors.push(where + " has no candidates")
+        end if
+        for i = 0 to candidates.count() - 1
+          validateStoryNode(where + " candidate " + i.toStr(), candidates[i], story, state, errors)
+        end for
+      else
+        validateStoryNode(where, entry, story, state, errors)
+      end if
+    end for
+    if story.rules <> invalid
+      if type(story.rules) <> "roArray"
+        errors.push("rules must be a list")
+      else
+        for i = 0 to story.rules.count() - 1
+          rule = story.rules[i]
+          ruleWhere = "rule " + i.toStr()
+          if type(rule) <> "roAssociativeArray"
+            errors.push(ruleWhere + " isn't an object")
+          else
+            if valueKind(rule.event) <> "string"
+              errors.push(ruleWhere + " has no event")
+            end if
+            validateStoryRuleMatch(ruleWhere, rule.match, errors)
+            validateStoryConditions(ruleWhere, rule.when, story, state, errors)
+            validateStoryEffects(ruleWhere, rule.effects, story, state, errors)
+          end if
+        end for
+      end if
+    end if
+    if story.items <> invalid
+      if type(story.items) <> "roAssociativeArray"
+        errors.push("items must be an object")
+      else
+        for each itemId in story.items
+          definition = story.items[itemId]
+          itemWhere = "item '" + itemId + "'"
+          if type(definition) <> "roAssociativeArray"
+            errors.push(itemWhere + " isn't an object")
+          else
+            if valueKind(definition.max) <> "integer"
+              errors.push(itemWhere + " needs an integer max")
+            end if
+            validateStoryEffects(itemWhere + " onAcquire", definition.onAcquire, story, state, errors)
+          end if
+        end for
+      end if
+    end if
+    return errors
+  end function
+
+  sub validateStoryNode(where as string, node as dynamic, story as StoryData, state as StoryState, errors as string[])
+    if type(node) <> "roAssociativeArray"
+      errors.push(where + " isn't a node, a list of nodes or a {select, candidates} group")
+      return
+    end if
+    hasLines = false
+    if node.lines <> invalid
+      if type(node.lines) <> "roArray"
+        errors.push(where + ": lines must be a list")
+      else
+        hasLines = node.lines.count() > 0
+        for i = 0 to node.lines.count() - 1
+          line = node.lines[i]
+          if valueKind(line) <> "string"
+            lineOk = false
+            if type(line) = "roAssociativeArray"
+              lineOk = valueKind(line.text) = "string"
+            end if
+            if not lineOk
+              errors.push(where + " line " + i.toStr() + " needs text")
+            end if
+          end if
+        end for
+      end if
+    end if
+    hasChoices = false
+    if node.choices <> invalid
+      if type(node.choices) <> "roArray"
+        errors.push(where + ": choices must be a list")
+      else
+        hasChoices = node.choices.count() > 0
+        for i = 0 to node.choices.count() - 1
+          choice = node.choices[i]
+          choiceWhere = where + " choice " + i.toStr()
+          if type(choice) <> "roAssociativeArray"
+            errors.push(choiceWhere + " isn't an object")
+          else
+            validateStoryChoiceFields(choiceWhere, choice, errors)
+            validateStoryConditions(choiceWhere, choice.when, story, state, errors)
+            validateStoryEffects(choiceWhere, choice.effects, story, state, errors)
+            validateStoryTarget(choiceWhere, choice["call"], story, errors)
+            validateStoryTarget(choiceWhere, choice["goto"], story, errors)
+          end if
+        end for
+      end if
+    end if
+    hasJump = valueKind(node["call"]) <> "invalid" or valueKind(node["goto"]) <> "invalid" or isTrue(node["end"])
+    if not hasLines and not hasChoices and not hasJump
+      errors.push(where + " has nothing to do (no lines, choices, call, goto or end)")
+    end if
+    validateStoryBooleanField(where, node, "once", errors)
+    validateStoryBooleanField(where, node, "end", errors)
+    validateStoryConditions(where, node.when, story, state, errors)
+    validateStoryEffects(where, node.effects, story, state, errors)
+    validateStoryTarget(where, node["call"], story, errors)
+    validateStoryTarget(where, node["goto"], story, errors)
+  end sub
+
+  sub validateStoryChoiceFields(where as string, choice as roAssociativeArray, errors as string[])
+    validateStoryBooleanField(where, choice, "once", errors)
+    validateStoryBooleanField(where, choice, "showDisabled", errors)
+    ' A non-string or empty label would quietly make the choice a fallback.
+    if choice.DoesExist("label")
+      labelOk = valueKind(choice.label) = "string"
+      if labelOk
+        labelOk = choice.label <> ""
+      end if
+      if not labelOk
+        errors.push(where + ": label must be a non-empty string (leave it out for a fallback)")
+      end if
+    end if
+    if choice.DoesExist("id") and valueKind(choice.id) <> "string"
+      errors.push(where + ": id must be a string")
+    end if
+  end sub
+
+  ' Reports item[key] if it's present but not true or false.
+  sub validateStoryBooleanField(where as string, item as roAssociativeArray, key as string, errors as string[])
+    if item.DoesExist(key) and valueKind(item[key]) <> "boolean"
+      errors.push(where + ": " + key + " must be true or false")
+    end if
+  end sub
+
+  sub validateStoryTarget(where as string, target as dynamic, story as StoryData, errors as string[])
+    kind = valueKind(target)
+    if kind = "invalid"
+      return
+    end if
+    if kind <> "string"
+      errors.push(where + " goes to " + FormatJson(target) + ", which isn't a node id")
+    else if not story.nodes.DoesExist(target)
+      errors.push(where + " goes to unknown node '" + target + "'")
+    end if
+  end sub
+
+  sub validateStoryConditions(where as string, conditions as dynamic, story as StoryData, state as StoryState, errors as string[])
+    if conditions = invalid
+      return
+    end if
+    if type(conditions) <> "roArray"
+      errors.push(where + ": when must be a list")
+      return
+    end if
+    for each condition in conditions
+      if type(condition) <> "roAssociativeArray"
+        errors.push(where + " has a condition that isn't an object")
+      else
+        keys = state.conditionKeys(condition)
+        if keys.count() = 0
+          errors.push(where + " has an unknown condition " + FormatJson(condition))
+        else if keys.count() > 1
+          errors.push(where + " has a condition with more than one of " + keys.join(", ") + " (only one is checked; use separate conditions): " + FormatJson(condition))
+        else if condition.DoesExist("any") and state.findConditionHandler(condition) = invalid
+          validateStoryConditions(where, condition.any, story, state, errors)
+        else if state.findConditionHandler(condition) = invalid
+          validateBuiltInCondition(where, condition, story, errors)
+        end if
+      end if
+    end for
+  end sub
+
+  sub validateStoryEffects(where as string, effects as dynamic, story as StoryData, state as StoryState, errors as string[])
+    if effects = invalid
+      return
+    end if
+    if type(effects) <> "roArray"
+      errors.push(where + ": effects must be a list")
+      return
+    end if
+    for each effect in effects
+      if type(effect) <> "roAssociativeArray"
+        errors.push(where + " has an effect that isn't an object")
+      else
+        keys = state.effectKeys(effect)
+        if keys.count() = 0
+          errors.push(where + " has an unknown effect " + FormatJson(effect))
+        else if keys.count() > 1
+          errors.push(where + " has an effect with more than one of " + keys.join(", ") + " (only one runs; use separate effects): " + FormatJson(effect))
+        else if state.findEffectHandler(effect) = invalid
+          validateBuiltInEffect(where, effect, story, errors)
+        end if
+      end if
+    end for
+  end sub
+
+  ' Built-in conditions read these fields directly, so a mistyped one fails (or crashes) at runtime.
+  sub validateBuiltInCondition(where as string, condition as roAssociativeArray, story as StoryData, errors as string[])
+    for each key in ["flag", "notFlag", "hasItem", "notItem", "visited", "notVisited"]
+      validateStoryFieldKind(where, "a condition", condition, key, ["string"], "a string", errors)
+    end for
+    validateStoryFieldKind(where, "a condition", condition, "gte", ["integer"], "an integer", errors)
+    validateStoryFieldKind(where, "a condition", condition, "lt", ["integer"], "an integer", errors)
+    validateStoryFieldKind(where, "a condition", condition, "eq", ["boolean", "integer", "string"], "a boolean, integer or string", errors)
+    validateStoryItemId(where, condition, "hasItem", story, errors)
+    validateStoryItemId(where, condition, "notItem", story, errors)
+  end sub
+
+  sub validateBuiltInEffect(where as string, effect as roAssociativeArray, story as StoryData, errors as string[])
+    for each key in ["set", "add", "giveItem", "takeItem", "post", "message", "speaker"]
+      validateStoryFieldKind(where, "an effect", effect, key, ["string"], "a string", errors)
+    end for
+    validateStoryFieldKind(where, "an effect", effect, "amount", ["integer"], "an integer", errors)
+    if effect.DoesExist("add") and not effect.DoesExist("amount")
+      errors.push(where + " has an effect whose add has no amount: " + FormatJson(effect))
+    end if
+    if effect.DoesExist("set")
+      validateStoryFieldKind(where, "an effect", effect, "value", ["boolean", "integer", "float", "string"], "a boolean, number or string", errors)
+      if not effect.DoesExist("value")
+        errors.push(where + " has an effect whose set has no value: " + FormatJson(effect))
+      end if
+    end if
+    validateStoryItemId(where, effect, "giveItem", story, errors)
+    validateStoryItemId(where, effect, "takeItem", story, errors)
+  end sub
+
+  ' Reports item[key] if it's a string naming an item the story's items don't declare. (A
+  ' non-string id is reported by validateStoryFieldKind, and malformed items by validateStory.)
+  sub validateStoryItemId(where as string, item as roAssociativeArray, key as string, story as StoryData, errors as string[])
+    itemId = item[key]
+    if valueKind(itemId) <> "string"
+      return
+    end if
+    if valueKind(story.items) = "invalid"
+      errors.push(where + " uses item '" + itemId + "', but the story has no items")
+    else if type(story.items) = "roAssociativeArray"
+      if not story.items.DoesExist(itemId)
+        errors.push(where + " uses unknown item '" + itemId + "'")
+      end if
+    end if
+  end sub
+
+  ' Reports item[key] if it's present but not one of the kinds.
+  sub validateStoryFieldKind(where as string, what as string, item as roAssociativeArray, key as string, kinds as string[], kindText as string, errors as string[])
+    if not item.DoesExist(key)
+      return
+    end if
+    kind = valueKind(item[key])
+    for each allowed in kinds
+      if kind = allowed
+        return
+      end if
+    end for
+    errors.push(where + " has " + what + " whose " + key + " isn't " + kindText + ": " + FormatJson(item))
+  end sub
+
+  sub validateStoryRuleMatch(where as string, match as dynamic, errors as string[])
+    if match = invalid
+      return
+    end if
+    if type(match) <> "roAssociativeArray"
+      errors.push(where + ": match must be an object")
+      return
+    end if
+    for each key in match
+      if not isScalar(match[key]) or valueKind(match[key]) = "invalid"
+        errors.push(where + " match '" + key + "' isn't a string, number or boolean")
+      end if
+    end for
+  end sub
+
+end namespace
