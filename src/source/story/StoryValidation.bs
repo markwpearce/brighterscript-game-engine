@@ -6,7 +6,8 @@ import "Selection.bs"
 namespace BGE.Story
 
   ' Checks a story for mistakes: jumps to nodes that don't exist, conditions and effects nothing
-  ' handles, empty or malformed nodes. Run it in a test over your real story data.
+  ' handles (or with two keys, of which only one would run), items the story doesn't declare,
+  ' mistyped fields, empty or malformed nodes. Run it in a test over your real story data.
   '
   ' @param {dynamic} story
   ' @param {StoryState} state - with your game's conditions and effects registered
@@ -57,8 +58,8 @@ namespace BGE.Story
               errors.push(ruleWhere + " has no event")
             end if
             validateStoryRuleMatch(ruleWhere, rule.match, errors)
-            validateStoryConditions(ruleWhere, rule.when, state, errors)
-            validateStoryEffects(ruleWhere, rule.effects, state, errors)
+            validateStoryConditions(ruleWhere, rule.when, story, state, errors)
+            validateStoryEffects(ruleWhere, rule.effects, story, state, errors)
           end if
         end for
       end if
@@ -76,7 +77,7 @@ namespace BGE.Story
             if valueKind(definition.max) <> "integer"
               errors.push(itemWhere + " needs an integer max")
             end if
-            validateStoryEffects(itemWhere + " onAcquire", definition.onAcquire, state, errors)
+            validateStoryEffects(itemWhere + " onAcquire", definition.onAcquire, story, state, errors)
           end if
         end for
       end if
@@ -121,8 +122,9 @@ namespace BGE.Story
           if type(choice) <> "roAssociativeArray"
             errors.push(choiceWhere + " isn't an object")
           else
-            validateStoryConditions(choiceWhere, choice.when, state, errors)
-            validateStoryEffects(choiceWhere, choice.effects, state, errors)
+            validateStoryChoiceFields(choiceWhere, choice, errors)
+            validateStoryConditions(choiceWhere, choice.when, story, state, errors)
+            validateStoryEffects(choiceWhere, choice.effects, story, state, errors)
             validateStoryTarget(choiceWhere, choice["call"], story, errors)
             validateStoryTarget(choiceWhere, choice["goto"], story, errors)
           end if
@@ -133,10 +135,37 @@ namespace BGE.Story
     if not hasLines and not hasChoices and not hasJump
       errors.push(where + " has nothing to do (no lines, choices, call, goto or end)")
     end if
-    validateStoryConditions(where, node.when, state, errors)
-    validateStoryEffects(where, node.effects, state, errors)
+    validateStoryBooleanField(where, node, "once", errors)
+    validateStoryBooleanField(where, node, "end", errors)
+    validateStoryConditions(where, node.when, story, state, errors)
+    validateStoryEffects(where, node.effects, story, state, errors)
     validateStoryTarget(where, node["call"], story, errors)
     validateStoryTarget(where, node["goto"], story, errors)
+  end sub
+
+  sub validateStoryChoiceFields(where as string, choice as roAssociativeArray, errors as string[])
+    validateStoryBooleanField(where, choice, "once", errors)
+    validateStoryBooleanField(where, choice, "showDisabled", errors)
+    ' A non-string or empty label would quietly make the choice a fallback.
+    if choice.DoesExist("label")
+      labelOk = valueKind(choice.label) = "string"
+      if labelOk
+        labelOk = choice.label <> ""
+      end if
+      if not labelOk
+        errors.push(where + ": label must be a non-empty string (leave it out for a fallback)")
+      end if
+    end if
+    if choice.DoesExist("id") and valueKind(choice.id) <> "string"
+      errors.push(where + ": id must be a string")
+    end if
+  end sub
+
+  ' Reports item[key] if it's present but not true or false.
+  sub validateStoryBooleanField(where as string, item as roAssociativeArray, key as string, errors as string[])
+    if item.DoesExist(key) and valueKind(item[key]) <> "boolean"
+      errors.push(where + ": " + key + " must be true or false")
+    end if
   end sub
 
   sub validateStoryTarget(where as string, target as dynamic, story as StoryData, errors as string[])
@@ -151,7 +180,7 @@ namespace BGE.Story
     end if
   end sub
 
-  sub validateStoryConditions(where as string, conditions as dynamic, state as StoryState, errors as string[])
+  sub validateStoryConditions(where as string, conditions as dynamic, story as StoryData, state as StoryState, errors as string[])
     if conditions = invalid
       return
     end if
@@ -162,17 +191,22 @@ namespace BGE.Story
     for each condition in conditions
       if type(condition) <> "roAssociativeArray"
         errors.push(where + " has a condition that isn't an object")
-      else if condition.DoesExist("any")
-        validateStoryConditions(where, condition.any, state, errors)
-      else if not state.isKnownCondition(condition)
-        errors.push(where + " has an unknown condition " + FormatJson(condition))
-      else if state.findConditionHandler(condition) = invalid
-        validateBuiltInCondition(where, condition, errors)
+      else
+        keys = state.conditionKeys(condition)
+        if keys.count() = 0
+          errors.push(where + " has an unknown condition " + FormatJson(condition))
+        else if keys.count() > 1
+          errors.push(where + " has a condition with more than one of " + keys.join(", ") + " (only one is checked; use separate conditions): " + FormatJson(condition))
+        else if condition.DoesExist("any") and state.findConditionHandler(condition) = invalid
+          validateStoryConditions(where, condition.any, story, state, errors)
+        else if state.findConditionHandler(condition) = invalid
+          validateBuiltInCondition(where, condition, story, errors)
+        end if
       end if
     end for
   end sub
 
-  sub validateStoryEffects(where as string, effects as dynamic, state as StoryState, errors as string[])
+  sub validateStoryEffects(where as string, effects as dynamic, story as StoryData, state as StoryState, errors as string[])
     if effects = invalid
       return
     end if
@@ -183,25 +217,32 @@ namespace BGE.Story
     for each effect in effects
       if type(effect) <> "roAssociativeArray"
         errors.push(where + " has an effect that isn't an object")
-      else if not state.isKnownEffect(effect)
-        errors.push(where + " has an unknown effect " + FormatJson(effect))
-      else if state.findEffectHandler(effect) = invalid
-        validateBuiltInEffect(where, effect, errors)
+      else
+        keys = state.effectKeys(effect)
+        if keys.count() = 0
+          errors.push(where + " has an unknown effect " + FormatJson(effect))
+        else if keys.count() > 1
+          errors.push(where + " has an effect with more than one of " + keys.join(", ") + " (only one runs; use separate effects): " + FormatJson(effect))
+        else if state.findEffectHandler(effect) = invalid
+          validateBuiltInEffect(where, effect, story, errors)
+        end if
       end if
     end for
   end sub
 
   ' Built-in conditions read these fields directly, so a mistyped one fails (or crashes) at runtime.
-  sub validateBuiltInCondition(where as string, condition as roAssociativeArray, errors as string[])
+  sub validateBuiltInCondition(where as string, condition as roAssociativeArray, story as StoryData, errors as string[])
     for each key in ["flag", "notFlag", "hasItem", "notItem", "visited", "notVisited"]
       validateStoryFieldKind(where, "a condition", condition, key, ["string"], "a string", errors)
     end for
     validateStoryFieldKind(where, "a condition", condition, "gte", ["integer"], "an integer", errors)
     validateStoryFieldKind(where, "a condition", condition, "lt", ["integer"], "an integer", errors)
     validateStoryFieldKind(where, "a condition", condition, "eq", ["boolean", "integer", "string"], "a boolean, integer or string", errors)
+    validateStoryItemId(where, condition, "hasItem", story, errors)
+    validateStoryItemId(where, condition, "notItem", story, errors)
   end sub
 
-  sub validateBuiltInEffect(where as string, effect as roAssociativeArray, errors as string[])
+  sub validateBuiltInEffect(where as string, effect as roAssociativeArray, story as StoryData, errors as string[])
     for each key in ["set", "add", "giveItem", "takeItem", "post", "message", "speaker"]
       validateStoryFieldKind(where, "an effect", effect, key, ["string"], "a string", errors)
     end for
@@ -213,6 +254,24 @@ namespace BGE.Story
       validateStoryFieldKind(where, "an effect", effect, "value", ["boolean", "integer", "float", "string"], "a boolean, number or string", errors)
       if not effect.DoesExist("value")
         errors.push(where + " has an effect whose set has no value: " + FormatJson(effect))
+      end if
+    end if
+    validateStoryItemId(where, effect, "giveItem", story, errors)
+    validateStoryItemId(where, effect, "takeItem", story, errors)
+  end sub
+
+  ' Reports item[key] if it's a string naming an item the story's items don't declare. (A
+  ' non-string id is reported by validateStoryFieldKind, and malformed items by validateStory.)
+  sub validateStoryItemId(where as string, item as roAssociativeArray, key as string, story as StoryData, errors as string[])
+    itemId = item[key]
+    if valueKind(itemId) <> "string"
+      return
+    end if
+    if valueKind(story.items) = "invalid"
+      errors.push(where + " uses item '" + itemId + "', but the story has no items")
+    else if type(story.items) = "roAssociativeArray"
+      if not story.items.DoesExist(itemId)
+        errors.push(where + " uses unknown item '" + itemId + "'")
       end if
     end if
   end sub

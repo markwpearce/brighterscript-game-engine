@@ -419,8 +419,10 @@ end if
 
 A typo in a node id or a condition key only shows up when a player reaches it.
 `validateStory` finds them up front: `goto`/`call` targets that don't exist,
-condition and effect keys that are neither built in nor registered, groups with
-an unknown `select` or no candidates, and nodes with nothing to do. Register
+condition and effect keys that are neither built in nor registered, a condition
+or effect with two keys (only one would run), item ids missing from `items`,
+mistyped fields (a `once` that isn't `true`/`false`, an empty `label`), groups
+with an unknown `select` or no candidates, and nodes with nothing to do. Register
 your vocabulary first, then validate in a Rooibos test:
 
 ```brighterscript
