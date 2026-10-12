@@ -158,11 +158,12 @@ before then runs nothing). Then, in order:
 1. `choices` - the runner switches to choosing. Each choice is evaluated: passing ones are enabled, failing
    ones are dropped unless `showDisabled`, in which case they're listed with `enabled: false`. A `once`
    choice that's been taken (visit key `<nodeKey>/<choice id or label>`) is dropped. If no labelled choice
-   is enabled and a choice with no `label` (a fallback) passes, it's taken immediately.
+   is enabled and a choice with no `label` (a fallback) passes, it's taken immediately. A fallback whose
+   `call` fails to enter moves on to the node's own call/goto/end/run-out.
 2. `call` - push a return point and enter the called node; when the called conversation runs out, resume
    here and continue with step 3.
 3. `goto` - enter that node.
-4. `end: true` - the whole conversation ends, call stack and all.
+4. `end: true` - the whole conversation ends, call stack and all. It takes precedence over `goto` on the same node (checked before it).
 5. Otherwise the node has run out: pop the call stack and resume there, or end the conversation if it's
    empty.
 
@@ -170,10 +171,13 @@ before then runs nothing). Then, in order:
 re-evaluated - the hub pattern), else its `goto`, else the node has run out (step 5). Pass-through keys
 (e.g. `open`) are the game's to act on after `choose()` returns.
 
+A failed `goto` or `call` (the target has no passing candidate) behaves as if the node ran out; a caller
+waiting on a choice's `call` then shows its choices again.
+
 A node with no lines goes straight to its end-of-node steps, so a node can be a pure router (a candidate
 group whose candidates only `goto`).
 
-**Saving a position:** `getPosition()` returns `{stack: [{node, line, choosing}]}` with node keys; `restore()`
+**Saving a position:** `getPosition()` returns `{stack: [{key, line, phase}]}` with node keys; `restore()`
 returns `false` if a key no longer exists (e.g. the story file changed), in which case the game restarts the
 node or the story.
 
