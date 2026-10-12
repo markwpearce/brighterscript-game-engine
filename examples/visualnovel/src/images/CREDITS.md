@@ -18,6 +18,8 @@ Resized and cropped for this example.
 
 Most of these are CC-BY-SA 3.0, which requires that adaptations (the resized and cropped images here) are shared under the same licence, with credit to the author and a link to the licence (https://creativecommons.org/licenses/by-sa/3.0/). The Husk, Sato and Castell portraits are also offered under GPL 3.0 as an alternative. The Centaur bridge is also offered under plain CC-BY.
 
+The adapted (resized, cropped or mirrored) images in this folder are licensed under CC-BY-SA 3.0 (the Centaur bridge under its CC-BY option), not under the repository's MIT licence.
+
 ## Font
 
 | Asset | File | Author | Licence | Source |

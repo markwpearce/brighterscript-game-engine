@@ -507,9 +507,9 @@ view has `enabled: false` and doesn't let it take focus.
 records each `ending:` id it sees, so the title can show how many endings
 have been found.
 
-**Choices under the last line.** When the typewriter finishes the last line
+**Choices with the last line.** When the typewriter finishes the last line
 of a node with choices, the scene calls `advance()` straight away if
-`choicesFollow()` is true, so the choices appear under that line without
+`choicesFollow()` is true, so the choices appear while the last line is still showing, without
 another press (see Choices, above).
 
 **Saving.** The game autosaves after every step: the state, the runner's
