@@ -454,3 +454,65 @@ To check that each ending can be reached, a spec can drive a
 `examples/story/tests/Jokes.spec.bs`). `runner.startNode(node)` plays a
 one-off node that isn't in the story, and `runner.cancel()` ends a
 conversation at any point.
+
+## A visual novel
+
+`examples/visualnovel` ("The Mutiny") is a short visual novel built on this
+module: a background, a portrait card each side, a text box and choices. The
+whole story is `src/story/mutiny.json`; the game code only draws what the
+runner gives it.
+
+**Stage directions are line keys.** The engine passes extra keys on a line
+through untouched, so each line can say what's on stage. A key that's there
+changes that part of the stage; a missing key leaves it as it was, and `""`
+clears it:
+
+```json
+{"speaker": "Dr. Voss", "text": "The derelict is the Greyan ship Ilsk.", "left": "voss", "right": "husk"},
+{"speaker": "Husk", "text": "And yet it is transmitting, Captain."}
+```
+
+The scene keeps the current stage and updates it from each line before drawing
+it:
+
+```brighterscript
+line = m.runner.currentLine()
+for each key in ["background", "left", "right"]
+  if BGE.Story.valueKind(line.line[key]) = "string"
+    m.stage[key] = line.line[key]
+  end if
+end for
+```
+
+**The hub.** The middle of the story is a hub: talk to each crew member once
+(`once` plus `call`, so the hub's choices come back after each conversation),
+then a fallback with no label moves on when nothing is left to pick:
+
+```json
+"choices": [
+  {"label": "Talk to Lt. Sato.", "once": true, "call": "talkSato"},
+  {"label": "Talk to Dr. Voss.", "once": true, "call": "talkVoss"},
+  {"label": "I've heard enough.", "when": [{"visited": "talkSato"}, {"visited": "talkVoss"}], "goto": "confrontation"},
+  {"goto": "confrontation"}
+]
+```
+
+**Accusations the player can see but not pick.** At the confrontation, each
+accusation has a `when` for the evidence it needs and `showDisabled: true`, so
+the player sees who they could have accused. The scene greys a choice whose
+view has `enabled: false` and doesn't let it take focus.
+
+**Endings post an event.** Each ending node ends with
+`{"post": "ending:<id>"}` and `"end": true`. The scene reads `result.posts` and
+records each `ending:` id it sees, so the title can show how many endings
+have been found.
+
+**Choices under the last line.** When the typewriter finishes the last line
+of a node with choices, the scene calls `advance()` straight away if
+`choicesFollow()` is true, so the choices appear under that line without
+another press (see Choices, above).
+
+**Saving.** The game autosaves after every step: the state, the runner's
+position, the backlog (so the history is still there after Continue) and the
+current stage, so a resumed game shows the same background and portraits.
+`runner.backlog` can be assigned back after `restore()`.
