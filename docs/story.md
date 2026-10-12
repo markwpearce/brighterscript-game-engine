@@ -87,6 +87,10 @@ sub show()
 end sub
 ```
 
+The imports are the form this repo's examples use, since they copy the engine
+into their own `source/` folder. A game that installs the engine with ropm has
+it under `roku_modules`, and `source` scope sees it without any imports.
+
 That loop is the whole contract. `currentLine()` gives `{text, speaker, line}`
 (`text` has `${flags}` filled in, `line` is the raw line if you stored extra
 keys on it). `choices()` gives `{label, enabled, choice}` for each button.
@@ -127,8 +131,9 @@ A node has lines to show, then effects, then somewhere to go:
   run out: the runner returns to whoever called it, or finishes.
 - A node with no lines skips straight to that step, so a node can be a pure
   router.
-- If a `goto` or `call` names a node that has no passing candidate, the node
-  behaves as if it had run out.
+- If a `goto` names a node that has no passing candidate, the node behaves as
+  if it had run out. If its own `call` does, the call is skipped and the node
+  carries on to its `goto` or `end`.
 
 `goto`, `call` and `end` are reserved words in BrightScript. In JSON that makes
 no difference. In a BrighterScript AA literal write them quoted
@@ -179,16 +184,27 @@ m.lineLabel.setText(line.text)
 if m.runner.choicesFollow()
   ' the last line of a node with choices: show it, then bring up the choices under it
   m.runner.advance()
-  m.addButtons()
+  if m.runner.isChoosing()
+    m.addButtons()
+  end if
 end if
 ```
 
 Draw the line first, because `advance()` runs the node's effects at that point,
 and if none of its choices turn out to be available the runner carries on to
-the node's `call`/`goto`/`end` (so check `isChoosing()` before adding buttons).
+the node's `call`/`goto`/`end` instead of waiting for a choice.
 
-Any other key on a choice (`open: "shop"`, say) is yours to read from
-`choices()[i].choice` after you call `choose()`.
+Any other key on a choice (`open: "shop"`, say) is yours to read. Take the view
+from `choices()` *before* calling `choose()`, since the choices change once the
+story moves on, then act on it afterwards:
+
+```brighterscript
+view = m.runner.choices()[index]
+m.runner.choose(index)
+if view.choice.open = "shop"
+  m.openShop()
+end if
+```
 
 ## Picking a node
 
@@ -362,21 +378,23 @@ fields (`name`, `icon`) stay on the definition in `story.items` for you to read.
 State and position are saved separately, and both are plain data:
 
 ```brighterscript
-' Save (getPosition() is invalid when no conversation is active or a startNode() one-off is playing)
+' Save. getPosition() is invalid when no conversation is active (or a
+' startNode() one-off is playing), so store it only when there is one.
+save = {state: m.state.toSaveData()}
 position = m.runner.getPosition()
 if position <> invalid
-  BGE.registryWrite("my-game", "save", {
-    state: m.state.toSaveData(),
-    position: position
-  })
+  save.position = position
 end if
+BGE.registryWrite("my-game", "save", save)
 
 ' Load
 saved = BGE.registryRead("my-game", "save", invalid)
 if saved <> invalid
   m.state.loadSaveData(saved.state)
-  if not m.runner.restore(saved.position)
-    m.runner.start("start") ' the story changed since the save; begin again
+  if saved.position <> invalid
+    if not m.runner.restore(saved.position)
+      m.runner.start("start") ' the story changed since the save; begin again
+    end if
   end if
 end if
 ```
@@ -385,7 +403,11 @@ end if
   anything malformed, so a damaged save gives a fresh state.
 - `getPosition()` is `{stack: [{key, line, phase}]}` - where the conversation
   is, including any `call`s still waiting to return. `restore()` returns `false`
-  when a node in it no longer exists.
+  when a node in it no longer exists. A candidate is saved by its index in its
+  group, so reordering a candidate list in the story file can resume a
+  different candidate. If the saved choices have all gone (rare),
+  `restore()` carries on to the node's fallback or `call`/`goto`, but can't
+  return what any effects that run then post or message.
 - `runner.backlog` is the list of lines shown so far, oldest first (capped by
   `backlogLimit`, default 100). It isn't part of the position; save it yourself
   if your game shows a history.
