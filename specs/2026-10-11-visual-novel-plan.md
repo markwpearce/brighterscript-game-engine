@@ -94,7 +94,16 @@ sips -c 1884 1413 "$HOME/Downloads/visual novel/StarPilot.png" --out /tmp/sato.p
 
 - [ ] **Step 3: Credits**
 
-Find each asset's OpenGameArt page (search "opengameart" + the file/collection name: the four Justin Nichol portraits - https://opengameart.org/users/justin-nichol - and the three renders; `centaurbrige/license.txt` is in the download). For each, record title, author, licence and URL in `src/images/CREDITS.md`:
+The asset pages (from the user):
+- Sato: https://opengameart.org/content/starship-pilot
+- Husk: https://opengameart.org/content/the-husk-human-analog-android
+- Castell: https://opengameart.org/content/starship-security-officer
+- Voss: https://opengameart.org/content/science-officer
+- Greyan bridge: https://opengameart.org/content/greyan-space-ship-bridge
+- Research lab: https://opengameart.org/content/ancient-artifact-research
+- Centaur bridge: no page given - read `~/Downloads/visual novel/centaurbrige/license.txt`, and search OpenGameArt for "centaur bridge" for the page.
+
+Fetch each page and read its author and licence. For each, record title, author, licence and URL in `src/images/CREDITS.md`:
 
 ```markdown
 # Art credits
