@@ -11,6 +11,7 @@ Licences as stated on each OpenGameArt page (checked 2026-10-12).
 | Greyan bridge ("Greyan Space Ship Bridge") | bg/greyanBridge.jpg | Tuomo Untinen (submitted by Reemax) | CC-BY-SA 3.0 (its textures are CC0) | https://opengameart.org/content/greyan-space-ship-bridge |
 | Research lab ("Ancient artifact research") | bg/lab.jpg | Tuomo Untinen (submitted by Reemax) | CC-BY-SA 3.0 | https://opengameart.org/content/ancient-artifact-research |
 | Centaur bridge ("Centaur Space Ship Bridge") | bg/centaurBridge.jpg | Tuomo Untinen (submitted by Reemax) | CC-BY 3.0, CC-BY 4.0, CC-BY-SA 3.0 or CC-BY-SA 4.0 (its textures are CC0) | https://opengameart.org/content/centaur-space-ship-bridge |
+| Civilian spaceship (Splash Screen) | Splash_HD.jpg | bull-1 | CC-BY 4.0 | https://opengameart.org/content/civilian-spaceship |
 
 Resized and cropped for this example.
 
@@ -25,3 +26,9 @@ The adapted (resized, cropped or mirrored) images in this folder are licensed un
 | Asset | File | Author | Licence | Source |
 |---|---|---|---|---|
 | Audiowide | ../fonts/Audiowide-Regular.ttf | Brian J. Bonislawsky (Astigmatic) | SIL OFL 1.1 (OFL.txt in src/fonts) | https://fonts.google.com/specimen/Audiowide |
+
+## Music
+
+| Asset | File | Author | Licence | Source |
+|---|---|---|---|---|
+| Drifting Through the Nebula (Ambient) | music/Drifting.mp3 | HitCtrl | CC-BY 3.0 | https://opengameart.org/content/drifting-through-the-nebula-ambient |
