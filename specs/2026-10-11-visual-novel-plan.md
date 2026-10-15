@@ -23,6 +23,20 @@
 - Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Gate: `npm run check`, `npm run validate-examples`, `cd examples/visualnovel && npm test`, then an on-device run.
 
+## Changes from PR 1 (#325) that override task text below
+
+- **Never use `source/Story/` (or any folder matching an engine folder case-insensitively).** pkg paths are case-insensitive, so it merges with the engine's `source/story/`. The VN's story helpers live in `src/source/Novel/` (already renamed in the tasks below).
+- `runner.start(id)` returns a `StoryResult`; check `runner.isActive()` after.
+- `runner.choicesFollow()` exists: when the text box has shown the last line of a node with choices, call `advance()` (settle/save its result) so the choices appear under that line - no extra OK. StageScene must do this once the typewriter finishes on such a line (not before - the player should see the whole line). If advancing ends the conversation or moves to a new line instead of choosing, handle that like any other step.
+- A node's `effects` run when its last line is read, before its choices show. Effects a player should be able to back out of belong on a choice.
+- `loadStory` parses with `ParseJson(text, "i")`: node/item ids are case-insensitive.
+- `validateStory` type-checks condition/effect fields and flags `add` without `amount`, `set` without `value`.
+- `restore()` returns false for a position that no longer fits; `getPosition()` is invalid when inactive or during `startNode()`.
+- Save story state even when no conversation is active (always write `state`; `position` only when valid) - the docs/story.md Saving section shows the shape.
+- Rooibos needs an `@describe` before the first `@it` (RBS2201). A BrighterScript `StoryData` literal without `items` can be misread against `roAssociativeArray.Items()` - add `items: {}` (not an issue for JSON).
+- Task 7's push/PR step is done by the controller with the user, not the implementer.
+- Engine default Button theme: the focused label is low-contrast. Set a high-contrast `game.defaultTheme` (focused background/text colours) in `main.bs`.
+
 ## Review Focus
 
 1. **A save from an older build of the story** (node renamed or removed) - Continue must start a new story at `start` (keeping nothing broken), not crash or show a blank box. Tested in Task 3.
@@ -43,8 +57,8 @@
 | `src/story/mutiny.json` | the whole story |
 | `src/images/bg/*.jpg`, `src/images/portraits/*.png`, `src/images/CREDITS.md` | art and attribution |
 | `src/source/main.bs` | game setup, scenes, deep links |
-| `src/source/Story/Characters.bs` | speaker name → portrait id; portrait/background ids → bitmap names |
-| `src/source/Story/VnSave.bs` | save data and endings-seen (pure, tested) |
+| `src/source/Novel/Characters.bs` | speaker name → portrait id; portrait/background ids → bitmap names |
+| `src/source/Novel/VnSave.bs` | save data and endings-seen (pure, tested) |
 | `src/source/UI/Backdrop.bs` | full-screen background with a fade on change |
 | `src/source/UI/PortraitCard.bs` | one framed portrait, lit or dimmed |
 | `src/source/UI/TextBox.bs` | name tab + typewriter text |
@@ -376,7 +390,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 2: Test config**
 
-`examples/visualnovel/bsconfig.test.json`: copy `examples/story/bsconfig.test.json` (PR 1, Task 8), changing `"story/jokes.json"` to `"story/mutiny.json"` and adding `"source/Story/VnSave.bs"` (Task 3 creates it; add the entry then). `package.json`: add `"test": "bsc --project bsconfig.test.json --create-package=false && node ../../scripts/run-tests-ci.js examples/visualnovel/test-build"`.
+`examples/visualnovel/bsconfig.test.json`: copy `examples/story/bsconfig.test.json` (PR 1, Task 8), changing `"story/jokes.json"` to `"story/mutiny.json"` and adding `"source/Novel/VnSave.bs"` (Task 3 creates it; add the entry then). `package.json`: add `"test": "bsc --project bsconfig.test.json --create-package=false && node ../../scripts/run-tests-ci.js examples/visualnovel/test-build"`.
 
 - [ ] **Step 3: Write the story tests**
 
@@ -569,7 +583,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 3: Save data and endings seen
 
 **Files:**
-- Create: `examples/visualnovel/src/source/Story/VnSave.bs`, `examples/visualnovel/tests/VnSave.spec.bs`
+- Create: `examples/visualnovel/src/source/Novel/VnSave.bs`, `examples/visualnovel/tests/VnSave.spec.bs`
 
 **Interfaces:**
 - Produces: `interface VnStage { background as string, left as string, right as string }`; `interface VnSave extends roAssociativeArray { version as integer, state as BGE.Story.StorySaveData, position as BGE.Story.RunnerPosition, backlog as roAssociativeArray[], stage as VnStage }`; `const VN_SAVE_VERSION = 1`, `const VN_SAVE_SECTION = "bge-visualnovel"`; `buildVnSave(state, runner, stage as VnStage) as VnSave` (invalid if the runner has no position); `validateVnSave(data as dynamic) as VnSave` (or invalid); `applyVnSave(save as VnSave, state, runner) as boolean` (false → caller starts over); `backlogToSave(backlog as BGE.Story.StoryLineView[]) as roAssociativeArray[]`, `backlogFromSave(data as dynamic) as BGE.Story.StoryLineView[]`; `addEndingSeen(seen as roAssociativeArray, endingId as string) as roAssociativeArray`; `endingsSeenText(seen as roAssociativeArray) as string`.
@@ -644,7 +658,7 @@ end namespace
 - [ ] **Step 3: Implement `VnSave.bs`**
 
 ```brighterscript
-' examples/visualnovel/src/source/Story/VnSave.bs
+' examples/visualnovel/src/source/Novel/VnSave.bs
 import "pkg:/source/story/StoryState.bs"
 import "pkg:/source/story/DialogueRunner.bs"
 
@@ -764,7 +778,7 @@ end function
 
 `position = invalid` is safe (an AA or invalid).
 
-- [ ] **Step 4: Run** - `npm test`, expected PASS. (Add `source/Story/VnSave.bs` to `bsconfig.test.json` first.)
+- [ ] **Step 4: Run** - `npm test`, expected PASS. (Add `source/Novel/VnSave.bs` to `bsconfig.test.json` first.)
 
 - [ ] **Step 5: Commit**
 
@@ -780,7 +794,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: Stage UI pieces
 
 **Files:**
-- Create: `src/source/Story/Characters.bs`, `src/source/UI/Backdrop.bs`, `src/source/UI/PortraitCard.bs`, `src/source/UI/TextBox.bs`, `src/source/UI/ChoiceList.bs`, `src/source/UI/BacklogPanel.bs` (all under `examples/visualnovel/`)
+- Create: `src/source/Novel/Characters.bs`, `src/source/UI/Backdrop.bs`, `src/source/UI/PortraitCard.bs`, `src/source/UI/TextBox.bs`, `src/source/UI/ChoiceList.bs`, `src/source/UI/BacklogPanel.bs` (all under `examples/visualnovel/`)
 
 **Interfaces:**
 - Produces: `portraitForSpeaker(speaker as string) as string`; `backgroundBitmapName(id as string) as string` (`"bg_" + id`); `portraitBitmapName(id as string) as string` (`"portrait_" + id`); `class Backdrop extends BGE.UI.UiWidget` with `setBackground(id as string)`; `class PortraitCard extends BGE.UI.UiWidget` with `new(game, side as string)`, `setPortrait(id as string)`, `portraitId as string`, `lit as boolean`; `class TextBox extends BGE.UI.UiContainer` with `showLine(speaker as string, text as string)`, `isTyping() as boolean`, `finishTyping()`, `clear()`; `class ChoiceList extends BGE.UI.UiContainer` with `show(views as BGE.Story.ChoiceView[], listener as ChoiceListener)`, `clear()`, `focusFirst()`, `hasButtons() as boolean`; `interface ChoiceListener { sub chooseIndex(index as integer) }`; `class BacklogPanel extends BGE.UI.UiContainer` with `new(game, entries as BGE.Story.StoryLineView[])`, `open(parent)`, `close(parent)`, `scroll(delta as integer)`.
@@ -822,7 +836,7 @@ end function
 
 ```brighterscript
 import "pkg:/source/engine/ui/UiWidget.bs"
-import "../Story/Characters.bs"
+import "../Novel/Characters.bs"
 
 ' The full-screen background. A change fades through black over FADE_SECONDS.
 const BACKDROP_FADE_SECONDS = 0.4
@@ -888,7 +902,7 @@ Check `UiWidget` has an overridable `onUpdate(deltaTime)` (UiContainer forwards 
 
 ```brighterscript
 import "pkg:/source/engine/ui/UiWidget.bs"
-import "../Story/Characters.bs"
+import "../Novel/Characters.bs"
 
 const PORTRAIT_W = 360
 const PORTRAIT_H = 480
@@ -1231,8 +1245,8 @@ import "pkg:/source/utils/registry.bs"
 import "pkg:/source/story/StoryState.bs"
 import "pkg:/source/story/DialogueRunner.bs"
 import "pkg:/source/story/StoryLoader.bs"
-import "../Story/Characters.bs"
-import "../Story/VnSave.bs"
+import "../Novel/Characters.bs"
+import "../Novel/VnSave.bs"
 import "../UI/Backdrop.bs"
 import "../UI/PortraitCard.bs"
 import "../UI/TextBox.bs"
@@ -1479,7 +1493,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 import "pkg:/source/engine/GameScene.bs"
 import "pkg:/source/engine/ui/Label.bs"
 import "pkg:/source/utils/registry.bs"
-import "../Story/VnSave.bs"
+import "../Novel/VnSave.bs"
 import "../UI/Backdrop.bs"
 import "../UI/ChoiceList.bs"
 
