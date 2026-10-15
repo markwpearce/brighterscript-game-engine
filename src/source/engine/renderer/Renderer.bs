@@ -1087,6 +1087,8 @@ namespace BGE
         return invalid
       end if
 
+      ' TriangleOps.create() reorders a clockwise array in place - cache under the order asked for
+      pointsAskedFor = [points[0], points[1], points[2]]
       srcRegion = srcRegionWithId.region
 
       srcPreX = 0
@@ -1236,7 +1238,7 @@ namespace BGE
 
       m.forceDraw(result.bitmap)
       if useCache
-        m.triangleCache.addTriangle(srcRegionWithId.id, points, result)
+        m.triangleCache.addTriangle(srcRegionWithId.id, pointsAskedFor, result)
       end if
 
       ' Everything worked here, so stage regions for return after completing drawing the frame.
@@ -1280,6 +1282,11 @@ namespace BGE
       end for
       if not shouldDraw
         return false
+      end if
+
+      ' The warp below only rotates and scales, which can't mirror (issue #269)
+      if m.isTriangleMirrored(srcPoints, destPoints)
+        return m.drawMirroredBitmapTriangleTo(draw2d, srcRegionWithId, srcPoints, destPoints, rgba)
       end if
 
       srcTriangleBmp = m.makeIntoTriangle(srcRegionWithId, srcPoints, true, true)
@@ -1454,6 +1461,69 @@ namespace BGE
       m.bmpPool.stageRegionsForReturn([scratchRegion1, scratchRegion2, scratchRegion3])
       '   draw2d.finish()
       return didDraw
+    end function
+
+    ' Whether mapping srcPoints onto destPoints is a reflection - their windings differ.
+    private function isTriangleMirrored(srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[]) as boolean
+      srcCross = (srcPoints[1].x - srcPoints[0].x) * (srcPoints[2].y - srcPoints[0].y) - (srcPoints[1].y - srcPoints[0].y) * (srcPoints[2].x - srcPoints[0].x)
+      destCross = (destPoints[1].x - destPoints[0].x) * (destPoints[2].y - destPoints[0].y) - (destPoints[1].y - destPoints[0].y) * (destPoints[2].x - destPoints[0].x)
+      return (srcCross < 0 and destCross > 0) or (srcCross > 0 and destCross < 0)
+    end function
+
+    ' Draws a triangle whose dest is wound the other way from its src: mirrors the src
+    ' triangle's bounding box into a scratch bitmap (a flip at rotation 0, which real
+    ' hardware does correctly - see issue #237), then warps that, which needs no mirror.
+    private function drawMirroredBitmapTriangleTo(draw2d as ifDraw2d, srcRegionWithId as BGE.RendererHelpers.RegionWithId, srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[], rgba as integer) as boolean
+      minX = BGE.Math.Min(srcPoints[0].x, BGE.Math.Min(srcPoints[1].x, srcPoints[2].x))
+      maxX = BGE.Math.Max(srcPoints[0].x, BGE.Math.Max(srcPoints[1].x, srcPoints[2].x))
+      minY = BGE.Math.Min(srcPoints[0].y, BGE.Math.Min(srcPoints[1].y, srcPoints[2].y))
+      maxY = BGE.Math.Max(srcPoints[0].y, BGE.Math.Max(srcPoints[1].y, srcPoints[2].y))
+      left = Int(minX)
+      right = -Int(-maxX)
+      top = Int(minY)
+      bottom = -Int(-maxY)
+      width = BGE.Math.Max(1, right - left)
+      height = BGE.Math.Max(1, bottom - top)
+
+      mirroredPoints = [] as BGE.Math.Vector[]
+      for each point in srcPoints
+        mirroredPoints.push(BGE.Math.VectorOps.create(right - point.x, point.y - top))
+      end for
+      ' The id carries the box's offset, so equal local points from different boxes don't share a cache entry
+      mirrored = {region: srcRegionWithId.region, id: ""} as BGE.RendererHelpers.RegionWithId
+      if srcRegionWithId.id <> ""
+        mirrored.id = `${srcRegionWithId.id}|mirror:${right},${top}`
+      end if
+      if mirrored.id <> "" and invalid <> m.triangleCache.getTriangle(mirrored.id, mirroredPoints)
+        ' already cached, so the region is never read
+        return m.drawBitmapTriangleTo(draw2d, mirrored, mirroredPoints, destPoints, rgba)
+      end if
+
+      scratch = m.bmpPool.getRegion(width, height)
+      pooled = invalid <> scratch and scratch.scale.x = 1 and scratch.scale.y = 1
+      if not pooled
+        ' too big for the pool, which would shrink it
+        m.bmpPool.returnRegion(scratch)
+        scratch = BGE.getNewMemoryScratchRegion(width + 1, height + 1)
+        if invalid = scratch
+          return false
+        end if
+      end if
+
+      srcRegion = srcRegionWithId.region
+      preTransX = srcRegion.GetPretranslationX()
+      preTransY = srcRegion.GetPretranslationY()
+      srcRegion.SetPretranslation(0, 0)
+      scratch.region.DrawScaledObject(right, -top, -1, 1, srcRegion)
+      srcRegion.SetPretranslation(preTransX, preTransY)
+      m.drawCallsLastFrame++
+
+      mirrored.region = scratch.region
+      result = m.drawBitmapTriangleTo(draw2d, mirrored, mirroredPoints, destPoints, rgba)
+      if pooled
+        m.bmpPool.returnRegion(scratch)
+      end if
+      return result
     end function
 
     private function getScalesForTriangleMapping(srcTriangle as BGE.Math.Triangle, destTriangle as BGE.Math.Triangle) as BGE.Math.Vector
