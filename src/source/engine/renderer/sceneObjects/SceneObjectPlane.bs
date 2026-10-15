@@ -42,7 +42,6 @@ namespace BGE
 
   ' Above this, the supertexture build's tilesPerAxis^2 blit count is worth a runtime
   ' warning (63x63 = ~4k blits) - see buildSuperTextureIfNeeded().
-  const SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD = 63
 
   class SceneObjectPlane extends SceneObject
 
@@ -468,12 +467,7 @@ namespace BGE
         m.tilesPerAxis = m.tilesPerAxis + 1
       end if
 
-      ' Not silently truncated - m.tilesPerAxis feeds directly into the corner-bleed
-      ' coverage math above, so reducing it here would reintroduce that bug. This is
-      ' just visibility: the blit loop below costs tilesPerAxis^2 calls, so a small
-      ' tile paired with a large maxDrawDistance can genuinely hitch on real hardware
-      ' (see issue #136 for a real fix - a bounded doubling-blit strategy that needs
-      ' on-device verification before shipping).
+      ' Not truncated - m.tilesPerAxis feeds the corner-bleed coverage math above.
       ' bmpWidth/bmpHeight are the supertexture's LOGICAL size (world coverage / wrap
       ' period); the PHYSICAL bitmap is capped to a device-tiered budget below and only
       ' ever downscaled from this, never upscaled - every pixel-space consumer must
@@ -493,20 +487,35 @@ namespace BGE
       m.superTextureBmp.SetAlphaEnable(true)
       m.superTextureBmp.Clear(&h00000000)
 
-      buildTimer = CreateObject("roTimespan")
-      failedBlits = 0
-      for row = 0 to m.tilesPerAxis - 1
-        for col = 0 to m.tilesPerAxis - 1
-          if not rendererObj.drawScaledObjectTo(m.superTextureBmp, col * m.tileWidth * m.superTextureScale, row * m.tileHeight * m.superTextureScale, m.superTextureScale, m.superTextureScale, m.drawable.region)
-            failedBlits++
-          end if
-        end for
-      end for
-      if m.tilesPerAxis > SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD
-        print "[BGE.SceneObjectPlane] warning: tiledImage supertexture needed "; m.tilesPerAxis; "x"; m.tilesPerAxis; " tile blits ("; m.tilesPerAxis * m.tilesPerAxis; " total, "; buildTimer.TotalMilliseconds(); "ms) - consider a larger tile or a smaller camera.maxDrawDistance"
+      ' One row of tiles into a strip, then the strip once per row: 2 x tilesPerAxis blits
+      ' instead of tilesPerAxis^2. Same pixels as blitting every tile, but a Roku Ultra
+      ' silently drops everything drawn to a bitmap in a frame once ~13,000 draws queue
+      ' up (issue #252), which a small tile at a long draw distance reached.
+      ' Tiles land on whole pixels, so at a fractional tile size a step can be a pixel
+      ' longer than the tile: each is stretched a pixel to overlap the next (drawn over it).
+      tileScaleX = m.superTextureScale + 1.0 / m.tileWidth
+      tileScaleY = m.superTextureScale + 1.0 / m.tileHeight
+      stripHeight = Int(m.tileHeight * tileScaleY) + 2
+      strip = CreateObject("roBitmap", {width: physicalWidth, height: stripHeight, AlphaEnable: true})
+      if invalid = strip
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate the tiledImage tile strip - skipping this plane this frame"
+        m.superTextureBmp = invalid
+        return false
       end if
+      strip.Clear(&h00000000)
+      failedBlits = 0
+      for col = 0 to m.tilesPerAxis - 1
+        if not rendererObj.drawScaledObjectTo(strip, col * m.tileWidth * m.superTextureScale, 0, tileScaleX, tileScaleY, m.drawable.region)
+          failedBlits++
+        end if
+      end for
+      for row = 0 to m.tilesPerAxis - 1
+        if not rendererObj.drawObjectTo(m.superTextureBmp, 0, row * m.tileHeight * m.superTextureScale, strip)
+          failedBlits++
+        end if
+      end for
       if failedBlits > 0
-        print "[BGE.SceneObjectPlane] warning: "; failedBlits; " of "; m.tilesPerAxis * m.tilesPerAxis; " tiledImage supertexture tile blits failed - the ground will have gaps"
+        print "[BGE.SceneObjectPlane] warning: "; failedBlits; " of "; 2 * m.tilesPerAxis; " tiledImage supertexture blits failed - the ground will have gaps"
       end if
 
       m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, physicalWidth, physicalHeight)
