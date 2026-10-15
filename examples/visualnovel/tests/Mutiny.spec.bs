@@ -1,0 +1,203 @@
+namespace tests
+  @suite("visual novel: The Mutiny")
+  class MutinyTests extends rooibos.BaseTestSuite
+
+    private story as BGE.Story.StoryData
+    private state as BGE.Story.StoryState
+    private runner as BGE.Story.DialogueRunner
+    private posts as string[]
+
+    protected override function beforeEach()
+      m.story = BGE.Story.loadStory("pkg:/story/mutiny.json")
+      m.state = new BGE.Story.StoryState(m.story)
+      m.runner = new BGE.Story.DialogueRunner(m.state, m.story)
+      ' Husk's reports in a fixed order: always the first least-visited one.
+      m.runner.random = function(count as integer) as integer
+        return 0
+      end function
+      m.posts = []
+    end function
+
+    ' Applies a step's result the way StageScene does: settle the rules, remember posts.
+    private sub take(result as BGE.Story.StoryResult)
+      m.posts.append(result.posts)
+      settled = m.state.settle()
+      m.posts.append(settled.posts)
+    end sub
+
+    private sub readToChoice()
+      while m.runner.isActive() and not m.runner.isChoosing()
+        m.take(m.runner.advance())
+      end while
+    end sub
+
+    private sub choose(label as string)
+      m.readToChoice()
+      views = m.runner.choices()
+      for i = 0 to views.count() - 1
+        if views[i].label = label
+          m.assertTrue(views[i].enabled, label + " is disabled")
+          m.take(m.runner.choose(i))
+          return
+        end if
+      end for
+      m.fail("no choice labelled " + label)
+    end sub
+
+    private function isEnabled(label as string) as boolean
+      m.readToChoice()
+      for each view in m.runner.choices()
+        if view.label = label
+          return view.enabled
+        end if
+      end for
+      m.fail("no choice labelled " + label)
+      return false
+    end function
+
+    private sub readToEnd()
+      while m.runner.isActive()
+        m.take(m.runner.advance())
+      end while
+    end sub
+
+    @describe("mutiny.json")
+
+    @it("validates with no game vocabulary at all")
+    function _()
+      m.assertNotInvalid(m.story)
+      m.assertEqual([], BGE.Story.validateStory(m.story, m.state))
+    end function
+
+    @it("keeps every line short enough for the text box")
+    function _()
+      for each id in m.story.nodes
+        entry = m.story.nodes[id]
+        nodes = BGE.Story.getCandidates(entry)
+        if nodes = invalid
+          nodes = [entry]
+        end if
+        for each node in nodes
+          if node.lines <> invalid
+            for each line in node.lines
+              text = line
+              if type(line) = "roAssociativeArray"
+                text = line.text
+              end if
+              m.assertTrue(Len(text) <= 130, id + ": " + text)
+            end for
+          end if
+        end for
+      end for
+    end function
+
+    @it("reaches the best ending with all three clues (Sato's route)")
+    function _()
+      m.take(m.runner.start("start"))
+      m.choose("Log it and hold position.")
+      m.choose("Sato's right. Scan it from here first.")
+      m.choose("Take Lt. Sato.")
+      m.choose("Agreed. Keep it quiet.")
+      m.choose("Talk to Lt. Sato.")
+      m.choose("Talk to Chief Castell.")
+      m.choose("Thanks, Chief.")
+      m.choose("Talk to Dr. Voss.")
+      m.choose("Ask Husk for a status report.")
+      m.choose("Ask Husk for a status report.")
+      m.choose("Ask Husk for a status report.")
+      ' Husk has nothing more to report and everyone's been seen: the fallback moves on.
+      m.readToChoice()
+      m.assertTrue(m.state.flags.isSet("evidence.complete"))
+      m.assertEqual(3, m.state.flags.getInt("evidence.count"))
+      m.choose("Chief Castell. You changed our course.")
+      m.readToEnd()
+      m.assertEqual(["ending:stopped"], m.posts)
+    end function
+
+    @it("can't accuse Castell without the relay tap (Castell's route)")
+    function _()
+      m.take(m.runner.start("start"))
+      m.choose("Answer the call.")
+      m.choose("Castell's right. We go aboard.")
+      m.choose("Take Chief Castell.")
+      m.choose("No. The crew deserves to know.")
+      m.choose("Talk to Lt. Sato.")
+      m.choose("Talk to Chief Castell.")
+      m.choose("Where were you at 0300?")
+      m.choose("Talk to Dr. Voss.")
+      m.choose("I've heard enough.")
+      m.assertFalse(m.isEnabled("Chief Castell. You changed our course."))
+      m.choose("Husk. You can get into everything.")
+      m.readToEnd()
+      m.assertEqual(["ending:mutiny"], m.posts)
+      m.assertEqual("Husk", m.state.flags.get("mutiny.accused"))
+    end function
+
+    @it("gates the accusations on what you know (Sato route, no Husk reports)")
+    function _()
+      m.take(m.runner.start("start"))
+      m.choose("Log it and hold position.")
+      m.choose("Sato's right. Scan it from here first.")
+      m.choose("Take Lt. Sato.")
+      m.choose("Agreed. Keep it quiet.")
+      m.choose("Talk to Lt. Sato.")
+      m.choose("Talk to Chief Castell.")
+      m.choose("Thanks, Chief.")
+      m.choose("Talk to Dr. Voss.")
+      m.choose("I've heard enough.")
+      m.assertEqual(2, m.state.flags.getInt("evidence.count"))
+      m.assertFalse(m.isEnabled("Chief Castell. You changed our course."))
+      m.assertTrue(m.isEnabled("Dr. Voss. You hid the warning."))
+      ' trust.castell is -1 (holding position) and no Husk reports were read, so this stays disabled.
+      m.assertFalse(m.isEnabled("Husk. You can get into everything."))
+    end function
+
+    @it("enables the Husk accusation after two status reports (Sato route)")
+    function _()
+      m.take(m.runner.start("start"))
+      m.choose("Log it and hold position.")
+      m.choose("Sato's right. Scan it from here first.")
+      m.choose("Take Lt. Sato.")
+      m.choose("Agreed. Keep it quiet.")
+      m.choose("Talk to Lt. Sato.")
+      m.choose("Talk to Chief Castell.")
+      m.choose("Thanks, Chief.")
+      m.choose("Talk to Dr. Voss.")
+      m.choose("Ask Husk for a status report.")
+      m.choose("Ask Husk for a status report.")
+      m.choose("I've heard enough.")
+      ' trust.castell is -1 here, so only the huskStatus visit count can enable this.
+      m.assertTrue(m.isEnabled("Husk. You can get into everything."))
+    end function
+
+    @it("can always stand down")
+    function _()
+      m.take(m.runner.start("start"))
+      m.choose("Answer the call.")
+      m.choose("Sato's right. Scan it from here first.")
+      m.choose("Take Lt. Sato.")
+      m.choose("Agreed. Keep it quiet.")
+      m.choose("Talk to Lt. Sato.")
+      m.choose("Talk to Chief Castell.")
+      m.choose("Thanks, Chief.")
+      m.choose("Talk to Dr. Voss.")
+      m.choose("I've heard enough.")
+      m.choose("Stand down. We're leaving.")
+      m.readToEnd()
+      m.assertEqual(["ending:leave"], m.posts)
+    end function
+
+    @it("returns to the hub's remaining choices after each conversation")
+    function _()
+      m.take(m.runner.start("hub"))
+      m.choose("Talk to Lt. Sato.")
+      m.readToChoice()
+      labels = []
+      for each view in m.runner.choices()
+        labels.push(view.label)
+      end for
+      m.assertEqual(["Talk to Chief Castell.", "Talk to Dr. Voss.", "Ask Husk for a status report."], labels)
+    end function
+
+  end class
+end namespace
