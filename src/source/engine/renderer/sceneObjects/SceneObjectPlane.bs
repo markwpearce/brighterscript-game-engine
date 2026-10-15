@@ -474,10 +474,6 @@ namespace BGE
       ' tile paired with a large maxDrawDistance can genuinely hitch on real hardware
       ' (see issue #136 for a real fix - a bounded doubling-blit strategy that needs
       ' on-device verification before shipping).
-      if m.tilesPerAxis > SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD
-        print "[BGE.SceneObjectPlane] warning: tiledImage supertexture needs "; m.tilesPerAxis; "x"; m.tilesPerAxis; " tile blits ("; m.tilesPerAxis * m.tilesPerAxis; " total) - consider a larger tile or a smaller camera.maxDrawDistance"
-      end if
-
       ' bmpWidth/bmpHeight are the supertexture's LOGICAL size (world coverage / wrap
       ' period); the PHYSICAL bitmap is capped to a device-tiered budget below and only
       ' ever downscaled from this, never upscaled - every pixel-space consumer must
@@ -497,13 +493,28 @@ namespace BGE
       m.superTextureBmp.SetAlphaEnable(true)
       m.superTextureBmp.Clear(&h00000000)
 
+      buildTimer = CreateObject("roTimespan")
+      failedBlits = 0
       for row = 0 to m.tilesPerAxis - 1
         for col = 0 to m.tilesPerAxis - 1
-          rendererObj.drawScaledObjectTo(m.superTextureBmp, col * m.tileWidth * m.superTextureScale, row * m.tileHeight * m.superTextureScale, m.superTextureScale, m.superTextureScale, m.drawable.region)
+          if not rendererObj.drawScaledObjectTo(m.superTextureBmp, col * m.tileWidth * m.superTextureScale, row * m.tileHeight * m.superTextureScale, m.superTextureScale, m.superTextureScale, m.drawable.region)
+            failedBlits++
+          end if
         end for
       end for
+      if m.tilesPerAxis > SCENE_OBJECT_PLANE_TILES_PER_AXIS_WARNING_THRESHOLD
+        print "[BGE.SceneObjectPlane] warning: tiledImage supertexture needed "; m.tilesPerAxis; "x"; m.tilesPerAxis; " tile blits ("; m.tilesPerAxis * m.tilesPerAxis; " total, "; buildTimer.TotalMilliseconds(); "ms) - consider a larger tile or a smaller camera.maxDrawDistance"
+      end if
+      if failedBlits > 0
+        print "[BGE.SceneObjectPlane] warning: "; failedBlits; " of "; m.tilesPerAxis * m.tilesPerAxis; " tiledImage supertexture tile blits failed - the ground will have gaps"
+      end if
 
       m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, physicalWidth, physicalHeight)
+      if invalid = m.superTextureRegion
+        print "[BGE.SceneObjectPlane] warning: couldn't create the tiledImage supertexture region - skipping this plane this frame"
+        m.superTextureBmp = invalid
+        return false
+      end if
       ' Unpadded size (see unpaddedScratchWidth/Height above) - the destination canvas
       ' must not grow with the source's rotation padding.
       m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth * m.superTextureScale, height: unpaddedScratchHeight * m.superTextureScale, AlphaEnable: true})
@@ -622,7 +633,7 @@ namespace BGE
       worked = rendererObj.drawRotatedImageWithCenterTo(scratchDrawTo, srcRegion, anchorPoint, rotation, rotateTranslation)
       worked = worked and rendererObj.drawScaledObjectTo(destRegion, scratchOffset.x * horizScale, scratchOffset.y * vertScale, horizScale, vertScale, scratchDrawTo)
       if not worked
-        print "failed to draw perspective bmp"
+        print "[BGE.SceneObjectPlane] warning: couldn't draw the ground texture into the plane's perspective bitmap - skipping this plane this frame"
       end if
 
       return worked
@@ -812,12 +823,16 @@ namespace BGE
       end if
 
       slices = m.computePerspectiveSlices(rendererObj, srcBmp.GetWidth(), srcBmp.GetHeight(), points, sliceCount)
+      if slices.count() = 0
+        ' nothing to draw - don't cache a blank composite as if it were the ground
+        return false
+      end if
 
       if invalid = m.tempBitmap or m.tempBitmap.GetWidth() <> destWidth or m.tempBitmap.GetHeight() <> canvasHeight
         m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: canvasHeight, AlphaEnable: true})
       end if
       if invalid = m.tempBitmap
-        print "failed to create temp bitmap for perspective slices"
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; destWidth; "x"; canvasHeight; " composite bitmap - skipping this plane this frame"
         return false
       end if
       m.tempBitmap.Clear(&h00000000)
@@ -827,6 +842,10 @@ namespace BGE
       for i = slices.count() - 1 to 0 step -1
         slice = slices[i]
         sliceRegion = CreateObject("roRegion", srcBmp, slice.srcX, slice.srcY, slice.srcWidth, slice.srcHeight)
+        if invalid = sliceRegion
+          print "[BGE.SceneObjectPlane] warning: couldn't create a perspective slice region - skipping this plane this frame"
+          return false
+        end if
         thisSliceWorked = rendererObj.drawScaledObjectTo(m.tempBitmap, Int(slice.destX + 0.5), Int(slice.destY + 0.5), slice.scaleX, slice.scaleY, sliceRegion)
         worked = thisSliceWorked and worked
       end for
@@ -854,7 +873,7 @@ namespace BGE
         m.rotatedTempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})
       end if
       if invalid = m.rotatedTempBitmap
-        print "failed to create rotated temp bitmap"
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate the rolled composite bitmap - skipping this plane this frame"
         return false
       end if
       m.rotatedTempBitmap.Clear(&h00000000)
