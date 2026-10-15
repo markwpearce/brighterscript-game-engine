@@ -23,28 +23,28 @@ thing). Here is an abridged knock-knock joke from `examples/story`:
 {
   "nodes": {
     "start": {
-      "speaker": "Husk",
-      "lines": ["Captain. May I attempt a joke?"],
+      "speaker": "AI-Bot",
+      "lines": ["Hello. May I attempt a joke?"],
       "choices": [
         {"label": "Go on, then.", "goto": "knockKnock"},
-        {"label": "Not now, Husk.", "goto": "declined"}
+        {"label": "Not now, AI-Bot.", "goto": "declined"}
       ]
     },
     "knockKnock": {
-      "speaker": "Husk",
+      "speaker": "AI-Bot",
       "lines": ["Knock knock."],
       "choices": [{"label": "Who's there?", "goto": "lettuce"}]
     },
     "lettuce": {
-      "speaker": "Husk",
-      "lines": ["Lettuce.", "Lettuce in, it is cold out here."],
+      "speaker": "AI-Bot",
+      "lines": ["Lettuce.", "Lettuce in, it is cold out here in the data-center."],
       "goto": "laugh"
     },
     "laugh": {
-      "effects": [{"add": "husk.jokes", "amount": 1}],
+      "effects": [{"add": "aiBot.jokes", "amount": 1}],
       "choices": [{"label": "(Laugh)", "goto": "start"}]
     },
-    "declined": {"speaker": "Husk", "lines": ["Understood."]}
+    "declined": {"speaker": "AI-Bot", "lines": ["Understood."]}
   }
 }
 ```
@@ -182,7 +182,7 @@ does), check `choicesFollow()` once a line is on screen:
 line = m.runner.currentLine()
 m.lineLabel.setText(line.text)
 if m.runner.choicesFollow()
-  ' the last line of a node with choices: show it, then bring up the choices under it
+  ' the last line, and a choice can be taken: show it, then bring up the choices under it
   m.runner.advance()
   if m.runner.isChoosing()
     m.addButtons()
@@ -265,7 +265,7 @@ conditions to decide anything else in your game.
 Text can show a flag with `${name}`:
 
 ```json
-"lines": ["That is ${husk.jokes} jokes. I believe I am funny."]
+"lines": ["That is ${aiBot.jokes} jokes. I believe I am funny."]
 ```
 
 A string flag is inserted as is, a number is written as digits, a boolean as
