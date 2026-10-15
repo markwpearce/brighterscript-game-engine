@@ -5,6 +5,7 @@ import "../GameTimer.bs"
 import "../../math/math.bs"
 import "../../utils/urls.bs"
 import "DownloadTask.bs"
+import "SharedDownloadTask.bs"
 import "LoadTask.bs"
 import "StepTask.bs"
 import "AssetLoadTasks.bs"
@@ -43,6 +44,8 @@ namespace BGE
     ' how long nothing has been able to run, while waiting on another loader's task
     private stallTimer as roTimespan = invalid
     private stallWarned as boolean = false
+    ' this batch's downloads by target file: {task, refresh}, so a URL loaded twice downloads once
+    private runningDownloads as roAssociativeArray
 
     sub new(game as BGE.Game)
       m.game = game
@@ -50,6 +53,7 @@ namespace BGE
       m.tasks = []
       m.errors = []
       m.downloadSlots = new BGE.DownloadSlots()
+      m.runningDownloads = {}
       m.id = CreateObject("roDeviceInfo").GetRandomUUID()
     end sub
 
@@ -150,12 +154,41 @@ namespace BGE
     ' @param {BGE.DownloadOptions} [options={}] - `cache: false` for tmp: instead, `refresh: true` to download again, `timeoutSeconds`, `retries`
     ' @return {BGE.DownloadTask} the queued task
     function download(url as string, options = {} as BGE.DownloadOptions) as BGE.DownloadTask
-      task = m.newDownloadTask(url, options)
+      task = m.getDownloadTask(url, options)
       m.addTask(task)
       return task
     end function
 
-    ' Creates (but doesn't queue) the DownloadTask for a URL. Used by every download this loader
+    ' Returns a DownloadTask for a URL, without queueing it. If this loader is already downloading
+    ' that URL to the same file, the task waits for that download instead of making another
+    ' request. Otherwise it's a new task from `newDownloadTask()`.
+    '
+    ' @param {string} url
+    ' @param {BGE.DownloadOptions} options
+    ' @return {BGE.DownloadTask}
+    function getDownloadTask(url as string, options as BGE.DownloadOptions) as BGE.DownloadTask
+      useCache = options.cache = invalid or options.cache
+      refresh = options.refresh <> invalid and options.refresh
+      extension = ""
+      if options.extension <> invalid
+        extension = LCase(options.extension)
+      end if
+      key = BGE.Downloads.getBasePath(url, useCache) + "|" + extension
+      running = m.runningDownloads[key]
+      if running <> invalid
+        leader = running.task as BGE.DownloadTask
+        ' a refresh only shares a download that is itself a refresh, so it never gets a cached copy
+        if not leader.isFinished() and not leader.wasAborted() and (running.refresh or not refresh)
+          shared = new BGE.SharedDownloadTask(leader, m, options)
+          return shared
+        end if
+      end if
+      task = m.newDownloadTask(url, options)
+      m.runningDownloads[key] = {task: task, refresh: refresh}
+      return task
+    end function
+
+    ' Creates (but doesn't queue) a new DownloadTask for a URL. Used by every download this loader
     ' makes - override it to change how downloads are made.
     '
     ' @param {string} url
@@ -294,6 +327,7 @@ namespace BGE
 
       if not m.completeFired and m.isDone()
         m.completeFired = true
+        m.runningDownloads = {}
         if m.onComplete <> invalid
           onCompleteFn = m.onComplete
           onCompleteFn(m)
@@ -380,7 +414,7 @@ namespace BGE
 
     private sub attachDownload(task as BGE.FileLoadTask, pathOrUrl as string, options as BGE.DownloadOptions)
       if BGE.Urls.isUrl(pathOrUrl)
-        task.download = m.newDownloadTask(pathOrUrl, options)
+        task.download = m.getDownloadTask(pathOrUrl, options)
       end if
     end sub
 
