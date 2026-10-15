@@ -1,0 +1,326 @@
+import "pkg:/source/engine/GameScene.bs"
+import "pkg:/source/utils/registry.bs"
+import "pkg:/source/story/ValueKinds.bs"
+import "pkg:/source/story/StoryState.bs"
+import "pkg:/source/story/DialogueRunner.bs"
+import "pkg:/source/story/StoryLoader.bs"
+import "../Novel/Characters.bs"
+import "../Novel/VnSave.bs"
+import "../UI/Backdrop.bs"
+import "../UI/PortraitCard.bs"
+import "../UI/TextBox.bs"
+import "../UI/ChoiceList.bs"
+import "../UI/BacklogPanel.bs"
+
+' Plays mutiny.json: lines in the text box, choices above it, portraits and backgrounds from each
+' line's background/left/right keys. OK reads on, * or Up opens the backlog, Back returns to the title.
+'
+' changeScene args: {continue: true} resumes the save, {node, flags, items} starts at a node with
+' saving off (deep links), {} starts a new game.
+class StageScene extends BGE.GameScene
+
+  savingEnabled as boolean = true
+  private story as BGE.Story.StoryData = invalid
+  private state as BGE.Story.StoryState = invalid
+  private runner as BGE.Story.DialogueRunner = invalid
+  private stage as VnStage = invalid
+  private backdrop as Backdrop = invalid
+  private leftCard as PortraitCard = invalid
+  private rightCard as PortraitCard = invalid
+  private textBox as TextBox = invalid
+  private choiceList as ChoiceList = invalid
+  private backlog as BacklogPanel = invalid
+  ' Frames to wait before showing choices, so the OK that ended the line can't click one.
+  private choicesDelay as integer = -1
+  ' True from showing a line until its typing finishes, to show any choices that follow it.
+  private lineTyping as boolean = false
+  private ended as boolean = false
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "StageScene"
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    for each id in getBackgroundIds()
+      m.loadBitmapOnce(loader, backgroundBitmapName(id), "pkg:/images/bg/" + id + ".jpg")
+    end for
+    for each id in getPortraitIds()
+      m.loadBitmapOnce(loader, portraitBitmapName(id), "pkg:/images/portraits/" + id + ".png")
+    end for
+  end sub
+
+  ' The title already loaded its background; skip anything still loaded.
+  ' Bitmaps, not getBitmap(), which warns for every name not loaded yet.
+  private sub loadBitmapOnce(loader as BGE.AssetLoader, name as string, path as string)
+    if not m.game.Bitmaps.DoesExist(name)
+      loader.loadBitmap(name, path)
+    end if
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.story = BGE.Story.loadStory("pkg:/story/mutiny.json")
+    m.state = new BGE.Story.StoryState(m.story)
+    m.runner = new BGE.Story.DialogueRunner(m.state, m.story)
+    m.stage = {background: "", left: "", right: ""}
+    m.ended = false
+    m.backlog = invalid
+    m.lineTyping = false
+    m.choicesDelay = -1
+    m.buildUi()
+    m.savingEnabled = BGE.Story.valueKind(args.node) <> "string"
+    resumed = false
+    if BGE.Story.isTrue(args.continue)
+      save = validateVnSave(BGE.registryRead(VN_SAVE_SECTION, "save"))
+      resumed = applyVnSave(save, m.state, m.runner)
+      if resumed
+        m.stage = save.stage
+        m.showLastLineForChoices()
+      end if
+    end if
+    if not resumed
+      startNode = "start"
+      if not m.savingEnabled
+        startNode = args.node
+        m.applyDeepLinkState(args)
+      end if
+      m.applyResult(m.runner.start(startNode))
+    end if
+    m.refresh()
+  end sub
+
+  ' The engine calls this, not onDestroy(), when the game leaves a scene.
+  override sub onChangeScene(newScene as BGE.GameScene)
+    super.onChangeScene(newScene)
+    m.removeUi()
+  end sub
+
+  override sub onDestroy()
+    m.removeUi()
+  end sub
+
+  ' Takes the widgets out of gameUi, so the choice buttons stop taking focus.
+  private sub removeUi()
+    if m.choiceList = invalid
+      return
+    end if
+    m.choiceList.clear()
+    if m.backlog <> invalid
+      m.game.gameUi.removeChild(m.backlog)
+      m.backlog = invalid
+    end if
+    for each widget in [m.choiceList, m.textBox, m.rightCard, m.leftCard, m.backdrop]
+      m.game.gameUi.removeChild(widget)
+    end for
+    m.choiceList = invalid
+    m.textBox = invalid
+    m.rightCard = invalid
+    m.leftCard = invalid
+    m.backdrop = invalid
+  end sub
+
+  private sub buildUi()
+    m.backdrop = new Backdrop(m.game)
+    m.game.gameUi.addChild(m.backdrop)
+    m.leftCard = new PortraitCard(m.game, "left")
+    m.game.gameUi.addChild(m.leftCard)
+    m.rightCard = new PortraitCard(m.game, "right")
+    m.game.gameUi.addChild(m.rightCard)
+    m.textBox = new TextBox(m.game)
+    m.game.gameUi.addChild(m.textBox)
+    m.choiceList = new ChoiceList(m.game)
+    m.game.gameUi.addChild(m.choiceList)
+  end sub
+
+  ' Deep links: set flags and give items before the start node runs.
+  private sub applyDeepLinkState(args as roAssociativeArray)
+    if type(args.flags) = "roArray"
+      for each flagName in args.flags
+        if BGE.Story.valueKind(flagName) = "string"
+          m.state.flags.set(flagName, true)
+        end if
+      end for
+    end if
+    ' items may be an array of ids or an AA keyed by id (args.items would read as AA.Items())
+    items = args["items"] as dynamic
+    if type(items) = "roArray" or type(items) = "roAssociativeArray"
+      for each itemId in items
+        if BGE.Story.valueKind(itemId) = "string"
+          m.state.inventory.add(itemId)
+        end if
+      end for
+    end if
+    m.state.settle()
+  end sub
+
+  ' Resuming at a choice: show the line the choices followed.
+  private sub showLastLineForChoices()
+    if not m.runner.isChoosing()
+      return
+    end if
+    for i = m.runner.backlog.count() - 1 to 0 step -1
+      entry = m.runner.backlog[i]
+      if not entry.isChoice
+        m.textBox.showLine(entry.speaker, entry.text)
+        m.textBox.finishTyping()
+        m.applyStage(entry.speaker)
+        return
+      end if
+    end for
+    m.applyStage("")
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press or m.game.isTransitioning()
+      return
+    end if
+    if m.backlog <> invalid
+      if input.isButton("up")
+        m.backlog.scroll(-1)
+      else if input.isButton("down")
+        m.backlog.scroll(1)
+      else if input.isButton("back") or input.isButton("ok") or input.isButton("options")
+        m.closeBacklog()
+      end if
+      input.consume()
+      return
+    end if
+    reading = m.runner.isActive() and not m.runner.isChoosing()
+    if input.isButton("options") or (reading and input.isButton("up"))
+      m.openBacklog()
+      input.consume()
+    else if LCase(input.button) = "back"
+      ' Only the remote's Back quits; gamepad B is aliased to back but doesn't leave the stage.
+      m.game.changeSceneWithFade("TitleScene", {})
+    else if input.isButton("ok") and m.ended
+      m.game.changeSceneWithFade("TitleScene", {})
+    else if input.isButton("ok") and reading
+      if m.textBox.isTyping()
+        m.textBox.finishTyping()
+      else
+        m.applyResult(m.runner.advance())
+        m.refresh()
+      end if
+    end if
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    ' The text box may finish typing behind the backlog; its choices wait until the backlog closes.
+    if m.backlog <> invalid or m.textBox = invalid or m.game.isTransitioning()
+      return
+    end if
+    if m.lineTyping and not m.textBox.isTyping()
+      m.lineTyping = false
+      if m.runner.choicesFollow()
+        ' The whole line is showing: bring its choices up under it.
+        m.applyResult(m.runner.advance())
+        m.refresh()
+      end if
+    end if
+    if m.choicesDelay = 0
+      m.choicesDelay = -1
+      m.choiceList.show(m.runner.choices(), m)
+    else if m.choicesDelay > 0
+      m.choicesDelay--
+    end if
+  end sub
+
+  ' Called by a ChoiceButton.
+  sub chooseIndex(index as integer)
+    if m.game.isTransitioning()
+      return
+    end if
+    m.choiceList.clear()
+    m.applyResult(m.runner.choose(index))
+    m.refresh()
+  end sub
+
+  ' Settles the rules and records any endings reached (not on deep-link runs).
+  private sub applyResult(result as BGE.Story.StoryResult)
+    posts = [] as string[]
+    posts.append(result.posts)
+    posts.append(m.state.settle().posts)
+    for each eventName in posts
+      if m.savingEnabled and Left(eventName, 7) = "ending:"
+        seen = BGE.registryRead(VN_SAVE_SECTION, "endings", {})
+        BGE.registryWrite(VN_SAVE_SECTION, "endings", addEndingSeen(seen, Mid(eventName, 8)))
+      end if
+    end for
+  end sub
+
+  ' Shows whatever the runner is at now (a line, the choices, or the end) and autosaves.
+  private sub refresh()
+    if not m.runner.isActive()
+      m.ended = true
+      m.lineTyping = false
+      m.choicesDelay = -1
+      m.choiceList.clear()
+      m.textBox.showLine("", "The End. Press OK to return to the title.")
+      m.textBox.finishTyping()
+      m.leftCard.setPortrait("")
+      m.rightCard.setPortrait("")
+      if m.savingEnabled
+        deleteVnSave()
+      end if
+      return
+    end if
+    if m.runner.isChoosing()
+      ' The line the choices follow stays in the text box.
+      m.choicesDelay = 1
+    else
+      line = m.runner.currentLine()
+      m.updateStage(line)
+      m.textBox.showLine(line.speaker, line.text)
+      m.lineTyping = true
+    end if
+    m.save()
+  end sub
+
+  private sub updateStage(line as BGE.Story.StoryLineView)
+    for each key in ["background", "left", "right"]
+      if BGE.Story.valueKind(line.line[key]) = "string"
+        m.stage[key] = line.line[key]
+      end if
+    end for
+    m.applyStage(line.speaker)
+  end sub
+
+  ' Shows m.stage, lighting the speaker's card (both lit for narration).
+  private sub applyStage(speaker as string)
+    m.backdrop.setBackground(m.stage.background)
+    m.leftCard.setPortrait(m.stage.left)
+    m.rightCard.setPortrait(m.stage.right)
+    speaking = portraitForSpeaker(speaker)
+    m.leftCard.lit = speaking = "" or speaking = m.stage.left
+    m.rightCard.lit = speaking = "" or speaking = m.stage.right
+  end sub
+
+  private sub save()
+    if not m.savingEnabled
+      return
+    end if
+    data = buildVnSave(m.state, m.runner, m.stage)
+    if data <> invalid
+      BGE.registryWrite(VN_SAVE_SECTION, "save", data)
+    end if
+  end sub
+
+  private sub openBacklog()
+    if m.runner.isChoosing()
+      ' The focus manager sees input before the scene, so hide the buttons or OK/Up/Down would reach them.
+      m.choiceList.clear()
+      m.choicesDelay = -1
+    end if
+    m.backlog = new BacklogPanel(m.game, m.runner.backlog)
+    m.game.gameUi.addChild(m.backlog)
+  end sub
+
+  private sub closeBacklog()
+    m.game.gameUi.removeChild(m.backlog)
+    m.backlog = invalid
+    if m.runner.isChoosing()
+      m.choicesDelay = 1
+    end if
+  end sub
+
+end class
