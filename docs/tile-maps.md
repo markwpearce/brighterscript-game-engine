@@ -122,8 +122,10 @@ Each chunk becomes one draw call. A tile can be any size and can be nudged
 off the grid (the platformer raises its grass tiles a few pixels so the
 player's feet line up with the art); a chunk's bitmap grows to fit.
 
-> **Keep `chunkSize` at 512 or below.** Larger chunks can fail to draw inside
-> a running game even though they work in isolation (issue #213).
+> **512 is a good `chunkSize`.** Larger chunks draw fine, but each chunk's
+> bitmap covers its whole bounding box, so tiles far apart in one chunk spend
+> texture memory on the empty space between them - and HD Roku devices have
+> only 64MB of it.
 
 Baking happens once, in `onCreate()`, so its cost is paid while the level
 loads rather than every frame.
