@@ -29,6 +29,8 @@ namespace BGE
   ' Most bands (one `DrawRect` each) a triangle is filled with before the two-call exact fill
   ' is cheaper. Measured the same on a Roku Ultra (rendererTest's "Triangle Fill Check") and
   ' the simulator ("Static Geometry BSP Benchmark": 8 and 16 tied, 30 was 6% slower).
+  ' A cost break-even rather than a quality knob, so it isn't in RenderQualitySettings - the
+  ' quality trade is the band size while moving, `triangleQuickDrawStep`.
   const TRIANGLE_SPAN_MAX_BANDS = 16
 
   ' The triangle fill values a `Renderer` is using - see `getTriangleQuickDrawParams()`.
@@ -172,6 +174,8 @@ namespace BGE
 
     dummyScreen as roScreen
 
+    ' Turns on alpha blending on `draw2d` (`SetAlphaEnable(true)`), which scene objects need -
+    ' so later drawing of your own onto that surface blends too.
     sub new(draw2d as ifDraw2d, mainGame = invalid as BGE.Game, cam = invalid as BGE.Camera, options = {useBitmapPooling: true} as RendererOptions)
       m.game = mainGame
       m.useDrawTarget(draw2d)
@@ -2187,7 +2191,7 @@ namespace BGE
       totalYOffset = y + minP.y
 
       if allowQuickDraw
-        if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, true)
+        if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, true, invalid)
           return true
         end if
       end if
@@ -2249,7 +2253,7 @@ namespace BGE
     ' with allowQuickDraw.
     '
     ' @return {boolean} true if the triangle was handled here
-    private function drawTriangleWithSpansIfCheaperTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw as boolean) as boolean
+    private function drawTriangleWithSpansIfCheaperTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw as boolean, bandAcrossY as dynamic) as boolean
       bounds = BGE.Math.getBounds(points)
       params = m.triangleQuickDrawParams
       width = bounds[1].x - bounds[0].x
@@ -2258,21 +2262,27 @@ namespace BGE
         m.lossyTriangleFillCount++
         return true
       end if
-      shortSide = BGE.Math.Min(width, height)
-      if shortSide <= params.maxBands
-        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, 1)
+      if invalid = bandAcrossY
+        bandAcrossY = height <= width
+      end if
+      bandedSide = width
+      if bandAcrossY
+        bandedSide = height
+      end if
+      if bandedSide <= params.maxBands
+        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, 1, bandAcrossY)
         return true
       end if
-      if allowQuickDraw and params.step > 1 and shortSide <= params.maxBands * params.step
+      if allowQuickDraw and params.step > 1 and bandedSide <= params.maxBands * params.step
         m.lossyTriangleFillCount++
-        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, params.step)
+        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, params.step, bandAcrossY)
         return true
       end if
       return false
     end function
 
-    function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
-      return m.drawTriangleTo(m.draw2d, points, x, y, rgba, allowQuickDraw)
+    function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, bandAcrossY = invalid as dynamic) as boolean
+      return m.drawTriangleTo(m.draw2d, points, x, y, rgba, allowQuickDraw, bandAcrossY)
     end function
 
     ' Fills a triangle with a flat color, picking the cheapest way to do it well: small
@@ -2286,8 +2296,10 @@ namespace BGE
     ' @param {integer} rgba fill color
     ' @param {boolean} [allowQuickDraw=false] allow a coarser fill (or skipping a tiny
     '   triangle) for something that's moving - see `getLossyTriangleFillCount()`
+    ' @param {dynamic} [bandAcrossY=invalid] band direction if banded - pass the same value
+    '   for triangles sharing an edge (see `drawTriangleAsSpansTo()`)
     ' @return {boolean} true if the triangle was drawn (or deliberately skipped)
-    function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
+    function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, bandAcrossY = invalid as dynamic) as boolean
       if canvasDrawTo = invalid or points = invalid
         return false
       end if
@@ -2296,7 +2308,7 @@ namespace BGE
         return false
       end if
 
-      if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
+      if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw, bandAcrossY)
         return true
       end if
       return m.drawTriangleExactTo(canvasDrawTo, points, x, y, rgba)
@@ -2358,9 +2370,10 @@ namespace BGE
       end if
 
       triangles = BGE.QuickHull.getTrianglesFromPoints(points, true)
+      bandAcrossY = m.shouldBandAcrossY(points)
       didDraw = true
       for each tri in triangles
-        didDraw = m.drawTriangleTo(canvasDrawTo, tri, x, y, rgba, allowQuickDraw) or didDraw
+        didDraw = m.drawTriangleTo(canvasDrawTo, tri, x, y, rgba, allowQuickDraw, bandAcrossY) or didDraw
       end for
       return didDraw
     end function
@@ -2428,10 +2441,11 @@ namespace BGE
 
 
     ' Fills a triangle with one `DrawRect` per band of `bandSize` pixels, banding across
-    ' whichever axis of its bounding box is shorter (fewest rects). Each band's span is
-    ' the triangle's cross-section at the band's middle, so the fill has no gaps, and two
-    ' triangles sharing an edge (a quad) neither overlap nor leave a seam. Edges come out
-    ' stepped by up to `bandSize` pixels.
+    ' whichever axis of its bounding box is shorter (fewest rects) unless `bandAcrossY` says
+    ' which. Each band's span is the triangle's cross-section at the band's middle, so the
+    ' fill has no gaps. Two triangles sharing an edge (a quad) neither overlap nor leave a
+    ' seam as long as they band across the same axis - pass the same `bandAcrossY` for both.
+    ' Edges come out stepped by up to `bandSize` pixels.
     '
     ' @param {ifDraw2d} canvasDrawTo
     ' @param {BGE.Math.Vector[]} points the triangle's 3 corners
@@ -2439,8 +2453,10 @@ namespace BGE
     ' @param {float} y offset added to every point
     ' @param {integer} rgba fill color
     ' @param {integer} [bandSize=1] band thickness in pixels
+    ' @param {dynamic} [bandAcrossY=invalid] true for horizontal bands, false for vertical,
+    '   invalid to pick by the triangle's own shape
     ' @return {boolean} true if anything was drawn
-    function drawTriangleAsSpansTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize = 1 as integer) as boolean
+    function drawTriangleAsSpansTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize = 1 as integer, bandAcrossY = invalid as dynamic) as boolean
       if invalid = canvasDrawTo or invalid = points or points.count() <> 3
         return false
       end if
@@ -2448,8 +2464,9 @@ namespace BGE
         bandSize = 1
       end if
       ' Work in (u, v) where v is the banded axis.
-      bounds = BGE.Math.getBounds(points)
-      bandAcrossY = (bounds[1].y - bounds[0].y) <= (bounds[1].x - bounds[0].x)
+      if invalid = bandAcrossY
+        bandAcrossY = m.shouldBandAcrossY(points)
+      end if
       u = []
       v = []
       for each p in points
@@ -2465,7 +2482,8 @@ namespace BGE
       maxV = BGE.Math.Max(v[0], BGE.Math.Max(v[1], v[2]))
 
       drewAny = false
-      bandStart = Int(minV)
+      ' On a shared grid, so neighbouring triangles' bands line up along their shared edge
+      bandStart = Int(minV / bandSize) * bandSize
       while bandStart < maxV
         sampleV = bandStart + bandSize / 2.0
         if sampleV > maxV
@@ -2511,6 +2529,16 @@ namespace BGE
         bandStart += bandSize
       end while
       return drewAny
+    end function
+
+
+    ' Whether a set of points is cheaper to band across y (horizontal bands) than across x.
+    '
+    ' @param {BGE.Math.Vector[]} points
+    ' @return {boolean}
+    function shouldBandAcrossY(points as BGE.Math.Vector[]) as boolean
+      bounds = BGE.Math.getBounds(points)
+      return (bounds[1].y - bounds[0].y) <= (bounds[1].x - bounds[0].x)
     end function
 
 
