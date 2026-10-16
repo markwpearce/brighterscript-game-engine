@@ -140,7 +140,8 @@ A file that downloads but then won't load (say a Wi-Fi sign-in page served in pl
 is deleted rather than cached, so the next load downloads it again. A real image that fails to
 load (when texture memory runs out, say) is kept.
 
-An `.obj` from a URL downloads its `.mtl` and texture too, found relative to the model's URL.
+An `.obj` from a URL downloads its `.mtl` and texture too: the `.mtl` relative to the model's URL,
+and the texture relative to the `.mtl`'s.
 `texturePath` may also be a URL.
 
 Each load takes download options: `cache: false` keeps the file only until the channel exits,
@@ -157,7 +158,8 @@ loader.load3dModel("boss", base + "boss.obj", {}, {refresh: true})
 
 `loader.download(url)` downloads without loading anything, and its task's `localPath` is the
 file once done. At most `loader.maxConcurrentDownloads` (4) downloads run at once, counted per
-loader (`game.assets` has its own limit).
+loader (`game.assets` has its own limit). Two loads in one loader that need the same URL (two
+models sharing a texture, say) share one download.
 `game.assets.clearCache()` deletes every cached download.
 
 A download reports no progress while it runs, because the device only shows the file once it's
