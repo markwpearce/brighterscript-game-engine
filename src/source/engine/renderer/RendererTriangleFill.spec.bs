@@ -1,0 +1,198 @@
+namespace tests
+
+  ' maxBands is TRIANGLE_SPAN_MAX_BANDS (16) and the default Medium quality's band step is 2.
+  @suite("BGE.Renderer triangle fill")
+  class RendererTriangleFillTests extends rooibos.BaseTestSuite
+
+    bitmap as roBitmap
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.bitmap = CreateObject("roBitmap", {width: 200, height: 200, alphaEnable: true})
+      m.bitmap.Clear(&h00000000)
+      m.renderer = new BGE.Renderer(m.bitmap)
+    end function
+
+    private function alphaAt(x as integer, y as integer) as integer
+      return m.bitmap.GetByteArray(x, y, 1, 1)[3]
+    end function
+
+    ' Whether every pixel of the rectangle is opaque.
+    private function isFilled(x as integer, y as integer, w as integer, h as integer) as boolean
+      bytes = m.bitmap.GetByteArray(x, y, w, h)
+      for i = 3 to bytes.count() - 1 step 4
+        if bytes[i] <> 255
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    private function v(x as float, y as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(x, y)
+    end function
+
+    @describe("drawTriangleAsSpansTo")
+
+    @it("fills the inside of the triangle and nothing outside it")
+    function _()
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [m.v(10, 10), m.v(70, 10), m.v(10, 40)], 0, 0, BGE.Colors.Red, 1)
+      m.assertEqual(255, m.alphaAt(20, 15))
+      m.assertEqual(0, m.alphaAt(65, 35))
+      m.assertEqual(0, m.alphaAt(5, 5))
+    end function
+
+    @it("applies the x/y offset")
+    function _()
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [m.v(0, 0), m.v(60, 0), m.v(0, 30)], 100, 100, BGE.Colors.Red, 1)
+      m.assertEqual(255, m.alphaAt(110, 105))
+      m.assertEqual(0, m.alphaAt(10, 5))
+    end function
+
+    @it("leaves no gaps where two triangles of a quad meet (issue #119)")
+    function _()
+      ' a thin quad on a diagonal, the shape the old line fill striped
+      quad = [m.v(20, 20), m.v(160, 90), m.v(150, 110), m.v(10, 40)]
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [quad[0], quad[1], quad[2]], 0, 0, BGE.Colors.Red, 1)
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [quad[0], quad[2], quad[3]], 0, 0, BGE.Colors.Red, 1)
+      ' sample along the quad's centre line
+      for t = 0.1 to 0.9 step 0.05
+        x = cint(15 + t * 140)
+        y = cint(30 + t * 70)
+        m.assertEqual(255, m.alphaAt(x, y), `gap at (${x}, ${y})`)
+      end for
+    end function
+
+    @it("neither gaps nor double-blends a quad's diagonal with coarse bands, given one band direction")
+    function _()
+      ' banded on their own, [tl, tr, br] would band across y and [tl, br, bl] across x
+      tl = m.v(10, 10)
+      tr = m.v(120, 20)
+      br = m.v(110, 60)
+      bl = m.v(20, 150)
+      bandAcrossY = m.renderer.shouldBandAcrossY([tl, tr, br, bl])
+      translucent = &hFF000080
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [tl, tr, br], 0, 0, translucent, 2, bandAcrossY)
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [tl, br, bl], 0, 0, translucent, 2, bandAcrossY)
+      ' a strip around the diagonal, clear of the quad's outer edges
+      bytes = m.bitmap.GetByteArray(0, 0, 200, 200)
+      bad = 0
+      for x = 20 to 100
+        diagonalY = Int(10 + (x - 10) * 0.5)
+        for y = diagonalY - 3 to diagonalY + 3
+          if bytes[(y * 200 + x) * 4 + 3] <> &h80
+            bad++
+          end if
+        end for
+      end for
+      m.assertEqual(0, bad)
+    end function
+
+    @it("lines coarse bands up between triangles that start on different rows")
+    function _()
+      ' [tl, tr, br] starts at y 5, [tl, br, bl] at y 10.5
+      tl = m.v(10, 10.5)
+      tr = m.v(120, 5)
+      br = m.v(110, 60)
+      bl = m.v(20, 70)
+      bandAcrossY = m.renderer.shouldBandAcrossY([tl, tr, br, bl])
+      translucent = &hFF000080
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [tl, tr, br], 0, 0, translucent, 2, bandAcrossY)
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [tl, br, bl], 0, 0, translucent, 2, bandAcrossY)
+      bytes = m.bitmap.GetByteArray(0, 0, 200, 200)
+      bad = 0
+      for x = 20 to 100
+        diagonalY = Int(10.5 + (x - 10) * 0.495)
+        for y = diagonalY - 3 to diagonalY + 3
+          if bytes[(y * 200 + x) * 4 + 3] <> &h80
+            bad++
+          end if
+        end for
+      end for
+      m.assertEqual(0, bad)
+    end function
+
+    @it("fills a vertical-edged quad completely, corners included (issue #332)")
+    function _()
+      quad = [m.v(0, 0), m.v(60, 60), m.v(60, 120), m.v(0, 180)]
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [quad[0], quad[1], quad[2]], 0, 0, BGE.Colors.Red, 1)
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [quad[0], quad[2], quad[3]], 0, 0, BGE.Colors.Red, 1)
+      m.assertTrue(m.isFilled(2, 10, 6, 160))
+      m.assertTrue(m.isFilled(2, 60, 56, 60))
+      m.assertEqual(255, m.alphaAt(20, 30))
+      m.assertEqual(255, m.alphaAt(20, 150))
+      m.assertEqual(0, m.alphaAt(50, 20))
+    end function
+
+    @it("bands across the shorter side of the bounding box")
+    function _()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [m.v(0, 0), m.v(10, 100), m.v(0, 100)], 0, 0, BGE.Colors.Red, 1)
+      m.assertEqual(10, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @it("uses bands of the given size")
+    function _()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawTriangleAsSpansTo(m.bitmap, [m.v(0, 0), m.v(100, 0), m.v(0, 20)], 0, 0, BGE.Colors.Red, 4)
+      m.assertEqual(5, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @describe("drawTriangleTo")
+
+    @it("fills a small triangle with bands, accurately")
+    function _()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawTriangleTo(m.bitmap, [m.v(0, 0), m.v(100, 0), m.v(0, 12)], 0, 0, BGE.Colors.Red)
+      m.assertEqual(12, m.renderer.getDrawCallsLastFrame())
+      m.assertEqual(0, m.renderer.getLossyTriangleFillCount())
+    end function
+
+    @it("uses the two-call exact fill once bands would cost more")
+    function _()
+      m.renderer.getRightTriangleResource()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawTriangleTo(m.bitmap, [m.v(0, 0), m.v(100, 0), m.v(0, 50)], 0, 0, BGE.Colors.Red)
+      m.assertEqual(2, m.renderer.getDrawCallsLastFrame())
+      m.assertEqual(0, m.renderer.getLossyTriangleFillCount())
+    end function
+
+    @it("uses coarser bands for a mid-sized triangle when quick drawing, and counts it as lossy")
+    function _()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawTriangleTo(m.bitmap, [m.v(0, 0), m.v(100, 0), m.v(0, 30)], 0, 0, BGE.Colors.Red, true)
+      m.assertEqual(15, m.renderer.getDrawCallsLastFrame())
+      m.assertEqual(1, m.renderer.getLossyTriangleFillCount())
+    end function
+
+    @it("skips a tiny triangle when quick drawing, and counts it as lossy")
+    function _()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.drawTriangleTo(m.bitmap, [m.v(0, 0), m.v(2, 0), m.v(0, 2)], 0, 0, BGE.Colors.Red, true)
+      m.assertEqual(0, m.renderer.getDrawCallsLastFrame())
+      m.assertEqual(1, m.renderer.getLossyTriangleFillCount())
+    end function
+
+    @it("does not count an accurate band fill as lossy when quick drawing")
+    function _()
+      m.renderer.drawTriangleTo(m.bitmap, [m.v(0, 0), m.v(100, 0), m.v(0, 12)], 0, 0, BGE.Colors.Red, true)
+      m.assertEqual(0, m.renderer.getLossyTriangleFillCount())
+    end function
+
+    @describe("draw target")
+
+    @it("blends onto a surface created with alpha off, rather than copying transparent pixels as black (issue #332)")
+    function _()
+      opaque = CreateObject("roBitmap", {width: 50, height: 50, alphaEnable: false})
+      opaque.Clear(&hFF0000FF)
+      renderer = new BGE.Renderer(opaque)
+      transparent = CreateObject("roBitmap", {width: 20, height: 20, alphaEnable: true})
+      transparent.Clear(&h00000000)
+      renderer.drawObject(0, 0, transparent)
+      opaque.Finish()
+      m.assertEqual(255, opaque.GetByteArray(10, 10, 1, 1)[0])
+    end function
+
+  end class
+
+end namespace

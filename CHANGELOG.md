@@ -4,6 +4,16 @@ All notable changes to this project are documented here, following [Keep a Chang
 
 ## [Unreleased]
 
+### Fixed
+
+- A `Renderer` now turns on alpha blending on the surface it draws to. On a surface created with `alphaEnable: false`, every oriented object's transparent corners were drawn as black over whatever was behind them ([#332](https://github.com/markwpearce/brighterscript-game-engine/issues/332)).
+- Moving flat-colored triangles (oriented `DrawableRectangle`s, `DrawablePolygon`s, untextured model faces) no longer stripe: the fast fill is now `DrawRect` bands instead of fanned lines, and a rectangle or polygon drawn with it is redrawn exactly once it stops moving ([#119](https://github.com/markwpearce/brighterscript-game-engine/issues/119)).
+
+### Changed
+
+- Small triangles are always filled with 1px `DrawRect` bands, which are gap-free and no slower than the two-call fill up to 16px on the shorter side. New `Renderer.drawTriangleAsSpansTo()`, `drawTriangleExactTo()` and `getLossyTriangleFillCount()`.
+- `RenderQualitySettings.triangleQuickDrawThreshold` is removed - the band budget is now a measured constant (`BGE.TRIANGLE_SPAN_MAX_BANDS`), and `triangleQuickDrawStep` is the band size while moving. `getTriangleQuickDrawParams()` returns `{skipSize, maxBands, step}`.
+
 ## [0.8.0] - 2026-10-08
 
 ### Changed

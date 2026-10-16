@@ -1,0 +1,198 @@
+' Compares the ways Renderer can fill a flat-colored triangle, side by side and timed
+' (issues #119, #332). OK flips between pages:
+'
+'   1. the same quads filled each way - look for gaps, stripes and seams
+'   2. a wall rendered onto a surface created with alpha off (#332's black corners)
+'   3. ms per quad for each method at several sizes, also printed to the console
+'
+' The methods:
+'   exact - drawTriangleExactTo(), two DrawTransformedObject calls of a right-triangle texture
+'   rays  - drawTriangleAsRaysTo(), lines fanned out from one corner (the old moving fill)
+'   spans - drawTriangleAsSpansTo(), one DrawRect per band of N pixels
+'   auto  - drawTriangleTo(), which picks spans or exact by size
+'
+' The timing table is where TRIANGLE_SPAN_MAX_BANDS in Renderer.bs comes from: spans
+' cost grows with the triangle's shorter side, exact is flat, and auto should track the
+' cheaper of the two.
+class TriangleFillCheck extends RendererTest
+
+  private iterations = 20
+  private resultLines as string[] = []
+  private font as roFont = invalid
+  private pages as roBitmap[] = invalid
+  private page = 0
+
+  private methodNames = ["exact", "rays", "spans", "spans", "spans", "auto"]
+  private methodSteps = [1, 2, 1, 2, 4, 1]
+
+  sub new()
+    super("Triangle Fill Check")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.runBenchmark(renderer)
+    ' Draw each page once into a cached bitmap, so the per-frame cost is just a blit.
+    size = renderer.getCanvasSize()
+    m.pages = []
+    for page = 0 to 2
+      bmp = CreateObject("roBitmap", {width: size.x, height: size.y, AlphaEnable: true})
+      bmp.Clear(0)
+      if page = 0
+        m.drawComparisonPage(renderer, bmp)
+      else if page = 1
+        m.drawAlphaTargetPage(renderer, bmp)
+      else
+        m.drawBenchmarkPage(renderer, bmp)
+      end if
+      renderer.forceDraw(bmp)
+      m.pages.push(bmp)
+    end for
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "OK"
+      m.page = (m.page + 1) mod m.pages.count()
+    end if
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    if invalid <> m.pages and m.pages.count() > m.page
+      renderer.drawObject(0, 0, m.pages[m.page])
+    end if
+  end sub
+
+  private sub text(renderer as BGE.Renderer, target as ifDraw2d, line as string, x as integer, y as integer)
+    renderer.drawTextTo(target, line, x, y, BGE.Colors.White, m.font)
+  end sub
+
+  private function methodLabel(index as integer) as string
+    if m.methodNames[index] = "rays" or m.methodNames[index] = "spans"
+      return m.methodNames[index] + Str(m.methodSteps[index]).trim()
+    end if
+    return m.methodNames[index]
+  end function
+
+  ' A row per shape, a column per method.
+  private sub drawComparisonPage(renderer as BGE.Renderer, target as ifDraw2d)
+    header = "Page 1/3 (OK: next)   columns:"
+    for k = 0 to m.methodNames.count() - 1
+      header += "  " + m.methodLabel(k)
+    end for
+    m.text(renderer, target, header, 140, 70)
+    for k = 0 to m.methodNames.count() - 1
+      cx = 200 + k * 170
+      ' a thin quad on a diagonal, the shape the ray fill striped (#119)
+      m.fillQuad(renderer, target, m.rotatedQuad(cx, 200, 12, 160, 1.1), k)
+      ' a wall seen side-on: vertical edges, longest triangle side vertical (#332)
+      m.fillQuad(renderer, target, [
+        BGE.Math.VectorOps.create(cx - 40, 290),
+        BGE.Math.VectorOps.create(cx + 40, 340),
+        BGE.Math.VectorOps.create(cx + 40, 460),
+        BGE.Math.VectorOps.create(cx - 40, 510)
+      ], k)
+      ' a small square, like a distant ball
+      m.fillQuad(renderer, target, m.rotatedQuad(cx, 570, 30, 30, 0.4), k)
+    end for
+  end sub
+
+  ' Renders one side wall with a Renderer of its own onto a surface created with alpha off.
+  ' The Renderer turns blending on, so the wall's temp bitmap blends in; before #332 its
+  ' transparent corners were copied over the backdrop as black.
+  private sub drawAlphaTargetPage(renderer as BGE.Renderer, target as ifDraw2d)
+    m.text(renderer, target, "Page 2/3   a wall rendered onto a surface with alpha off - no black corners", 140, 70)
+    surface = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: false})
+    wallRenderer = new BGE.Renderer(surface)
+    camera = new BGE.Camera3d()
+    camera.position = BGE.Math.VectorOps.create(0, 0, -450)
+    camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+    wallRenderer.setCamera(camera)
+    wall = new BGE.DrawableRectangle(invalid, 300, 300, {
+      offset: BGE.Math.VectorOps.create(150, 0, 0),
+      rotation: BGE.Math.VectorOps.create(0, BGE.Math.HALF_PI, 0),
+      color: BGE.ColorsRGB.Maroon,
+      drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace
+    })
+    wall.setAnchor(0.5, 0.5)
+    wall.addToRenderer(wallRenderer)
+    surface.Clear(&h404040FF)
+    wallRenderer.setupCameraForFrame()
+    wallRenderer.render()
+    surface.Finish()
+    target.DrawScaledObject(320, 160, 0.5, 0.5, surface)
+  end sub
+
+  private sub drawBenchmarkPage(renderer as BGE.Renderer, target as ifDraw2d)
+    m.text(renderer, target, "Page 3/3", 140, 70)
+    y = 110
+    for each line in m.resultLines
+      m.text(renderer, target, line, 140, y)
+      y += 26
+    end for
+  end sub
+
+  private function rotatedQuad(cx as float, cy as float, w as float, h as float, theta as float) as BGE.Math.Vector[]
+    corners = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]
+    result = [] as BGE.Math.Vector[]
+    for each c in corners
+      result.push(BGE.Math.VectorOps.create(cx + c[0] * cos(theta) - c[1] * sin(theta), cy + c[0] * sin(theta) + c[1] * cos(theta)))
+    end for
+    return result
+  end function
+
+  private sub fillQuad(renderer as BGE.Renderer, target as ifDraw2d, quad as BGE.Math.Vector[], methodIndex as integer)
+    method = m.methodNames[methodIndex]
+    stepSize = m.methodSteps[methodIndex]
+    triangles = [[quad[0], quad[1], quad[2]], [quad[0], quad[2], quad[3]]]
+    for each tri in triangles
+      if method = "rays"
+        renderer.drawTriangleAsRaysTo(target, tri, 0, 0, BGE.Colors.Cyan, {levelOffset: 0, levelOfDetail: stepSize})
+      else if method = "spans"
+        renderer.drawTriangleAsSpansTo(target, tri, 0, 0, BGE.Colors.Cyan, stepSize)
+      else if method = "auto"
+        renderer.drawTriangleTo(target, tri, 0, 0, BGE.Colors.Cyan)
+      else
+        renderer.drawTriangleExactTo(target, tri, 0, 0, BGE.Colors.Cyan)
+      end if
+    end for
+  end sub
+
+  ' Each method fills `iterations` quads of each size, rotated a little more each time.
+  private sub runBenchmark(renderer as BGE.Renderer)
+    scratch = CreateObject("roBitmap", {width: 400, height: 400, AlphaEnable: true})
+    timer = CreateObject("roTimespan")
+    sizes = [[4, 60], [8, 120], [16, 16], [24, 24], [48, 48], [32, 200], [96, 96], [200, 200]]
+    m.resultLines = [`ms per quad (2 triangles), ${m.iterations} rotations each`]
+    header = m.pad("size", 10)
+    for k = 0 to m.methodNames.count() - 1
+      header += m.pad(m.methodLabel(k), 9)
+    end for
+    m.resultLines.push(header)
+    for each size in sizes
+      line = m.pad(`${size[0]}x${size[1]}`, 10)
+      for k = 0 to m.methodNames.count() - 1
+        timer.Mark()
+        for i = 0 to m.iterations - 1
+          m.fillQuad(renderer, scratch, m.rotatedQuad(200, 200, size[0], size[1], 0.05 + i * 0.07), k)
+        end for
+        scratch.Finish()
+        ms = timer.TotalMilliseconds() / m.iterations
+        line += m.pad(Str(Int(ms * 100) / 100.0).trim(), 9)
+      end for
+      m.resultLines.push(line)
+    end for
+    print "=== Triangle Fill Check ==="
+    for each line in m.resultLines
+      print line
+    end for
+    print "=== end ==="
+  end sub
+
+  private function pad(value as string, width as integer) as string
+    while len(value) < width
+      value += " "
+    end while
+    return value
+  end function
+
+end class
