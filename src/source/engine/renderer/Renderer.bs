@@ -26,13 +26,19 @@ namespace BGE
   const RendererResourceSize = 400
   const DEPTH_TIE_EPSILON = 0.5
 
-  ' The triangle line-fill values a `Renderer` is using - see `getTriangleQuickDrawParams()`.
+  ' Most bands (one `DrawRect` each) a triangle is filled with before the two-call exact fill
+  ' is cheaper. Measured the same on a Roku Ultra (rendererTest's "Triangle Fill Check") and
+  ' the simulator ("Static Geometry BSP Benchmark": 8 and 16 tied, 30 was 6% slower).
+  const TRIANGLE_SPAN_MAX_BANDS = 16
+
+  ' The triangle fill values a `Renderer` is using - see `getTriangleQuickDrawParams()`.
   interface TriangleQuickDrawParams
-    ' Triangles smaller than this many pixels on both axes are skipped
+    ' While moving, triangles smaller than this many pixels on both axes are skipped
     skipSize as float
-    ' Triangles smaller than this on either axis use the cheap line-fill
-    threshold as float
-    ' Pixel step between lines in the line-fill
+    ' A triangle whose shorter bounding-box side, divided by the band size, is at most this
+    ' is filled with `DrawRect` bands rather than the exact fill
+    maxBands as integer
+    ' Band size, in pixels, of the coarse fill used while moving
     step as integer
   end interface
 
@@ -142,6 +148,8 @@ namespace BGE
     qualityVersion as integer = 0
     ' Derived from qualitySettings once per change, since triangle drawing reads it per call.
     private triangleQuickDrawParams as TriangleQuickDrawParams = invalid
+    ' Counts triangles drawn with a coarse or skipped fill - see getLossyTriangleFillCount().
+    private lossyTriangleFillCount = 0
 
     game as BGE.Game = invalid
 
@@ -166,7 +174,7 @@ namespace BGE
 
     sub new(draw2d as ifDraw2d, mainGame = invalid as BGE.Game, cam = invalid as BGE.Camera, options = {useBitmapPooling: true} as RendererOptions)
       m.game = mainGame
-      m.draw2d = draw2d
+      m.useDrawTarget(draw2d)
       if BGE.getDeviceRenderTier() = BGE.DeviceRenderTier.simulator
         ' The simulator does not need pooling
         m.isSimulator = true
@@ -277,8 +285,21 @@ namespace BGE
       return circleBitmap
     end function
 
-    sub setDraw2d(draw2d as ifDraw2d)
+    ' Scene objects are blitted from bitmaps with transparent corners, which a surface with
+    ' alpha blending off would copy as opaque black over whatever is already drawn (#332).
+    private sub useDrawTarget(draw2d as ifDraw2d)
       m.draw2d = draw2d
+      if invalid <> draw2d
+        draw2d.SetAlphaEnable(true)
+      end if
+    end sub
+
+    ' Points this renderer at a different surface. Turns on alpha blending on it, which
+    ' scene objects need.
+    '
+    ' @param {ifDraw2d} draw2d
+    sub setDraw2d(draw2d as ifDraw2d)
+      m.useDrawTarget(draw2d)
       m.camera.setFrameSize(m.draw2d.getWidth(), m.draw2d.getHeight())
     end sub
 
@@ -316,22 +337,28 @@ namespace BGE
       m.updateTriangleQuickDrawParams()
     end sub
 
-    ' The triangle line-fill parameters in effect, after the simulator adjustment.
+    ' The triangle fill parameters in effect for this quality level.
     '
-    ' @return {object} {skipSize, threshold, step}
+    ' @return {object} {skipSize, maxBands, step}
     function getTriangleQuickDrawParams() as TriangleQuickDrawParams
       return m.triangleQuickDrawParams
     end function
 
+    ' How many triangles this renderer has drawn with a coarse (or skipped) fill so far.
+    ' Compare it before and after drawing to tell whether that drawing needs redoing exactly
+    ' once the object stops moving.
+    '
+    ' @return {integer}
+    function getLossyTriangleFillCount() as integer
+      return m.lossyTriangleFillCount
+    end function
+
     private sub updateTriangleQuickDrawParams()
-      threshold = m.qualitySettings.triangleQuickDrawThreshold
-      lineStep = m.qualitySettings.triangleQuickDrawStep
-      if m.isSimulator
-        ' line drawing is comparatively slow on the simulator
-        threshold = BGE.Math.Min(threshold, 32.0)
-        lineStep = cint(BGE.Math.Max(lineStep, 4))
+      bandStep = m.qualitySettings.triangleQuickDrawStep
+      if bandStep < 1
+        bandStep = 1
       end if
-      m.triangleQuickDrawParams = {skipSize: m.qualitySettings.triangleSkipSize, threshold: threshold, step: lineStep}
+      m.triangleQuickDrawParams = {skipSize: m.qualitySettings.triangleSkipSize, maxBands: BGE.TRIANGLE_SPAN_MAX_BANDS, step: bandStep}
     end sub
 
     sub resetDrawCallCounter()
@@ -2160,7 +2187,7 @@ namespace BGE
       totalYOffset = y + minP.y
 
       if allowQuickDraw
-        if m.drawQuickTriangleTo(canvasDrawTo, points, x, y, rgba)
+        if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, true)
           return true
         end if
       end if
@@ -2216,25 +2243,50 @@ namespace BGE
       return didDraw
     end function
 
-    private function drawQuickTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer) as boolean
+    ' Fills the triangle with DrawRect bands when that's no dearer than the exact fill. A
+    ' band fill at 1px is as accurate as the exact one (without its seams), so it's used
+    ' whether or not the object is moving; coarser bands, or skipping a tiny triangle, only
+    ' with allowQuickDraw.
+    '
+    ' @return {boolean} true if the triangle was handled here
+    private function drawTriangleWithSpansIfCheaperTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw as boolean) as boolean
       bounds = BGE.Math.getBounds(points)
-
-      params = m.getTriangleQuickDrawParams()
-      triangleSize = BGE.Math.VectorOps.subtract(bounds[1], bounds[0])
-      if triangleSize.x < params.skipSize and triangleSize.y < params.skipSize
+      params = m.triangleQuickDrawParams
+      width = bounds[1].x - bounds[0].x
+      height = bounds[1].y - bounds[0].y
+      if allowQuickDraw and width < params.skipSize and height < params.skipSize
+        m.lossyTriangleFillCount++
         return true
       end if
-
-      if (triangleSize.x < params.threshold) or (triangleSize.y < params.threshold)
-        return m.drawTriangleAsRaysTo(canvasDrawTo, points, x, y, rgba, {levelOffset: 0, levelOfDetail: params.step})
+      shortSide = BGE.Math.Min(width, height)
+      if shortSide <= params.maxBands
+        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, 1)
+        return true
+      end if
+      if allowQuickDraw and params.step > 1 and shortSide <= params.maxBands * params.step
+        m.lossyTriangleFillCount++
+        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, params.step)
+        return true
       end if
       return false
     end function
 
     function drawTriangle(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
-      return m.drawTriangleTo(m.draw2d, points, x, y, rgba)
+      return m.drawTriangleTo(m.draw2d, points, x, y, rgba, allowQuickDraw)
     end function
 
+    ' Fills a triangle with a flat color, picking the cheapest way to do it well: small
+    ' triangles are filled with `DrawRect` bands (see `drawTriangleAsSpansTo()`), larger ones
+    ' with `drawTriangleExactTo()`.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the triangle's 3 corners
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {boolean} [allowQuickDraw=false] allow a coarser fill (or skipping a tiny
+    '   triangle) for something that's moving - see `getLossyTriangleFillCount()`
+    ' @return {boolean} true if the triangle was drawn (or deliberately skipped)
     function drawTriangleTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
       if canvasDrawTo = invalid or points = invalid
         return false
@@ -2244,12 +2296,25 @@ namespace BGE
         return false
       end if
 
-      if allowQuickDraw
-        if m.drawQuickTriangleTo(canvasDrawTo, points, x, y, rgba)
-          return true
-        end if
+      if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
+        return true
       end if
+      return m.drawTriangleExactTo(canvasDrawTo, points, x, y, rgba)
+    end function
 
+    ' Fills a triangle with two `DrawTransformedObject` calls of a shared right-triangle
+    ' texture - a fixed cost whatever the triangle's size.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the triangle's 3 corners
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @return {boolean} true if both draws worked
+    function drawTriangleExactTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer) as boolean
+      if canvasDrawTo = invalid or points = invalid or points.count() <> 3
+        return false
+      end if
       rightTriangle = m.getRightTriangleResource()
       if invalid = rightTriangle
         return false
@@ -2362,6 +2427,93 @@ namespace BGE
     end function
 
 
+    ' Fills a triangle with one `DrawRect` per band of `bandSize` pixels, banding across
+    ' whichever axis of its bounding box is shorter (fewest rects). Each band's span is
+    ' the triangle's cross-section at the band's middle, so the fill has no gaps, and two
+    ' triangles sharing an edge (a quad) neither overlap nor leave a seam. Edges come out
+    ' stepped by up to `bandSize` pixels.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the triangle's 3 corners
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {integer} [bandSize=1] band thickness in pixels
+    ' @return {boolean} true if anything was drawn
+    function drawTriangleAsSpansTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize = 1 as integer) as boolean
+      if invalid = canvasDrawTo or invalid = points or points.count() <> 3
+        return false
+      end if
+      if bandSize < 1
+        bandSize = 1
+      end if
+      ' Work in (u, v) where v is the banded axis.
+      bounds = BGE.Math.getBounds(points)
+      bandAcrossY = (bounds[1].y - bounds[0].y) <= (bounds[1].x - bounds[0].x)
+      u = []
+      v = []
+      for each p in points
+        if bandAcrossY
+          u.push(p.x + x)
+          v.push(p.y + y)
+        else
+          u.push(p.y + y)
+          v.push(p.x + x)
+        end if
+      end for
+      minV = BGE.Math.Min(v[0], BGE.Math.Min(v[1], v[2]))
+      maxV = BGE.Math.Max(v[0], BGE.Math.Max(v[1], v[2]))
+
+      drewAny = false
+      bandStart = Int(minV)
+      while bandStart < maxV
+        sampleV = bandStart + bandSize / 2.0
+        if sampleV > maxV
+          sampleV = (bandStart + maxV) / 2.0
+        end if
+        if sampleV < minV
+          sampleV = (minV + BGE.Math.Min(bandStart + bandSize, maxV)) / 2.0
+        end if
+        spanMin = 1e9
+        spanMax = -1e9
+        j = 2
+        for i = 0 to 2
+          vi = v[i]
+          vj = v[j]
+          if (vi <= sampleV and vj >= sampleV) or (vj <= sampleV and vi >= sampleV)
+            if vi = vj
+              crossU = BGE.Math.Min(u[i], u[j])
+              spanMin = BGE.Math.Min(spanMin, crossU)
+              spanMax = BGE.Math.Max(spanMax, BGE.Math.Max(u[i], u[j]))
+            else
+              crossU = u[i] + (sampleV - vi) / (vj - vi) * (u[j] - u[i])
+              spanMin = BGE.Math.Min(spanMin, crossU)
+              spanMax = BGE.Math.Max(spanMax, crossU)
+            end if
+          end if
+          j = i
+        end for
+        startU = Int(spanMin + 0.5)
+        endU = Int(spanMax + 0.5)
+        if endU <= startU and spanMax >= spanMin
+          ' a sliver thinner than a pixel still gets one
+          endU = startU + 1
+        end if
+        if endU > startU
+          if bandAcrossY
+            canvasDrawTo.DrawRect(startU, bandStart, endU - startU, bandSize, rgba)
+          else
+            canvasDrawTo.DrawRect(bandStart, startU, bandSize, endU - startU, rgba)
+          end if
+          m.drawCallsLastFrame++
+          drewAny = true
+        end if
+        bandStart += bandSize
+      end while
+      return drewAny
+    end function
+
+
     function drawTriangleAsRaysTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, options = {levelOffset: 0, levelOfDetail: 2} as LevelOfDetailOptions) as boolean
       if invalid = canvasDrawTo or invalid = points
         return false
@@ -2376,7 +2528,7 @@ namespace BGE
       if len0 <= len1 and len0 <= len2
         apexIndex = 0
         shortLength = len0
-      else if len1 <= len0 and len1 < len0
+      else if len1 <= len0 and len1 <= len2
         apexIndex = 1
         shortLength = len1
       else ' if len2 < len0 and len2 < len1
