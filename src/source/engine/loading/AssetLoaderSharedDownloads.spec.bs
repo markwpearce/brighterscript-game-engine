@@ -1,0 +1,141 @@
+import "pkg:/source/engine/loading/DownloadPaths.bs"
+import "pkg:/source/engine/loading/AssetLoader.bs"
+
+namespace tests
+
+  @suite("BGE.AssetLoader shared downloads")
+  class AssetLoaderSharedDownloadsTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as tests.ServedAssetLoader
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.loader = new tests.ServedAssetLoader(m.game)
+      bitmap = CreateObject("roBitmap", {width: 4, height: 2, AlphaEnable: true})
+      bitmap.GetPng(0, 0, 4, 2).WriteFile("tmp:/bge_served.png")
+    end function
+
+    @describe("one download per URL")
+
+    @it("downloads a URL once when two loads in a batch use it")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_served.png"
+      m.loader.stepsPerDownload = 3
+      m.loader.loadBitmap("first", "https://example.com/a.png")
+      m.loader.loadBitmap("second", "https://example.com/a.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(1, m.loader.requested.count())
+      m.assertEqual(4, m.game.getBitmap("first").GetWidth())
+      m.assertEqual(4, m.game.getBitmap("second").GetWidth())
+    end function
+
+    @it("shares a model's texture download with a bitmap load of the same URL")
+    function _()
+      objLines = ["v 0 0 0", "v 1 0 0", "v 0 1 0", "vt 0 0", "vt 1 0", "vt 0 1", "f 1/1 2/2 3/3"]
+      WriteAsciiFile("tmp:/bge_shared_tri.obj", objLines.join(chr(10)))
+      m.loader.files["https://example.com/skin.png"] = "tmp:/bge_served.png"
+      m.loader.stepsPerDownload = 3
+      m.loader.loadBitmap("skin", "https://example.com/skin.png")
+      m.loader.load3dModel("tri", "tmp:/bge_shared_tri.obj", {texturePath: "https://example.com/skin.png"})
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(1, m.loader.requested.count())
+      m.assertNotInvalid(m.game.Models["tri"].faces[0].Texture.srcRegionWithId)
+    end function
+
+    @it("shares a failed download's error")
+    function _()
+      first = m.loader.loadBitmap("first", "https://example.com/missing.png")
+      second = m.loader.loadBitmap("second", "https://example.com/missing.png")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.requested.count())
+      m.assertNotInvalid(first.error)
+      m.assertNotInvalid(second.error)
+    end function
+
+    @it("downloads separately with a different extension option")
+    function _()
+      m.loader.getDownloadTask("https://example.com/a", {extension: ".png"})
+      m.loader.getDownloadTask("https://example.com/a", {extension: ".jpg"})
+      m.assertEqual(2, m.loader.requested.count())
+    end function
+
+    @it("downloads separately when one is cached and one isn't")
+    function _()
+      m.loader.getDownloadTask("https://example.com/a.png", {})
+      m.loader.getDownloadTask("https://example.com/a.png", {cache: false})
+      m.assertEqual(2, m.loader.requested.count())
+    end function
+
+    @it("doesn't let a refresh share a download that may come from the cache")
+    function _()
+      m.loader.getDownloadTask("https://example.com/a.png", {})
+      m.loader.getDownloadTask("https://example.com/a.png", {refresh: true})
+      m.assertEqual(2, m.loader.requested.count())
+    end function
+
+    @it("lets a plain load share a refresh")
+    function _()
+      m.loader.getDownloadTask("https://example.com/a.png", {refresh: true})
+      m.loader.getDownloadTask("https://example.com/a.png", {})
+      m.assertEqual(1, m.loader.requested.count())
+    end function
+
+    @it("downloads itself when the shared download is aborted")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_served.png"
+      first = m.loader.getDownloadTask("https://example.com/a.png", {})
+      second = m.loader.getDownloadTask("https://example.com/a.png", {})
+      first.abort()
+      m.assertTrue(second.step(10))
+      m.assertEqual(2, m.loader.requested.count())
+      m.assertEqual("tmp:/bge_served.png", second.localPath)
+    end function
+
+    @it("doesn't abort the shared download when a task using it is aborted")
+    function _()
+      m.loader.files["https://example.com/a.png"] = "tmp:/bge_served.png"
+      first = m.loader.getDownloadTask("https://example.com/a.png", {})
+      second = m.loader.getDownloadTask("https://example.com/a.png", {})
+      second.abort()
+      m.assertFalse(first.wasAborted())
+    end function
+
+    @describe("finished downloads")
+
+    @it("starts a new download once the shared one has finished")
+    function _()
+      plainLoader = new BGE.AssetLoader(m.game)
+      url = "https://example.com/bge-shared-finished.png"
+      fs = CreateObject("roFileSystem")
+      fs.CreateDirectory(BGE.Downloads.CACHE_FOLDER)
+      cachedPath = BGE.Downloads.getBasePath(url, true) + ".png"
+      CreateObject("roBitmap", {width: 2, height: 2}).GetPng(0, 0, 2, 2).WriteFile(cachedPath)
+      first = plainLoader.getDownloadTask(url, {})
+      m.assertTrue(first.step(10))
+      m.assertTrue(first.isFinished())
+      second = plainLoader.getDownloadTask(url, {}) as dynamic
+      m.assertFalse(second.DoesExist("leader"))
+      fs.Delete(cachedPath)
+    end function
+
+    @it("returns true again when a finished download is stepped")
+    function _()
+      plainLoader = new BGE.AssetLoader(m.game)
+      url = "https://example.com/bge-shared-restep.png"
+      fs = CreateObject("roFileSystem")
+      fs.CreateDirectory(BGE.Downloads.CACHE_FOLDER)
+      cachedPath = BGE.Downloads.getBasePath(url, true) + ".png"
+      CreateObject("roBitmap", {width: 2, height: 2}).GetPng(0, 0, 2, 2).WriteFile(cachedPath)
+      task = plainLoader.getDownloadTask(url, {})
+      m.assertTrue(task.step(10))
+      m.assertTrue(task.step(10))
+      m.assertEqual(cachedPath, task.localPath)
+      fs.Delete(cachedPath)
+    end function
+
+  end class
+
+end namespace
