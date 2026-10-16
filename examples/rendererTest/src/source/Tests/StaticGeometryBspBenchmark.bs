@@ -1,173 +1,170 @@
-' Times Renderer.render()'s static-geometry BSP path (Renderer.markStatic(), issue
-' #107) against the plain per-object sorted path it replaces, using a small "scene" of
-' static wall quads with dynamic "ball" quads moving between them each frame - the same
-' shape as examples/collisions3d, without needing BGE.Game/GameEntity for the *demo*
-' itself (see SkyboxTest.bs for the same owner-less construction pattern this demo
-' otherwise follows).
+' Times Renderer.render()'s static-geometry BSP path (Renderer.markStatic(), issue #107)
+' against the plain sorted path, for a box of wall quads with "ball" quads moving inside
+' it - the same shape as examples/collisions3d, built from ownerless drawables (#231).
 '
-' Deviation from a literal `owner = invalid` on each DrawableRectangle: unlike
-' SkyboxTest.bs (which bypasses SceneObject.update() entirely via renderNow()), the
-' normal Renderer.render() path this benchmark specifically measures calls
-' SceneObject.update() on every object, which unconditionally dereferences
-' m.drawable.owner.transformationMatrix/.movedLastFrame() - a real crash with an invalid
-' owner, not just a lint concern. A Drawable's `owner` field is also compile-time typed
-' `as GameEntity`, so nothing short of a real GameEntity satisfies it.
-'
-' A real `new BGE.GameEntity(...)` needs a real `BGE.Game` - but constructing one here
-' (`new BGE.Game(...)`) is NOT safe: its constructor always creates its own on-screen
-' `roScreen`, which - confirmed on real hardware while building this benchmark - silently
-' and permanently steals the physical display away from main.bs's own screen (the app
-' keeps running, render() keeps executing, but the screen freezes on the channel splash
-' forever; recoverable only by not creating that second roScreen at all). So instead of a
-' real Game, `BenchmarkGameStub` below stands in for the tiny slice of Game's public
-' surface that GameEntity/SceneObjectBillboard's oriented-mode draw path actually touches
-' for a Drawable with no texture/UI dependencies (getNextGameEntityId(), log(),
-' getDebugValue()) - passed through a `dynamic`-typed local so bsc's static `as Game`
-' param check doesn't reject it (BrighterScript doesn't validate object-typed arguments at
-' runtime, only scalar float/int params coerce at the call boundary - see CLAUDE.md).
-' Since the owner's transformationMatrix stays identity throughout, each drawable's
-' absolute `offset` still resolves directly to world position, matching the brief's intent
-' unchanged.
-class BenchmarkGameStub
-
-  private nextEntityId = 0
-
-  function getNextGameEntityId() as string
-    id = m.nextEntityId.ToStr()
-    m.nextEntityId++
-    return id
-  end function
-
-  sub log(message as string, level = 0 as dynamic)
-    print "[benchmark owner] "; message
-  end sub
-
-  function getDebugValue(debugKey as string) as dynamic
-    return invalid
-  end function
-
-end class
-
+' Each phase gets its own identical off-screen renderer, since hasStaticGeometry is a
+' one-way latch. Phases run one after the other, one frame per update(), so nothing
+' blocks long enough to trip the Roku watchdog and only one extra scratch pool is alive.
 class StaticGeometryBspBenchmark extends RendererTest
 
-  private wallCount = 6
   private ballCount = 10
-  private resultLines as string[] = []
+  private warmupFrames = 5
+  private timedFrames = 60
+  private boxHalfSize = 150.0
+  private surfaceWidth = 1280
+  private surfaceHeight = 720
+  private thumbScale = 0.375
+  private safeX = 140
+  private lineHeight = 26
+  private font as roFont
 
-  private ownerGameStub as object
-  private owner as BGE.GameEntity
+  private phaseNames as string[] = ["Static BSP", "Plain sorted"]
+  private phaseIndex = 0
+  private frameIndex = 0
+  private phaseMs as integer[] = [0, 0]
+  private phaseDrawCalls as integer[] = [0, 0]
+  private phaseBitmaps as roBitmap[] = []
+
+  private phaseRenderer as BGE.Renderer
+  private balls as BGE.DrawableRectangle[] = []
 
   sub new()
     super("Static Geometry BSP Benchmark")
   end sub
 
   override sub setup(renderer as BGE.Renderer)
-    m.ownerGameStub = new BenchmarkGameStub()
-    m.owner = new BGE.GameEntity((m.ownerGameStub as dynamic), {name: "BenchmarkOwner"})
-
-    renderer.camera = new BGE.Camera3d()
-    renderer.camera.position = BGE.Math.VectorOps.create(0, 0, -400)
-    renderer.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
-
-    m.buildWalls(renderer, true)
-    m.buildBalls(renderer)
-    staticMs = m.timeDrawScene(renderer, 60)
-    m.resetScene(renderer)
-
-    ' Phase 2 needs a genuinely separate Renderer, not the shared one above -
-    ' Renderer.hasStaticGeometry is a one-way latch (markStatic() sets it true and
-    ' nothing ever clears it), so re-registering walls on the SAME renderer without
-    ' markStatic() would still take render()'s `if m.hasStaticGeometry` branch and
-    ' never reach the real plain-sorted `else` branch this phase is supposed to
-    ' measure. A plain roBitmap surface (no on-screen roScreen - see DrawableParallaxLayer.spec.bs/
-    ' Drawable.spec.bs for the same pattern) is enough; this renderer is only driven
-    ' long enough to time it and is then discarded.
-    plainRenderer = new BGE.Renderer(CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true}))
-    plainRenderer.camera = new BGE.Camera3d()
-    plainRenderer.camera.position = BGE.Math.VectorOps.create(0, 0, -400)
-    plainRenderer.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
-    m.buildWalls(plainRenderer, false)
-    m.buildBalls(plainRenderer)
-    plainMs = m.timeDrawScene(plainRenderer, 60)
-
-    m.resultLines = [
-      `Static BSP path:   ${staticMs} ms / 60 frames`
-      `Plain sorted path: ${plainMs} ms / 60 frames`
-    ]
-
-    print "=== Static Geometry BSP Benchmark ==="
-    for each line in m.resultLines
-      print line
-    end for
-    print "=== end ==="
-
-    ' Leave the shared renderer (the one main.bs keeps using for this demo's own
-    ' draw() calls and every subsequent demo) clean - no leftover scene objects from
-    ' either phase.
-    m.resetScene(renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.startPhase()
   end sub
 
-  private sub resetScene(renderer as BGE.Renderer)
-    for each sceneObj in renderer.getSceneObjectsCopy()
-      renderer.removeSceneObject(sceneObj)
-    end for
+  override sub update(dt as float)
+    if m.phaseIndex >= m.phaseNames.count()
+      return
+    end if
+
+    m.moveBalls(m.frameIndex)
+    timer = CreateObject("roTimespan")
+    m.phaseRenderer.setupCameraForFrame()
+    m.phaseRenderer.resetDrawCallCounter()
+    m.phaseRenderer.render()
+    ms = timer.TotalMilliseconds()
+
+    if m.frameIndex >= m.warmupFrames
+      m.phaseMs[m.phaseIndex] += ms
+      m.phaseDrawCalls[m.phaseIndex] += m.phaseRenderer.getDrawCallsLastFrame()
+    end if
+    m.frameIndex++
+
+    if m.frameIndex >= m.warmupFrames + m.timedFrames
+      print `[BSP benchmark] ${m.resultLine(m.phaseIndex)}`
+      m.phaseIndex++
+      m.frameIndex = 0
+      ' Free this phase's scratch pool before the next one allocates its own.
+      m.phaseRenderer = invalid
+      m.balls = []
+      RunGarbageCollector()
+      if m.phaseIndex < m.phaseNames.count()
+        m.startPhase()
+      end if
+    end if
   end sub
 
-  private sub buildWalls(renderer as BGE.Renderer, markAsStatic as boolean)
-    positions = [
-      BGE.Math.VectorOps.create(0, 0, 150), BGE.Math.VectorOps.create(0, 0, -150),
-      BGE.Math.VectorOps.create(150, 0, 0), BGE.Math.VectorOps.create(-150, 0, 0),
-      BGE.Math.VectorOps.create(0, 150, 0), BGE.Math.VectorOps.create(0, -150, 0)
+  private sub startPhase()
+    bitmap = CreateObject("roBitmap", {width: m.surfaceWidth, height: m.surfaceHeight, alphaEnable: false})
+    m.phaseBitmaps.push(bitmap)
+    m.phaseRenderer = new BGE.Renderer(bitmap)
+    camera = new BGE.Camera3d()
+    camera.position = BGE.Math.VectorOps.create(0, 0, -450)
+    camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+    m.phaseRenderer.setCamera(camera)
+    m.buildWalls(m.phaseIndex = 0)
+    m.buildBalls()
+  end sub
+
+  ' Walls are rotated into place about their centres, mirroring collisions3d's Wall.bs.
+  ' The near wall is wireframe so the camera can see in, but it's still a BSP plane.
+  private sub buildWalls(markAsStatic as boolean)
+    h = m.boxHalfSize
+    halfPi = BGE.Math.HALF_PI
+    walls = [
+      {center: [0, 0, h], rotation: [0, 0, 0], color: BGE.ColorsRGB.Navy, wireFrame: false},
+      {center: [h, 0, 0], rotation: [0, halfPi, 0], color: BGE.ColorsRGB.Maroon, wireFrame: false},
+      {center: [-h, 0, 0], rotation: [0, halfPi, 0], color: BGE.ColorsRGB.Green, wireFrame: false},
+      {center: [0, h, 0], rotation: [halfPi, 0, 0], color: BGE.ColorsRGB.Purple, wireFrame: false},
+      {center: [0, -h, 0], rotation: [halfPi, 0, 0], color: BGE.ColorsRGB.Teal, wireFrame: false},
+      {center: [0, 0, -h], rotation: [0, 0, 0], color: BGE.ColorsRGB.White, wireFrame: true}
     ]
-    for i = 0 to m.wallCount - 1
-      drawable = new BGE.DrawableRectangle(m.owner, 300, 300, {drawMode: BGE.SceneObjectDrawMode.oriented})
-      drawable.offset = positions[i]
-      sceneObj = drawable.addToRenderer(renderer)
+    for each wall in walls
+      drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
+      if wall.wireFrame
+        drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
+      end if
+      drawable = new BGE.DrawableRectangle(invalid, h * 2, h * 2, {
+        offset: BGE.Math.VectorOps.create(wall.center[0], wall.center[1], wall.center[2]),
+        rotation: BGE.Math.VectorOps.create(wall.rotation[0], wall.rotation[1], wall.rotation[2]),
+        color: wall.color,
+        outlineRGBA: BGE.ColorsRGB.White,
+        drawMode: drawMode
+      })
+      drawable.setAnchor(0.5, 0.5)
+      sceneObj = drawable.addToRenderer(m.phaseRenderer)
       if markAsStatic
-        renderer.markStatic(sceneObj)
+        m.phaseRenderer.markStatic(sceneObj)
       end if
     end for
   end sub
 
-  private sub buildBalls(renderer as BGE.Renderer)
+  private sub buildBalls()
+    m.balls = []
     for i = 0 to m.ballCount - 1
-      drawable = new BGE.DrawableRectangle(m.owner, 20, 20, {drawMode: BGE.SceneObjectDrawMode.oriented})
-      angle = (2 * BGE.Math.PI) * (i / m.ballCount)
-      drawable.offset = BGE.Math.VectorOps.create(cos(angle) * 80, sin(angle) * 80, sin(angle * 2) * 80)
-      drawable.addToRenderer(renderer)
+      drawable = new BGE.DrawableRectangle(invalid, 24, 24, {
+        color: BGE.ColorsRGB.Yellow,
+        ' Unrotated, the quad faces away from this camera, so plain oriented culls it.
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace
+      })
+      drawable.setAnchor(0.5, 0.5)
+      drawable.addToRenderer(m.phaseRenderer)
+      m.balls.push(drawable)
     end for
   end sub
 
-  private function timeDrawScene(renderer as BGE.Renderer, frames as integer) as integer
-    timer = CreateObject("roTimespan")
-    for i = 0 to frames - 1
-      ' Mirrors the real per-frame call order (Game.drawEntities()) - render()
-      ' itself does not call this; every spec test that exercises render() calls
-      ' it first too (e.g. SceneObjectImage.spec.bs). Skipping it leaves the
-      ' camera's frustum normals uninitialized (invalid), crashing the first
-      ' SceneObject.update()'s distanceFromCameraFront() call.
-      renderer.setupCameraForFrame()
-      ' The shared dummy owner's MotionChecker.movedLastFrame starts (and stays)
-      ' true until something calls updateTransformationMatrix() on it - normally
-      ' Game's per-frame entity loop (Game.bs:963). Without this, every wall's
-      ' Drawable.movedLastFrame(true) reads back true forever (owner OR'd in),
-      ' which both crashes the isStatic-moved warning (m.owner.name is unset on
-      ' this bare owner) and would force a static-tree rebuild every single frame -
-      ' defeating the entire point of the static-path benchmark.
-      m.owner.updateTransformationMatrix()
-      renderer.render()
+  ' Driven by frame index rather than dt so both phases draw identical frames.
+  private sub moveBalls(frame as integer)
+    t = frame * 0.05
+    for i = 0 to m.balls.count() - 1
+      angle = (2 * BGE.Math.PI) * (i / m.ballCount) + t
+      m.balls[i].offset = BGE.Math.VectorOps.create(cos(angle) * 100, sin(angle * 2) * 60, sin(angle) * 120)
     end for
-    return timer.TotalMilliseconds()
+  end sub
+
+  private function resultLine(index as integer) as string
+    frames = m.timedFrames
+    return `${m.phaseNames[index]}: ${m.phaseMs[index]} ms / ${frames} frames, ${m.phaseDrawCalls[index] / frames} draw calls/frame`
   end function
 
   override sub draw(renderer as BGE.Renderer)
-    ' Starts below main.bs's own centered title header (drawn at y=20) so the two
-    ' don't overlap - see QuadFillBenchmark.bs, which starts at the same y=80 for
-    ' the same reason.
+    ' y=80 clears main.bs's title header (see QuadFillBenchmark.bs).
     y = 80
-    for each line in m.resultLines
-      renderer.drawText(line, 20, y, BGE.Colors.White)
-      y += 28
+    for i = 0 to m.phaseNames.count() - 1
+      if i < m.phaseIndex
+        line = m.resultLine(i)
+      else if i = m.phaseIndex
+        line = `${m.phaseNames[i]}: running (${m.frameIndex}/${m.warmupFrames + m.timedFrames})`
+      else
+        line = `${m.phaseNames[i]}: waiting`
+      end if
+      renderer.drawText(line, m.safeX, y, BGE.Colors.White, m.font)
+      y += m.lineHeight
+    end for
+
+    ' Each phase's last frame, so a blank (0 draw call) render is obvious.
+    thumbWidth = m.surfaceWidth * m.thumbScale
+    x = m.safeX
+    y += 16
+    for i = 0 to m.phaseBitmaps.count() - 1
+      renderer.drawScaledObject(x, y, m.thumbScale, m.thumbScale, m.phaseBitmaps[i])
+      renderer.drawText(m.phaseNames[i], x, y + m.surfaceHeight * m.thumbScale + 8, BGE.Colors.White, m.font)
+      x += thumbWidth + 40
     end for
   end sub
 
