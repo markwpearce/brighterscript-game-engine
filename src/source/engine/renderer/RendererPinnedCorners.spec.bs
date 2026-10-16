@@ -1,0 +1,136 @@
+namespace tests
+
+  ' drawPinnedCorners with mirrored quads (issue #269).
+  @suite("BGE.Renderer drawPinnedCorners")
+  class RendererPinnedCornersTests extends rooibos.BaseTestSuite
+
+    bitmap as roBitmap
+    renderer as BGE.Renderer
+    source as BGE.RendererHelpers.RegionWithId
+
+    protected override function beforeEach()
+      m.bitmap = CreateObject("roBitmap", {width: 240, height: 240, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.bitmap)
+      ' 64x64, top left quadrant red, the rest blue
+      sourceBitmap = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: true})
+      sourceBitmap.Clear(&h0000FFFF)
+      sourceBitmap.DrawRect(0, 0, 32, 32, &hFF0000FF)
+      m.source = {region: CreateObject("roRegion", sourceBitmap, 0, 0, 64, 64), id: "quadrants"}
+    end function
+
+    ' A 120x120 quad centred on the canvas, rotated by `degrees`, optionally mirrored.
+    private function makeQuad(degrees as float, flipX as boolean, flipY as boolean) as BGE.Math.CornerPoints
+      theta = BGE.Math.DegreesToRadians(degrees)
+      c = cos(theta)
+      s = sin(theta)
+      corner = function(u as float, v as float, c as float, s as float) as BGE.Math.Vector
+        return BGE.Math.VectorOps.create(120 + u * c - v * s, 120 + u * s + v * c)
+      end function
+      left = -60
+      right = 60
+      top = -60
+      bottom = 60
+      if flipX
+        left = 60
+        right = -60
+      end if
+      if flipY
+        top = 60
+        bottom = -60
+      end if
+      return BGE.Math.createCornerPoints(corner(left, top, c, s), corner(right, top, c, s), corner(left, bottom, c, s), corner(right, bottom, c, s))
+    end function
+
+    ' Canvas point at (u, v) across the quad, 0..1 from its topLeft label.
+    private function pointInQuad(quad as BGE.Math.CornerPoints, u as float, v as float) as BGE.Math.Vector
+      topX = BGE.Math.lerp(quad.topLeft.x, quad.topRight.x, u)
+      topY = BGE.Math.lerp(quad.topLeft.y, quad.topRight.y, u)
+      bottomX = BGE.Math.lerp(quad.bottomLeft.x, quad.bottomRight.x, u)
+      bottomY = BGE.Math.lerp(quad.bottomLeft.y, quad.bottomRight.y, u)
+      return BGE.Math.VectorOps.create(BGE.Math.lerp(topX, bottomX, v), BGE.Math.lerp(topY, bottomY, v))
+    end function
+
+    private function isRedAt(point as BGE.Math.Vector) as boolean
+      bytes = m.bitmap.GetByteArray(Int(point.x), Int(point.y), 1, 1)
+      return bytes[0] > 128 and bytes[2] < 128
+    end function
+
+    ' Draws the quad, then reports which sampled quadrants came out red. Two samples per
+    ' quadrant, one either side of each diagonal, so both triangles are checked.
+    private function drawAndFindRed(quad as BGE.Math.CornerPoints) as string
+      m.bitmap.Clear(&h000000FF)
+      m.renderer.drawPinnedCorners(quad, m.source)
+      samples = {
+        TL: [[0.35, 0.15], [0.15, 0.35]],
+        TR: [[0.65, 0.15], [0.85, 0.35]],
+        BL: [[0.15, 0.65], [0.35, 0.85]],
+        BR: [[0.65, 0.85], [0.85, 0.65]]
+      }
+      found = ""
+      for each quadrant in ["TL", "TR", "BL", "BR"]
+        for each uv in samples[quadrant]
+          if m.isRedAt(m.pointInQuad(quad, uv[0], uv[1]))
+            found = found + quadrant
+          end if
+        end for
+      end for
+      return found
+    end function
+
+    @describe("pixels")
+
+    @it("maps an unmirrored quad")
+    function _()
+      m.assertEqual("TLTL", m.drawAndFindRed(m.makeQuad(0, false, false)))
+      m.assertEqual("TLTL", m.drawAndFindRed(m.makeQuad(30, false, false)))
+    end function
+
+    @it("maps a horizontally mirrored quad")
+    function _()
+      m.assertTrue(m.makeQuad(0, true, false).isMirroredOnCanvas())
+      m.assertEqual("TLTL", m.drawAndFindRed(m.makeQuad(0, true, false)))
+      m.assertEqual("TLTL", m.drawAndFindRed(m.makeQuad(30, true, false)))
+    end function
+
+    @it("maps a vertically mirrored quad")
+    function _()
+      m.assertEqual("TLTL", m.drawAndFindRed(m.makeQuad(0, false, true)))
+      m.assertEqual("TLTL", m.drawAndFindRed(m.makeQuad(-50, false, true)))
+    end function
+
+    @it("reuses cached mirrored triangles on a later draw")
+    function _()
+      quad = m.makeQuad(30, true, false)
+      m.renderer.resetDrawCallCounter()
+      m.drawAndFindRed(quad)
+      firstDrawCalls = m.renderer.getDrawCallsLastFrame()
+      m.renderer.resetDrawCallCounter()
+      m.assertEqual("TLTL", m.drawAndFindRed(quad))
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() < firstDrawCalls)
+    end function
+
+    @describe("native calls")
+
+    ' brs-engine mirrors at any angle; real Roku only mirrors at rotation 0 (issue #237).
+    @it("never combines a negative scale with a nonzero rotation")
+    function _()
+      spy = m.renderer as dynamic
+      spy.badCalls = 0
+      spy.calls = 0
+      spy.drawTransformedObjectTo = function(draw2d as object, x as float, y as float, scaleX as float, scaleY as float, theta as float, region as object, rgba = -1 as integer) as boolean
+        m.calls++
+        if (scaleX < 0 or scaleY < 0) and Abs(theta) > 0.0001
+          m.badCalls++
+        end if
+        return draw2d.DrawTransformedObject(x, y, BGE.Math.RadiansToDegrees(theta), scaleX, scaleY, region, rgba)
+      end function
+      for each degrees in [0, 30]
+        for each flip in [[true, false], [false, true]]
+          m.drawAndFindRed(m.makeQuad(degrees, flip[0], flip[1]))
+        end for
+      end for
+      m.assertTrue(spy.calls > 0)
+      m.assertEqual(0, spy.badCalls)
+    end function
+  end class
+end namespace
