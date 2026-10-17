@@ -60,13 +60,72 @@ namespace tests
       return drawable.addToRenderer(renderer)
     end function
 
-    ' A 100-unit cube centred on the origin, registered as an occluder.
-    private function newCube(renderer as BGE.Renderer) as BGE.SceneObjectModel
+    ' A cube centred on the origin, registered as an occluder.
+    private function newCube(renderer as BGE.Renderer, size = 100 as float) as BGE.SceneObjectModel
       entity = new BGE.GameEntity(m.game, {name: "cube", isStatic: true})
-      entity.position = BGE.Math.VectorOps.create(-50, -50, -50)
+      entity.position = BGE.Math.VectorOps.create(-size / 2, -size / 2, -size / 2)
       entity.updateTransformationMatrix()
-      drawable = new BGE.DrawableModel(entity, m.cubeModel(100), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solid})
+      drawable = new BGE.DrawableModel(entity, m.cubeModel(size), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solid})
       return drawable.addToRenderer(renderer) as BGE.SceneObjectModel
+    end function
+
+    ' A static occluder wall in the z=0 plane, centred on (centerX, 0).
+    private function newOccluderWall(renderer as BGE.Renderer, centerX as float, width as float, height as float) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(centerX - width / 2, height / 2, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, width, height, {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      return drawable.addToRenderer(renderer)
+    end function
+
+    ' A small non-static rectangle centred on (x, 0, z), with a spy counting performDraw() calls.
+    private function newTree(renderer as BGE.Renderer, x as float, z as float, width = 20 as float, height = 20 as float) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "tree"})
+      entity.position = BGE.Math.VectorOps.create(x - width / 2, height / 2, z)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, width, height, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      sceneObj = drawable.addToRenderer(renderer)
+      spy = sceneObj as dynamic
+      spy.performDrawCount = 0
+      spy.realPerformDraw = spy.performDraw
+      spy.performDraw = function(rendererObj as object, drawMode as integer) as boolean
+        m.performDrawCount++
+        return m.realPerformDraw(rendererObj, drawMode)
+      end function
+      return sceneObj
+    end function
+
+    ' A directScaled rectangle at (0, 0, 200) whose own plane is turned edge-on to the camera.
+    private function newEdgeOnSprite(renderer as BGE.Renderer, width as float, yaw as float) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "sprite"})
+      entity.position = BGE.Math.VectorOps.create(0, 0, 200)
+      entity.rotation = BGE.Math.VectorOps.create(0, yaw, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, width, 20, {drawMode: BGE.SceneObjectDrawMode.directScaled})
+      return drawable.addToRenderer(renderer)
+    end function
+
+    private function performDrawCount(sceneObj as BGE.SceneObject) as integer
+      return (sceneObj as dynamic).performDrawCount
+    end function
+
+    ' Renders frames the way Game does, ticking each owning entity's transform first.
+    private sub renderFrames(renderer as BGE.Renderer, count = 2 as integer)
+      for i = 1 to count
+        for each sceneObj in renderer.getSceneObjectsCopy()
+          owner = sceneObj.drawable.owner
+          if owner <> invalid
+            owner.updateTransformationMatrix()
+          end if
+        end for
+        renderer.setupCameraForFrame()
+        renderer.render()
+      end for
+    end sub
+
+    ' A renderer with the camera at (0, 0, -500) looking at the origin.
+    private function newOcclusionRenderer() as BGE.Renderer
+      return m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
     end function
 
     private function renderAndCollect(renderer as BGE.Renderer, sceneObj as BGE.SceneObject) as BGE.OccluderPolygon[]
@@ -373,6 +432,233 @@ namespace tests
     function _()
       m.assertTrue(m.imageUsedFastPath(false), "the scenario should take the fast path for a plain image")
       m.assertFalse(m.imageUsedFastPath(true))
+    end function
+
+    @describe("occlusion culling")
+
+    @it("occludes an object fully behind a wall")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      m.assertTrue(tree.occludedThisFrame)
+      m.assertEqual(0, m.performDrawCount(tree))
+      m.assertEqual(1, renderer.getOccludedCountLastFrame())
+      m.assertNotInvalid(tree.occlusionTestBounds)
+    end function
+
+    @it("does not occlude an object beside the wall")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 400, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+      m.assertTrue(m.performDrawCount(tree) > 0)
+      m.assertEqual(0, renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("does not occlude an object in front of the wall")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, -100)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+    end function
+
+    @it("hides an object behind two touching walls")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, -75, 150, 300)
+      m.newOccluderWall(renderer, 75, 150, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+    end function
+
+    @it("never occludes an object with a bounding point behind the camera")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      ' turned to run along z, from behind the wall to behind the camera
+      entity = new BGE.GameEntity(m.game, {name: "log"})
+      entity.position = BGE.Math.VectorOps.create(5, 10, 200)
+      entity.rotation = BGE.Math.VectorOps.create(0, -BGE.Math.HALF_PI, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 900, 20, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      longTree = drawable.addToRenderer(renderer)
+      m.renderFrames(renderer)
+      m.assertTrue(longTree.negDistanceFromCamera < 0, "its centre should be in front of the camera")
+      behindCamera = 0
+      for each point in longTree.getOcclusionTestPoints(renderer.camera)
+        if invalid = renderer.camera.worldPointToCanvasPoint(point)
+          behindCamera++
+        end if
+      end for
+      m.assertTrue(behindCamera > 0, "a bounding point should be behind the camera")
+      m.assertFalse(longTree.occludedThisFrame)
+      m.assertNotEqual(BGE.VisibilityState.occluded, longTree.getVisibility())
+    end function
+
+    @it("shows a hidden object again the frame its occluder is disabled")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      wall = m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      wall.drawable.enabled = false
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+      m.assertEqual(1, m.performDrawCount(tree))
+    end function
+
+    @it("shows a hidden object again the frame its occluder is removed")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      wall = m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      wall.drawable.removeFromRenderer(renderer)
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+      m.assertEqual(1, m.performDrawCount(tree))
+    end function
+
+    @it("does nothing when occlusionCullingEnabled is false")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      renderer.occlusionCullingEnabled = false
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+      m.assertInvalid(renderer.getOcclusionMap())
+    end function
+
+    @it("stops occluding the frame occlusionCullingEnabled is turned off")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      renderer.occlusionCullingEnabled = false
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+      m.assertFalse(tree.occludedThisFrame)
+      m.assertInvalid(tree.occlusionTestBounds)
+      renderer.occlusionCullingEnabled = true
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+    end function
+
+    @it("does nothing under a Camera2d")
+    function _()
+      entity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true})
+      entity.addRectangle("r", 300, 300, {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      m.assertTrue(m.renderer.hasOccluders())
+      m.renderFrames(m.renderer)
+      m.assertInvalid(m.renderer.getOcclusionMap())
+      m.assertEqual(0, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("does no occlusion work with no occluders registered")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertInvalid(renderer.getOcclusionMap())
+      m.assertEqual(0, renderer.getOcclusionMapBuildCount())
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+    end function
+
+    @it("reuses the map while nothing moves")
+    function _()
+      camera = m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500))
+      renderer = m.newRenderer3d(camera)
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer, 3)
+      builds = renderer.getOcclusionMapBuildCount()
+      m.assertTrue(builds > 0)
+      m.renderFrames(renderer, 2)
+      m.assertEqual(builds, renderer.getOcclusionMapBuildCount())
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      camera.position = BGE.Math.VectorOps.create(1, 0, -500)
+      m.renderFrames(renderer, 1)
+      m.assertEqual(builds + 1, renderer.getOcclusionMapBuildCount())
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+    end function
+
+    @it("keeps only the largest occluders when over maxOccluders")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, -300, 300, 300)
+      m.newOccluderWall(renderer, 0, 60, 60)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility(), "the small wall alone should hide it")
+      renderer.maxOccluders = 1
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+    end function
+
+    @it("hides objects behind a static model occluder")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newCube(renderer, 300)
+      tree = m.newTree(renderer, 0, 300)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      m.assertEqual(0, m.performDrawCount(tree))
+    end function
+
+    @it("is not reported occluded when an object moves out from behind the wall")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      tree = m.newTree(renderer, 0, 200)
+      m.renderFrames(renderer)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+      owner = tree.drawable.owner
+      owner.position = BGE.Math.VectorOps.create(390, 10, 200)
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility())
+      m.assertEqual(1, m.performDrawCount(tree))
+    end function
+
+    @it("never occludes a directToCamera billboard")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      entity = new BGE.GameEntity(m.game, {name: "sprite"})
+      entity.position = BGE.Math.VectorOps.create(0, 0, 200)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 2, 2, {drawMode: BGE.SceneObjectDrawMode.directToCamera})
+      sprite = drawable.addToRenderer(renderer)
+      m.renderFrames(renderer)
+      m.assertFalse(sprite.occludedThisFrame)
+    end function
+
+    @it("tests a directScaled billboard by its camera-facing quad")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      small = m.newEdgeOnSprite(renderer, 20, BGE.Math.HALF_PI)
+      ' wider on screen than the wall, though its own corners, edge-on, would sit behind it
+      wideA = m.newEdgeOnSprite(renderer, 400, BGE.Math.HALF_PI)
+      wideB = m.newEdgeOnSprite(renderer, 400, -BGE.Math.HALF_PI)
+      m.renderFrames(renderer)
+      m.assertTrue(small.occludedThisFrame)
+      m.assertFalse(wideA.occludedThisFrame)
+      m.assertFalse(wideB.occludedThisFrame)
+      m.assertEqual(BGE.VisibilityState.visible, wideA.getVisibility())
+      m.assertEqual(BGE.VisibilityState.visible, wideB.getVisibility())
     end function
 
     @describe("settings")

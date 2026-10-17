@@ -249,6 +249,17 @@ namespace BGE
     ' to be set directly - flag the Drawable's isOccluder instead.
     isOccluder as boolean = false
 
+    ' Whether occlusion culling hides this object this frame. Set by the Renderer; read-only.
+    occludedThisFrame as boolean = false
+    ' The Renderer's occlusion map version occludedThisFrame was judged against, -1 if none.
+    occlusionMapVersion as integer = -1
+    ' The inflated canvas box occludedThisFrame was judged on, or invalid when this object
+    ' isn't being tested for occlusion. Read-only.
+    occlusionTestBounds as BGE.OcclusionTestBounds = invalid
+    ' Whether this occluder could contribute to the occlusion map as of the last
+    ' occluderChangedThisFrame() call.
+    private occluderWasContributing as boolean = false
+
     ' True for exactly the frame Renderer.updateSceneObjects() should mark the static
     ' geometry tree dirty because a static-flagged object's transform changed after
     ' registration - see update()'s misuse-detection block.
@@ -420,6 +431,45 @@ namespace BGE
       m.lastFrameWasCulled = false
       m.visibility = BGE.VisibilityState.occluded
     end sub
+
+    ' Whether this object's shape on the canvas may have changed this frame: it or the
+    ' camera moved, its geometry or draw mode changed, or it was just enabled. Call after
+    ' update() and before draw() for the frame.
+    '
+    ' @return {boolean}
+    function canvasShapeMayHaveChanged() as boolean
+      return m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or m.geometryChanged()
+    end function
+
+    ' Whether this occluder's contribution to the occlusion map may differ from last time
+    ' this was called. Renderer calls it once per frame for every occluder, after update().
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {boolean}
+    function occluderChangedThisFrame(rendererObj as Renderer) as boolean
+      contributing = m.getOccluderDrawMode(rendererObj) >= 0
+      changed = contributing <> m.occluderWasContributing
+      m.occluderWasContributing = contributing
+      return changed or (contributing and m.canvasShapeMayHaveChanged())
+    end function
+
+    ' The world points occlusion culling tests this object by - its canvas extent must lie
+    ' within their projection. invalid when this object must never be judged hidden.
+    '
+    ' @param {Camera} cameraObj
+    ' @return {BGE.Math.Vector[]}
+    function getOcclusionTestPoints(cameraObj as Camera) as BGE.Math.Vector[]
+      return m.getPositionsForOcclusionTest(cameraObj, m.getActualDrawMode(cameraObj))
+    end function
+
+    ' Override for a type whose bounding points don't bound what it draws in some mode.
+    '
+    ' @param {Camera} cameraObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {BGE.Math.Vector[]}
+    protected function getPositionsForOcclusionTest(cameraObj as Camera, drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      return m.getBoundingPoints(cameraObj)
+    end function
 
     ' Check if the object is enabled
     '
@@ -768,12 +818,17 @@ namespace BGE
     end function
 
     ' The draw mode this occluder draws in this frame, or -1 when it can't occlude this
-    ' frame: anything translucent, faded, wireframe or screen-aligned, or no Camera3d.
+    ' frame: anything translucent, faded, wireframe, screen-aligned or not drawn because
+    ' its depth point is behind the camera, or no Camera3d.
     '
     ' @param {Renderer} rendererObj
     ' @return {integer}
     protected function getOccluderDrawMode(rendererObj as Renderer) as integer
       if not m.isOccluder or not m.isEnabled() or m.distanceFadeAlpha < 1 or m.drawable.alpha < 255
+        return -1
+      end if
+      ' Renderer skips drawing anything whose depth point is behind the camera
+      if m.negDistanceFromCamera >= 0
         return -1
       end if
       cam = rendererObj.camera
