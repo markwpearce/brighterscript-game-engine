@@ -5,6 +5,7 @@ import "../../../utils/deviceRenderTier.bs"
 import "../../drawables/Drawable.bs"
 import "../cameras/Camera.bs"
 import "../Renderer.bs"
+import "../occlusion/OcclusionTypes.bs"
 
 namespace BGE
 
@@ -128,6 +129,18 @@ namespace BGE
     return dotProductResult > 0.0001
   end function
 
+  ' Model faces carry outward normals (counter-clockwise winding seen from outside, the
+  ' .obj/.stl convention), so a face is front-facing when its normal points back toward
+  ' the camera.
+  function isOutwardNormalFacingCamera(rendererObj as BGE.Renderer, facePoint as BGE.Math.Vector, faceNormal as BGE.Math.Vector) as boolean
+    return getDotProductFromSurfaceToCamera(rendererObj, facePoint, faceNormal) < -0.0001
+  end function
+
+  ' How directly an outward normal faces the camera: 1 head on, 0 or less edge-on or away.
+  function getOutwardNormalFacingAmount(rendererObj as BGE.Renderer, facePoint as BGE.Math.Vector, faceNormal as BGE.Math.Vector) as float
+    return -getDotProductFromSurfaceToCamera(rendererObj, facePoint, faceNormal)
+  end function
+
   class SceneObject
 
     name as string
@@ -188,6 +201,8 @@ namespace BGE
     ' deterministic draw failures, like a backface or an off-canvas rejection, which used
     ' to re-run the full frustum check every single frame with no latch at all).
     protected lastFrameWasCulled = false
+    ' What the last draw (or skip) reported about this object. See getVisibility().
+    protected visibility as BGE.VisibilityState = BGE.VisibilityState.unknown
 
     ' Whether the last frame's draw actually happened. Distinct from lastFrameWasCulled
     ' because a frame has four possible outcomes, not two: drew, was culled by the
@@ -241,6 +256,27 @@ namespace BGE
     ' this object's concrete type supports static BSP (isEligibleForStaticBsp()). Not
     ' meant to be set directly by game code - see Renderer.markStatic().
     isStatic as boolean = false
+
+    ' Set by Renderer.markOccluder() when this object hides what's behind it. Not meant
+    ' to be set directly - flag the Drawable's isOccluder instead.
+    isOccluder as boolean = false
+    ' The renderer's occluderDrawPolicy, set by the Renderer for an occluder. Read-only.
+    occluderDrawPolicy as BGE.OccluderDrawPolicy = BGE.OccluderDrawPolicy.fastShrink
+
+    ' Whether occlusion culling hides this object this frame. Set by the Renderer; read-only.
+    occludedThisFrame as boolean = false
+    ' The Renderer's occlusion map version occludedThisFrame was judged against, -1 if none.
+    occlusionMapVersion as integer = -1
+    ' The inflated canvas box occludedThisFrame was judged on, or invalid when this object
+    ' isn't being tested for occlusion. Read-only.
+    occlusionTestBounds as BGE.OcclusionTestBounds = invalid
+    ' Whether this occluder could contribute to the occlusion map as of the last
+    ' occluderChangedThisFrame() call.
+    private occluderWasContributing as boolean = false
+
+    ' The inset and quality level this occluder's claim was last judged with.
+    private occluderLastInset as float = 0.0
+    private occluderLastQualityVersion as integer = -1
 
     ' True for exactly the frame Renderer.updateSceneObjects() should mark the static
     ' geometry tree dirty because a static-flagged object's transform changed after
@@ -393,9 +429,73 @@ namespace BGE
       m.lastDrawMode = m.getActualDrawMode(cameraObj)
       m.lastGeometryVersion = m.drawable.geometryVersion
       m.lastFrameWasCulled = true
+      m.visibility = BGE.VisibilityState.offCamera
       m.lastFrameDidDraw = false
       m.isFirstFrameSinceEnabled = false
     end sub
+
+    ' Called by Renderer instead of draw() for an object it skips because something in front
+    ' hides it. Unlike a cull this doesn't latch, and the canvas geometry is dropped so the
+    ' next draw() recomputes it. Projection and quality versions are deliberately not
+    ' recorded, so a change that happens while hidden is applied when it returns.
+    '
+    ' @param {Camera} cameraObj the renderer's camera
+    sub markSkippedOccluded(cameraObj as Camera)
+      m.lastDrawMode = m.getActualDrawMode(cameraObj)
+      m.lastGeometryVersion = m.drawable.geometryVersion
+      m.isFirstFrameSinceEnabled = false
+      m.lastFrameDidDraw = false
+      m.hasValidCanvasPosition = false
+      m.lastFrameWasCulled = false
+      m.visibility = BGE.VisibilityState.occluded
+    end sub
+
+    ' Whether this object's shape on the canvas may have changed this frame: it or the
+    ' camera moved, its geometry or draw mode changed, or it was just enabled. Call after
+    ' update() and before draw() for the frame.
+    '
+    ' @return {boolean}
+    function canvasShapeMayHaveChanged() as boolean
+      return m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or m.geometryChanged()
+    end function
+
+    ' Whether this occluder's contribution to the occlusion map may differ from last time
+    ' this was called. Renderer calls it once per frame for every occluder, after update().
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {boolean}
+    function occluderChangedThisFrame(rendererObj as Renderer) as boolean
+      drawMode = m.getOccluderDrawMode(rendererObj)
+      contributing = drawMode >= 0
+      inset = 0.0
+      if contributing
+        inset = m.getOccluderInset(rendererObj, drawMode)
+      end if
+      ' the claim grows back once it stops moving, and quality sets the approximations
+      changed = contributing <> m.occluderWasContributing or inset <> m.occluderLastInset or rendererObj.qualityVersion <> m.occluderLastQualityVersion
+      m.occluderWasContributing = contributing
+      m.occluderLastInset = inset
+      m.occluderLastQualityVersion = rendererObj.qualityVersion
+      return changed or (contributing and m.canvasShapeMayHaveChanged())
+    end function
+
+    ' The world points occlusion culling tests this object by - its canvas extent must lie
+    ' within their projection. invalid when this object must never be judged hidden.
+    '
+    ' @param {Camera} cameraObj
+    ' @return {BGE.Math.Vector[]}
+    function getOcclusionTestPoints(cameraObj as Camera) as BGE.Math.Vector[]
+      return m.getPositionsForOcclusionTest(cameraObj, m.getActualDrawMode(cameraObj))
+    end function
+
+    ' Override for a type whose bounding points don't bound what it draws in some mode.
+    '
+    ' @param {Camera} cameraObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {BGE.Math.Vector[]}
+    protected function getPositionsForOcclusionTest(cameraObj as Camera, drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
+      return m.getBoundingPoints(cameraObj)
+    end function
 
     ' Check if the object is enabled
     '
@@ -456,6 +556,12 @@ namespace BGE
         end if
       end if
       m.lastFrameWasCulled = not enteredDrawPath or deterministicFailure
+      ' A transient draw failure still reports visible, as isOnScreen() always has.
+      if m.lastFrameWasCulled
+        m.visibility = BGE.VisibilityState.offCamera
+      else
+        m.visibility = BGE.VisibilityState.visible
+      end if
       m.lastFrameDidDraw = didDraw
       m.isFirstFrameSinceEnabled = false
       m.lastGeometryVersion = m.drawable.geometryVersion
@@ -715,6 +821,81 @@ namespace BGE
       return false
     end function
 
+    ' Whether this type can act as an occluder (see Drawable.isOccluder): opaque, with a
+    ' known flat-panel silhouette. False by default; Image, Rectangle and Model opt in.
+    '
+    ' @return {boolean}
+    function isEligibleOccluderType() as boolean
+      return false
+    end function
+
+    ' Hook called by Renderer.markOccluder() once this object is accepted as an occluder,
+    ' for a type that needs to precompute something. Does nothing by default.
+    sub prepareOccluder()
+    end sub
+
+    ' Adds the canvas-space polygons this occluder is guaranteed to cover this frame to
+    ' `out` - none when it doesn't qualify (see Drawable.isOccluder). When an approximate
+    ' draw path (a reused bitmap, a coarse fill, the image fast path) may run this frame,
+    ' each polygon is shrunk to what that path still paints. Call after update() for the
+    ' frame. Adds nothing by default.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {BGE.OccluderPolygon[]} out
+    function appendOccluderPolygons(rendererObj as Renderer, out as BGE.OccluderPolygon[]) as void
+    end function
+
+    ' Whether this is an occluder that must draw exactly (OccluderDrawPolicy.exact).
+    '
+    ' @return {boolean}
+    protected function drawsOccluderExactly() as boolean
+      return m.isOccluder and m.occluderDrawPolicy = BGE.OccluderDrawPolicy.exact
+    end function
+
+    ' Whether this occluder's claim is shrunk while an approximate draw path may run
+    ' (OccluderDrawPolicy.fastShrink) - otherwise it claims its exact outline.
+    '
+    ' @return {boolean}
+    protected function shrinksOccluderClaim() as boolean
+      return m.occluderDrawPolicy = BGE.OccluderDrawPolicy.fastShrink
+    end function
+
+    ' How many canvas pixels this occluder's claim is shrunk by this frame, to stay inside
+    ' what an approximate draw path may paint (see appendOccluderPolygons()). 0 by default.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} drawMode as returned by getOccluderDrawMode()
+    ' @return {float}
+    protected function getOccluderInset(rendererObj as Renderer, drawMode as integer) as float
+      return 0.0
+    end function
+
+    ' The draw mode this occluder draws in this frame, or -1 when it can't occlude this
+    ' frame: anything translucent, faded, wireframe, screen-aligned or not drawn because
+    ' its depth point is behind the camera, or no Camera3d.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {integer}
+    protected function getOccluderDrawMode(rendererObj as Renderer) as integer
+      if not m.isOccluder or not m.isEnabled() or m.distanceFadeAlpha < 1 or m.drawable.alpha < 255
+        return -1
+      end if
+      ' Renderer skips drawing anything whose depth point is behind the camera
+      if m.negDistanceFromCamera >= 0
+        return -1
+      end if
+      cam = rendererObj.camera
+      if cam.name <> "Camera3d"
+        return -1
+      end if
+      ' resolved, so a matchCamera occluder follows the camera's mode
+      drawMode = m.getActualDrawMode(cam)
+      if isWireFrameDrawMode(drawMode) or isScreenAlignedDrawMode(drawMode)
+        return -1
+      end if
+      return drawMode
+    end function
+
     ' Whether this object should actually be included in this build of the static
     ' geometry BSP tree (see Renderer.buildStaticGeometryTree()) - combines
     ' isEligibleForStaticBsp() (concrete type support) with a runtime check that the
@@ -800,12 +981,20 @@ namespace BGE
     ' Whether this object was culled (skipped entirely) on the last frame drawn - either
     ' by the camera frustum, or by a deterministic draw failure (see
     ' isDeterministicDrawFailure()) that's being treated the same way. Game code can use
-    ' this (e.g. via GameEntity.isOnScreen()/Drawable.isOnScreen()) to skip its own
+    ' this (e.g. via GameEntity.isOnScreen()) to skip its own
     ' expensive per-frame work for an entity that isn't currently visible - see issue #75.
     '
     ' @return {boolean}
     function isCulled() as boolean
       return m.lastFrameWasCulled
+    end function
+
+    ' Whether this object was drawn, hidden behind something, or off camera as of the last
+    ' frame. unknown until it has been through a draw. See GameEntity.getVisibility().
+    '
+    ' @return {BGE.VisibilityState}
+    function getVisibility() as BGE.VisibilityState
+      return m.visibility
     end function
 
   end class

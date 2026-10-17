@@ -240,6 +240,10 @@ and perspective:
 This is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard capability (see
 `examples/3d`) - `examples/rendererTest` has a runnable demo per mode (`DemoList.bs`).
 
+For a model, a face's front is the side it's wound counter-clockwise from - the usual .obj/.stl
+convention, so its outside. The modes without `DrawBackFace` draw only faces turned toward the
+camera, and `isShaded` lights each face by how squarely it faces the camera.
+
 `matchCamera`, `directToCamera` and `directScaled` are the **screen-aligned** (billboard) modes -
 `isScreenAlignedDrawMode()` - and they keep an object square to the screen instead of turning it
 in 3D. `directScaled` is the Doom-sprite one: it faces the camera and its on-screen size comes
@@ -282,6 +286,89 @@ A ground plane always reaches the farthest any quality level would draw objects 
 past its edge, and the horizon doesn't move when the quality level changes. Past the
 default distance, the ground's texture gets a little softer instead of costing more memory.
 
+## Occluders and visibility
+
+A big opaque thing in a 3D scene (a building, a wall, a hill) hides whatever stands behind it.
+Mark its drawable `isOccluder: true` and the renderer stops drawing everything it fully hides:
+
+```brighterscript
+class Chapel extends BGE.GameEntity
+
+  override sub onCreate(args as roAssociativeArray)
+    m.isStatic = true ' an occluder's owner never moves
+    model = m.game.get3dModel("chapel")
+    m.addDrawable("chapel", new BGE.DrawableModel(m, model, {
+      isOccluder: true,
+      drawMode: BGE.SceneObjectDrawMode.solid
+    }))
+  end sub
+
+end class
+```
+
+Game code can ask what happened to an entity last frame, for example to skip purely visual
+work for a tree nobody can see:
+
+```brighterscript
+override sub onUpdate(dt as float)
+  if not m.isOnScreen()
+    return ' hidden or off camera: skip the sway animation
+  end if
+  m.animateSway(dt)
+end sub
+
+' Or tell the reasons apart:
+if m.getVisibility() = BGE.VisibilityState.occluded
+  ' something solid is in front of it
+end if
+```
+
+`getVisibility()` (on `GameEntity`, `Drawable` and `SceneObject`) returns a `BGE.VisibilityState`:
+`visible` (drawn), `occluded` (hidden behind an occluder), `offCamera` (outside the camera's view)
+or `unknown` (no drawables, or not drawn yet). An entity with several drawables reports the
+most visible one, in the order visible > occluded > offCamera > unknown. `isOnScreen()` is true for
+`visible` and `unknown`. Nothing in the engine skips an entity's `onUpdate()` or collisions for
+you; this is only a signal.
+
+To see what's going on, call `game.debugDrawOcclusion(true)` (it shades the canvas areas the
+occluders cover and draws a red box around each hidden object), and read `renderer.getOccludedCountLastFrame()`. The `terrain` example has a
+static chapel that hides the trees behind it, and OK toggles occlusion in its `WorldScene`.
+
+A few things the renderer enforces, which are easy to trip over:
+
+- The drawable must be **fully opaque** (an image with no transparent pixels, a model with no
+  translucent colors). The engine can't check this, so anything behind a see-through occluder
+  would vanish.
+- The owner must be `isStatic`, and the drawable's draw mode must be an oriented one
+  (`oriented`, `orientedDrawBackFace`, `solid`, `solidDrawBackFace`). Screen-aligned modes
+  (`matchCamera`, `directToCamera`, `directScaled`) are ignored as occluders, and so is any
+  occluder under a `Camera2d`.
+- A standalone `SceneObject` with no owner registers itself with `renderer.markOccluder()`.
+- Occlusion is conservative: an object is only hidden when it is clearly behind the occluders,
+  with a small safety margin, so a borderline object still draws. Screen-aligned fixed-size
+  objects, text and particles are never hidden.
+- An occluder draws like anything else, cached bitmaps and coarse fills included. While it (or
+  the camera) moves, the area it claims to cover shrinks by the largest error those shortcuts
+  can make, so it rarely hides something it doesn't actually paint over (a non-convex model
+  can still briefly over-claim near its silhouette). An object near an
+  occluder's edge can therefore stay drawn while the camera moves, and is hidden again once it
+  stops.
+- `renderer.occluderDrawPolicy` changes that trade-off. The default,
+  `BGE.OccluderDrawPolicy.fastShrink`, is the behaviour above. `exact` makes occluders always
+  draw exactly and claim their whole outline (slower to draw, hides the most).
+  `fastExactClaim` keeps the shortcuts but still claims the whole outline, so an object just
+  behind an occluder's edge can vanish for a few frames while the camera moves.
+- Tuning knobs on the `Renderer`: `occlusionCullingEnabled` (default `true`), `occlusionBandCount`
+  (45 horizontal bands), `maxOccluders` (32, the largest on screen are kept) and `occlusionMargin`
+  (2.0 pixels of safety around each object). With no occluders registered the whole feature
+  costs nothing.
+- Occlusion has its own cost: while the camera moves, the occluders are re-projected and each
+  object is re-judged every frame. It pays off when what it hides is expensive to draw (warped
+  textures, models), and barely breaks even when the hidden objects are cheap sprites.
+  `renderer.getOcclusionMsLastFrame()` and `renderer.getOcclusionTestsLastFrame()` (objects
+  that needed the full test) show what it costs you; compare frame times with
+  `occlusionCullingEnabled` on and off.
+
 ## How `Renderer.render()` actually draws a frame
 
 `Renderer.render()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a
@@ -295,8 +382,8 @@ separate `Renderer` for the game canvas and the UI canvas). It does three things
    whose `negDistanceFromCamera < 0` (i.e. in front of the camera). Planes are drawn first because
    they're meant to be a ground/floor - drawing them before anything else means normal
    painter's-algorithm depth sorting for everything else (which _does_ sort against the camera
-   distance) still looks correct sitting on top of the plane. This is a `TODO` for proper occlusion
-   culling in the engine's own comments, not a settled final design.
+   distance) still looks correct sitting on top of the plane. Objects hidden behind an occluder
+   are skipped before this point (see "Occluders and visibility").
 
 ### Per-object update (`SceneObject.update`/`draw`)
 

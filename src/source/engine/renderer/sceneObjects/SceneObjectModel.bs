@@ -3,6 +3,7 @@ import "../../../math/Matrix44.bs"
 import "../../../math/vector.bs"
 import "../../../utils/colors.bs"
 import "../../drawables/Model3d.bs"
+import "../occlusion/OccluderPanels.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
@@ -13,6 +14,13 @@ namespace BGE
   class SceneObjectModel extends SceneObjectBillboard
 
     drawable as DrawableModel
+
+    ' Convex opaque panels merged from the model's faces, in model-local space. Built
+    ' once when the model is registered as an occluder (see prepareOccluder()).
+    occluderPanels as BGE.OccluderPanel[] = []
+    ' occluderPanels in world space, rebuilt when the model moves.
+    private occluderPanelsWorld as BGE.OccluderPanel[] = []
+    private occluderPanelsWorldValid as boolean = false
 
     private modelWorldBounds as BGE.Math.Vector[] = []
     private modelWorldFaces as BGE.Model3dFace[] = []
@@ -165,7 +173,8 @@ namespace BGE
     ' @param {BGE.Model3dFace} face
     ' @param {float} modelOffsetX the model's own canvas-bounds top-left, negated (see drawToTempBitmap)
     ' @param {float} modelOffsetY
-    ' @param {boolean} allowFastDraw forwarded to drawTriangleTo for an untextured face - see Renderer.drawTriangleTo
+    ' @param {boolean} allowFastDraw whether the model is moving (see mayReuseFaceRaster()), and
+    '   forwarded to drawTriangleTo for an untextured face - see Renderer.drawTriangleTo
     ' @return {boolean} true if something was actually drawn
     private function drawFaceWithReuse(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, face as BGE.Model3dFace, modelOffsetX as float, modelOffsetY as float, allowFastDraw as boolean) as boolean
       bounds = BGE.Math.getBounds(face.vertices)
@@ -190,7 +199,7 @@ namespace BGE
       ' to the LAST redraw's footprint, not this frame's). Require the cache to already be
       ' big enough before cropping it to this size, or a reused frame could ask
       ' getCroppedFaceRegion() for a region larger than its backing bitmap.
-      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
         m.lastDrawWasFullyFresh = false
         return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(cache.bitmap, width, height))
@@ -219,6 +228,22 @@ namespace BGE
       cache.staleFrameCount = 0
       cache.triangleAtCapture = BGE.Math.vectorArrayCopy(face.vertices)
       return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(faceBitmap, width, height))
+    end function
+
+    ' Whether a face may reuse its cached raster this draw. A fastShrink occluder only reuses
+    ' while moving, so a still one ends up exact and can claim its exact outline; an exact
+    ' occluder never reuses.
+    '
+    ' @param {boolean} moving whether the model moved relative to the camera
+    ' @return {boolean}
+    private function mayReuseFaceRaster(moving as boolean) as boolean
+      if not m.isOccluder
+        return true
+      end if
+      if m.occluderDrawPolicy = BGE.OccluderDrawPolicy.exact
+        return false
+      end if
+      return moving or m.occluderDrawPolicy <> BGE.OccluderDrawPolicy.fastShrink
     end function
 
     ' Crops `bitmap` (which may be larger than `width`x`height` due to grow-only reuse -
@@ -288,6 +313,7 @@ namespace BGE
 
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
+      m.occluderPanelsWorldValid = false
       m.modelWorldFaces = []
       m.worldPosition = m.drawable.getWorldPosition()
       m.modelWorldBounds = []
@@ -328,8 +354,11 @@ namespace BGE
 
 
     override function getPositionForCameraDistance(drawMode as SceneObjectDrawMode) as BGE.Math.Vector
-      if drawMode = BGE.SceneObjectDrawMode.oriented
-        return m.worldPoints.getCenter()
+      ' worldPoints is never filled for a model, so use the centre of its world bounds
+      if not isScreenAlignedDrawMode(drawMode) and m.modelWorldBounds.Count() = 2
+        lo = m.modelWorldBounds[0]
+        hi = m.modelWorldBounds[1]
+        return BGE.Math.VectorOps.create((lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2)
       end if
       return m.worldPosition
     end function
@@ -378,7 +407,7 @@ namespace BGE
         thisFaceIndex = worldFaceIndex
         worldFaceIndex++
         canvasPoints = [] as BGE.Math.Vector[]
-        if isBackFaceDrawMode(drawMode) or isNormalFacingCamera(rendererObj, worldFace.vertices[0], worldFace.normal)
+        if isBackFaceDrawMode(drawMode) or isOutwardNormalFacingCamera(rendererObj, worldFace.vertices[0], worldFace.normal)
           negDistances = []
 
           for each vert in worldFace.vertices
@@ -402,7 +431,7 @@ namespace BGE
             canvasFace = BGE.Model3dFaceOps.create(canvasPoints)
             canvasFace.Texture = worldFace.Texture
             canvasFace.color = worldFace.color
-            canvasFace.brightness = isShaded? BGE.Math.Max(getDotProductFromSurfaceToCamera(rendererObj, worldFace.vertices[0], worldFace.normal), m.drawable.ambientBrightness) : 1
+            canvasFace.brightness = isShaded? BGE.Math.Max(getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal), m.drawable.ambientBrightness) : 1
             canvasFace.priority = -BGE.Math.arrayMax(negDistances)
             canvasFace.faceIndex = thisFaceIndex
             m.modelCanvasFaces.Push(canvasFace)
@@ -517,6 +546,101 @@ namespace BGE
     override function drawPrimitive(rendererObj as Renderer, index as integer) as boolean
       return m.drawFaceToCanvas(rendererObj, m.modelCanvasFaces[index], m.lastDrawMode as SceneObjectDrawMode)
     end function
+
+    ' A model hides what's behind it through its merged opaque panels (see Drawable.isOccluder).
+    '
+    ' @return {boolean}
+    override function isEligibleOccluderType() as boolean
+      return true
+    end function
+
+    ' Builds and caches the model's occluder panels.
+    override sub prepareOccluder()
+      m.occluderPanels = BGE.Occlusion.buildModelPanels(m.drawable.model.faces)
+      m.occluderPanelsWorldValid = false
+    end sub
+
+    ' Adds one polygon per panel the draw path draws this frame: facing the camera (or
+    ' any panel in a *DrawBackFace mode), with every vertex projecting. While moving, each
+    ' panel is shrunk by getOccluderInset(), and a panel with a vertex inside it is left out,
+    ' since a tiny face there may be skipped.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {BGE.OccluderPolygon[]} out
+    override function appendOccluderPolygons(rendererObj as Renderer, out as BGE.OccluderPolygon[]) as void
+      drawMode = m.getOccluderDrawMode(rendererObj)
+      if drawMode < 0
+        return
+      end if
+      inset = m.getOccluderInset(rendererObj, drawMode)
+      drawBackFaces = isBackFaceDrawMode(drawMode as BGE.SceneObjectDrawMode)
+      if not m.occluderPanelsWorldValid
+        m.occluderPanelsWorld = m.getOccluderPanelsInWorld()
+        m.occluderPanelsWorldValid = true
+      end if
+      for each panel in m.occluderPanelsWorld
+        if inset > 0 and panel.hasInnerVertices
+          continue for
+        end if
+        if not drawBackFaces and not isOutwardNormalFacingCamera(rendererObj, panel.vertices[0], panel.normal)
+          continue for
+        end if
+        polygon = m.projectOccluderPolygon(rendererObj, panel.vertices, inset)
+        if invalid <> polygon
+          out.push(polygon)
+        end if
+      end for
+    end function
+
+    private function getOccluderPanelsInWorld() as BGE.OccluderPanel[]
+      worldPanels = [] as BGE.OccluderPanel[]
+      for each panel in m.occluderPanels
+        worldVertices = [] as BGE.Math.Vector[]
+        for each vertex in panel.vertices
+          worldVertices.push(BGE.Math.Matrix44.multVecMatrix(vertex, m.transformationMatrix))
+        end for
+        ' world-space normal built like Model3dFaceOps.resetNormal(), as updateCanvasPosition() tests it
+        normal = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.subtract(worldVertices[1], worldVertices[0]), BGE.Math.VectorOps.subtract(worldVertices[2], worldVertices[0]))
+        BGE.Math.VectorOps.normalize(normal)
+        worldPanels.push({vertices: worldVertices, normal: normal, hasInnerVertices: panel.hasInnerVertices})
+      end for
+      return worldPanels
+    end function
+
+    ' How far a moving model's draw may fall short of its exact faces: the larger of the
+    ' whole-model stretch threshold (when that may run) and a reused face raster's error,
+    ' plus any coarse fill - and never less than a skippable tiny face's reach.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} drawMode
+    ' @return {float}
+    protected override function getOccluderInset(rendererObj as Renderer, drawMode as integer) as float
+      ' every approximation is only taken while moving (see drawFaceWithReuse())
+      if not m.shrinksOccluderClaim() or not m.objMovedInRelationToCamera(rendererObj.camera)
+        return 0.0
+      end if
+      inset = 0.0
+      if m.drawable.maxStaleFrames > 0
+        ' a reused raster sits at this frame's bounding box, so each vertex can be off by
+        ' its own drift plus the box corner's
+        inset = m.drawable.maxFaceDriftDistance * (1 + Sqr(2))
+      end if
+      if m.mayReuseTransformedTempBitmap(drawMode)
+        inset = BGE.Math.Max(inset, m.getTempBitmapThreshold(drawMode as SceneObjectDrawMode))
+      end if
+      inset += rendererObj.getQuickDrawFillError()
+      ' a skipped face lies within its own bounding box's diagonal of the panel's edge
+      return BGE.Math.Max(inset, rendererObj.qualitySettings.triangleSkipSize * Sqr(2))
+    end function
+
+    ' Also needs the cached bitmap to be every face freshly drawn - see attemptTransformTempBitmap().
+    '
+    ' @param {integer} drawMode
+    ' @return {boolean}
+    protected override function mayReuseTransformedTempBitmap(drawMode as integer) as boolean
+      return m.lastDrawWasFullyFresh and super.mayReuseTransformedTempBitmap(drawMode)
+    end function
+
   end class
 
 end namespace

@@ -1,0 +1,145 @@
+import "OccluderPanels.bs"
+import "../../drawables/Model3d.bs"
+
+namespace tests
+
+  @suite("BGE.Occlusion.buildModelPanels")
+  class OccluderPanelsTests extends rooibos.BaseTestSuite
+
+    private function tri(a as float[], b as float[], c as float[]) as BGE.Model3dFace
+      return BGE.Model3dFaceOps.create([
+        BGE.Math.VectorOps.create(a[0], a[1], a[2]),
+        BGE.Math.VectorOps.create(b[0], b[1], b[2]),
+        BGE.Math.VectorOps.create(c[0], c[1], c[2])
+      ])
+    end function
+
+    ' True when every turn around the panel bends the same way as its normal.
+    private function isConvex(panel as BGE.OccluderPanel) as boolean
+      count = panel.vertices.Count()
+      for i = 0 to count - 1
+        a = panel.vertices[i]
+        b = panel.vertices[(i + 1) mod count]
+        c = panel.vertices[(i + 2) mod count]
+        turn = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.subtract(b, a), BGE.Math.VectorOps.subtract(c, b))
+        if BGE.Math.VectorOps.dotProduct(turn, panel.normal) < -0.000001
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    ' Two triangles per face of the unit cube, each face wound counter-clockwise from outside.
+    private function cubeFaces() as BGE.Model3dFace[]
+      faces = []
+      quads = [
+        [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]],
+        [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]],
+        [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]],
+        [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]],
+        [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]],
+        [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]
+      ]
+      for each q in quads
+        faces.push(m.tri(q[0], q[1], q[2]))
+        faces.push(m.tri(q[0], q[2], q[3]))
+      end for
+      return faces
+    end function
+
+    @describe("buildModelPanels")
+
+    @it("merges two coplanar triangles sharing an edge into one 4-vertex panel")
+    function _()
+      faces = [
+        m.tri([0, 0, 0], [1, 0, 0], [1, 1, 0]),
+        m.tri([0, 0, 0], [1, 1, 0], [0, 1, 0])
+      ]
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertEqual(panels.Count(), 1)
+      m.assertEqual(panels[0].vertices.Count(), 4)
+      ' Winding is kept: the panel normal matches the source triangles'.
+      m.assertTrue(BGE.Math.VectorOps.dotProduct(panels[0].normal, faces[0].normal) > 0.99)
+      m.assertTrue(m.isConvex(panels[0]))
+    end function
+
+    @it("keeps triangles on different planes separate")
+    function _()
+      faces = [
+        m.tri([0, 0, 0], [1, 0, 0], [1, 1, 0]),
+        m.tri([0, 0, 0], [0, 1, 0], [0, 1, 1])
+      ]
+      m.assertEqual(BGE.Occlusion.buildModelPanels(faces).Count(), 2)
+    end function
+
+    @it("merges a cube's 12 triangles into 6 panels")
+    function _()
+      panels = BGE.Occlusion.buildModelPanels(m.cubeFaces())
+      m.assertEqual(panels.Count(), 6)
+      for each panel in panels
+        m.assertEqual(panel.vertices.Count(), 4)
+        m.assertTrue(m.isConvex(panel))
+      end for
+    end function
+
+    @it("does not merge when the result would be non-convex")
+    function _()
+      ' An L shape split into four triangles.
+      faces = [
+        m.tri([0, 0, 0], [2, 0, 0], [1, 1, 0]),
+        m.tri([2, 0, 0], [2, 1, 0], [1, 1, 0]),
+        m.tri([0, 0, 0], [1, 1, 0], [0, 2, 0]),
+        m.tri([1, 1, 0], [1, 2, 0], [0, 2, 0])
+      ]
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertTrue(panels.Count() > 1)
+      for each panel in panels
+        m.assertTrue(m.isConvex(panel))
+      end for
+    end function
+
+    @it("flags no inner corners for a cube's panels")
+    function _()
+      for each panel in BGE.Occlusion.buildModelPanels(m.cubeFaces())
+        m.assertFalse(panel.hasInnerVertices)
+      end for
+    end function
+
+    @it("flags a panel merged from a fan around a corner inside it")
+    function _()
+      ' four triangles around the square's centre
+      faces = [
+        m.tri([0, 0, 0], [2, 0, 0], [1, 1, 0]),
+        m.tri([2, 0, 0], [2, 2, 0], [1, 1, 0]),
+        m.tri([2, 2, 0], [0, 2, 0], [1, 1, 0]),
+        m.tri([0, 2, 0], [0, 0, 0], [1, 1, 0])
+      ]
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertEqual(panels.Count(), 1)
+      m.assertEqual(panels[0].vertices.Count(), 4)
+      m.assertTrue(panels[0].hasInnerVertices)
+    end function
+
+    @it("does not flag a corner lying on a panel's edge")
+    function _()
+      ' a square split into three triangles, one corner partway along its bottom edge
+      faces = [
+        m.tri([0, 0, 0], [1, 0, 0], [0, 2, 0]),
+        m.tri([1, 0, 0], [2, 0, 0], [2, 2, 0]),
+        m.tri([1, 0, 0], [2, 2, 0], [0, 2, 0])
+      ]
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertEqual(panels.Count(), 1)
+      m.assertEqual(panels[0].vertices.Count(), 4)
+      m.assertFalse(panels[0].hasInnerVertices)
+    end function
+
+    @it("ignores degenerate faces")
+    function _()
+      faces = [m.tri([0, 0, 0], [1, 0, 0], [2, 0, 0])]
+      m.assertEqual(BGE.Occlusion.buildModelPanels(faces).Count(), 0)
+    end function
+
+  end class
+
+end namespace
