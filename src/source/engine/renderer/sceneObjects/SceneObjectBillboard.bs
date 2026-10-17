@@ -7,6 +7,7 @@ import "../../../utils/colors.bs"
 import "../../../utils/utils.bs"
 import "../../drawables/Drawable.bs"
 import "../../interfaces.bs"
+import "../occlusion/ConvexInset.bs"
 import "../occlusion/OcclusionTypes.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
@@ -24,6 +25,16 @@ namespace BGE
   interface TempBitmapDrawResult
     worked as boolean
     didFastDraw as boolean
+  end interface
+
+  ' Where drawRegionAsRotatedQuad() blits a region: its top left corner, size and rotation.
+  interface RotatedQuadBlit
+    x as float
+    y as float
+    width as float
+    height as float
+    ' radians, negated as CornerPoints.getAvgRotation() returns it
+    rotation as float
   end interface
 
   class SceneObjectBillboard extends SceneObject
@@ -111,9 +122,8 @@ namespace BGE
             m.tempBitmapRegion = invalid
             retval = m.drawToCanvas(rendererObj, drawMode)
           else
-            ' try to create a temp bitmap and draw it to the
-            ' an occluder's pixels must cover its occluder polygon, so no coarse fill
-            m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode, objectMoved and not m.isOccluder)
+            ' try to create a temp bitmap and draw it to the canvas
+            m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode, objectMoved)
             if invalid <> m.tempBitmap
               retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmapRegion, blitColor)
             end if
@@ -384,13 +394,11 @@ namespace BGE
     ' @param {integer} color packed RGBA tint/fill color
     ' @return {boolean} true if the draw call succeeded
     protected function drawRegionAsRotatedQuad(rendererObj as BGE.Renderer, regionObj as roRegion, quad as BGE.Math.CornerPoints, color as integer) as boolean
-      ' drawRegion places the region by its *top left* corner, so that's what it has to be
-      ' given - passing the quad's center draws the sprite half its own size down and to the
-      ' right of where it belonged.
+      blit = m.getRotatedQuadBlit(quad)
       drawPos = quad.topLeft
-      totalScaleX = 1.0 * quad.getAvgWidth() / regionObj.getWidth()
-      totalScaleY = 1.0 * quad.getAvgHeight() / regionObj.getHeight()
-      theta = quad.getAvgRotation()
+      totalScaleX = 1.0 * blit.width / regionObj.getWidth()
+      totalScaleY = 1.0 * blit.height / regionObj.getHeight()
+      theta = blit.rotation
       ' Roku mirrors a region drawn at a negative scale around its draw position, so a
       ' mirrored quad still draws from topLeft, just flipped (issue #237).
       if quad.isMirroredOnCanvas()
@@ -418,6 +426,54 @@ namespace BGE
       return retVal
     end function
 
+
+    ' Where drawRegionAsRotatedQuad() blits a region to match `quad`. drawRegion places a
+    ' region by its *top left* corner, so that's what it has to be given - passing the
+    ' quad's center draws the sprite half its own size down and to the right of where it
+    ' belonged.
+    '
+    ' @param {BGE.Math.CornerPoints} quad
+    ' @return {RotatedQuadBlit}
+    protected function getRotatedQuadBlit(quad as BGE.Math.CornerPoints) as RotatedQuadBlit
+      return {x: quad.topLeft.x, y: quad.topLeft.y, width: quad.getAvgWidth(), height: quad.getAvgHeight(), rotation: quad.getAvgRotation()}
+    end function
+
+    ' The canvas rectangle drawRegionAsRotatedQuad() paints for `quad`, in order around it.
+    '
+    ' @param {BGE.Math.CornerPoints} quad
+    ' @return {BGE.Math.Vector[]} its 4 corners
+    protected function getRotatedQuadPaintedCorners(quad as BGE.Math.CornerPoints) as BGE.Math.Vector[]
+      blit = m.getRotatedQuadBlit(quad)
+      ' the blit's top edge runs at its rotation, y down
+      ux = cos(blit.rotation)
+      uy = -sin(blit.rotation)
+      ' the side edge runs toward the quad's bottom, which a mirrored quad has flipped
+      vx = -uy
+      vy = ux
+      anchorX = blit.x
+      anchorY = blit.y
+      if quad.isMirroredOnCanvas()
+        vx = uy
+        vy = -ux
+        if invalid = m.getMirroredBlitTransform(quad)
+          ' drawMirroredRegionRotated() blits from the top right corner back along the top edge
+          anchorX = quad.topRight.x
+          anchorY = quad.topRight.y
+          ux = -ux
+          uy = -uy
+        end if
+      end if
+      acrossX = ux * blit.width
+      acrossY = uy * blit.width
+      downX = vx * blit.height
+      downY = vy * blit.height
+      return [
+        BGE.Math.VectorOps.create(anchorX, anchorY),
+        BGE.Math.VectorOps.create(anchorX + acrossX, anchorY + acrossY),
+        BGE.Math.VectorOps.create(anchorX + acrossX + downX, anchorY + acrossY + downY),
+        BGE.Math.VectorOps.create(anchorX + downX, anchorY + downY)
+      ]
+    end function
 
     ' Blits a mirrored quad that is also rotated in two steps, since real hardware can't do
     ' both in one call (see getMirroredBlitTransform()): mirror the region into a scratch
@@ -965,10 +1021,6 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {TransformTempBitmapDetails} the details of the transformation or invalid if it cannot be done
     protected function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
-      ' an occluder must draw exactly this frame's geometry, which is what it hides things behind
-      if m.isOccluder
-        return invalid
-      end if
       if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.tempBitmapRegion) or rodash.isInvalid(m.limitPointMap) or not m.usesTempBitmap(drawMode)
         return invalid
       end if
@@ -1079,39 +1131,119 @@ namespace BGE
       if m.isCulledAsBackFace(facesAway, drawMode as BGE.SceneObjectDrawMode)
         return
       end if
-      polygon = m.projectOccluderPolygon(rendererObj, m.worldPoints.toClockwiseOutlineArray())
+      ' projected the way updateCanvasPosition() will project it for this frame's draw
+      cam = rendererObj.camera
+      canvasQuad = new BGE.Math.CornerPoints()
+      depth = 0.0
+      index = 0
+      for each corner in m.worldPoints.toArray()
+        canvasPoint = rendererObj.worldPointToCanvasPoint(corner)
+        if invalid = canvasPoint
+          return
+        end if
+        canvasQuad.setPointByIndex(index, canvasPoint)
+        depth = BGE.Math.Max(depth, cam.distanceFromCameraFront(corner))
+        index++
+      end for
+      polygon = m.getOccluderClaim(rendererObj, drawMode as BGE.SceneObjectDrawMode, canvasQuad, depth)
       if invalid <> polygon
         out.push(polygon)
       end if
+    end function
+
+    ' The part of this frame's canvas quad the draw is guaranteed to paint: the quad, shrunk
+    ' by the worst error of any approximate draw path that may run this frame.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @param {BGE.Math.CornerPoints} canvasQuad this frame's projected corners
+    ' @param {float} depth the farthest corner's distance from the camera
+    ' @return {BGE.OccluderPolygon} invalid if nothing is guaranteed
+    protected function getOccluderClaim(rendererObj as Renderer, drawMode as SceneObjectDrawMode, canvasQuad as BGE.Math.CornerPoints, depth as float) as BGE.OccluderPolygon
+      return m.newOccluderPolygon(canvasQuad.toClockwiseOutlineArray(), depth, m.getOccluderInset(rendererObj, drawMode))
+    end function
+
+    ' How far this frame's draw may fall short of the exact quad: the temp-bitmap reuse
+    ' threshold when that reuse may run, plus any coarse fill.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} drawMode
+    ' @return {float}
+    protected override function getOccluderInset(rendererObj as Renderer, drawMode as integer) as float
+      ' reuse and coarse fills only happen while the object moves relative to the camera
+      if not m.objMovedInRelationToCamera(rendererObj.camera)
+        return 0.0
+      end if
+      inset = m.getCoarseFillInset(rendererObj, drawMode)
+      if m.mayReuseTransformedTempBitmap(drawMode)
+        ' the reused bitmap may itself hold a coarse fill
+        inset += m.getTempBitmapThreshold(drawMode as SceneObjectDrawMode)
+      end if
+      return inset
+    end function
+
+    ' How far a coarse fill drawn while moving may fall short of the exact shape. 0 for
+    ' a type that never draws one.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} drawMode
+    ' @return {float}
+    protected function getCoarseFillInset(rendererObj as Renderer, drawMode as integer) as float
+      return 0.0
+    end function
+
+    ' Whether attemptTransformTempBitmap() could reuse the cached temp bitmap this frame,
+    ' judged from what's cached before the draw.
+    '
+    ' @param {integer} drawMode
+    ' @return {boolean}
+    protected function mayReuseTransformedTempBitmap(drawMode as integer) as boolean
+      return m.useTempBitmapMap[drawMode] and invalid <> m.tempBitmap and invalid <> m.tempBitmapRegion and invalid <> m.limitPointMap
     end function
 
     ' Projects a convex world-space outline to an occluder polygon.
     '
     ' @param {Renderer} rendererObj
     ' @param {BGE.Math.Vector[]} worldOutline the polygon's vertices, in order around it
-    ' @return {BGE.OccluderPolygon} invalid if any vertex doesn't project
-    protected function projectOccluderPolygon(rendererObj as Renderer, worldOutline as BGE.Math.Vector[]) as BGE.OccluderPolygon
+    ' @param {float} [inset=0] how far to shrink it, in canvas pixels
+    ' @return {BGE.OccluderPolygon} invalid if any vertex doesn't project, or the inset collapses it
+    protected function projectOccluderPolygon(rendererObj as Renderer, worldOutline as BGE.Math.Vector[], inset = 0 as float) as BGE.OccluderPolygon
       cam = rendererObj.camera
-      xs = [] as float[]
-      ys = [] as float[]
+      canvasOutline = [] as BGE.Math.Vector[]
       depth = 0.0
       for each worldPoint in worldOutline
         canvasPoint = cam.worldPointToCanvasPoint(worldPoint)
         if invalid = canvasPoint
           return invalid
         end if
-        xs.push(canvasPoint.x * 1.0)
-        ys.push(canvasPoint.y * 1.0)
+        canvasOutline.push(canvasPoint)
         depth = BGE.Math.Max(depth, cam.distanceFromCameraFront(worldPoint))
       end for
-      ' shoelace
-      twiceArea = 0.0
-      count = xs.count()
-      for i = 0 to count - 1
-        j = (i + 1) mod count
-        twiceArea += xs[i] * ys[j] - xs[j] * ys[i]
+      return m.newOccluderPolygon(canvasOutline, depth, inset)
+    end function
+
+    ' An occluder polygon from a convex canvas outline, shrunk by `inset`.
+    '
+    ' @param {BGE.Math.Vector[]} canvasOutline vertices in order around it
+    ' @param {float} depth the farthest vertex's distance from the camera
+    ' @param {float} inset how far to shrink it, in canvas pixels
+    ' @return {BGE.OccluderPolygon} invalid if the inset collapses it
+    protected function newOccluderPolygon(canvasOutline as BGE.Math.Vector[], depth as float, inset as float) as BGE.OccluderPolygon
+      xs = [] as float[]
+      ys = [] as float[]
+      for each point in canvasOutline
+        xs.push(point.x * 1.0)
+        ys.push(point.y * 1.0)
       end for
-      return {xs: xs, ys: ys, depth: depth, area: Abs(twiceArea) / 2}
+      if inset > 0
+        shrunk = BGE.Occlusion.insetConvexPolygon(xs, ys, inset)
+        if invalid = shrunk
+          return invalid
+        end if
+        xs = shrunk.xs
+        ys = shrunk.ys
+      end if
+      return {xs: xs, ys: ys, depth: depth, area: BGE.Occlusion.getPolygonArea(xs, ys)}
     end function
 
     ' A backface cull and an in-frustum-but-entirely-off-canvas rejection are both

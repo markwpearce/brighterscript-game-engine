@@ -170,7 +170,8 @@ namespace BGE
     ' @param {BGE.Model3dFace} face
     ' @param {float} modelOffsetX the model's own canvas-bounds top-left, negated (see drawToTempBitmap)
     ' @param {float} modelOffsetY
-    ' @param {boolean} allowFastDraw forwarded to drawTriangleTo for an untextured face - see Renderer.drawTriangleTo
+    ' @param {boolean} allowFastDraw whether the model is moving: allows the reuse, and is
+    '   forwarded to drawTriangleTo for an untextured face - see Renderer.drawTriangleTo
     ' @return {boolean} true if something was actually drawn
     private function drawFaceWithReuse(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, face as BGE.Model3dFace, modelOffsetX as float, modelOffsetY as float, allowFastDraw as boolean) as boolean
       bounds = BGE.Math.getBounds(face.vertices)
@@ -195,7 +196,7 @@ namespace BGE
       ' to the LAST redraw's footprint, not this frame's). Require the cache to already be
       ' big enough before cropping it to this size, or a reused frame could ask
       ' getCroppedFaceRegion() for a region larger than its backing bitmap.
-      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.qualityChangedThisDraw and not m.isOccluder and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and allowFastDraw and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
         m.lastDrawWasFullyFresh = false
         return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(cache.bitmap, width, height))
@@ -539,7 +540,9 @@ namespace BGE
     end sub
 
     ' Adds one polygon per panel the draw path draws this frame: facing the camera (or
-    ' any panel in a *DrawBackFace mode), with every vertex projecting.
+    ' any panel in a *DrawBackFace mode), with every vertex projecting. While moving, each
+    ' panel is shrunk by getOccluderInset(), and a panel with a vertex inside it is left out,
+    ' since a tiny face there may be skipped.
     '
     ' @param {Renderer} rendererObj
     ' @param {BGE.OccluderPolygon[]} out
@@ -548,8 +551,12 @@ namespace BGE
       if drawMode < 0
         return
       end if
+      inset = m.getOccluderInset(rendererObj, drawMode)
       drawBackFaces = isBackFaceDrawMode(drawMode as BGE.SceneObjectDrawMode)
       for each panel in m.occluderPanels
+        if inset > 0 and panel.hasInnerVertices
+          continue for
+        end if
         worldVertices = [] as BGE.Math.Vector[]
         for each vertex in panel.vertices
           worldVertices.push(BGE.Math.Matrix44.multVecMatrix(vertex, m.transformationMatrix))
@@ -562,11 +569,45 @@ namespace BGE
             continue for
           end if
         end if
-        polygon = m.projectOccluderPolygon(rendererObj, worldVertices)
+        polygon = m.projectOccluderPolygon(rendererObj, worldVertices, inset)
         if invalid <> polygon
           out.push(polygon)
         end if
       end for
+    end function
+
+    ' How far a moving model's draw may fall short of its exact faces: the larger of the
+    ' whole-model stretch threshold (when that may run) and a reused face raster's error,
+    ' plus any coarse fill - and never less than a skippable tiny face's reach.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} drawMode
+    ' @return {float}
+    protected override function getOccluderInset(rendererObj as Renderer, drawMode as integer) as float
+      ' every approximation is only taken while moving (see drawFaceWithReuse())
+      if not m.objMovedInRelationToCamera(rendererObj.camera)
+        return 0.0
+      end if
+      inset = 0.0
+      if m.drawable.maxStaleFrames > 0
+        ' a reused raster sits at this frame's bounding box, so each vertex can be off by
+        ' its own drift plus the box corner's
+        inset = m.drawable.maxFaceDriftDistance * (1 + Sqr(2))
+      end if
+      if m.mayReuseTransformedTempBitmap(drawMode)
+        inset = BGE.Math.Max(inset, m.getTempBitmapThreshold(drawMode as SceneObjectDrawMode))
+      end if
+      inset += rendererObj.getQuickDrawFillError()
+      ' a skipped face lies within its own bounding box's diagonal of the panel's edge
+      return BGE.Math.Max(inset, rendererObj.qualitySettings.triangleSkipSize * Sqr(2))
+    end function
+
+    ' Also needs the cached bitmap to be every face freshly drawn - see attemptTransformTempBitmap().
+    '
+    ' @param {integer} drawMode
+    ' @return {boolean}
+    protected override function mayReuseTransformedTempBitmap(drawMode as integer) as boolean
+      return m.lastDrawWasFullyFresh and super.mayReuseTransformedTempBitmap(drawMode)
     end function
 
   end class

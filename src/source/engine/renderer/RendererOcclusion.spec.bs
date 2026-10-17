@@ -136,6 +136,40 @@ namespace tests
       return polygons
     end function
 
+    ' The canvas bounds of everything an occluder claims this frame.
+    private function claimedBounds(renderer as BGE.Renderer, sceneObj as BGE.SceneObject) as BGE.OcclusionTestBounds
+      polygons = [] as BGE.OccluderPolygon[]
+      sceneObj.appendOccluderPolygons(renderer, polygons)
+      bounds = {minX: 1e9, minY: 1e9, maxX: -1e9, maxY: -1e9}
+      for each polygon in polygons
+        for i = 0 to polygon.xs.count() - 1
+          bounds.minX = BGE.Math.Min(bounds.minX, polygon.xs[i])
+          bounds.maxX = BGE.Math.Max(bounds.maxX, polygon.xs[i])
+          bounds.minY = BGE.Math.Min(bounds.minY, polygon.ys[i])
+          bounds.maxY = BGE.Math.Max(bounds.maxY, polygon.ys[i])
+        end for
+      end for
+      return bounds
+    end function
+
+    ' The canvas bounds of world points projected through the renderer's camera.
+    private function projectedBounds(renderer as BGE.Renderer, worldPoints as BGE.Math.Vector[]) as BGE.OcclusionTestBounds
+      bounds = {minX: 1e9, minY: 1e9, maxX: -1e9, maxY: -1e9}
+      for each worldPoint in worldPoints
+        p = renderer.camera.worldPointToCanvasPoint(worldPoint)
+        bounds.minX = BGE.Math.Min(bounds.minX, p.x)
+        bounds.maxX = BGE.Math.Max(bounds.maxX, p.x)
+        bounds.minY = BGE.Math.Min(bounds.minY, p.y)
+        bounds.maxY = BGE.Math.Max(bounds.maxY, p.y)
+      end for
+      return bounds
+    end function
+
+    ' The canvas bounds of a billboard's exactly projected quad.
+    private function exactBounds(renderer as BGE.Renderer, sceneObj as BGE.SceneObject) as BGE.OcclusionTestBounds
+      return m.projectedBounds(renderer, sceneObj.getWorldPoints().toClockwiseOutlineArray())
+    end function
+
     ' Wraps attemptTransformTempBitmap() to count how often it offered a reusable transform.
     private sub spyOnTempBitmapReuse(sceneObj as BGE.SceneObject)
       spy = sceneObj as dynamic
@@ -197,24 +231,6 @@ namespace tests
         staleCounts.push(sceneObj.getFaceStaleFrameCount(0))
       end for
       return staleCounts
-    end function
-
-    ' Whether a head-on, unrotated oriented Image took the rotated-rectangle fast path.
-    private function imageUsedFastPath(asOccluder as boolean) as boolean
-      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500)))
-      entity = new BGE.GameEntity(m.game, {name: "poster"})
-      entity.position = BGE.Math.VectorOps.create(-50, 50, 0)
-      entity.updateTransformationMatrix()
-      bitmap = CreateObject("roBitmap", {width: 100, height: 100, alphaEnable: true})
-      bitmap.Clear(&hFF0000FF)
-      image = new BGE.Image(entity, CreateObject("roRegion", bitmap, 0, 0, 100, 100), {drawMode: BGE.SceneObjectDrawMode.oriented})
-      sceneObj = image.addToRenderer(renderer) as BGE.SceneObjectImage
-      if asOccluder
-        renderer.markOccluder(sceneObj)
-      end if
-      renderer.setupCameraForFrame()
-      renderer.render()
-      return sceneObj.usedTransformedFastDraw()
     end function
 
     @describe("registering occluders")
@@ -395,6 +411,7 @@ namespace tests
       camera = m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500))
       renderer = m.newRenderer3d(camera)
       sceneObj = m.newCube(renderer)
+      m.renderFrames(renderer)
       polygons = m.renderAndCollect(renderer, sceneObj)
       m.assertEqual(1, polygons.count())
       ' the same faces the draw path drew, two triangles per panel
@@ -402,6 +419,8 @@ namespace tests
 
       camera.position = BGE.Math.VectorOps.create(-400, 400, -400)
       camera.setTarget(BGE.Math.VectorOps.create())
+      m.renderAndCollect(renderer, sceneObj)
+      ' once the camera has stopped, so the panels aren't shrunk
       polygons = m.renderAndCollect(renderer, sceneObj)
       m.assertEqual(3, polygons.count())
       m.assertEqual(6, sceneObj.getPrimitiveCount())
@@ -410,28 +429,144 @@ namespace tests
       end for
     end function
 
-    @it("never reuses a transformed temp bitmap for a registered occluder")
+    @it("reuses a transformed temp bitmap for a moving occluder")
     function _()
-      control = m.drawMovingRectangle(false)
-      m.assertTrue(control.reuseCount > 0, "the scenario should reuse for a plain rectangle")
-
       occluder = m.drawMovingRectangle(true)
-      m.assertTrue(occluder.attemptCount > 0, "the reuse path should have been reached")
-      m.assertEqual(0, occluder.reuseCount)
+      m.assertTrue(occluder.reuseCount > 0, `reused ${occluder.reuseCount} of ${occluder.attemptCount} attempts`)
     end function
 
-    @it("never reuses a model face's stale raster for a registered occluder")
+    @it("reuses a model face's stale raster for a moving occluder")
     function _()
-      m.assertEqual(1, m.modelFaceStaleCounts(false)[1], "the scenario should reuse for a plain model")
-      for each staleCount in m.modelFaceStaleCounts(true)
-        m.assertEqual(0, staleCount)
+      m.assertEqual(1, m.modelFaceStaleCounts(true)[1])
+    end function
+
+    @it("claims its exact outline while nothing moves")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      wall = m.newOccluderWall(renderer, 0, 300, 300)
+      m.renderFrames(renderer, 3)
+      claimed = m.claimedBounds(renderer, wall)
+      exact = m.exactBounds(renderer, wall)
+      m.assertTrue(Abs(claimed.minX - exact.minX) < 0.001 and Abs(claimed.maxX - exact.maxX) < 0.001 and Abs(claimed.minY - exact.minY) < 0.001 and Abs(claimed.maxY - exact.maxY) < 0.001, `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
+    end function
+
+    @it("shrinks its claim by at least the temp bitmap reuse threshold while the camera moves")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      wall = m.newOccluderWall(renderer, 0, 300, 300)
+      m.renderFrames(renderer, 3)
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -500)
+      m.renderFrames(renderer, 1)
+      threshold = (wall as dynamic).getTempBitmapThreshold(BGE.SceneObjectDrawMode.orientedDrawBackFace)
+      polygons = [] as BGE.OccluderPolygon[]
+      wall.appendOccluderPolygons(renderer, polygons)
+      m.assertEqual(1, polygons.count(), "the wall should still claim something")
+      claimed = m.claimedBounds(renderer, wall)
+      exact = m.exactBounds(renderer, wall)
+      m.assertTrue(claimed.minX >= exact.minX + threshold and claimed.maxX <= exact.maxX - threshold and claimed.minY >= exact.minY + threshold and claimed.maxY <= exact.maxY - threshold, `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}, threshold ${threshold}`)
+    end function
+
+    @it("shrinks a model's panels by at least the face drift distance while the camera moves")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -400)))
+      cube = m.newCube(renderer, 300)
+      m.renderFrames(renderer, 3)
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -400)
+      m.renderFrames(renderer, 1)
+      polygons = [] as BGE.OccluderPolygon[]
+      cube.appendOccluderPolygons(renderer, polygons)
+      m.assertEqual(1, polygons.count(), "the front panel should still claim something")
+      claimed = m.claimedBounds(renderer, cube)
+      exact = m.projectedBounds(renderer, [
+        BGE.Math.VectorOps.create(-150, -150, -150),
+        BGE.Math.VectorOps.create(150, -150, -150),
+        BGE.Math.VectorOps.create(150, 150, -150),
+        BGE.Math.VectorOps.create(-150, 150, -150)
+      ])
+      drift = cube.drawable.maxFaceDriftDistance
+      m.assertTrue(claimed.minX >= exact.minX + drift and claimed.maxX <= exact.maxX - drift and claimed.minY >= exact.minY + drift and claimed.maxY <= exact.maxY - drift, `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
+    end function
+
+    @it("leaves out a model panel with a corner inside it while the camera moves")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -400)))
+      entity = new BGE.GameEntity(m.game, {name: "fan", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-150, -150, 0)
+      entity.updateTransformationMatrix()
+      ' four triangles around the square's centre, which a skipped tiny face could sit at
+      corners = [[0, 0], [300, 0], [300, 300], [0, 300]]
+      faces = []
+      for i = 0 to 3
+        a = corners[i]
+        b = corners[(i + 1) mod 4]
+        faces.push(BGE.Model3dFaceOps.create([
+          BGE.Math.VectorOps.create(a[0], a[1], 0),
+          BGE.Math.VectorOps.create(b[0], b[1], 0),
+          BGE.Math.VectorOps.create(150, 150, 0)
+        ]))
+      end for
+      drawable = new BGE.DrawableModel(entity, new BGE.Model3d(faces), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solidDrawBackFace})
+      sceneObj = drawable.addToRenderer(renderer)
+      m.renderFrames(renderer, 3)
+      polygons = [] as BGE.OccluderPolygon[]
+      sceneObj.appendOccluderPolygons(renderer, polygons)
+      m.assertEqual(1, polygons.count(), "a still model claims the panel")
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -400)
+      m.renderFrames(renderer, 1)
+      polygons = [] as BGE.OccluderPolygon[]
+      sceneObj.appendOccluderPolygons(renderer, polygons)
+      m.assertEqual(0, polygons.count())
+    end function
+
+    @it("claims a rotated or mirrored fast-path image's own quad, inset 1px")
+    function _()
+      for each scaleX in [1, -1]
+        renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500)))
+        entity = new BGE.GameEntity(m.game, {name: "poster", isStatic: true})
+        entity.position = BGE.Math.VectorOps.create(-50, 50, 0)
+        entity.rotation = BGE.Math.VectorOps.create(0, 0, 0.4)
+        entity.updateTransformationMatrix()
+        bitmap = CreateObject("roBitmap", {width: 160, height: 100, alphaEnable: true})
+        bitmap.Clear(&hFF0000FF)
+        image = new BGE.Image(entity, CreateObject("roRegion", bitmap, 0, 0, 160, 100), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+        image.scale = BGE.Math.VectorOps.create(scaleX, 1, 1)
+        sceneObj = image.addToRenderer(renderer) as BGE.SceneObjectImage
+        m.renderFrames(renderer, 2)
+        m.assertTrue(sceneObj.usedTransformedFastDraw(), `scale ${scaleX}: the occluder should draw through the fast path`)
+        polygons = [] as BGE.OccluderPolygon[]
+        sceneObj.appendOccluderPolygons(renderer, polygons)
+        m.assertEqual(1, polygons.count())
+        exact = [] as BGE.Math.Vector[]
+        for each corner in sceneObj.getWorldPoints().toArray()
+          exact.push(renderer.camera.worldPointToCanvasPoint(corner))
+        end for
+        ' each claimed corner sits about 1px in from an exact corner (sqrt 2 along the diagonal, plus rounding)
+        for i = 0 to 3
+          nearest = 1e9
+          for each point in exact
+            nearest = BGE.Math.Min(nearest, Sqr((polygons[0].xs[i] - point.x) ^ 2 + (polygons[0].ys[i] - point.y) ^ 2))
+          end for
+          m.assertTrue(nearest > 0.5 and nearest < 3, `scale ${scaleX}: corner ${i} is ${nearest}px from the quad's nearest corner`)
+        end for
       end for
     end function
 
-    @it("never uses the image fast path for a registered occluder")
+    @it("claims the rectangle the image fast path paints, inset 1px, and takes the fast path")
     function _()
-      m.assertTrue(m.imageUsedFastPath(false), "the scenario should take the fast path for a plain image")
-      m.assertFalse(m.imageUsedFastPath(true))
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500)))
+      entity = new BGE.GameEntity(m.game, {name: "poster", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-50, 50, 0)
+      entity.updateTransformationMatrix()
+      bitmap = CreateObject("roBitmap", {width: 100, height: 100, alphaEnable: true})
+      bitmap.Clear(&hFF0000FF)
+      image = new BGE.Image(entity, CreateObject("roRegion", bitmap, 0, 0, 100, 100), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.oriented})
+      sceneObj = image.addToRenderer(renderer) as BGE.SceneObjectImage
+      m.assertTrue(sceneObj.isOccluder)
+      m.renderFrames(renderer, 2)
+      m.assertTrue(sceneObj.usedTransformedFastDraw(), "the occluder should draw through the fast path")
+      claimed = m.claimedBounds(renderer, sceneObj)
+      exact = m.exactBounds(renderer, sceneObj)
+      m.assertTrue(Abs(claimed.minX - exact.minX - 1) < 0.01 and Abs(claimed.maxX - exact.maxX + 1) < 0.01 and Abs(claimed.minY - exact.minY - 1) < 0.01 and Abs(claimed.maxY - exact.maxY + 1) < 0.01, `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
     end function
 
     @describe("occlusion culling")
@@ -477,6 +612,29 @@ namespace tests
       tree = m.newTree(renderer, 0, 200)
       m.renderFrames(renderer)
       m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility())
+    end function
+
+    @it("does not hide an object just inside a wall's edge while the camera moves")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      m.newOccluderWall(renderer, 0, 300, 300)
+      renderer.setupCameraForFrame()
+      ' the tree's right edge lands 6px inside the wall's right edge on the canvas
+      cam = renderer.camera
+      origin = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(0, 0, 0))
+      wallScale = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(1, 0, 0)).x - origin.x
+      treeScale = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(1, 0, 200)).x - cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(0, 0, 200)).x
+      treeRight = (150 * wallScale - 6) / treeScale
+      tree = m.newTree(renderer, treeRight - 10, 200)
+      m.renderFrames(renderer, 3)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility(), "the still wall should hide it")
+      for i = 1 to 2
+        cam.position = BGE.Math.VectorOps.create(i * 0.2, 0, -500)
+        m.renderFrames(renderer, 1)
+        m.assertEqual(BGE.VisibilityState.visible, tree.getVisibility(), `frame ${i} of the move`)
+      end for
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.VisibilityState.occluded, tree.getVisibility(), "hidden again once the camera stops")
     end function
 
     @it("never occludes an object with a bounding point behind the camera")

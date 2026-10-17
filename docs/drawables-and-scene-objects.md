@@ -343,8 +343,11 @@ A few things the renderer enforces, which are easy to trip over:
 - Occlusion is conservative: an object is only hidden when it is clearly behind the occluders,
   with a small safety margin, so a borderline object still draws. Screen-aligned fixed-size
   objects, text and particles are never hidden.
-- An occluder always draws exactly, with no cached bitmap or coarse fill, so its silhouette is
-  what the renderer relied on.
+- An occluder draws like anything else, cached bitmaps and coarse fills included. While it (or
+  the camera) moves, the area it claims to cover shrinks by the largest error those shortcuts
+  can make, so it never hides something it doesn't actually paint over. An object near an
+  occluder's edge can therefore stay drawn while the camera moves, and is hidden again once it
+  stops.
 - Tuning knobs on the `Renderer`: `occlusionCullingEnabled` (default `true`), `occlusionBandCount`
   (45 horizontal bands), `maxOccluders` (32, the largest on screen are kept) and `occlusionMargin`
   (2.0 pixels of safety around each object). With no occluders registered the whole feature
