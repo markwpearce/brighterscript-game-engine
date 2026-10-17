@@ -11,7 +11,9 @@ namespace tests
       m.renderer = m.game.canvas.renderer
     end function
 
-    private function cubeModel() as BGE.Model3d
+    ' A cube from 0 to `size` on each axis, wound so its outside faces are the ones the
+    ' renderer treats as front-facing.
+    private function cubeModel(size = 1 as float) as BGE.Model3d
       faces = []
       quads = [
         [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]],
@@ -22,15 +24,120 @@ namespace tests
         [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]
       ]
       for each q in quads
-        for each tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]
+        for each tri in [[q[0], q[2], q[1]], [q[0], q[3], q[2]]]
           faces.push(BGE.Model3dFaceOps.create([
-            BGE.Math.VectorOps.create(tri[0][0], tri[0][1], tri[0][2]),
-            BGE.Math.VectorOps.create(tri[1][0], tri[1][1], tri[1][2]),
-            BGE.Math.VectorOps.create(tri[2][0], tri[2][1], tri[2][2])
+            BGE.Math.VectorOps.create(tri[0][0] * size, tri[0][1] * size, tri[0][2] * size),
+            BGE.Math.VectorOps.create(tri[1][0] * size, tri[1][1] * size, tri[1][2] * size),
+            BGE.Math.VectorOps.create(tri[2][0] * size, tri[2][1] * size, tri[2][2] * size)
           ]))
         end for
       end for
       return new BGE.Model3d(faces)
+    end function
+
+    private function newCamera3d(position as BGE.Math.Vector, target = BGE.Math.VectorOps.create() as BGE.Math.Vector) as BGE.Camera3d
+      camera = new BGE.Camera3d()
+      camera.position = position
+      camera.setTarget(target)
+      camera.drawDistanceFadeFraction = 0
+      camera.drawDistanceTransitionSeconds = 0
+      return camera
+    end function
+
+    private function newRenderer3d(camera as BGE.Camera3d) as BGE.Renderer
+      bitmap = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      return new BGE.Renderer(bitmap, m.game, camera)
+    end function
+
+    ' A 200x200 static wall centred on the origin in the z=0 plane, registered as an occluder.
+    private function newWall(renderer as BGE.Renderer, args = {} as roAssociativeArray) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-100, 100, 0)
+      entity.updateTransformationMatrix()
+      drawArgs = {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace}
+      drawArgs.append(args)
+      drawable = new BGE.DrawableRectangle(entity, 200, 200, drawArgs)
+      return drawable.addToRenderer(renderer)
+    end function
+
+    ' A 100-unit cube centred on the origin, registered as an occluder.
+    private function newCube(renderer as BGE.Renderer) as BGE.SceneObjectModel
+      entity = new BGE.GameEntity(m.game, {name: "cube", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-50, -50, -50)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableModel(entity, m.cubeModel(100), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solid})
+      return drawable.addToRenderer(renderer) as BGE.SceneObjectModel
+    end function
+
+    private function renderAndCollect(renderer as BGE.Renderer, sceneObj as BGE.SceneObject) as BGE.OccluderPolygon[]
+      renderer.setupCameraForFrame()
+      renderer.render()
+      polygons = [] as BGE.OccluderPolygon[]
+      sceneObj.appendOccluderPolygons(renderer, polygons)
+      return polygons
+    end function
+
+    ' Wraps attemptTransformTempBitmap() to count how often it offered a reusable transform.
+    private sub spyOnTempBitmapReuse(sceneObj as BGE.SceneObject)
+      spy = sceneObj as dynamic
+      spy.attemptCount = 0
+      spy.reuseCount = 0
+      spy.realAttemptTransformTempBitmap = spy.attemptTransformTempBitmap
+      spy.attemptTransformTempBitmap = function(renderObj as object, drawMode as integer) as object
+        m.attemptCount++
+        result = m.realAttemptTransformTempBitmap(renderObj, drawMode)
+        if result <> invalid
+          m.reuseCount++
+        end if
+        return result
+      end function
+    end sub
+
+    ' Draws a non-static rectangle twice with a small camera move between, returning the spy.
+    private function drawMovingRectangle(asOccluder as boolean) as dynamic
+      camera = m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500))
+      renderer = m.newRenderer3d(camera)
+      entity = new BGE.GameEntity(m.game, {name: "panel"})
+      entity.position = BGE.Math.VectorOps.create(-100, 100, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 200, 200, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      sceneObj = drawable.addToRenderer(renderer)
+      if asOccluder
+        renderer.markOccluder(sceneObj)
+      end if
+      m.spyOnTempBitmapReuse(sceneObj)
+      for i = 0 to 2
+        camera.position = BGE.Math.VectorOps.create(i * 2, 0, 500)
+        renderer.setupCameraForFrame()
+        renderer.render()
+      end for
+      return sceneObj
+    end function
+
+    ' The stale-frame count of a rotating single-face model's face on each of 3 frames.
+    private function modelFaceStaleCounts(asOccluder as boolean) as integer[]
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 1000)))
+      entity = new BGE.GameEntity(m.game, {name: "spinner"})
+      entity.position = BGE.Math.VectorOps.create(0, 0, 500)
+      face = BGE.Model3dFaceOps.create([
+        BGE.Math.VectorOps.create(-40, -40, 0),
+        BGE.Math.VectorOps.create(40, -40, 0),
+        BGE.Math.VectorOps.create(0, 40, 0)
+      ])
+      drawable = new BGE.DrawableModel(entity, new BGE.Model3d([face]), {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      sceneObj = drawable.addToRenderer(renderer) as BGE.SceneObjectModel
+      if asOccluder
+        renderer.markOccluder(sceneObj)
+      end if
+      staleCounts = [] as integer[]
+      for i = 1 to 3
+        entity.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
+        entity.updateTransformationMatrix()
+        renderer.setupCameraForFrame()
+        renderer.render()
+        staleCounts.push(sceneObj.getFaceStaleFrameCount(0))
+      end for
+      return staleCounts
     end function
 
     @describe("registering occluders")
@@ -118,6 +225,130 @@ namespace tests
       m.assertTrue(m.renderer.hasOccluders())
       entity.removeDrawable("r")
       m.assertFalse(m.renderer.hasOccluders())
+    end function
+
+    @describe("occluder polygons")
+
+    @it("contributes one polygon for a solid wall facing the camera")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
+      sceneObj = m.newWall(renderer)
+      polygons = m.renderAndCollect(renderer, sceneObj)
+      m.assertEqual(1, polygons.count())
+      m.assertEqual(4, polygons[0].xs.count())
+      m.assertEqual(4, polygons[0].ys.count())
+      m.assertTrue(polygons[0].depth > 0, `depth was ${polygons[0].depth}`)
+      m.assertTrue(polygons[0].area > 0, `area was ${polygons[0].area}`)
+    end function
+
+    @it("contributes a plain oriented quad facing the camera")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500)))
+      sceneObj = m.newWall(renderer, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      m.assertEqual(1, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing in a wireframe mode")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
+      sceneObj = m.newWall(renderer, {drawMode: BGE.SceneObjectDrawMode.wireFrameDrawBackFace})
+      m.assertEqual(0, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing when partly faded")
+    function _()
+      camera = m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500))
+      camera.drawDistanceFadeFraction = 0.9
+      renderer = m.newRenderer3d(camera)
+      sceneObj = m.newWall(renderer)
+      polygons = m.renderAndCollect(renderer, sceneObj)
+      m.assertTrue(sceneObj.distanceFadeAlpha > 0 and sceneObj.distanceFadeAlpha < 1, `fade was ${sceneObj.distanceFadeAlpha}`)
+      m.assertEqual(0, polygons.count())
+    end function
+
+    @it("contributes nothing when drawable alpha is below 255")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
+      sceneObj = m.newWall(renderer, {alpha: 254})
+      m.assertEqual(0, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing for an unfilled rectangle")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
+      sceneObj = m.newWall(renderer)
+      (sceneObj.drawable as BGE.DrawableRectangle).filled = false
+      m.assertEqual(0, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing for a plain oriented quad facing away")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
+      sceneObj = m.newWall(renderer, {drawMode: BGE.SceneObjectDrawMode.oriented})
+      m.assertEqual(0, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing when a corner is behind the camera")
+    function _()
+      ' just off the wall, looking along it: its x = -100 corners are behind
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -50), BGE.Math.VectorOps.create(500, 0, -50)))
+      sceneObj = m.newWall(renderer)
+      m.assertEqual(0, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing while disabled")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500)))
+      sceneObj = m.newWall(renderer)
+      sceneObj.drawable.enabled = false
+      m.assertEqual(0, m.renderAndCollect(renderer, sceneObj).count())
+    end function
+
+    @it("contributes nothing under a Camera2d")
+    function _()
+      entity = new BGE.GameEntity(m.game, {name: "wall", isStatic: true})
+      drawable = entity.addRectangle("r", 100, 100, {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      sceneObj = drawable.getSceneObjects()[0]
+      m.assertTrue(sceneObj.isOccluder)
+      m.assertEqual(0, m.renderAndCollect(m.renderer, sceneObj).count())
+    end function
+
+    @it("contributes a cube model's front-facing panels only")
+    function _()
+      camera = m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -500))
+      renderer = m.newRenderer3d(camera)
+      sceneObj = m.newCube(renderer)
+      polygons = m.renderAndCollect(renderer, sceneObj)
+      m.assertEqual(1, polygons.count())
+      ' the same faces the draw path drew, two triangles per panel
+      m.assertEqual(2, sceneObj.getPrimitiveCount())
+
+      camera.position = BGE.Math.VectorOps.create(-400, 400, -400)
+      camera.setTarget(BGE.Math.VectorOps.create())
+      polygons = m.renderAndCollect(renderer, sceneObj)
+      m.assertEqual(3, polygons.count())
+      m.assertEqual(6, sceneObj.getPrimitiveCount())
+      for each polygon in polygons
+        m.assertEqual(4, polygon.xs.count())
+      end for
+    end function
+
+    @it("never reuses a transformed temp bitmap for a registered occluder")
+    function _()
+      control = m.drawMovingRectangle(false)
+      m.assertTrue(control.reuseCount > 0, "the scenario should reuse for a plain rectangle")
+
+      occluder = m.drawMovingRectangle(true)
+      m.assertTrue(occluder.attemptCount > 0, "the reuse path should have been reached")
+      m.assertEqual(0, occluder.reuseCount)
+    end function
+
+    @it("never reuses a model face's stale raster for a registered occluder")
+    function _()
+      m.assertEqual(1, m.modelFaceStaleCounts(false)[1], "the scenario should reuse for a plain model")
+      for each staleCount in m.modelFaceStaleCounts(true)
+        m.assertEqual(0, staleCount)
+      end for
     end function
 
     @describe("settings")

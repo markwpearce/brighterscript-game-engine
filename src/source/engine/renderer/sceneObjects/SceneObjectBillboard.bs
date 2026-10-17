@@ -111,7 +111,8 @@ namespace BGE
             retval = m.drawToCanvas(rendererObj, drawMode)
           else
             ' try to create a temp bitmap and draw it to the
-            m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode, objectMoved)
+            ' an occluder's pixels must cover its occluder polygon, so no coarse fill
+            m.tempBitmap = m.createTempBitmap(canvasBounds, rendererObj, drawMode, objectMoved and not m.isOccluder)
             if invalid <> m.tempBitmap
               retVal = rendererObj.drawObject(canvasBounds[0].x, canvasBounds[0].y, m.tempBitmapRegion, blitColor)
             end if
@@ -933,6 +934,10 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {TransformTempBitmapDetails} the details of the transformation or invalid if it cannot be done
     protected function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      ' an occluder must draw exactly this frame's geometry, which is what it hides things behind
+      if m.isOccluder
+        return invalid
+      end if
       if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.tempBitmapRegion) or rodash.isInvalid(m.limitPointMap) or not m.usesTempBitmap(drawMode)
         return invalid
       end if
@@ -1010,13 +1015,72 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode - some drawModes explicitly should draw the backface
     ' @return {boolean} true if we should not draw
     protected function doNotDrawBecauseBackFace(drawMode as SceneObjectDrawMode) as boolean
-      if m.isMirror
+      return m.isCulledAsBackFace(m.isMirror, drawMode)
+    end function
+
+    ' Whether a quad is skipped as a back face in `drawMode`, given whether it faces away.
+    '
+    ' @param {boolean} facesAway
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    private function isCulledAsBackFace(facesAway as boolean, drawMode as SceneObjectDrawMode) as boolean
+      if facesAway
         if drawMode = SceneObjectDrawMode.orientedDrawBackFace or drawMode = SceneObjectDrawMode.wireFrameDrawBackFace
           return false
         end if
         return true
       end if
       return false
+    end function
+
+    ' Adds this quad's canvas polygon when it qualifies as an occluder this frame and all
+    ' four corners project - see SceneObject.appendOccluderPolygons().
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {BGE.OccluderPolygon[]} out
+    override function appendOccluderPolygons(rendererObj as Renderer, out as BGE.OccluderPolygon[]) as void
+      drawMode = m.getOccluderDrawMode(rendererObj)
+      if drawMode < 0
+        return
+      end if
+      ' the same facing test findCanvasPosition() feeds the draw path's backface cull
+      facesAway = invalid <> m.surfaceNormal and not isNormalFacingCamera(rendererObj, m.worldPoints.getCenter(), m.surfaceNormal)
+      if m.isCulledAsBackFace(facesAway, drawMode as BGE.SceneObjectDrawMode)
+        return
+      end if
+      polygon = m.projectOccluderPolygon(rendererObj, m.worldPoints.toClockwiseOutlineArray())
+      if invalid <> polygon
+        out.push(polygon)
+      end if
+    end function
+
+    ' Projects a convex world-space outline to an occluder polygon.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {BGE.Math.Vector[]} worldOutline the polygon's vertices, in order around it
+    ' @return {BGE.OccluderPolygon} invalid if any vertex doesn't project
+    protected function projectOccluderPolygon(rendererObj as Renderer, worldOutline as BGE.Math.Vector[]) as BGE.OccluderPolygon
+      cam = rendererObj.camera
+      xs = [] as float[]
+      ys = [] as float[]
+      depth = 0.0
+      for each worldPoint in worldOutline
+        canvasPoint = cam.worldPointToCanvasPoint(worldPoint)
+        if invalid = canvasPoint
+          return invalid
+        end if
+        xs.push(canvasPoint.x * 1.0)
+        ys.push(canvasPoint.y * 1.0)
+        depth = BGE.Math.Max(depth, cam.distanceFromCameraFront(worldPoint))
+      end for
+      ' shoelace
+      twiceArea = 0.0
+      count = xs.count()
+      for i = 0 to count - 1
+        j = (i + 1) mod count
+        twiceArea += xs[i] * ys[j] - xs[j] * ys[i]
+      end for
+      return {xs: xs, ys: ys, depth: depth, area: Abs(twiceArea) / 2}
     end function
 
     ' A backface cull and an in-frustum-but-entirely-off-canvas rejection are both
