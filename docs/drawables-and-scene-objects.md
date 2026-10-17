@@ -326,8 +326,8 @@ most visible one, in the order visible > occluded > offCamera > unknown. `isOnSc
 `visible` and `unknown`. Nothing in the engine skips an entity's `onUpdate()` or collisions for
 you; this is only a signal.
 
-To see what's going on, call `game.debugDrawOcclusion(true)` (it outlines each occluder and
-each hidden object), and read `renderer.getOccludedCountLastFrame()`. The `terrain` example has a
+To see what's going on, call `game.debugDrawOcclusion(true)` (it shades the canvas areas the
+occluders cover and draws a red box around each hidden object), and read `renderer.getOccludedCountLastFrame()`. The `terrain` example has a
 static chapel that hides the trees behind it, and OK toggles occlusion in its `WorldScene`.
 
 A few things the renderer enforces, which are easy to trip over:
@@ -342,7 +342,7 @@ A few things the renderer enforces, which are easy to trip over:
 - A standalone `SceneObject` with no owner registers itself with `renderer.markOccluder()`.
 - Occlusion is conservative: an object is only hidden when it is clearly behind the occluders,
   with a small safety margin, so a borderline object still draws. Screen-aligned fixed-size
-  objects and particles are never hidden.
+  objects, text and particles are never hidden.
 - An occluder always draws exactly, with no cached bitmap or coarse fill, so its silhouette is
   what the renderer relied on.
 - Tuning knobs on the `Renderer`: `occlusionCullingEnabled` (default `true`), `occlusionBandCount`
