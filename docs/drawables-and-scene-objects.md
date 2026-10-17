@@ -361,6 +361,12 @@ A few things the renderer enforces, which are easy to trip over:
   (45 horizontal bands), `maxOccluders` (32, the largest on screen are kept) and `occlusionMargin`
   (2.0 pixels of safety around each object). With no occluders registered the whole feature
   costs nothing.
+- Occlusion has its own cost: while the camera moves, the occluders are re-projected and each
+  object is re-judged every frame. It pays off when what it hides is expensive to draw (warped
+  textures, models), and barely breaks even when the hidden objects are cheap sprites.
+  `renderer.getOcclusionMsLastFrame()` and `renderer.getOcclusionTestsLastFrame()` (objects
+  that needed the full test) show what it costs you; compare frame times with
+  `occlusionCullingEnabled` on and off.
 
 ## How `Renderer.render()` actually draws a frame
 

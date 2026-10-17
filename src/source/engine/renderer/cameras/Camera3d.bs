@@ -146,6 +146,13 @@ namespace BGE
     ' own dirty check or the frustum/view-matrix/plane caches would all go stale. See
     ' issue #53's roll design.
     private lastRollDegrees as float = 0
+    ' getLevelUpVector()'s last result, and the orientation it was for
+    private levelUpCache as BGE.Math.Vector = invalid
+    private levelUpCacheOrientation as BGE.Math.Vector = invalid
+    ' projectPointsWithDepth()'s focal length, and the frame width and FOV it was for
+    private projectionNear as float = 0
+    private projectionNearFrameWidth as float = -1
+    private projectionNearFieldOfView as float = -1
 
     protected frustumNormals as CameraFrustumNormals = new CameraFrustumNormals()
 
@@ -282,6 +289,55 @@ namespace BGE
 
       '? "pCamera: "; pCamera.toStr();" -> screen: [";pScreen.x;pScreen.y;"] -> NDC [";pNDC.x;pNDC.y;"] -> Raster [";pRaster.x;pRaster.y;"]"
       return pRaster
+    end function
+
+
+    ' Projects many points at once, giving the same canvas point as worldPointToCanvasPoint()
+    ' and the same depth as distanceFromCameraFront() for each, but faster.
+    '
+    ' @param {BGE.Math.Vector[]} points world points
+    ' @param {float[]} out cleared, then filled with x, y, depth for each point in turn
+    ' @return {boolean} false, leaving `out` incomplete, as soon as a point won't project
+    function projectPointsWithDepth(points as BGE.Math.Vector[], out as float[]) as boolean
+      out.Clear()
+      if invalid = m.worldToCamera
+        m.computeWorldToCameraMatrix()
+      end if
+      ' the same arithmetic, in the same order, as multVecMatrix(), worldPointToCanvasPoint()
+      ' and distanceFromPlane(), so the results match exactly
+      mat = m.worldToCamera
+      m0 = mat[0]
+      m1 = mat[1]
+      m2 = mat[2]
+      m3 = mat[3]
+      if m.frameSize.x <> m.projectionNearFrameWidth or m.fieldOfViewDegrees <> m.projectionNearFieldOfView
+        m.projectionNear = (m.frameSize.x / 2) / tan(BGE.Math.DegreesToRadians(m.fieldOfViewDegrees) / 2)
+        m.projectionNearFrameWidth = m.frameSize.x
+        m.projectionNearFieldOfView = m.fieldOfViewDegrees
+      end if
+      near = m.projectionNear
+      canvasWidth = m.frameSize.x
+      canvasHeight = m.frameSize.y
+      nearNormal = m.frustumNormals.near
+      convergence = m.frustrumConvergence
+      for each point in points
+        srcX = point.x
+        srcY = point.y
+        srcZ = point.z <> invalid ? point.z : 0
+        w = srcX * m0[3] + srcY * m1[3] + srcZ * m2[3] + m3[3]
+        cz = (srcX * m0[2] + srcY * m1[2] + srcZ * m2[2] + m3[2]) / w
+        if cz >= 0
+          return false
+        end if
+        cx = (srcX * m0[0] + srcY * m1[0] + srcZ * m2[0] + m3[0]) / w
+        cy = (srcX * m0[1] + srcY * m1[1] + srcZ * m2[1] + m3[1]) / w
+        ndcX = (near * cx / -cz + canvasWidth * 0.5) / canvasWidth
+        ndcY = (near * cy / -cz + canvasHeight * 0.5) / canvasHeight
+        out.push(fix(ndcX * canvasWidth))
+        out.push(cint((1 - ndcY) * canvasHeight))
+        out.push((srcX - convergence.x) * nearNormal.x + (srcY - convergence.y) * nearNormal.y + (srcZ - convergence.z) * nearNormal.z)
+      end for
+      return true
     end function
 
 
@@ -524,6 +580,18 @@ namespace BGE
     '
     ' @return {BGE.Math.Vector}
     function getLevelUpVector() as BGE.Math.Vector
+      ' cached by orientation, which callers may replace or change in place
+      o = m.orientation
+      cached = m.levelUpCache
+      if invalid <> cached and o.x = m.levelUpCacheOrientation.x and o.y = m.levelUpCacheOrientation.y and o.z = m.levelUpCacheOrientation.z
+        return BGE.Math.VectorOps.copy(cached)
+      end if
+      m.levelUpCacheOrientation = BGE.Math.VectorOps.copy(o)
+      m.levelUpCache = m.computeLevelUpVector()
+      return BGE.Math.VectorOps.copy(m.levelUpCache)
+    end function
+
+    private function computeLevelUpVector() as BGE.Math.Vector
       forward = BGE.Math.VectorOps.copy(m.orientation)
       BGE.Math.VectorOps.normalize(forward)
 

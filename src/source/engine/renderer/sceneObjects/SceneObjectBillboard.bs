@@ -9,6 +9,7 @@ import "../../drawables/Drawable.bs"
 import "../../interfaces.bs"
 import "../occlusion/ConvexInset.bs"
 import "../occlusion/OcclusionTypes.bs"
+import "../cameras/Camera3d.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
@@ -715,6 +716,11 @@ namespace BGE
     ' camera-facing quad it draws, and the fixed-pixel-size modes are never tested.
     protected override function getPositionsForOcclusionTest(cameraObj as Camera, drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
       if not isScreenAlignedDrawMode(drawMode)
+        objType = m.type
+        if objType = SceneObjectType.Bitmap or objType = SceneObjectType.Rectangle or objType = SceneObjectType.Circle
+          ' the quad update() placed this frame, which is what it draws - getBoundingPoints() recomputes it
+          return m.worldPoints.toArray()
+        end if
         return m.getBoundingPoints(cameraObj)
       end if
       size = m.getDirectModeCanvasSize()
@@ -934,9 +940,6 @@ namespace BGE
     ' @param {Camera} cameraObj
     ' @return {BGE.Math.Vector[]} top left, top right, bottom left, bottom right
     protected function getCameraFacingQuadWorldCorners(cameraObj as Camera) as BGE.Math.Vector[]
-      right = cameraObj.getRightVector()
-      up = cameraObj.getUpVector()
-
       ' getRightVector()/getUpVector() are roll-aware (rotated by the camera's own
       ' rollDegrees) - building the quad from them and then projecting through that
       ' same rolled camera necessarily cancels the roll back out, which is exactly what
@@ -950,6 +953,9 @@ namespace BGE
         camera3d = cameraObj as Camera3d
         right = camera3d.getLevelRightVector()
         up = camera3d.getLevelUpVector()
+      else
+        right = cameraObj.getRightVector()
+        up = cameraObj.getUpVector()
       end if
 
       worldSize = m.getDirectModeCanvasSize()
@@ -1211,18 +1217,19 @@ namespace BGE
     ' @param {float} [inset=0] how far to shrink it, in canvas pixels
     ' @return {BGE.OccluderPolygon} invalid if any vertex doesn't project, or the inset collapses it
     protected function projectOccluderPolygon(rendererObj as Renderer, worldOutline as BGE.Math.Vector[], inset = 0 as float) as BGE.OccluderPolygon
-      cam = rendererObj.camera
-      canvasOutline = [] as BGE.Math.Vector[]
+      projected = [] as float[]
+      if not (rendererObj.camera as Camera3d).projectPointsWithDepth(worldOutline, projected)
+        return invalid
+      end if
+      xs = [] as float[]
+      ys = [] as float[]
       depth = 0.0
-      for each worldPoint in worldOutline
-        canvasPoint = cam.worldPointToCanvasPoint(worldPoint)
-        if invalid = canvasPoint
-          return invalid
-        end if
-        canvasOutline.push(canvasPoint)
-        depth = BGE.Math.Max(depth, cam.distanceFromCameraFront(worldPoint))
+      for i = 0 to projected.count() - 1 step 3
+        xs.push(projected[i] * 1.0)
+        ys.push(projected[i + 1] * 1.0)
+        depth = BGE.Math.Max(depth, projected[i + 2])
       end for
-      return m.newOccluderPolygon(canvasOutline, depth, inset)
+      return m.newOccluderPolygonFromXY(xs, ys, depth, inset)
     end function
 
     ' An occluder polygon from a convex canvas outline, shrunk by `inset`.
@@ -1238,6 +1245,11 @@ namespace BGE
         xs.push(point.x * 1.0)
         ys.push(point.y * 1.0)
       end for
+      return m.newOccluderPolygonFromXY(xs, ys, depth, inset)
+    end function
+
+    ' newOccluderPolygon() from separate x and y lists, which it may keep.
+    protected function newOccluderPolygonFromXY(xs as float[], ys as float[], depth as float, inset as float) as BGE.OccluderPolygon
       if inset > 0
         shrunk = BGE.Occlusion.insetConvexPolygon(xs, ys, inset)
         if invalid = shrunk

@@ -18,6 +18,9 @@ namespace BGE
     ' Convex opaque panels merged from the model's faces, in model-local space. Built
     ' once when the model is registered as an occluder (see prepareOccluder()).
     occluderPanels as BGE.OccluderPanel[] = []
+    ' occluderPanels in world space, rebuilt when the model moves.
+    private occluderPanelsWorld as BGE.OccluderPanel[] = []
+    private occluderPanelsWorldValid as boolean = false
 
     private modelWorldBounds as BGE.Math.Vector[] = []
     private modelWorldFaces as BGE.Model3dFace[] = []
@@ -310,6 +313,7 @@ namespace BGE
 
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
+      m.occluderPanelsWorldValid = false
       m.modelWorldFaces = []
       m.worldPosition = m.drawable.getWorldPosition()
       m.modelWorldBounds = []
@@ -553,6 +557,7 @@ namespace BGE
     ' Builds and caches the model's occluder panels.
     override sub prepareOccluder()
       m.occluderPanels = BGE.Occlusion.buildModelPanels(m.drawable.model.faces)
+      m.occluderPanelsWorldValid = false
     end sub
 
     ' Adds one polygon per panel the draw path draws this frame: facing the camera (or
@@ -569,27 +574,37 @@ namespace BGE
       end if
       inset = m.getOccluderInset(rendererObj, drawMode)
       drawBackFaces = isBackFaceDrawMode(drawMode as BGE.SceneObjectDrawMode)
-      for each panel in m.occluderPanels
+      if not m.occluderPanelsWorldValid
+        m.occluderPanelsWorld = m.getOccluderPanelsInWorld()
+        m.occluderPanelsWorldValid = true
+      end if
+      for each panel in m.occluderPanelsWorld
         if inset > 0 and panel.hasInnerVertices
           continue for
         end if
-        worldVertices = [] as BGE.Math.Vector[]
-        for each vertex in panel.vertices
-          worldVertices.push(BGE.Math.Matrix44.multVecMatrix(vertex, m.transformationMatrix))
-        end for
-        if not drawBackFaces
-          ' world-space normal built like Model3dFaceOps.resetNormal(), as updateCanvasPosition() tests it
-          normal = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.subtract(worldVertices[1], worldVertices[0]), BGE.Math.VectorOps.subtract(worldVertices[2], worldVertices[0]))
-          BGE.Math.VectorOps.normalize(normal)
-          if not isOutwardNormalFacingCamera(rendererObj, worldVertices[0], normal)
-            continue for
-          end if
+        if not drawBackFaces and not isOutwardNormalFacingCamera(rendererObj, panel.vertices[0], panel.normal)
+          continue for
         end if
-        polygon = m.projectOccluderPolygon(rendererObj, worldVertices, inset)
+        polygon = m.projectOccluderPolygon(rendererObj, panel.vertices, inset)
         if invalid <> polygon
           out.push(polygon)
         end if
       end for
+    end function
+
+    private function getOccluderPanelsInWorld() as BGE.OccluderPanel[]
+      worldPanels = [] as BGE.OccluderPanel[]
+      for each panel in m.occluderPanels
+        worldVertices = [] as BGE.Math.Vector[]
+        for each vertex in panel.vertices
+          worldVertices.push(BGE.Math.Matrix44.multVecMatrix(vertex, m.transformationMatrix))
+        end for
+        ' world-space normal built like Model3dFaceOps.resetNormal(), as updateCanvasPosition() tests it
+        normal = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.subtract(worldVertices[1], worldVertices[0]), BGE.Math.VectorOps.subtract(worldVertices[2], worldVertices[0]))
+        BGE.Math.VectorOps.normalize(normal)
+        worldPanels.push({vertices: worldVertices, normal: normal, hasInnerVertices: panel.hasInnerVertices})
+      end for
+      return worldPanels
     end function
 
     ' How far a moving model's draw may fall short of its exact faces: the larger of the

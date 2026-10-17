@@ -17,6 +17,7 @@ import "../interfaces.bs"
 import "bsp/StaticGeometryBSP.bs"
 import "cameras/Camera.bs"
 import "cameras/Camera2d.bs"
+import "cameras/Camera3d.bs"
 import "DepthSortHelpers.bs"
 import "RendererHelpers.bs"
 import "sceneObjects/SceneObject.bs"
@@ -150,6 +151,12 @@ namespace BGE
     private occlusionMapVersion as integer = 0
     private occlusionMapBuildCount as integer = 0
     private occludedCountLastFrame as integer = 0
+    private occlusionMsLastFrame as integer = 0
+    private occlusionTestsLastFrame as integer = 0
+    private occlusionTimer as roTimespan = CreateObject("roTimespan")
+    ' Scratch for projected occlusion test points: x, y, depth per point.
+    private occlusionProjected as float[] = []
+    private occlusionDepthPoint as BGE.Math.Vector[] = [invalid]
     ' Whether updateOcclusion() did any work last frame - so turning it off clears verdicts once.
     private occlusionWasActive as boolean = false
     ' What the current map was built for - any change forces a rebuild.
@@ -563,6 +570,21 @@ namespace BGE
       return m.occludedCountLastFrame
     end function
 
+    ' How long occlusion culling took in the last rendered frame, in whole milliseconds.
+    '
+    ' @return {integer}
+    function getOcclusionMsLastFrame() as integer
+      return m.occlusionMsLastFrame
+    end function
+
+    ' How many scene objects were fully tested against the occlusion map in the last
+    ' rendered frame - those not ruled out by a cheaper check first.
+    '
+    ' @return {integer}
+    function getOcclusionTestsLastFrame() as integer
+      return m.occlusionTestsLastFrame
+    end function
+
     ' Marks a SceneObject as static geometry and schedules a tree rebuild. Called
     ' automatically by addSceneObject() when the object's owning GameEntity is isStatic -
     ' exposed publicly so a SceneObject with no owning GameEntity (e.g.
@@ -674,6 +696,7 @@ namespace BGE
     private sub updateOcclusion()
       wasActive = m.occlusionWasActive
       m.occludedCountLastFrame = 0
+      m.occlusionTestsLastFrame = 0
       if not m.occlusionCullingEnabled or not m.hasOccluders() or m.camera.name <> "Camera3d"
         if wasActive
           for each sceneObj in m.sceneObjects
@@ -710,7 +733,12 @@ namespace BGE
       for each sceneObj in m.sceneObjects
         if m.isOcclusionCandidate(sceneObj)
           if sceneObj.occlusionMapVersion <> m.occlusionMapVersion or sceneObj.canvasShapeMayHaveChanged()
-            sceneObj.occludedThisFrame = m.isHiddenByOccluders(sceneObj)
+            sceneObj.occludedThisFrame = false
+            sceneObj.occlusionTestBounds = invalid
+            if m.mayBeHiddenByOccluders(sceneObj)
+              m.occlusionTestsLastFrame++
+              sceneObj.occludedThisFrame = m.isHiddenByOccluders(sceneObj)
+            end if
             sceneObj.occlusionMapVersion = m.occlusionMapVersion
           end if
           if sceneObj.occludedThisFrame
@@ -748,7 +776,8 @@ namespace BGE
     ' An object latched off camera stays off camera, so its cull latch isn't released.
     private function isOcclusionCandidate(sceneObj as SceneObject) as boolean
       objType = sceneObj.type
-      return sceneObj.isEnabled() and not sceneObj.isOccluder and not sceneObj.isCulled() and objType <> SceneObjectType.Plane and objType <> SceneObjectType.Skybox and objType <> SceneObjectType.ParallaxLayer and sceneObj.negDistanceFromCamera < 0 and sceneObj.distanceFadeAlpha > 0
+      ' cheapest checks first
+      return sceneObj.negDistanceFromCamera < 0 and not sceneObj.isOccluder and sceneObj.distanceFadeAlpha > 0 and objType <> SceneObjectType.Plane and objType <> SceneObjectType.Skybox and objType <> SceneObjectType.ParallaxLayer and not sceneObj.isCulled() and sceneObj.isEnabled()
     end function
 
     private sub clearOcclusionVerdict(sceneObj as SceneObject)
@@ -756,6 +785,22 @@ namespace BGE
       sceneObj.occlusionMapVersion = -1
       sceneObj.occlusionTestBounds = invalid
     end sub
+
+    ' A cheap first check by the object's depth position, which lies within what it draws:
+    ' an object reaching nearer than every occluder, or whose position isn't covered by a
+    ' nearer occluder, can't be hidden. Only rules objects out, so it never hides anything.
+    private function mayBeHiddenByOccluders(sceneObj as SceneObject) as boolean
+      depth = -sceneObj.negDistanceFromCamera
+      if depth <= m.occlusionMap.getNearestDepth()
+        return false
+      end if
+      projected = m.occlusionProjected
+      m.occlusionDepthPoint[0] = sceneObj.getDepthPosition()
+      if not (m.camera as Camera3d).projectPointsWithDepth(m.occlusionDepthPoint, projected)
+        return false
+      end if
+      return m.occlusionMap.isPointCovered(projected[0], projected[1], depth)
+    end function
 
     ' Whether every point the object could draw at is behind the occluders. Any point that
     ' doesn't project means it can't be judged, so it isn't hidden.
@@ -765,32 +810,31 @@ namespace BGE
       if invalid = points or points.count() = 0
         return false
       end if
-      cam = m.camera
-      minX = 0.0
-      minY = 0.0
-      maxX = 0.0
-      maxY = 0.0
-      nearest = 0.0
-      isFirst = true
-      for each point in points
-        canvasPoint = cam.worldPointToCanvasPoint(point)
-        if invalid = canvasPoint
-          return false
+      projected = m.occlusionProjected
+      if not (m.camera as Camera3d).projectPointsWithDepth(points, projected)
+        return false
+      end if
+      minX = projected[0]
+      maxX = minX
+      minY = projected[1]
+      maxY = minY
+      nearest = projected[2]
+      for i = 3 to projected.count() - 1 step 3
+        x = projected[i]
+        y = projected[i + 1]
+        depth = projected[i + 2]
+        if x < minX
+          minX = x
+        else if x > maxX
+          maxX = x
         end if
-        depth = cam.distanceFromCameraFront(point)
-        if isFirst
-          minX = canvasPoint.x
-          maxX = canvasPoint.x
-          minY = canvasPoint.y
-          maxY = canvasPoint.y
+        if y < minY
+          minY = y
+        else if y > maxY
+          maxY = y
+        end if
+        if depth < nearest
           nearest = depth
-          isFirst = false
-        else
-          minX = BGE.Math.Min(minX, canvasPoint.x)
-          maxX = BGE.Math.Max(maxX, canvasPoint.x)
-          minY = BGE.Math.Min(minY, canvasPoint.y)
-          maxY = BGE.Math.Max(maxY, canvasPoint.y)
-          nearest = BGE.Math.Min(nearest, depth)
         end if
       end for
       margin = m.occlusionMargin
@@ -974,7 +1018,10 @@ namespace BGE
     sub render()
       m.applyOccluderDrawPolicy()
       m.updateSceneObjects()
+      ' a free-running timer, so both readings round down alike and averages stay unbiased
+      occlusionStart = m.occlusionTimer.TotalMilliseconds()
       m.updateOcclusion()
+      m.occlusionMsLastFrame = m.occlusionTimer.TotalMilliseconds() - occlusionStart
 
       if m.computeOverlapClusters
         clusterResult = BGE.DepthSort.groupIntoClusters(m.getClusterCandidates(), m, m.lastClusterSortOrder)
