@@ -1,0 +1,165 @@
+' Deep link `profile=1`: flies the camera along a fixed path (driven by frame index, not
+' dt or input) once per occlusion configuration, and reports frame times for each.
+class TerrainProfiler
+
+  ' Frames before the first configuration, so loading/first-draw costs aren't measured.
+  settleFrames = 60
+  moveFrames = 240
+  holdFrames = 120
+  ' Frames skipped at the start of each segment.
+  warmupFrames = 10
+
+  configs = [
+    ' fastExactClaim draws the chapel the way it would draw were it not an occluder
+    {name: "off", occlusion: false, policy: BGE.OccluderDrawPolicy.fastExactClaim},
+    {name: "exact", occlusion: true, policy: BGE.OccluderDrawPolicy.exact},
+    {name: "fastShrink", occlusion: true, policy: BGE.OccluderDrawPolicy.fastShrink},
+    {name: "fastExactClaim", occlusion: true, policy: BGE.OccluderDrawPolicy.fastExactClaim}
+  ]
+
+  results = [] as string[]
+  done = false
+
+  ' Where WorldScene.addChapel() puts it.
+  private chapelX = 80.0
+  private chapelZ = -320.0
+  private game as BGE.Game
+  private camera as BGE.Camera3d
+  private startPosition as BGE.Math.Vector
+  ' -1 while settling
+  private configIndex = -1
+  ' The path frame the camera is posed for, -1 before the first.
+  private pathFrame = -1
+  private stats as roAssociativeArray
+
+  sub new(game as BGE.Game)
+    m.game = game
+    m.camera = game.canvas.renderer.camera as BGE.Camera3d
+    m.startPosition = BGE.Math.VectorOps.copy(m.camera.position)
+  end sub
+
+  ' Call from the scene's onUpdate(). dt is how long the previous frame took.
+  sub update(dt as float)
+    if m.done
+      return
+    end if
+    if m.pathFrame >= 0 and m.configIndex >= 0
+      m.addSample(m.pathFrame, "ms", dt * 1000)
+    end if
+    nextFrame = m.pathFrame + 1
+    if nextFrame >= m.getFrameCount()
+      m.finishConfig()
+      m.configIndex++
+      if m.configIndex >= m.configs.count()
+        m.done = true
+        m.posePath(0)
+        return
+      end if
+      m.startConfig()
+      nextFrame = 0
+    end if
+    m.pathFrame = nextFrame
+    m.posePath(nextFrame)
+  end sub
+
+  ' Call from the scene's onDrawEnd(), after the game canvas has rendered this frame.
+  sub afterDraw(renderer as BGE.Renderer)
+    if m.done or m.configIndex < 0 or m.pathFrame < 0
+      return
+    end if
+    m.addSample(m.pathFrame, "drawCalls", renderer.getDrawCallsLastFrame())
+    m.addSample(m.pathFrame, "occluded", renderer.getOccludedCountLastFrame())
+  end sub
+
+  function getStatusText() as string
+    if m.done
+      return "Profile done (quality " + m.game.renderQuality.getLevel().ToStr() + ")" + Chr(10) + m.results.Join(Chr(10))
+    end if
+    if m.configIndex < 0
+      return "Profile: settling"
+    end if
+    return "Profile: " + m.configs[m.configIndex].name + " frame " + m.pathFrame.ToStr()
+  end function
+
+  private function getFrameCount() as integer
+    if m.configIndex < 0
+      return m.settleFrames
+    end if
+    return m.moveFrames + m.holdFrames
+  end function
+
+  private sub startConfig()
+    config = m.configs[m.configIndex]
+    renderer = m.game.canvas.renderer
+    renderer.occlusionCullingEnabled = config.occlusion
+    renderer.occluderDrawPolicy = config.policy
+    m.stats = {
+      moving: {ms: [], drawCalls: [], occluded: []},
+      still: {ms: [], drawCalls: [], occluded: []}
+    }
+  end sub
+
+  private sub addSample(frame as integer, key as string, value as float)
+    if m.configIndex < 0
+      return
+    end if
+    segment = m.stats.moving
+    segmentFrame = frame
+    if frame >= m.moveFrames
+      segment = m.stats.still
+      segmentFrame = frame - m.moveFrames
+    end if
+    if segmentFrame >= m.warmupFrames
+      segment[key].push(value)
+    end if
+  end sub
+
+  private sub finishConfig()
+    if m.configIndex < 0
+      return
+    end if
+    moving = m.stats.moving
+    still = m.stats.still
+    line = m.configs[m.configIndex].name + ": moving avg " + m.format(m.average(moving.ms)) + "ms worst " + m.format(m.maximum(moving.ms)) + "ms occluded " + m.format(m.average(moving.occluded)) + " draws " + m.format(m.average(moving.drawCalls))
+    line += " | still avg " + m.format(m.average(still.ms)) + "ms worst " + m.format(m.maximum(still.ms)) + "ms occluded " + m.format(m.average(still.occluded)) + " draws " + m.format(m.average(still.drawCalls))
+    print "[terrain profile] " + line
+    m.results.push(line)
+  end sub
+
+  ' Strafes right, then left, then back to the middle while edging forward, turning to keep
+  ' the chapel in view, so the trees behind it slide in and out of its shadow. Then holds.
+  private sub posePath(frame as integer)
+    t = BGE.Math.Min(frame, m.moveFrames) / m.moveFrames
+    x = m.startPosition.x + 200 * Sin(2 * BGE.Math.PI * t)
+    z = m.startPosition.z - 60 * t
+    m.camera.position = BGE.Math.VectorOps.create(x, m.startPosition.y, z)
+    ' starts at the normal view straight ahead, and turns toward the chapel over the first tenth
+    towardChapel = Atn((m.chapelX - x) / (z - m.chapelZ))
+    heading = towardChapel * BGE.Math.Min(1, t * 10)
+    m.camera.orientation = BGE.Math.VectorOps.create(Sin(heading), 0, -Cos(heading))
+  end sub
+
+  private function average(values as float[]) as float
+    if values.count() = 0
+      return 0
+    end if
+    total = 0.0
+    for each value in values
+      total += value
+    end for
+    return total / values.count()
+  end function
+
+  private function maximum(values as float[]) as float
+    result = 0.0
+    for each value in values
+      result = BGE.Math.Max(result, value)
+    end for
+    return result
+  end function
+
+  private function format(value as float) as string
+    return (Int(value * 10 + 0.5) / 10).ToStr()
+  end function
+
+end class
