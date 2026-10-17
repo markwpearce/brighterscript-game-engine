@@ -186,10 +186,11 @@ namespace tests
       end function
     end sub
 
-    ' Draws a non-static rectangle twice with a small camera move between, returning the spy.
-    private function drawMovingRectangle(asOccluder as boolean) as dynamic
+    ' Draws a non-static rectangle 3 times with a small camera move between, returning the spy.
+    private function drawMovingRectangle(asOccluder as boolean, policy = BGE.OccluderDrawPolicy.fastShrink as BGE.OccluderDrawPolicy) as dynamic
       camera = m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500))
       renderer = m.newRenderer3d(camera)
+      renderer.occluderDrawPolicy = policy
       entity = new BGE.GameEntity(m.game, {name: "panel"})
       entity.position = BGE.Math.VectorOps.create(-100, 100, 0)
       entity.updateTransformationMatrix()
@@ -207,9 +208,11 @@ namespace tests
       return sceneObj
     end function
 
-    ' The stale-frame count of a rotating single-face model's face on each of 3 frames.
-    private function modelFaceStaleCounts(asOccluder as boolean) as integer[]
+    ' The stale-frame count of a single-face model's face on each frame: rotating for
+    ' `movingFrames`, then still for `stillFrames`.
+    private function modelFaceStaleCounts(asOccluder as boolean, policy = BGE.OccluderDrawPolicy.fastShrink as BGE.OccluderDrawPolicy, movingFrames = 3 as integer, stillFrames = 0 as integer, maxStaleFrames = 1 as integer) as integer[]
       renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 1000)))
+      renderer.occluderDrawPolicy = policy
       entity = new BGE.GameEntity(m.game, {name: "spinner"})
       entity.position = BGE.Math.VectorOps.create(0, 0, 500)
       face = BGE.Model3dFaceOps.create([
@@ -218,19 +221,51 @@ namespace tests
         BGE.Math.VectorOps.create(0, 40, 0)
       ])
       drawable = new BGE.DrawableModel(entity, new BGE.Model3d([face]), {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      drawable.maxStaleFrames = maxStaleFrames
       sceneObj = drawable.addToRenderer(renderer) as BGE.SceneObjectModel
       if asOccluder
         renderer.markOccluder(sceneObj)
       end if
       staleCounts = [] as integer[]
-      for i = 1 to 3
-        entity.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
+      for i = 1 to movingFrames + stillFrames
+        entity.rotation = BGE.Math.VectorOps.create(0, 0.01 * BGE.Math.Min(i, movingFrames), 0)
         entity.updateTransformationMatrix()
         renderer.setupCameraForFrame()
         renderer.render()
         staleCounts.push(sceneObj.getFaceStaleFrameCount(0))
       end for
       return staleCounts
+    end function
+
+    ' A 300x300 occluder wall's claimed and exact canvas bounds on a frame the camera moves,
+    ' after 3 still frames.
+    private function movingWallClaim(policy as BGE.OccluderDrawPolicy) as roAssociativeArray
+      renderer = m.newOcclusionRenderer()
+      renderer.occluderDrawPolicy = policy
+      wall = m.newOccluderWall(renderer, 0, 300, 300)
+      m.renderFrames(renderer, 3)
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -500)
+      m.renderFrames(renderer, 1)
+      return {claimed: m.claimedBounds(renderer, wall), exact: m.exactBounds(renderer, wall)}
+    end function
+
+    private function boundsMatch(a as BGE.OcclusionTestBounds, b as BGE.OcclusionTestBounds) as boolean
+      return Abs(a.minX - b.minX) < 0.01 and Abs(a.maxX - b.maxX) < 0.01 and Abs(a.minY - b.minY) < 0.01 and Abs(a.maxY - b.maxY) < 0.01
+    end function
+
+    ' A 100x100 oriented image occluder facing the camera, after 2 frames.
+    private function newFastPathImage(policy as BGE.OccluderDrawPolicy) as roAssociativeArray
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, 500)))
+      renderer.occluderDrawPolicy = policy
+      entity = new BGE.GameEntity(m.game, {name: "poster", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-50, 50, 0)
+      entity.updateTransformationMatrix()
+      bitmap = CreateObject("roBitmap", {width: 100, height: 100, alphaEnable: true})
+      bitmap.Clear(&hFF0000FF)
+      image = new BGE.Image(entity, CreateObject("roRegion", bitmap, 0, 0, 100, 100), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.oriented})
+      sceneObj = image.addToRenderer(renderer) as BGE.SceneObjectImage
+      m.renderFrames(renderer, 2)
+      return {renderer: renderer, image: sceneObj}
     end function
 
     @describe("registering occluders")
@@ -567,6 +602,93 @@ namespace tests
       claimed = m.claimedBounds(renderer, sceneObj)
       exact = m.exactBounds(renderer, sceneObj)
       m.assertTrue(Abs(claimed.minX - exact.minX - 1) < 0.01 and Abs(claimed.maxX - exact.maxX + 1) < 0.01 and Abs(claimed.minY - exact.minY - 1) < 0.01 and Abs(claimed.maxY - exact.maxY + 1) < 0.01, `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
+    end function
+
+    @describe("occluder draw policy")
+
+    @it("exact: never reuses a temp bitmap for a moving occluder")
+    function _()
+      occluder = m.drawMovingRectangle(true, BGE.OccluderDrawPolicy.exact)
+      m.assertTrue(occluder.attemptCount > 0)
+      m.assertEqual(0, occluder.reuseCount)
+    end function
+
+    @it("exact: never reuses a model face's raster")
+    function _()
+      m.assertEqual([0, 0, 0, 0], m.modelFaceStaleCounts(true, BGE.OccluderDrawPolicy.exact, 3, 1, 3))
+    end function
+
+    @it("exact: never takes the image fast path, and claims the exact quad")
+    function _()
+      result = m.newFastPathImage(BGE.OccluderDrawPolicy.exact)
+      image = result.image as BGE.SceneObjectImage
+      m.assertFalse(image.usedTransformedFastDraw())
+      claimed = m.claimedBounds(result.renderer, image)
+      exact = m.exactBounds(result.renderer, image)
+      m.assertTrue(m.boundsMatch(claimed, exact), `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
+    end function
+
+    @it("exact: claims its exact outline while the camera moves")
+    function _()
+      result = m.movingWallClaim(BGE.OccluderDrawPolicy.exact)
+      m.assertTrue(m.boundsMatch(result.claimed, result.exact), `claimed ${FormatJson(result.claimed)} vs exact ${FormatJson(result.exact)}`)
+    end function
+
+    @it("fastShrink: shrinks its claim while the camera moves")
+    function _()
+      result = m.movingWallClaim(BGE.OccluderDrawPolicy.fastShrink)
+      m.assertTrue(result.claimed.minX > result.exact.minX + 1 and result.claimed.maxX < result.exact.maxX - 1, `claimed ${FormatJson(result.claimed)} vs exact ${FormatJson(result.exact)}`)
+    end function
+
+    @it("fastShrink: an occluder model redraws its faces fresh on a still frame")
+    function _()
+      m.assertEqual([0, 1, 0], m.modelFaceStaleCounts(true, BGE.OccluderDrawPolicy.fastShrink, 2, 1, 3))
+    end function
+
+    @it("a model that isn't an occluder still reuses face rasters on a still frame")
+    function _()
+      m.assertEqual([0, 1, 2], m.modelFaceStaleCounts(false, BGE.OccluderDrawPolicy.fastShrink, 2, 1, 3))
+    end function
+
+    @it("fastExactClaim: reuses a temp bitmap for a moving occluder")
+    function _()
+      occluder = m.drawMovingRectangle(true, BGE.OccluderDrawPolicy.fastExactClaim)
+      m.assertTrue(occluder.reuseCount > 0, `reused ${occluder.reuseCount} of ${occluder.attemptCount} attempts`)
+    end function
+
+    @it("fastExactClaim: claims its exact outline while the camera moves")
+    function _()
+      result = m.movingWallClaim(BGE.OccluderDrawPolicy.fastExactClaim)
+      m.assertTrue(m.boundsMatch(result.claimed, result.exact), `claimed ${FormatJson(result.claimed)} vs exact ${FormatJson(result.exact)}`)
+    end function
+
+    @it("fastExactClaim: takes the image fast path and claims the exact quad")
+    function _()
+      result = m.newFastPathImage(BGE.OccluderDrawPolicy.fastExactClaim)
+      image = result.image as BGE.SceneObjectImage
+      m.assertTrue(image.usedTransformedFastDraw())
+      claimed = m.claimedBounds(result.renderer, image)
+      exact = m.exactBounds(result.renderer, image)
+      m.assertTrue(m.boundsMatch(claimed, exact), `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
+    end function
+
+    @it("fastExactClaim: an occluder model reuses face rasters on a still frame")
+    function _()
+      m.assertEqual([0, 1, 2], m.modelFaceStaleCounts(true, BGE.OccluderDrawPolicy.fastExactClaim, 2, 1, 3))
+    end function
+
+    @it("applies a policy changed after the occluders registered from the next render")
+    function _()
+      renderer = m.newOcclusionRenderer()
+      wall = m.newOccluderWall(renderer, 0, 300, 300)
+      m.renderFrames(renderer, 3)
+      renderer.occluderDrawPolicy = BGE.OccluderDrawPolicy.exact
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -500)
+      m.renderFrames(renderer, 1)
+      m.assertEqual(BGE.OccluderDrawPolicy.exact, wall.occluderDrawPolicy)
+      claimed = m.claimedBounds(renderer, wall)
+      exact = m.exactBounds(renderer, wall)
+      m.assertTrue(m.boundsMatch(claimed, exact), `claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
     end function
 
     @describe("occlusion culling")
@@ -941,6 +1063,7 @@ namespace tests
       m.assertEqual(45, m.renderer.occlusionBandCount)
       m.assertEqual(32, m.renderer.maxOccluders)
       m.assertEqual(2.0, m.renderer.occlusionMargin)
+      m.assertEqual(BGE.OccluderDrawPolicy.fastShrink, m.renderer.occluderDrawPolicy)
     end function
 
   end class

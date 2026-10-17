@@ -348,6 +348,11 @@ A few things the renderer enforces, which are easy to trip over:
   can make, so it never hides something it doesn't actually paint over. An object near an
   occluder's edge can therefore stay drawn while the camera moves, and is hidden again once it
   stops.
+- `renderer.occluderDrawPolicy` changes that trade-off. The default,
+  `BGE.OccluderDrawPolicy.fastShrink`, is the behaviour above. `exact` makes occluders always
+  draw exactly and claim their whole outline (slower to draw, hides the most).
+  `fastExactClaim` keeps the shortcuts but still claims the whole outline, so an object just
+  behind an occluder's edge can vanish for a frame while the camera moves.
 - Tuning knobs on the `Renderer`: `occlusionCullingEnabled` (default `true`), `occlusionBandCount`
   (45 horizontal bands), `maxOccluders` (32, the largest on screen are kept) and `occlusionMargin`
   (2.0 pixels of safety around each object). With no occluders registered the whole feature
