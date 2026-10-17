@@ -240,6 +240,10 @@ and perspective:
 This is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard capability (see
 `examples/3d`) - `examples/rendererTest` has a runnable demo per mode (`DemoList.bs`).
 
+For a model, a face's front is the side it's wound counter-clockwise from - the usual .obj/.stl
+convention, so its outside. The modes without `DrawBackFace` draw only faces turned toward the
+camera, and `isShaded` lights each face by how squarely it faces the camera.
+
 `matchCamera`, `directToCamera` and `directScaled` are the **screen-aligned** (billboard) modes -
 `isScreenAlignedDrawMode()` - and they keep an object square to the screen instead of turning it
 in 3D. `directScaled` is the Doom-sprite one: it faces the camera and its on-screen size comes
