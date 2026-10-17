@@ -1,0 +1,262 @@
+' Times BGE.OcclusionSpanMap (issue #108) on random convex canvas-space occluders and
+' checks every "hidden" verdict against a brute-force sample of the polygons (falseHides
+' must be 0).
+'
+' One config runs per few frames, so nothing blocks long enough to trip the Roku
+' watchdog. A visual check follows: blue = occluders, red box = judged hidden, green =
+' visible. OK regenerates it.
+class OcclusionSpanMapBenchmark extends RendererTest
+
+  private width = 1280
+  private height = 720
+  private bandCount = 45
+  private occludeeCount = 300
+  private buildsPerFrame = 5
+  private framesPerConfig = 4
+  private checksPerFrame = 8
+  private pendingChecks as integer[] = []
+  private occluderCounts as integer[] = [8, 32, 128]
+  private configIndex = 0
+  private frameIndex = 0
+  private results as string[] = []
+  private font as roFont
+
+  private occluders as BGE.OccluderPolygon[] = []
+  private occludees as object[] = []
+  private buildMs = 0
+  private queryMs = 0
+  private hiddenCount = 0
+  private falseHides = 0
+
+  private visualHidden as boolean[] = []
+  private visualReady = false
+  private visualLine = ""
+
+  sub new()
+    super("Occlusion Span Map Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.startConfig()
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "OK" and m.visualReady
+      m.buildVisual()
+    end if
+  end sub
+
+  private sub startConfig()
+    m.occluders = m.makeOccluders(m.occluderCounts[m.configIndex], 10, 50)
+    m.occludees = m.makeOccludees(m.occludeeCount, 0, 100)
+    m.buildMs = 0
+    m.queryMs = 0
+    m.hiddenCount = 0
+    m.falseHides = 0
+    m.frameIndex = 0
+    m.pendingChecks = []
+  end sub
+
+  override sub update(dt as float)
+    if m.configIndex >= m.occluderCounts.count()
+      return
+    end if
+    if m.frameIndex < m.framesPerConfig
+      spanMap = new BGE.OcclusionSpanMap(m.width, m.height, m.bandCount)
+      timer = CreateObject("roTimespan")
+      for i = 1 to m.buildsPerFrame
+        spanMap.build(m.occluders)
+      end for
+      m.buildMs += timer.TotalMilliseconds()
+
+      timer.Mark()
+      hidden = []
+      for each aabb in m.occludees
+        hidden.push(spanMap.isHidden(aabb.x0, aabb.y0, aabb.x1, aabb.y1, aabb.depth))
+      end for
+      m.queryMs += timer.TotalMilliseconds()
+
+      ' The brute-force check is slow, so it's queued (first frame's verdicts) and a few run per frame.
+      if m.frameIndex = 0
+        for i = 0 to m.occludees.count() - 1
+          if hidden[i]
+            m.hiddenCount++
+            m.pendingChecks.push(i)
+          end if
+        end for
+      end if
+    end if
+    checks = 0
+    while m.pendingChecks.count() > 0 and checks < m.checksPerFrame
+      if not m.bruteForceHidden(m.occludees[m.pendingChecks.pop()])
+        m.falseHides++
+      end if
+      checks++
+    end while
+
+    m.frameIndex++
+    if m.frameIndex >= m.framesPerConfig and m.pendingChecks.count() = 0
+      builds = m.buildsPerFrame * m.framesPerConfig
+      queryPer = m.queryMs / (m.framesPerConfig * m.occludeeCount)
+      line = `k=${m.occluderCounts[m.configIndex]} bands=${m.bandCount}: build ${m.buildMs / builds} ms, query ${queryPer * 1000} us/obj, hidden ${m.hiddenCount}/${m.occludeeCount}, falseHides ${m.falseHides}`
+      print `[Occlusion span benchmark] ${line}`
+      m.results.push(line)
+      m.configIndex++
+      if m.configIndex < m.occluderCounts.count()
+        m.startConfig()
+      else
+        m.buildVisual()
+      end if
+    end if
+  end sub
+
+  private sub buildVisual()
+    m.occluders = m.makeOccluders(12, 10, 50)
+    ' All behind every occluder, so the picture is purely about screen coverage.
+    m.occludees = m.makeOccludees(60, 60, 100)
+    spanMap = new BGE.OcclusionSpanMap(m.width, m.height, m.bandCount)
+    spanMap.build(m.occluders)
+    m.visualHidden = []
+    hiddenCount = 0
+    falseHides = 0
+    for each aabb in m.occludees
+      isHidden = spanMap.isHidden(aabb.x0, aabb.y0, aabb.x1, aabb.y1, aabb.depth)
+      m.visualHidden.push(isHidden)
+      if isHidden
+        hiddenCount++
+        if not m.bruteForceHidden(aabb)
+          falseHides++
+        end if
+      end if
+    end for
+    m.visualReady = true
+    m.visualLine = `visual: hidden ${hiddenCount}/${m.occludees.count()}, falseHides ${falseHides} (OK = new scene)`
+    print `[Occlusion span benchmark] ${m.visualLine}`
+  end sub
+
+  private function makeOccluders(count as integer, minDepth as float, maxDepth as float) as BGE.OccluderPolygon[]
+    list = []
+    for i = 1 to count
+      cx = Rnd(0) * m.width
+      cy = Rnd(0) * m.height
+      hw = 50 + Rnd(0) * 150
+      hh = 50 + Rnd(0) * 150
+      angle = Rnd(0) * 3.14159
+      c = cos(angle)
+      s = sin(angle)
+      corners = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]
+      if Rnd(0) < 0.3
+        corners = [[-hw, hh], [0, -hh], [hw, hh]]
+      end if
+      xs = []
+      ys = []
+      for each p in corners
+        xs.push(cx + p[0] * c - p[1] * s)
+        ys.push(cy + p[0] * s + p[1] * c)
+      end for
+      list.push({xs: xs, ys: ys, depth: minDepth + Rnd(0) * (maxDepth - minDepth), area: hw * hh})
+    end for
+    return list
+  end function
+
+  private function makeOccludees(count as integer, minDepth as float, maxDepth as float) as object[]
+    list = []
+    for i = 1 to count
+      w = 10 + Rnd(0) * 70
+      h = 10 + Rnd(0) * 70
+      x0 = Rnd(0) * (m.width - w)
+      y0 = Rnd(0) * (m.height - h)
+      list.push({x0: x0, y0: y0, x1: x0 + w, y1: y0 + h, depth: minDepth + Rnd(0) * (maxDepth - minDepth)})
+    end for
+    return list
+  end function
+
+  ' Samples the aabb every 2px; every sample must lie in a nearer occluder.
+  private function bruteForceHidden(aabb as object) as boolean
+    y = aabb.y0
+    while true
+      x = aabb.x0
+      while true
+        covered = false
+        for each occ in m.occluders
+          if occ.depth < aabb.depth and m.pointInConvex(occ.xs, occ.ys, x, y)
+            covered = true
+            exit for
+          end if
+        end for
+        if not covered
+          return false
+        end if
+        if x >= aabb.x1
+          exit while
+        end if
+        x = BGE.Math.Min(x + 2, aabb.x1)
+      end while
+      if y >= aabb.y1
+        exit while
+      end if
+      y = BGE.Math.Min(y + 2, aabb.y1)
+    end while
+    return true
+  end function
+
+  private function pointInConvex(xs as float[], ys as float[], x as float, y as float) as boolean
+    n = xs.count()
+    sign = 0
+    for i = 0 to n - 1
+      j = (i + 1) mod n
+      cross = (xs[j] - xs[i]) * (y - ys[i]) - (ys[j] - ys[i]) * (x - xs[i])
+      if cross <> 0
+        s = 1
+        if cross < 0
+          s = -1
+        end if
+        if sign = 0
+          sign = s
+        else if s <> sign
+          return false
+        end if
+      end if
+    end for
+    return true
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    if m.visualReady
+      for each occ in m.occluders
+        points = []
+        for i = 0 to occ.xs.count() - 1
+          points.push(BGE.Math.VectorOps.create(occ.xs[i], occ.ys[i], 0))
+        end for
+        renderer.drawPolygon(points, 0, 0, &h3060C0A0)
+      end for
+      for i = 0 to m.occludees.count() - 1
+        aabb = m.occludees[i]
+        rgba = BGE.Colors.Green
+        if m.visualHidden[i]
+          rgba = BGE.Colors.Red
+        end if
+        renderer.drawLine(aabb.x0, aabb.y0, aabb.x1, aabb.y0, rgba)
+        renderer.drawLine(aabb.x1, aabb.y0, aabb.x1, aabb.y1, rgba)
+        renderer.drawLine(aabb.x1, aabb.y1, aabb.x0, aabb.y1, rgba)
+        renderer.drawLine(aabb.x0, aabb.y1, aabb.x0, aabb.y0, rgba)
+      end for
+    end if
+
+    ' y=80 clears main.bs's title header (see QuadFillBenchmark.bs).
+    y = 80
+    for each line in m.results
+      renderer.drawRectangle(130, y - 2, 1020, 24, &h000000C0)
+      renderer.drawText(line, 140, y, BGE.Colors.White, m.font)
+      y += 26
+    end for
+    if m.visualReady
+      renderer.drawRectangle(130, y - 2, 1020, 24, &h000000C0)
+      renderer.drawText(m.visualLine, 140, y, BGE.Colors.Yellow, m.font)
+    else
+      renderer.drawText(`running config ${m.configIndex + 1}/${m.occluderCounts.count()}`, 140, y, BGE.Colors.White, m.font)
+    end if
+  end sub
+
+end class

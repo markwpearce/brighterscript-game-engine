@@ -1,0 +1,208 @@
+' Times Renderer occlusion culling (issue #108) on an occlusion-heavy scene: three large
+' static wall rectangles registered as occluders, with 60 oriented Image billboards
+' (expensive texture warps) scattered behind and beside them, under an orbiting camera.
+'
+' Four phases: occlusion on/off x camera moving/still. Each gets its own identical
+' off-screen renderer, driven by frame index so every phase draws the same frames, one
+' frame per update() so nothing blocks long enough to trip the Roku watchdog. A live view
+' follows; OK toggles the occlusion debug overlay on it.
+class OcclusionSceneBenchmark extends RendererTest
+
+  private imageCount = 60
+  private warmupFrames = 5
+  private timedFrames = 60
+  private surfaceWidth = 1280
+  private surfaceHeight = 720
+  private thumbWidth = 320
+  private thumbHeight = 180
+  private safeX = 140
+  private lineHeight = 26
+  private font as roFont
+  private texture as roBitmap
+
+  private phaseNames as string[] = ["Occlusion on, camera moving", "Occlusion off, camera moving", "Occlusion on, camera still", "Occlusion off, camera still"]
+  private phaseOcclusion as boolean[] = [true, false, true, false]
+  private phaseMoving as boolean[] = [true, true, false, false]
+  private phaseIndex = 0
+  private frameIndex = 0
+  private phaseMs as float[] = [0, 0, 0, 0]
+  private phaseDrawCalls as integer[] = [0, 0, 0, 0]
+  private phaseOccluded as integer[] = [0, 0, 0, 0]
+  private phaseThumbs as roBitmap[] = []
+
+  private sceneRenderer as BGE.Renderer
+  private sceneBitmap as roBitmap
+  private camera as BGE.Camera3d
+  private isLive = false
+  private liveFrame = 0
+
+  sub new()
+    super("Occlusion Scene Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.texture = m.createTexture()
+    m.startScene(true, true)
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "OK" and m.isLive
+      m.sceneRenderer.showOcclusionDebug = not m.sceneRenderer.showOcclusionDebug
+    end if
+  end sub
+
+  override sub update(dt as float)
+    if m.sceneRenderer = invalid
+      return
+    end if
+
+    if m.isLive
+      m.renderFrame(m.liveFrame, true)
+      m.liveFrame++
+      return
+    end if
+
+    timer = CreateObject("roTimespan")
+    m.renderFrame(m.frameIndex, m.phaseMoving[m.phaseIndex])
+    ms = timer.TotalMilliseconds()
+
+    if m.frameIndex >= m.warmupFrames
+      m.phaseMs[m.phaseIndex] += ms
+      m.phaseDrawCalls[m.phaseIndex] += m.sceneRenderer.getDrawCallsLastFrame()
+      m.phaseOccluded[m.phaseIndex] += m.sceneRenderer.getOccludedCountLastFrame()
+    end if
+    m.frameIndex++
+
+    if m.frameIndex >= m.warmupFrames + m.timedFrames
+      print `[Occlusion scene benchmark] ${m.resultLine(m.phaseIndex)}`
+      thumb = CreateObject("roBitmap", {width: m.thumbWidth, height: m.thumbHeight, alphaEnable: false})
+      thumb.DrawScaledObject(0, 0, m.thumbWidth / m.surfaceWidth, m.thumbHeight / m.surfaceHeight, m.sceneBitmap)
+      thumb.Finish()
+      m.phaseThumbs.push(thumb)
+      m.phaseIndex++
+      m.frameIndex = 0
+      ' Free this phase's scratch pool before the next one allocates its own.
+      m.sceneRenderer = invalid
+      m.sceneBitmap = invalid
+      RunGarbageCollector()
+      if m.phaseIndex < m.phaseNames.count()
+        m.startScene(m.phaseOcclusion[m.phaseIndex], true)
+      else
+        m.isLive = true
+        m.startScene(true, false)
+      end if
+    end if
+  end sub
+
+  ' Draws one frame; frame index (not dt) drives the camera so phases match.
+  private sub renderFrame(frame as integer, moving as boolean)
+    angle = 0.4
+    if moving
+      angle = sin(frame * 0.03) * 0.6
+    end if
+    m.camera.position = BGE.Math.VectorOps.create(sin(angle) * 600, 40, -cos(angle) * 600)
+    m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 100))
+    m.sceneRenderer.setupCameraForFrame()
+    m.sceneRenderer.resetDrawCallCounter()
+    m.sceneRenderer.render()
+  end sub
+
+  private sub startScene(occlusion as boolean, clearBackground as boolean)
+    m.sceneBitmap = CreateObject("roBitmap", {width: m.surfaceWidth, height: m.surfaceHeight, alphaEnable: false})
+    m.sceneRenderer = new BGE.Renderer(m.sceneBitmap)
+    m.sceneRenderer.occlusionCullingEnabled = occlusion
+    m.camera = new BGE.Camera3d()
+    m.sceneRenderer.setCamera(m.camera)
+    m.buildWalls()
+    m.buildImages()
+  end sub
+
+  private sub buildWalls()
+    colors = [BGE.ColorsRGB.Navy, BGE.ColorsRGB.Maroon, BGE.ColorsRGB.Green]
+    for i = 0 to 2
+      wall = new BGE.DrawableRectangle(invalid, 280, 260, {
+        offset: BGE.Math.VectorOps.create(-290 + 290 * i, 0, 0),
+        color: colors[i],
+        outlineRGBA: BGE.ColorsRGB.White,
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace
+      })
+      wall.setAnchor(0.5, 0.5)
+      sceneObj = wall.addToRenderer(m.sceneRenderer)
+      m.sceneRenderer.markStatic(sceneObj)
+      m.sceneRenderer.markOccluder(sceneObj)
+    end for
+  end sub
+
+  ' Behind (z > 0) and beside the walls, at fixed pseudo-random spots so every phase matches.
+  private sub buildImages()
+    for i = 0 to m.imageCount - 1
+      region = CreateObject("roRegion", m.texture, 0, 0, 64, 64)
+      region.SetPretranslation(-32, -32)
+      image = new BGE.Image(invalid, region, {
+        offset: BGE.Math.VectorOps.create(m.spread(i, 1.7) * 480, m.spread(i, 3.1) * 130, 40 + (m.spread(i, 5.3) + 1) * 150),
+        scale: BGE.Math.VectorOps.create(1.5, 1.5, 1),
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace
+      })
+      image.addToRenderer(m.sceneRenderer)
+    end for
+  end sub
+
+  ' Deterministic value in [-1, 1].
+  private function spread(index as integer, factor as float) as float
+    return sin((index + 1) * factor * 12.9898)
+  end function
+
+  private function createTexture() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: true})
+    bmp.Clear(&hFFC040FF)
+    for i = 0 to 7
+      for j = 0 to 7
+        if (i + j) mod 2 = 0
+          bmp.DrawRect(i * 8, j * 8, 8, 8, &h202020FF)
+        end if
+      end for
+    end for
+    bmp.Finish()
+    return bmp
+  end function
+
+  private function resultLine(index as integer) as string
+    frames = m.timedFrames
+    return `${m.phaseNames[index]}: ${m.phaseMs[index] / frames} ms/frame, ${m.phaseDrawCalls[index] / frames} draw calls, ${m.phaseOccluded[index] / frames} occluded`
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    if m.isLive and m.sceneBitmap <> invalid
+      renderer.drawObject(0, 0, m.sceneBitmap)
+    end if
+
+    ' y=80 clears main.bs's title header (see QuadFillBenchmark.bs).
+    y = 80
+    for i = 0 to m.phaseNames.count() - 1
+      if i < m.phaseIndex
+        line = m.resultLine(i)
+      else if i = m.phaseIndex
+        line = `${m.phaseNames[i]}: running (${m.frameIndex}/${m.warmupFrames + m.timedFrames})`
+      else
+        line = `${m.phaseNames[i]}: waiting`
+      end if
+      renderer.drawRectangle(m.safeX - 10, y - 2, 1000, m.lineHeight - 2, &h000000C0)
+      renderer.drawText(line, m.safeX, y, BGE.Colors.White, m.font)
+      y += m.lineHeight
+    end for
+
+    if m.isLive
+      renderer.drawRectangle(m.safeX - 10, y - 2, 1000, m.lineHeight - 2, &h000000C0)
+      renderer.drawText(`live: ${m.sceneRenderer.getOccludedCountLastFrame()} occluded, OK = toggle debug overlay`, m.safeX, y, BGE.Colors.Yellow, m.font)
+    else
+      x = m.safeX
+      y += 16
+      for i = 0 to m.phaseThumbs.count() - 1
+        renderer.drawObject(x, y, m.phaseThumbs[i])
+        x += m.thumbWidth + 10
+      end for
+    end if
+  end sub
+
+end class
