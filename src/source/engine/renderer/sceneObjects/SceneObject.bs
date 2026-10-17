@@ -5,6 +5,7 @@ import "../../../utils/deviceRenderTier.bs"
 import "../../drawables/Drawable.bs"
 import "../cameras/Camera.bs"
 import "../Renderer.bs"
+import "../occlusion/OcclusionTypes.bs"
 
 namespace BGE
 
@@ -188,6 +189,8 @@ namespace BGE
     ' deterministic draw failures, like a backface or an off-canvas rejection, which used
     ' to re-run the full frustum check every single frame with no latch at all).
     protected lastFrameWasCulled = false
+    ' What the last draw (or skip) reported about this object. See getVisibility().
+    protected visibility as BGE.VisibilityState = BGE.VisibilityState.unknown
 
     ' Whether the last frame's draw actually happened. Distinct from lastFrameWasCulled
     ' because a frame has four possible outcomes, not two: drew, was culled by the
@@ -393,8 +396,25 @@ namespace BGE
       m.lastDrawMode = m.getActualDrawMode(cameraObj)
       m.lastGeometryVersion = m.drawable.geometryVersion
       m.lastFrameWasCulled = true
+      m.visibility = BGE.VisibilityState.offCamera
       m.lastFrameDidDraw = false
       m.isFirstFrameSinceEnabled = false
+    end sub
+
+    ' Called by Renderer instead of draw() for an object it skips because something in front
+    ' hides it. Unlike a cull this doesn't latch, and the canvas geometry is dropped so the
+    ' next draw() recomputes it. Projection and quality versions are deliberately not
+    ' recorded, so a change that happens while hidden is applied when it returns.
+    '
+    ' @param {Camera} cameraObj the renderer's camera
+    sub markSkippedOccluded(cameraObj as Camera)
+      m.lastDrawMode = m.getActualDrawMode(cameraObj)
+      m.lastGeometryVersion = m.drawable.geometryVersion
+      m.isFirstFrameSinceEnabled = false
+      m.lastFrameDidDraw = false
+      m.hasValidCanvasPosition = false
+      m.lastFrameWasCulled = false
+      m.visibility = BGE.VisibilityState.occluded
     end sub
 
     ' Check if the object is enabled
@@ -456,6 +476,12 @@ namespace BGE
         end if
       end if
       m.lastFrameWasCulled = not enteredDrawPath or deterministicFailure
+      ' A transient draw failure still reports visible, as isOnScreen() always has.
+      if m.lastFrameWasCulled
+        m.visibility = BGE.VisibilityState.offCamera
+      else
+        m.visibility = BGE.VisibilityState.visible
+      end if
       m.lastFrameDidDraw = didDraw
       m.isFirstFrameSinceEnabled = false
       m.lastGeometryVersion = m.drawable.geometryVersion
@@ -800,12 +826,20 @@ namespace BGE
     ' Whether this object was culled (skipped entirely) on the last frame drawn - either
     ' by the camera frustum, or by a deterministic draw failure (see
     ' isDeterministicDrawFailure()) that's being treated the same way. Game code can use
-    ' this (e.g. via GameEntity.isOnScreen()/Drawable.isOnScreen()) to skip its own
+    ' this (e.g. via GameEntity.isOnScreen()) to skip its own
     ' expensive per-frame work for an entity that isn't currently visible - see issue #75.
     '
     ' @return {boolean}
     function isCulled() as boolean
       return m.lastFrameWasCulled
+    end function
+
+    ' Whether this object was drawn, hidden behind something, or off camera as of the last
+    ' frame. unknown until it has been through a draw. See GameEntity.getVisibility().
+    '
+    ' @return {BGE.VisibilityState}
+    function getVisibility() as BGE.VisibilityState
+      return m.visibility
     end function
 
   end class
