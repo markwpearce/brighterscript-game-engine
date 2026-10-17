@@ -124,6 +124,19 @@ namespace BGE
     ' entirely (lines, planes, or anything else with a degenerate bounding-point set).
     public computeOverlapClusters as boolean = false
 
+    ' Whether static drawables flagged isOccluder hide what's behind them.
+    public occlusionCullingEnabled as boolean = true
+    ' Number of vertical bands in the occlusion span map.
+    public occlusionBandCount as integer = 45
+    ' The most occluders considered per frame.
+    public maxOccluders as integer = 32
+    ' Pixels an occluder's silhouette is shrunk by before it may hide anything.
+    public occlusionMargin as float = 2.0
+
+    ' Registered occluder scene objects by id.
+    private occluders as roAssociativeArray = {}
+    private occludersChanged as boolean = false
+
     camera as Camera
 
     triangleCache = new TriangleCache(5)
@@ -434,7 +447,46 @@ namespace BGE
       if owner <> invalid and owner.isStatic
         m.markStatic(sceneObj)
       end if
+
+      drawable = sceneObj.drawable
+      if drawable.isOccluder
+        if owner <> invalid and not owner.isStatic
+          drawable.warnOccluderNeedsStaticOwner()
+        else
+          m.markOccluder(sceneObj)
+        end if
+      end if
     end sub
+
+    ' Registers a SceneObject as an occluder, so it can hide objects behind it. Called
+    ' automatically by addSceneObject() for a Drawable with isOccluder set on a static
+    ' entity - exposed publicly so a SceneObject with no owning GameEntity can opt in
+    ' directly. Declines (with a warning) a type that can't occlude, or a drawable whose
+    ' own drawMode is screen-aligned.
+    '
+    ' @param {SceneObject} sceneObj
+    sub markOccluder(sceneObj as SceneObject)
+      drawable = sceneObj.drawable
+      if not sceneObj.isEligibleOccluderType()
+        drawable.log("Drawable '" + drawable.name + "' has isOccluder set but its " + sceneObj.type.toStr() + " scene object type can't occlude (only Image, Rectangle and Model can) - it will draw normally", BGE.Debug.LogLevel.warning)
+        return
+      end if
+      if isScreenAlignedDrawMode(drawable.drawMode)
+        drawable.log("Drawable '" + drawable.name + "' has isOccluder set but uses a screen-aligned draw mode, which can't occlude - it will draw normally", BGE.Debug.LogLevel.warning)
+        return
+      end if
+      sceneObj.prepareOccluder()
+      sceneObj.isOccluder = true
+      m.occluders[sceneObj.id] = sceneObj
+      m.occludersChanged = true
+    end sub
+
+    ' Whether any occluder is currently registered.
+    '
+    ' @return {boolean}
+    function hasOccluders() as boolean
+      return m.occluders.count() > 0
+    end function
 
     ' Marks a SceneObject as static geometry and schedules a tree rebuild. Called
     ' automatically by addSceneObject() when the object's owning GameEntity is isStatic -
@@ -486,6 +538,11 @@ namespace BGE
         m.needsDepthSort = true
         if sceneObjToRemove.isStatic
           m.needsStaticTreeRebuild = true
+        end if
+        if sceneObjToRemove.isOccluder
+          m.occluders.delete(sceneObjToRemove.id)
+          sceneObjToRemove.isOccluder = false
+          m.occludersChanged = true
         end if
       end if
       sceneObjToRemove.id = ""
