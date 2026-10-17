@@ -295,7 +295,7 @@ class Chapel extends BGE.GameEntity
     model = m.game.get3dModel("chapel")
     m.addDrawable("chapel", new BGE.DrawableModel(m, model, {
       isOccluder: true,
-      drawMode: BGE.SceneObjectDrawMode.solidDrawBackFace
+      drawMode: BGE.SceneObjectDrawMode.solid
     }))
   end sub
 
