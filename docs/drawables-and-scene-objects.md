@@ -343,6 +343,7 @@ A few things the renderer enforces, which are easy to trip over:
   (`oriented`, `orientedDrawBackFace`, `solid`, `solidDrawBackFace`). Screen-aligned modes
   (`matchCamera`, `directToCamera`, `directScaled`) are ignored as occluders, and so is any
   occluder under a `Camera2d`.
+- `isOccluder` can be turned on or off at any time, e.g. when a wall becomes see-through.
 - A standalone `SceneObject` with no owner registers itself with `renderer.markOccluder()`.
 - Occlusion is conservative: an object is only hidden when it is clearly behind the occluders,
   with a small safety margin, so a borderline object still draws. Screen-aligned fixed-size
