@@ -50,14 +50,16 @@ namespace BGE
     ' See attemptTransformTempBitmap()'s gate on it.
     private lastDrawWasFullyFresh as boolean = true
 
-    ' The impostor's capture (see DrawableModel.impostorTolerance): the bounding box
-    ' corners' canvas x/y when the temp bitmap was last drawn fully fresh, and that
-    ' bitmap's canvas origin. invalid when there's nothing to reuse.
+    ' The impostor's capture (see DrawableModel.useImpostor): the bounding box corners'
+    ' canvas x/y when the temp bitmap was last drawn fully fresh, the direction it was seen
+    ' from, and that bitmap's canvas origin. invalid when there's nothing to reuse.
     private impostorCapture as roAssociativeArray = invalid
-    private impostorStaleFrames as integer = 0
     private impostorProjected as float[] = []
-    ' a reused rendering is redrawn after this many frames whatever the fit
-    private impostorMaxStaleFrames as integer = 30
+    ' this frame's impostor blit, decided before projecting the faces so a reused frame
+    ' can skip that - see updateCanvasPosition()
+    private impostorThisFrame as TransformTempBitmapDetails = invalid
+    ' true while modelCanvasFaces is left over from an earlier frame (an impostor frame)
+    private canvasFacesStale as boolean = false
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -300,6 +302,11 @@ namespace BGE
       if tempBitmap = invalid
         return {worked: false, didFastDraw: false}
       end if
+      if m.canvasFacesStale
+        ' the impostor blit was decided but didn't happen - the bitmap is sized from the
+        ' fitted bounds, which are within the tolerance of the real ones
+        m.projectCanvasFaces(rendererObj, drawMode)
+      end if
       someWorked = false
       offsetX = -canvasPointsTopLeftBound.x
       offsetY = -canvasPointsTopLeftBound.y
@@ -311,7 +318,7 @@ namespace BGE
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and m.drawable.impostorTolerance <= 0)
+          thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
         else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
           ' Outlines are cheap already (no texture warp) - not worth caching, and a
           ' debug wireframe shouldn't lag a frame behind the model's real position.
@@ -321,15 +328,14 @@ namespace BGE
         end if
         someWorked = thisWorked or someWorked
       end for
-      if m.drawable.impostorTolerance > 0
-        m.captureImpostor(rendererObj, canvasPointsTopLeftBound)
+      if m.drawable.useImpostor
+        m.captureImpostor(rendererObj, canvasPointsTopLeftBound, drawMode)
       end if
       return {worked: someWorked, didFastDraw: allowFastDraw}
     end function
 
-    private sub captureImpostor(rendererObj as BGE.Renderer, origin as BGE.Math.Vector)
+    private sub captureImpostor(rendererObj as BGE.Renderer, origin as BGE.Math.Vector, drawMode as SceneObjectDrawMode)
       m.impostorCapture = invalid
-      m.impostorStaleFrames = 0
       samples = m.projectImpostorSamples(rendererObj)
       if invalid = samples or not m.lastDrawWasFullyFresh
         return
@@ -337,10 +343,16 @@ namespace BGE
       samples.originX = origin.x
       samples.originY = origin.y
       samples.transformVersion = m.transformVersion
+      samples.geometryVersion = m.drawable.geometryVersion
+      samples.drawMode = drawMode
+      samples.triangleSkipSize = rendererObj.qualitySettings.triangleSkipSize
+      samples.canvasBounds = m.modelCanvasBounds
+      samples.canvasSamplePoints = m.modelCanvasSamplePoints
       m.impostorCapture = samples
     end sub
 
-    ' The bounding box corners' canvas x and y this frame, or invalid if one won't project.
+    ' The bounding box corners' canvas x and y this frame and the direction from the camera
+    ' to their centre, or invalid if one won't project.
     private function projectImpostorSamples(rendererObj as BGE.Renderer) as roAssociativeArray
       if rendererObj.camera.name <> "Camera3d"
         return invalid
@@ -351,33 +363,52 @@ namespace BGE
       end if
       xs = [] as float[]
       ys = [] as float[]
+      centre = BGE.Math.VectorOps.create()
       for i = 0 to points.count() - 1
         xs.push(m.impostorProjected[i * 3])
         ys.push(m.impostorProjected[i * 3 + 1])
+        BGE.Math.VectorOps.plusEquals(centre, points[i])
       end for
-      return {xs: xs, ys: ys}
+      direction = BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.scale(centre, 1.0 / points.count()), rendererObj.camera.position)
+      BGE.Math.VectorOps.normalize(direction)
+      return {xs: xs, ys: ys, direction: direction}
     end function
 
     ' The scaled blit of the captured rendering that fits this frame, or invalid.
-    private function attemptImpostor(renderObj as Renderer) as TransformTempBitmapDetails
+    private function attemptImpostor(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       capture = m.impostorCapture
-      if invalid = capture or m.drawsOccluderExactly() or m.impostorStaleFrames >= m.impostorMaxStaleFrames
+      if invalid = capture or m.drawsOccluderExactly()
         return invalid
       end if
       ' the box fit only follows the camera - a model turning in place can keep the same box
-      if capture.transformVersion <> m.transformVersion
+      if capture.transformVersion <> m.transformVersion or capture.geometryVersion <> m.drawable.geometryVersion or capture.drawMode <> drawMode
         return invalid
       end if
       samples = m.projectImpostorSamples(renderObj)
       if invalid = samples
         return invalid
       end if
-      fit = BGE.ImpostorFit.fitScaleTranslate(capture.xs, capture.ys, samples.xs, samples.ys)
-      if fit.residual > m.drawable.impostorTolerance
+      settings = renderObj.qualitySettings
+      ' which faces show, and their shading, depend on the direction the model is seen from
+      cosine = BGE.Math.VectorOps.dotProduct(samples.direction, capture.direction)
+      if cosine < Cos(BGE.Math.DegreesToRadians(settings.modelImpostorMaxAngleDegrees))
         return invalid
       end if
-      m.impostorStaleFrames++
+      fit = BGE.ImpostorFit.fitScaleTranslate(capture.xs, capture.ys, samples.xs, samples.ys)
       p = fit.params
+      if invalid = p or BGE.Math.Max(p.scaleX, p.scaleY) > settings.modelImpostorMaxZoom
+        return invalid
+      end if
+      ' the error allowed scales with the model's size on screen (2px at least, so a small
+      ' model can still use it), capped at the reuse threshold, which is what a fastShrink
+      ' occluder's claim already shrinks by
+      allowed = BGE.Math.Max(2, settings.modelImpostorError * m.getScreenDiagonal(samples.xs, samples.ys))
+      allowed = BGE.Math.Min(allowed, m.getTempBitmapThreshold(drawMode))
+      if fit.residual > allowed
+        return invalid
+      end if
+      capture.fitOffsetX = p.offsetX
+      capture.fitOffsetY = p.offsetY
       return {
         origin: BGE.Math.VectorOps.create(p.scaleX * capture.originX + p.offsetX, p.scaleY * capture.originY + p.offsetY),
         rotation: 0,
@@ -386,6 +417,12 @@ namespace BGE
       }
     end function
 
+
+    private function getScreenDiagonal(xs as float[], ys as float[]) as float
+      width = BGE.Math.arrayMax(xs) - BGE.Math.arrayMin(xs)
+      height = BGE.Math.arrayMax(ys) - BGE.Math.arrayMin(ys)
+      return Sqr(width * width + height * height)
+    end function
 
     protected override function updateWorldPosition(drawMode as SceneObjectDrawMode) as boolean
       if m.isOccluder and m.occluderPanelsGeometryVersion <> m.drawable.geometryVersion
@@ -461,7 +498,56 @@ namespace BGE
       return m.modelCanvasBounds
     end function
 
+    ' An impostor frame (see DrawableModel.useImpostor) skips projecting every vertex:
+    ' only the 8 box corners are projected, and the canvas bounds and sample points are moved
+    ' by the same fit the blit uses.
     protected override function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.impostorThisFrame = invalid
+      m.keepImpostorThroughQualityDrop(rendererObj)
+      if m.drawable.useImpostor and m.clusterMemberCount <= 1 and not m.qualityChangedThisDraw and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
+        m.impostorThisFrame = m.attemptImpostor(rendererObj, drawMode)
+        if invalid <> m.impostorThisFrame
+          m.moveCanvasPointsByImpostor()
+          m.canvasFacesStale = true
+          return true
+        end if
+      end if
+      return m.projectCanvasFaces(rendererObj, drawMode)
+    end function
+
+    ' A step down in quality keeps the impostor's rendering, since it was drawn at least as
+    ' well as the new level would draw it - only a step up redraws it.
+    protected override function isRedrawToCanvasRequired(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.keepImpostorThroughQualityDrop(rendererObj)
+      return super.isRedrawToCanvasRequired(rendererObj, drawMode)
+    end function
+
+    private sub keepImpostorThroughQualityDrop(rendererObj as BGE.Renderer)
+      if m.qualityChangedThisDraw and m.drawable.useImpostor and invalid <> m.impostorCapture
+        if rendererObj.qualitySettings.triangleSkipSize >= m.impostorCapture.triangleSkipSize
+          m.qualityChangedThisDraw = false
+        end if
+      end if
+    end sub
+
+    private sub moveCanvasPointsByImpostor()
+      capture = m.impostorCapture
+      scaleX = m.impostorThisFrame.scaleX
+      scaleY = m.impostorThisFrame.scaleY
+      offsetX = capture.fitOffsetX
+      offsetY = capture.fitOffsetY
+      m.modelCanvasBounds = []
+      for each point in capture.canvasBounds
+        m.modelCanvasBounds.push(BGE.Math.VectorOps.create(scaleX * point.x + offsetX, scaleY * point.y + offsetY))
+      end for
+      m.modelCanvasSamplePoints = []
+      for each point in capture.canvasSamplePoints
+        m.modelCanvasSamplePoints.push(BGE.Math.VectorOps.create(scaleX * point.x + offsetX, scaleY * point.y + offsetY))
+      end for
+    end sub
+
+    private function projectCanvasFaces(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.canvasFacesStale = false
       m.modelCanvasFaces = []
       m.modelCanvasSamplePoints = []
       m.modelCanvasBounds = []
@@ -542,8 +628,11 @@ namespace BGE
     ' than reused per-face (drawFaceWithReuse()) - stretching an already-patchwork bitmap
     ' would compound each face's own staleness/drift. See #163.
     protected override function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
-      if m.drawable.impostorTolerance > 0
-        return m.attemptImpostor(renderObj)
+      if m.drawable.useImpostor
+        ' decided in updateCanvasPosition(), before the faces were (or weren't) projected
+        details = m.impostorThisFrame
+        m.impostorThisFrame = invalid
+        return details
       end if
       if not m.lastDrawWasFullyFresh
         return invalid

@@ -159,3 +159,17 @@ the scale fit does nearly all the work.
 - Impostors for non-model objects. Billboards are already single blits.
 - Rendering far models into a shared atlas, or at lower resolution.
 - Making the corner pin itself cheaper.
+
+## Prototype (draft #350)
+
+`DrawableModel.useImpostor` turns it on (experimental). The limits come from the quality
+level: `modelImpostorError` (error allowed as a fraction of the model's on-screen diagonal,
+2px at least, capped at the model's 64px reuse threshold), `modelImpostorMaxZoom` (how far
+the bitmap may be enlarged) and `modelImpostorMaxAngleDegrees` (how far the view direction
+may turn) - no frame limit. A reused frame projects only the 8 box corners, not every
+vertex. A quality step down keeps the reused rendering; only a step up redraws it.
+
+`examples/3d` CarScene, `impostor=1`, holding up/down, Roku Ultra at a fixed Ultra level:
+~330ms per moving frame with the impostor off, ~80ms with it on before the projection
+skip, ~42-46ms after. Runs are bimodal (some come in at 100-150ms) for reasons not yet
+tracked down.
