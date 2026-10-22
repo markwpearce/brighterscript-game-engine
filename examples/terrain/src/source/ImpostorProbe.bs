@@ -15,13 +15,17 @@ class ImpostorProbe
 
   private variants = [] as roAssociativeArray[]
   private projected = [] as float[]
+  private modelVertices as BGE.Math.Vector[] = invalid
 
   sub new()
-    for each tolerance in [1, 2, 4, 8]
-      for each angle in [2, 5, 10]
+    ' "box" fits the 8 bounding box corners, "verts" every model vertex - the box's corners
+    ' are farther apart in depth than the model is, so it may overstate the error
+    for each samples in ["box", "verts"]
+      for each tolerance in [1, 2, 4, 8]
         m.variants.push({
+          samples: samples,
           tolerance: tolerance,
-          maxAngleDegrees: angle,
+          maxAngleDegrees: 5,
           capture: invalid,
           staleFrames: 0,
           counts: {scale: 0, rotate: 0, pin: 0, redraw: 0, hidden: 0}
@@ -36,13 +40,26 @@ class ImpostorProbe
     if not moving
       return
     end if
-    points = sceneObj.getBoundingPoints(camera)
-    if points.count() = 0 or not camera.projectPointsWithDepth(points, m.projected)
-      for each variant in m.variants
+    sets = {
+      box: m.projectSamples(sceneObj.getBoundingPoints(camera), camera),
+      verts: m.projectSamples(m.getModelVertices(sceneObj.drawable as BGE.DrawableModel), camera)
+    }
+    for each variant in m.variants
+      projection = sets[variant.samples]
+      if invalid = projection
         variant.capture = invalid
         variant.counts.hidden++
-      end for
-      return
+      else
+        m.observeVariant(variant, projection.xs, projection.ys, projection.direction)
+      end if
+    end for
+  end sub
+
+  ' Canvas x and y of each point, and the direction from the camera to their centre, or
+  ' invalid if any point won't project.
+  private function projectSamples(points as BGE.Math.Vector[], camera as BGE.Camera3d) as roAssociativeArray
+    if points.count() = 0 or not camera.projectPointsWithDepth(points, m.projected)
+      return invalid
     end if
     xs = [] as float[]
     ys = [] as float[]
@@ -55,11 +72,22 @@ class ImpostorProbe
     centre = BGE.Math.VectorOps.scale(centre, 1.0 / points.count())
     direction = BGE.Math.VectorOps.subtract(centre, camera.position)
     BGE.Math.VectorOps.normalize(direction)
+    return {xs: xs, ys: ys, direction: direction}
+  end function
 
-    for each variant in m.variants
-      m.observeVariant(variant, xs, ys, direction)
-    end for
-  end sub
+  ' The model's vertices in world space, once - the chapel is static.
+  private function getModelVertices(drawable as BGE.DrawableModel) as BGE.Math.Vector[]
+    if invalid = m.modelVertices
+      matrix = BGE.Math.Matrix44.multiply(drawable.transformationMatrix, drawable.getOwnerTransformationMatrix())
+      m.modelVertices = []
+      for each face in drawable.model.faces
+        for each vert in face.vertices
+          m.modelVertices.push(BGE.Math.Matrix44.multVecMatrix(vert, matrix))
+        end for
+      end for
+    end if
+    return m.modelVertices
+  end function
 
   private sub observeVariant(variant as roAssociativeArray, xs as float[], ys as float[], direction as BGE.Math.Vector)
     capture = variant.capture
@@ -103,7 +131,7 @@ class ImpostorProbe
         drawn = 1
       end if
       estimate = ((counts.scale + counts.rotate) * m.blitMs + counts.pin * m.pinMs + counts.redraw * m.redrawMs) / drawn
-      line = "tol " + variant.tolerance.ToStr() + "px angle " + variant.maxAngleDegrees.ToStr() + "deg:"
+      line = variant.samples + " tol " + variant.tolerance.ToStr() + "px:"
       line += " scale " + m.percent(counts.scale, drawn) + " rotate " + m.percent(counts.rotate, drawn)
       line += " pin " + m.percent(counts.pin, drawn) + " redraw " + m.percent(counts.redraw, drawn)
       line += " | est " + m.format(estimate) + "ms vs " + m.format(m.redrawMs) + "ms (hidden " + counts.hidden.ToStr() + ")"

@@ -1,6 +1,7 @@
 # Model impostors (#345)
 
-Status: investigation, not implemented.
+Status: investigation, not implemented. The hit-rate probe (see [Results](#results)) says
+it isn't worth building for terrain's chapel.
 
 ## Problem
 
@@ -106,7 +107,7 @@ This would replace `SceneObjectModel.attemptTransformTempBitmap()`'s pure-zoom c
 per-face raster reuse (`drawFaceWithReuse()`) stays as the next fallback after the
 impostor and before a full redraw.
 
-## Expected gain, and what to measure first
+## Expected gain, and what to measure first (before the probe)
 
 If the impostor held for most moving frames in terrain, the chapel's ~13ms would drop to
 under 1ms (scale fit) or ~4.5ms (corner pin) - roughly 8-12ms of a ~73ms moving frame.
@@ -114,6 +115,44 @@ The unknown is the hit rate: how many moving frames stay under the tolerance and
 limits along terrain's profile path. The first prototype step should be to compute the
 fits and log hit rates per tolerance, without drawing through them, using the existing
 `profile=stages` path.
+
+## Results
+
+`examples/terrain` `--param profile=impostor` (`ImpostorProbe.bs`, fits from
+`BGE.ImpostorFit`) flies the profile path once with fastShrink and, for every moving frame,
+simulates the reuse loop above without drawing through it: fit the capture to this frame,
+take the first fit under the tolerance, otherwise count a redraw and recapture. Roku Ultra,
+the chapel on screen every moving frame (~12fps along this path):
+
+| samples | tolerance | scale | rotate | pin | redraw | est. chapel ms/frame (vs 13) |
+| --- | --- | --- | --- | --- | --- | --- |
+| box corners | 1px | 5% | 0% | 1% | 93% | 12.2 |
+| box corners | 2px | 14% | 0% | 1% | 84% | 11.1 |
+| box corners | 4px | 27% | 0% | 0% | 72% | 9.5 |
+| box corners | 8px | 48% | 2% | 1% | 49% | 6.7 |
+| model vertices | 1px | 3% | 2% | 0% | 94% | 12.3 |
+| model vertices | 2px | 15% | 0% | 0% | 85% | 11.1 |
+| model vertices | 4px | 26% | 1% | 0% | 73% | 9.7 |
+| model vertices | 8px | 45% | 0% | 0% | 54% | 7.3 |
+
+The estimate uses 13ms for a redraw, 4.5ms for a pin and 0.5ms for a scaled blit.
+
+- The view-angle limit (2, 5 and 10 degrees in a first run) never decided anything - the
+  pixel tolerance always ran out first.
+- The corner pin almost never rescues a frame the scale fit missed. The error isn't a 2D
+  warp but parallax: the chapel is big and close (~330 units tall at ~300 away), and the
+  camera moves several units a frame here, so its near and far parts slide apart within a
+  frame or two.
+- Fitting every vertex instead of the box corners gives the same answer, so the box isn't
+  what makes it pessimistic.
+- At a tolerance that wouldn't show (1-2px) it saves ~1-2ms of a ~73ms moving frame. 4px
+  saves ~3.5ms, 8px ~6ms, but a model jumping 8px when it's redrawn would be visible.
+
+So it isn't worth building for a model like the chapel. It would pay for models that are
+small or far away on screen (less parallax per unit of camera motion), and at higher frame
+rates (less motion per frame) - neither is where terrain spends its time. If it's revisited,
+gate it on the model's depth extent relative to its distance, and drop the corner pin -
+the scale fit does nearly all the work.
 
 ## Not covered
 
