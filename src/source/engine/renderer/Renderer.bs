@@ -154,6 +154,14 @@ namespace BGE
     private occlusionMsLastFrame as integer = 0
     private occlusionTestsLastFrame as integer = 0
     private occlusionTimer as roTimespan = CreateObject("roTimespan")
+    private occlusionBuildMsLastFrame as integer = 0
+
+    ' When true, render() times each of its stages, and each scene object type's draws -
+    ' see getStageMsLastFrame(). Costs a timer read per scene object drawn, so leave it off
+    ' outside profiling.
+    public profileStages as boolean = false
+    private stageMs as roAssociativeArray = {}
+    private stageCounts as roAssociativeArray = {}
     ' Scratch for projected occlusion test points: x, y, depth per point.
     private occlusionProjected as float[] = []
     private occlusionDepthPoint as BGE.Math.Vector[] = [invalid]
@@ -698,7 +706,13 @@ namespace BGE
         end if
         m.syncOccluderFlag(sceneObj)
         if sceneObj.isEnabled()
-          sceneObj.update(m.camera)
+          if m.profileStages
+            start = m.occlusionTimer.TotalMilliseconds()
+            sceneObj.update(m.camera)
+            m.addStageMs("update" + sceneObj.type, m.occlusionTimer.TotalMilliseconds() - start)
+          else
+            sceneObj.update(m.camera)
+          end if
           if sceneObj.depthChangedThisFrame
             m.needsDepthSort = true
           end if
@@ -717,6 +731,7 @@ namespace BGE
       wasActive = m.occlusionWasActive
       m.occludedCountLastFrame = 0
       m.occlusionTestsLastFrame = 0
+      m.occlusionBuildMsLastFrame = 0
       if not m.occlusionCullingEnabled or not m.hasOccluders() or not m.camera.supportsOcclusionCulling()
         if wasActive
           for each sceneObj in m.sceneObjects
@@ -747,7 +762,9 @@ namespace BGE
       end for
 
       if needsBuild
+        buildStart = m.occlusionTimer.TotalMilliseconds()
         m.buildOcclusionMap()
+        m.occlusionBuildMsLastFrame = m.occlusionTimer.TotalMilliseconds() - buildStart
       end if
 
       for each sceneObj in m.sceneObjects
@@ -968,12 +985,62 @@ namespace BGE
         if sceneObj.isEnabled()
           if sceneObj.occludedThisFrame
             sceneObj.markSkippedOccluded(m.camera)
+          else if m.profileStages
+            m.drawAndTime(sceneObj)
           else
             sceneObj.draw(m)
           end if
         end if
       end for
     end sub
+
+    ' Draws one scene object, adding its time to its type's "draw<type>" stage.
+    private sub drawAndTime(sceneObj as SceneObject)
+      start = m.occlusionTimer.TotalMilliseconds()
+      sceneObj.draw(m)
+      m.addStageMs("draw" + sceneObj.type, m.occlusionTimer.TotalMilliseconds() - start)
+    end sub
+
+    ' Adds `ms` to a stage while profileStages is on - see getStageMsLastFrame(). For the
+    ' engine's own profiling.
+    '
+    ' @param {string} name
+    ' @param {integer} ms
+    sub addStageMs(name as string, ms as integer)
+      if invalid = m.stageMs[name]
+        m.stageMs[name] = 0
+        m.stageCounts[name] = 0
+      end if
+      m.stageMs[name] += ms
+      m.stageCounts[name]++
+    end sub
+
+    ' Milliseconds each stage of the last render() took, by name, while profileStages is
+    ' on: "update", "occlusion" (of which "occlusionBuild" rebuilt the span map), "sort"
+    ' (overlap clusters and the depth sort), "skybox", "planes", "objects" (everything else,
+    ' including the static geometry walk), "clusters" and "finish", plus "draw<type>" for
+    ' each SceneObjectType drawn (e.g. "drawModel", "drawBillboard") - those are part of
+    ' "objects". Readings are whole milliseconds, so average them over many frames.
+    '
+    ' @return {roAssociativeArray} stage name to milliseconds
+    ' A free-running millisecond clock for timing stages - see addStageMs().
+    '
+    ' @return {integer}
+    function getProfileClockMs() as integer
+      return m.occlusionTimer.TotalMilliseconds()
+    end function
+
+    function getStageMsLastFrame() as roAssociativeArray
+      return m.stageMs
+    end function
+
+    ' How many times each stage in getStageMsLastFrame() ran last frame - for a
+    ' "draw<type>" stage, how many objects of that type were drawn.
+    '
+    ' @return {roAssociativeArray} stage name to count
+    function getStageCountsLastFrame() as roAssociativeArray
+      return m.stageCounts
+    end function
 
     ' Whether any static geometry has ever been registered on this renderer - true even
     ' if every static object has since been removed (see hasStaticGeometry's own doc
@@ -1038,12 +1105,26 @@ namespace BGE
     ' this renderer's surface. `Game` calls this for you each frame; call it yourself
     ' only when using a Renderer without a Game.
     sub render()
+      profile = m.profileStages
+      if profile
+        m.stageMs = {}
+        m.stageCounts = {}
+      end if
+      ' a free-running timer, so both readings round down alike and averages stay unbiased
+      lap = m.occlusionTimer.TotalMilliseconds()
       m.applyOccluderDrawPolicy()
       m.updateSceneObjects()
-      ' a free-running timer, so both readings round down alike and averages stay unbiased
       occlusionStart = m.occlusionTimer.TotalMilliseconds()
+      if profile
+        m.addStageMs("update", occlusionStart - lap)
+      end if
       m.updateOcclusion()
-      m.occlusionMsLastFrame = m.occlusionTimer.TotalMilliseconds() - occlusionStart
+      lap = m.occlusionTimer.TotalMilliseconds()
+      m.occlusionMsLastFrame = lap - occlusionStart
+      if profile
+        m.addStageMs("occlusion", m.occlusionMsLastFrame)
+        m.addStageMs("occlusionBuild", m.occlusionBuildMsLastFrame)
+      end if
 
       if m.computeOverlapClusters
         clusterResult = BGE.DepthSort.groupIntoClusters(m.getClusterCandidates(), m, m.lastClusterSortOrder)
@@ -1094,12 +1175,14 @@ namespace BGE
         end for
         m.needsDepthSort = false
       end if
+      lap = m.lapStage("sort", lap)
 
       for each sceneObj in m.sceneObjects
         if sceneObj.isEnabled() and sceneObj.type = SceneObjectType.Skybox
           sceneObj.draw(m)
         end if
       end for
+      lap = m.lapStage("skybox", lap)
 
       'TODO - Do proper occlusion culling
       ' draw planes first
@@ -1116,7 +1199,7 @@ namespace BGE
           sceneObj.draw(m)
         end if
       end for
-
+      lap = m.lapStage("planes", lap)
 
       ' draw sceneObjects in sorted order - the static-geometry BSP walk (see
       ' drawStaticAndDynamicSceneObjects) once anything has ever been marked static on
@@ -1134,14 +1217,18 @@ namespace BGE
               sceneObj.markSkippedBehindCamera(m.camera)
             else if sceneObj.occludedThisFrame
               sceneObj.markSkippedOccluded(m.camera)
+            else if profile
+              m.drawAndTime(sceneObj)
             else
               sceneObj.draw(m)
             end if
           end if
         end for
       end if
+      lap = m.lapStage("objects", lap)
 
       m.drawPendingClusterPrimitives()
+      lap = m.lapStage("clusters", lap)
 
       if m.showOcclusionDebug
         m.drawOcclusionDebug()
@@ -1162,7 +1249,18 @@ namespace BGE
       if type(m.draw2d) <> "roScreen"
         m.draw2d.Finish()
       end if
+      m.lapStage("finish", lap)
     end sub
+
+    ' Records the time since `lap` as a stage while profileStages is on, and returns now.
+    private function lapStage(name as string, lap as integer) as integer
+      if not m.profileStages
+        return lap
+      end if
+      now = m.occlusionTimer.TotalMilliseconds()
+      m.addStageMs(name, now - lap)
+      return now
+    end function
 
 
     ' Draws the covered spans as translucent rectangles and each hidden object's tested box in red.
