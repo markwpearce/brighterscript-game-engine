@@ -1,0 +1,206 @@
+import "../../math/math.bs"
+
+namespace BGE.ImpostorFit
+
+  ' How well one 2D mapping takes a set of captured canvas points to where they are now -
+  ' see specs/2026-10-22-model-impostors-design.md. `residual` is the farthest any point
+  ' lands from where it really is, in pixels; invalid params mean the fit isn't usable.
+  interface FitResult
+    residual as float
+    ' scale + translate: x' = scaleX * x + offsetX, y' = scaleY * y + offsetY
+    ' rotate + scale: x' = rotate(scale(x - centre)) + centre', rotation in radians
+    ' affine: x' = a * x + b * y + c, y' = d * x + e * y + f
+    params as roAssociativeArray
+  end interface
+
+  ' Fits x' = sx * x + tx and y' = sy * y + ty by least squares - what a single
+  ' DrawScaledObject can draw. A mirrored or collapsed axis isn't usable.
+  '
+  ' @param {float[]} fromX captured x of each point
+  ' @param {float[]} fromY captured y of each point
+  ' @param {float[]} toX current x of each point
+  ' @param {float[]} toY current y of each point
+  ' @return {BGE.ImpostorFit.FitResult}
+  function fitScaleTranslate(fromX as float[], fromY as float[], toX as float[], toY as float[]) as FitResult
+    xAxis = fitAxis(fromX, toX)
+    yAxis = fitAxis(fromY, toY)
+    if invalid = xAxis or invalid = yAxis
+      return unusable()
+    end if
+    residual = 0.0
+    for i = 0 to fromX.count() - 1
+      dx = xAxis.scale * fromX[i] + xAxis.offset - toX[i]
+      dy = yAxis.scale * fromY[i] + yAxis.offset - toY[i]
+      residual = BGE.Math.Max(residual, Sqr(dx * dx + dy * dy))
+    end for
+    return {residual: residual, params: {scaleX: xAxis.scale, scaleY: yAxis.scale, offsetX: xAxis.offset, offsetY: yAxis.offset}}
+  end function
+
+  ' Fits a rotation about the points' centre, then a scale along each rotated axis - what a
+  ' single DrawTransformedObject can draw. The rotation comes from the best similarity fit,
+  ' then each axis's scale by least squares, so it isn't the joint optimum but is close for
+  ' the small rotations an impostor sees.
+  '
+  ' @param {float[]} fromX
+  ' @param {float[]} fromY
+  ' @param {float[]} toX
+  ' @param {float[]} toY
+  ' @return {BGE.ImpostorFit.FitResult}
+  function fitRotateScale(fromX as float[], fromY as float[], toX as float[], toY as float[]) as FitResult
+    n = fromX.count()
+    if n < 2
+      return unusable()
+    end if
+    fromCx = mean(fromX)
+    fromCy = mean(fromY)
+    toCx = mean(toX)
+    toCy = mean(toY)
+    cross = 0.0
+    dot = 0.0
+    for i = 0 to n - 1
+      px = fromX[i] - fromCx
+      py = fromY[i] - fromCy
+      qx = toX[i] - toCx
+      qy = toY[i] - toCy
+      cross += px * qy - py * qx
+      dot += px * qx + py * qy
+    end for
+    angle = BGE.Math.Atan2(cross, dot)
+    c = Cos(angle)
+    s = Sin(angle)
+    ' undo the rotation on the current points, then fit a scale per captured axis
+    sumPxQx = 0.0
+    sumPxPx = 0.0
+    sumPyQy = 0.0
+    sumPyPy = 0.0
+    for i = 0 to n - 1
+      px = fromX[i] - fromCx
+      py = fromY[i] - fromCy
+      qx = toX[i] - toCx
+      qy = toY[i] - toCy
+      ux = c * qx + s * qy
+      uy = -s * qx + c * qy
+      sumPxQx += px * ux
+      sumPxPx += px * px
+      sumPyQy += py * uy
+      sumPyPy += py * py
+    end for
+    if sumPxPx = 0 or sumPyPy = 0
+      return unusable()
+    end if
+    scaleX = sumPxQx / sumPxPx
+    scaleY = sumPyQy / sumPyPy
+    if scaleX <= 0 or scaleY <= 0
+      return unusable()
+    end if
+    residual = 0.0
+    for i = 0 to n - 1
+      sx = (fromX[i] - fromCx) * scaleX
+      sy = (fromY[i] - fromCy) * scaleY
+      dx = c * sx - s * sy + toCx - toX[i]
+      dy = s * sx + c * sy + toCy - toY[i]
+      residual = BGE.Math.Max(residual, Sqr(dx * dx + dy * dy))
+    end for
+    return {residual: residual, params: {rotation: angle, scaleX: scaleX, scaleY: scaleY, fromCentreX: fromCx, fromCentreY: fromCy, toCentreX: toCx, toCentreY: toCy}}
+  end function
+
+  ' Fits a general affine map by least squares - what a corner pin of the captured bitmap
+  ' draws, since drawPinnedCorners warps a parallelogram exactly.
+  '
+  ' @param {float[]} fromX
+  ' @param {float[]} fromY
+  ' @param {float[]} toX
+  ' @param {float[]} toY
+  ' @return {BGE.ImpostorFit.FitResult}
+  function fitAffine(fromX as float[], fromY as float[], toX as float[], toY as float[]) as FitResult
+    n = fromX.count()
+    if n < 3
+      return unusable()
+    end if
+    ' centred, so the normal equations stay well conditioned at canvas-sized coordinates
+    fromCx = mean(fromX)
+    fromCy = mean(fromY)
+    toCx = mean(toX)
+    toCy = mean(toY)
+    sxx = 0.0
+    sxy = 0.0
+    syy = 0.0
+    sxu = 0.0
+    syu = 0.0
+    sxv = 0.0
+    syv = 0.0
+    for i = 0 to n - 1
+      px = fromX[i] - fromCx
+      py = fromY[i] - fromCy
+      u = toX[i] - toCx
+      v = toY[i] - toCy
+      sxx += px * px
+      sxy += px * py
+      syy += py * py
+      sxu += px * u
+      syu += py * u
+      sxv += px * v
+      syv += py * v
+    end for
+    det = sxx * syy - sxy * sxy
+    if Abs(det) < 0.000001
+      return unusable()
+    end if
+    a = (sxu * syy - syu * sxy) / det
+    b = (syu * sxx - sxu * sxy) / det
+    d = (sxv * syy - syv * sxy) / det
+    e = (syv * sxx - sxv * sxy) / det
+    ' a mirrored or collapsed map can't be drawn as a corner pin of the captured bitmap
+    if a * e - b * d <= 0
+      return unusable()
+    end if
+    residual = 0.0
+    for i = 0 to n - 1
+      px = fromX[i] - fromCx
+      py = fromY[i] - fromCy
+      dx = a * px + b * py + toCx - toX[i]
+      dy = d * px + e * py + toCy - toY[i]
+      residual = BGE.Math.Max(residual, Sqr(dx * dx + dy * dy))
+    end for
+    c = toCx - a * fromCx - b * fromCy
+    f = toCy - d * fromCx - e * fromCy
+    return {residual: residual, params: {a: a, b: b, c: c, d: d, e: e, f: f}}
+  end function
+
+  function fitAxis(fromValues as float[], toValues as float[]) as roAssociativeArray
+    n = fromValues.count()
+    if n < 2
+      return invalid
+    end if
+    fromMean = mean(fromValues)
+    toMean = mean(toValues)
+    covariance = 0.0
+    variance = 0.0
+    for i = 0 to n - 1
+      p = fromValues[i] - fromMean
+      covariance += p * (toValues[i] - toMean)
+      variance += p * p
+    end for
+    if variance = 0
+      return invalid
+    end if
+    scale = covariance / variance
+    if scale <= 0
+      return invalid
+    end if
+    return {scale: scale, offset: toMean - scale * fromMean}
+  end function
+
+  function mean(values as float[]) as float
+    total = 0.0
+    for each value in values
+      total += value
+    end for
+    return total / values.count()
+  end function
+
+  function unusable() as FitResult
+    return {residual: 1000000.0, params: invalid}
+  end function
+
+end namespace
