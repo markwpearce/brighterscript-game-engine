@@ -5,6 +5,7 @@ import "../../../utils/colors.bs"
 import "../../drawables/Model3d.bs"
 import "../occlusion/OccluderPanels.bs"
 import "../Renderer.bs"
+import "../ImpostorFit.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
 import "SceneObjectBillboard.bs"
@@ -48,6 +49,15 @@ namespace BGE
     ' face instead reuses its own cached raster (drawFaceWithReuse()'s reuse branch).
     ' See attemptTransformTempBitmap()'s gate on it.
     private lastDrawWasFullyFresh as boolean = true
+
+    ' The impostor's capture (see DrawableModel.impostorTolerance): the bounding box
+    ' corners' canvas x/y when the temp bitmap was last drawn fully fresh, and that
+    ' bitmap's canvas origin. invalid when there's nothing to reuse.
+    private impostorCapture as roAssociativeArray = invalid
+    private impostorStaleFrames as integer = 0
+    private impostorProjected as float[] = []
+    ' a reused rendering is redrawn after this many frames whatever the fit
+    private impostorMaxStaleFrames as integer = 30
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -301,7 +311,7 @@ namespace BGE
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw)
+          thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and m.drawable.impostorTolerance <= 0)
         else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
           ' Outlines are cheap already (no texture warp) - not worth caching, and a
           ' debug wireframe shouldn't lag a frame behind the model's real position.
@@ -311,7 +321,64 @@ namespace BGE
         end if
         someWorked = thisWorked or someWorked
       end for
+      if m.drawable.impostorTolerance > 0
+        m.captureImpostor(rendererObj, canvasPointsTopLeftBound)
+      end if
       return {worked: someWorked, didFastDraw: allowFastDraw}
+    end function
+
+    private sub captureImpostor(rendererObj as BGE.Renderer, origin as BGE.Math.Vector)
+      m.impostorCapture = invalid
+      m.impostorStaleFrames = 0
+      samples = m.projectImpostorSamples(rendererObj)
+      if invalid = samples or not m.lastDrawWasFullyFresh
+        return
+      end if
+      samples.originX = origin.x
+      samples.originY = origin.y
+      m.impostorCapture = samples
+    end sub
+
+    ' The bounding box corners' canvas x and y this frame, or invalid if one won't project.
+    private function projectImpostorSamples(rendererObj as BGE.Renderer) as roAssociativeArray
+      if rendererObj.camera.name <> "Camera3d"
+        return invalid
+      end if
+      points = m.getBoundingPointsThisFrame(rendererObj.camera)
+      if points.count() = 0 or not (rendererObj.camera as Camera3d).projectPointsWithDepth(points, m.impostorProjected)
+        return invalid
+      end if
+      xs = [] as float[]
+      ys = [] as float[]
+      for i = 0 to points.count() - 1
+        xs.push(m.impostorProjected[i * 3])
+        ys.push(m.impostorProjected[i * 3 + 1])
+      end for
+      return {xs: xs, ys: ys}
+    end function
+
+    ' The scaled blit of the captured rendering that fits this frame, or invalid.
+    private function attemptImpostor(renderObj as Renderer) as TransformTempBitmapDetails
+      capture = m.impostorCapture
+      if invalid = capture or m.drawsOccluderExactly() or m.impostorStaleFrames >= m.impostorMaxStaleFrames
+        return invalid
+      end if
+      samples = m.projectImpostorSamples(renderObj)
+      if invalid = samples
+        return invalid
+      end if
+      fit = BGE.ImpostorFit.fitScaleTranslate(capture.xs, capture.ys, samples.xs, samples.ys)
+      if fit.residual > m.drawable.impostorTolerance
+        return invalid
+      end if
+      m.impostorStaleFrames++
+      p = fit.params
+      return {
+        origin: BGE.Math.VectorOps.create(p.scaleX * capture.originX + p.offsetX, p.scaleY * capture.originY + p.offsetY),
+        rotation: 0,
+        scaleX: p.scaleX,
+        scaleY: p.scaleY
+      }
     end function
 
 
@@ -470,6 +537,9 @@ namespace BGE
     ' than reused per-face (drawFaceWithReuse()) - stretching an already-patchwork bitmap
     ' would compound each face's own staleness/drift. See #163.
     protected override function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      if m.drawable.impostorTolerance > 0
+        return m.attemptImpostor(renderObj)
+      end if
       if not m.lastDrawWasFullyFresh
         return invalid
       end if
