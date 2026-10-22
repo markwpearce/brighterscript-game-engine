@@ -19,6 +19,8 @@ class TerrainProfiler
 
   results = [] as string[]
   done = false
+  ' Whether each frame is also broken down by render stage (Renderer.profileStages).
+  profileStages = false
 
   ' Where WorldScene.addChapel() puts it.
   private chapelX = 80.0
@@ -32,10 +34,16 @@ class TerrainProfiler
   private pathFrame = -1
   private stats as roAssociativeArray
 
-  sub new(game as BGE.Game)
+  sub new(game as BGE.Game, profileStages = false as boolean)
     m.game = game
     m.camera = game.canvas.renderer.camera as BGE.Camera3d
     m.startPosition = BGE.Math.VectorOps.copy(m.camera.position)
+    m.profileStages = profileStages
+    if profileStages
+      ' just occlusion off and the default policy, since timing every draw adds its own cost
+      m.configs = [m.configs[0], m.configs[2]]
+      game.canvas.renderer.profileStages = true
+    end if
   end sub
 
   ' Call from the scene's onUpdate(). dt is how long the previous frame took.
@@ -71,6 +79,28 @@ class TerrainProfiler
     m.addSample(m.pathFrame, "occluded", renderer.getOccludedCountLastFrame())
     m.addSample(m.pathFrame, "occlusionMs", renderer.getOcclusionMsLastFrame())
     m.addSample(m.pathFrame, "tests", renderer.getOcclusionTestsLastFrame())
+    if m.profileStages
+      m.addStageSamples(m.pathFrame, renderer)
+    end if
+  end sub
+
+  ' Adds up each render stage's time (and count) over the segment, so averages are per frame.
+  private sub addStageSamples(frame as integer, renderer as BGE.Renderer)
+    segment = m.getSegment(frame)
+    if invalid = segment
+      return
+    end if
+    stageMs = renderer.getStageMsLastFrame()
+    stageCounts = renderer.getStageCountsLastFrame()
+    for each name in stageMs
+      if invalid = segment.stageMs[name]
+        segment.stageMs[name] = 0
+        segment.stageCounts[name] = 0
+      end if
+      segment.stageMs[name] += stageMs[name]
+      segment.stageCounts[name] += stageCounts[name]
+    end for
+    segment.stageFrames++
   end sub
 
   function getStatusText() as string
@@ -96,14 +126,22 @@ class TerrainProfiler
     renderer.occlusionCullingEnabled = config.occlusion
     renderer.occluderDrawPolicy = config.policy
     m.stats = {
-      moving: {ms: [], drawCalls: [], occluded: [], occlusionMs: [], tests: []},
-      still: {ms: [], drawCalls: [], occluded: [], occlusionMs: [], tests: []}
+      moving: {ms: [], drawCalls: [], occluded: [], occlusionMs: [], tests: [], stageMs: {}, stageCounts: {}, stageFrames: 0},
+      still: {ms: [], drawCalls: [], occluded: [], occlusionMs: [], tests: [], stageMs: {}, stageCounts: {}, stageFrames: 0}
     }
   end sub
 
   private sub addSample(frame as integer, key as string, value as float)
+    segment = m.getSegment(frame)
+    if invalid <> segment
+      segment[key].push(value)
+    end if
+  end sub
+
+  ' The stats a path frame's samples go into, or invalid while settling or warming up.
+  private function getSegment(frame as integer) as roAssociativeArray
     if m.configIndex < 0
-      return
+      return invalid
     end if
     segment = m.stats.moving
     segmentFrame = frame
@@ -111,10 +149,11 @@ class TerrainProfiler
       segment = m.stats.still
       segmentFrame = frame - m.moveFrames
     end if
-    if segmentFrame >= m.warmupFrames
-      segment[key].push(value)
+    if segmentFrame < m.warmupFrames
+      return invalid
     end if
-  end sub
+    return segment
+  end function
 
   private sub finishConfig()
     if m.configIndex < 0
@@ -125,7 +164,28 @@ class TerrainProfiler
     line = m.configs[m.configIndex].name + ": moving " + m.describeSegment(moving) + " | still " + m.describeSegment(still)
     print "[terrain profile] " + line
     m.results.push(line)
+    if m.profileStages
+      name = m.configs[m.configIndex].name
+      print "[terrain profile] " + name + " stages moving: " + m.describeStages(moving)
+      print "[terrain profile] " + name + " stages still: " + m.describeStages(still)
+    end if
   end sub
+
+  ' Each stage's average ms per frame, with how many objects a draw stage drew per frame.
+  private function describeStages(segment as roAssociativeArray) as string
+    frames = BGE.Math.Max(1, segment.stageFrames)
+    parts = [] as string[]
+    names = segment.stageMs.Keys()
+    names.Sort()
+    for each name in names
+      part = name + " " + m.format(segment.stageMs[name] / frames)
+      if name.StartsWith("draw") or name.StartsWith("onScreenCheck") or name.StartsWith("canvasPosition") or name.StartsWith("performDraw") or (name.StartsWith("update") and name <> "update")
+        part += " (x" + m.format(segment.stageCounts[name] / frames) + ")"
+      end if
+      parts.push(part)
+    end for
+    return parts.Join(", ")
+  end function
 
   ' Averages for one segment; occlusion ms and tests are the occlusion pass's own cost.
   private function describeSegment(segment as roAssociativeArray) as string

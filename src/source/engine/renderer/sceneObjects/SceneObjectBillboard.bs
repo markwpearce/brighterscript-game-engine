@@ -49,6 +49,10 @@ namespace BGE
     protected canvasPosition as BGE.Math.Vector
 
     private isMirror = false
+    ' computeBillboardWorldCorners()'s last result and what it was computed from
+    private billboardCornersCache as roAssociativeArray = invalid
+    ' Scratch for projecting the directScaled quad's corners: x, y, depth per corner.
+    private cameraFacingProjected as float[] = []
 
     private surfaceToCameraDotProduct as float
     private surfaceNormal as BGE.Math.Vector
@@ -772,17 +776,25 @@ namespace BGE
       width = size.width
       height = size.height
       pretrans = m.drawable.getPretranslation()
+      ' they only depend on the transform and size, not the camera, so a still object's
+      ' corners are reused while the camera moves
+      cache = m.billboardCornersCache
+      if invalid <> cache and cache.transformVersion = m.transformVersion and cache.width = width and cache.height = height and cache.pretransX = pretrans.x and cache.pretransY = pretrans.y
+        return cache.corners
+      end if
       topLeft = BGE.Math.VectorOps.create(pretrans.x, -pretrans.y, 0)
       topRight = BGE.Math.VectorOps.add(topLeft, BGE.Math.VectorOps.create(width, 0, 0))
       bottomLeft = BGE.Math.VectorOps.add(topLeft, BGE.Math.VectorOps.create(0, -height, 0))
       bottomRight = BGE.Math.VectorOps.add(topLeft, BGE.Math.VectorOps.create(width, -height, 0))
 
-      return [
+      corners = [
         BGE.Math.Matrix44.multVecMatrix(topLeft, m.transformationMatrix),
         BGE.Math.Matrix44.multVecMatrix(topRight, m.transformationMatrix),
         BGE.Math.Matrix44.multVecMatrix(bottomLeft, m.transformationMatrix),
         BGE.Math.Matrix44.multVecMatrix(bottomRight, m.transformationMatrix)
       ]
+      m.billboardCornersCache = {transformVersion: m.transformVersion, width: width, height: height, pretransX: pretrans.x, pretransY: pretrans.y, corners: corners}
+      return corners
     end function
 
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -932,8 +944,22 @@ namespace BGE
     ' @param {Renderer} rendererObj
     ' @return {boolean} true if every corner projected onto the canvas
     protected function updateCanvasPointsForCameraFacingQuad(rendererObj as Renderer) as boolean
+      corners = m.getCameraFacingQuadWorldCorners(rendererObj.camera)
+      if rendererObj.camera.name = "Camera3d"
+        ' the same canvas points as worldPointToCanvasPoint(), in one cheaper pass
+        projected = m.cameraFacingProjected
+        if not (rendererObj.camera as Camera3d).projectPointsWithDepth(corners, projected)
+          return false
+        end if
+        canvasPoints = m.canvasPoints
+        m.setCanvasCorner(canvasPoints.topLeft, projected, 0)
+        m.setCanvasCorner(canvasPoints.topRight, projected, 3)
+        m.setCanvasCorner(canvasPoints.bottomLeft, projected, 6)
+        m.setCanvasCorner(canvasPoints.bottomRight, projected, 9)
+        return true
+      end if
       index = 0
-      for each cornerWorldPoint in m.getCameraFacingQuadWorldCorners(rendererObj.camera)
+      for each cornerWorldPoint in corners
         canvasPoint = rendererObj.worldPointToCanvasPoint(cornerWorldPoint)
         if invalid = canvasPoint
           return false
@@ -943,6 +969,12 @@ namespace BGE
       end for
       return true
     end function
+
+    private sub setCanvasCorner(corner as BGE.Math.Vector, projected as float[], offset as integer)
+      corner.x = projected[offset]
+      corner.y = projected[offset + 1]
+      corner.z = 0
+    end sub
 
     ' The world corners of the camera-facing quad directScaled draws - see
     ' updateCanvasPointsForCameraFacingQuad().
