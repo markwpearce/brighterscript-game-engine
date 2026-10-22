@@ -79,8 +79,9 @@ for what's drawn (not a strict one - a concave model's interior can do slightly 
   (it's camera-facing, see `getOutwardNormalFacingAmount`) all depend on the direction from
   the camera to the model. Redraw once that direction has turned more than a few degrees
   from capture (a `RenderQualitySettings` knob), even if the silhouette still fits.
-- **Staleness**: reuse `DrawableModel.maxStaleFrames`, so a model is redrawn fully every N
-  frames anyway.
+- **Staleness**: a separate frame limit, so a model is redrawn fully every N frames anyway.
+  Not `DrawableModel.maxStaleFrames` - that defaults to 1 for per-face reuse, which would
+  redraw the impostor every other frame.
 - **Quality**: a `qualityVersion` change redraws, as today.
 - **Occluders**: a `fastShrink` occluder's claim already shrinks by the stretch threshold
   while it may run (`getOccluderInset()`); add the impostor tolerance there. `exact` takes
