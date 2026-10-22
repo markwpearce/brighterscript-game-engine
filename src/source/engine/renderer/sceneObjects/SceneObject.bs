@@ -372,23 +372,24 @@ namespace BGE
       m.isFirstFrameSinceEnabled = (m.isEnabled() and not m.wasEnabledLastFrame)
       sceneObjDrawMode = m.getActualDrawMode(cameraObj)
       drawModeChanged = m.drawModeChanged(sceneObjDrawMode)
-      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled or m.geometryChanged() or drawModeChanged
+      geometryChanged = m.geometryChanged()
+      forceRecompute = objMovedLastFrame or not m.hasValidWorldPosition or m.isFirstFrameSinceEnabled or geometryChanged or drawModeChanged
       if forceRecompute
         m.drawable.computeTransformationMatrix()
         BGE.math.Matrix44.setFrom(m.transformationMatrix, BGE.math.Matrix44.multiply(m.drawable.transformationMatrix, m.drawable.getOwnerTransformationMatrix()))
         m.hasValidWorldPosition = m.updateWorldPosition(sceneObjDrawMode)
       end if
-      m.depthChangedThisFrame = cameraObj.movedLastFrame() or objMovedLastFrame or drawModeChanged
+      ' a geometry change can move the depth point (a model's or polygon's centre) in place
+      m.depthChangedThisFrame = cameraObj.movedLastFrame() or objMovedLastFrame or drawModeChanged or geometryChanged
       if m.depthChangedThisFrame
         m.depthPosition = m.getPositionForCameraDistance(sceneObjDrawMode)
         m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.depthPosition)
       end if
       ' a re-enabled object missed every update while disabled, and a resize moves its corners
-      if m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or m.geometryChanged() or cameraObj.farDistanceChangedThisFrame()
+      if m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or cameraObj.farDistanceChangedThisFrame()
         if cameraObj.fadesWithDistance() and m.participatesInDistanceFade()
           ' nearest bounding point, so a large object near the camera doesn't fade by its far end
-          m.boundingPointsThisFrame = m.getBoundingPoints(cameraObj)
-          m.distanceFadeAlpha = cameraObj.getDistanceFadeAlphaForPoints(m.boundingPointsThisFrame)
+          m.distanceFadeAlpha = cameraObj.getDistanceFadeAlphaForPoints(m.getBoundingPointsThisFrame(cameraObj))
         else
           m.distanceFadeAlpha = 1.0
         end if
@@ -467,11 +468,10 @@ namespace BGE
     ' @param {Renderer} rendererObj
     ' @return {boolean}
     function occluderChangedThisFrame(rendererObj as Renderer) as boolean
-      drawMode = m.getOccluderDrawMode(rendererObj)
-      contributing = drawMode >= 0
+      contributing = m.canOccludeThisFrame(rendererObj)
       inset = 0.0
       if contributing
-        inset = m.getOccluderInset(rendererObj, drawMode)
+        inset = m.getOccluderInset(rendererObj, m.getOccluderDrawMode(rendererObj))
       end if
       ' the claim grows back once it stops moving, and quality sets the approximations
       changed = contributing <> m.occluderWasContributing or inset <> m.occluderLastInset or rendererObj.qualityVersion <> m.occluderLastQualityVersion
@@ -490,12 +490,13 @@ namespace BGE
       return m.getPositionsForOcclusionTest(cameraObj, m.getActualDrawMode(cameraObj))
     end function
 
-    ' Whether this type can ever be hidden by occluders. Override to return false for a
-    ' type whose drawn extent isn't known before it draws.
+    ' Whether this type can ever be hidden by occluders. False by default, since the
+    ' default bounding points are a single position: a type opts in once its bounding
+    ' points (or getPositionsForOcclusionTest()) cover everything it draws.
     '
     ' @return {boolean}
     function canBeOccluded() as boolean
-      return true
+      return false
     end function
 
     ' Override for a type whose bounding points don't bound what it draws in some mode.
@@ -504,7 +505,18 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {BGE.Math.Vector[]}
     protected function getPositionsForOcclusionTest(cameraObj as Camera, drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
-      return m.getBoundingPoints(cameraObj)
+      return m.getBoundingPointsThisFrame(cameraObj)
+    end function
+
+    ' getBoundingPoints(), computed at most once per frame (update() clears it).
+    '
+    ' @param {Camera} cameraObj
+    ' @return {BGE.Math.Vector[]}
+    protected function getBoundingPointsThisFrame(cameraObj as Camera) as BGE.Math.Vector[]
+      if invalid = m.boundingPointsThisFrame
+        m.boundingPointsThisFrame = m.getBoundingPoints(cameraObj)
+      end if
+      return m.boundingPointsThisFrame
     end function
 
     ' Check if the object is enabled
@@ -744,11 +756,7 @@ namespace BGE
       ' Text) rather than just the anchor. Camera2d then tests those corners' bounding box
       ' against the view, so an object bigger than the view isn't culled once all of its
       ' corners are off screen (issue #258).
-      points = m.boundingPointsThisFrame
-      if invalid = points
-        points = m.getBoundingPoints(cameraObj)
-      end if
-      return cameraObj.isAnyInView(points)
+      return cameraObj.isAnyInView(m.getBoundingPointsThisFrame(cameraObj))
     end function
 
 
@@ -874,36 +882,41 @@ namespace BGE
     ' what an approximate draw path may paint (see appendOccluderPolygons()). 0 by default.
     '
     ' @param {Renderer} rendererObj
-    ' @param {integer} drawMode as returned by getOccluderDrawMode()
+    ' @param {SceneObjectDrawMode} drawMode this frame's, from getOccluderDrawMode()
     ' @return {float}
-    protected function getOccluderInset(rendererObj as Renderer, drawMode as integer) as float
+    protected function getOccluderInset(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as float
       return 0.0
     end function
 
-    ' The draw mode this occluder draws in this frame, or -1 when it can't occlude this
-    ' frame: anything translucent, faded, wireframe, screen-aligned or not drawn because
-    ' its depth point is behind the camera, or no Camera3d.
+    ' Whether this occluder hides anything this frame: not when translucent, faded,
+    ' wireframe, screen-aligned, not drawn because its depth point is behind the camera,
+    ' or the camera can't do occlusion culling.
     '
     ' @param {Renderer} rendererObj
-    ' @return {integer}
-    protected function getOccluderDrawMode(rendererObj as Renderer) as integer
+    ' @return {boolean}
+    protected function canOccludeThisFrame(rendererObj as Renderer) as boolean
       if not m.isOccluder or not m.isEnabled() or m.distanceFadeAlpha < 1 or m.drawable.alpha < 255
-        return -1
+        return false
       end if
       ' Renderer skips drawing anything whose depth point is behind the camera
       if m.negDistanceFromCamera >= 0
-        return -1
+        return false
       end if
       cam = rendererObj.camera
-      if cam.name <> "Camera3d"
-        return -1
+      if not cam.supportsOcclusionCulling()
+        return false
       end if
-      ' resolved, so a matchCamera occluder follows the camera's mode
       drawMode = m.getActualDrawMode(cam)
-      if isWireFrameDrawMode(drawMode) or isScreenAlignedDrawMode(drawMode)
-        return -1
-      end if
-      return drawMode
+      return not isWireFrameDrawMode(drawMode) and not isScreenAlignedDrawMode(drawMode)
+    end function
+
+    ' The draw mode this occluder draws in this frame, resolved so a matchCamera occluder
+    ' follows the camera's mode.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {SceneObjectDrawMode}
+    protected function getOccluderDrawMode(rendererObj as Renderer) as SceneObjectDrawMode
+      return m.getActualDrawMode(rendererObj.camera)
     end function
 
     ' Whether this object should actually be included in this build of the static
