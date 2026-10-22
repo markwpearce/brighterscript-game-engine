@@ -1,3 +1,4 @@
+import "../renderer/occlusion/OcclusionTypes.bs"
 import "../../math/Matrix44.bs"
 import "../../math/vector.bs"
 import "../../utils/colors.bs"
@@ -92,6 +93,26 @@ namespace BGE
     protected noOwnerTransformationMatrix as float[][] = invalid
 
     drawMode as SceneObjectDrawMode = SceneObjectDrawMode.matchCamera
+
+    ' Makes this drawable hide whatever sits behind it (occlusion culling). Only takes
+    ' effect when the owning GameEntity is `isStatic`, the drawable is fully opaque
+    ' (an Image, Rectangle or Model3d), its `drawMode` is an oriented one (not
+    ' directToCamera/directScaled), and the game uses a Camera3d. Otherwise it's ignored
+    ' and the drawable draws as normal.
+    '
+    ' Only flag a drawable that is fully opaque: an Image with no transparent pixels, a
+    ' model with no translucent face colors. The engine can't check this, and anything
+    ' behind a see-through occluder will vanish. Note that a large filled triangle can
+    ' leave dotted single-pixel seams along its internal edges, which occlusion still
+    ' treats as covered.
+    '
+    ' An occluder still uses the renderer's cheaper approximate drawing while it or the
+    ' camera moves. Its covered area shrinks to allow for that, so something just inside
+    ' its edge may keep drawing until the camera stops. See Renderer.occluderDrawPolicy
+    ' to change that trade-off.
+    isOccluder as boolean = false
+
+    private warnedOccluderNotStatic as boolean = false
 
     isShaded as boolean = false
 
@@ -228,6 +249,15 @@ namespace BGE
     function getGame() as BGE.Game
       return m.owner?.game
     end function
+
+    ' Logs once per drawable that isOccluder was ignored because its owner isn't static.
+    sub warnOccluderNeedsStaticOwner()
+      if m.warnedOccluderNotStatic
+        return
+      end if
+      m.warnedOccluderNotStatic = true
+      m.log("Drawable '" + m.name + "' has isOccluder set but its GameEntity isn't isStatic - it will not occlude anything", BGE.Debug.LogLevel.warning)
+    end sub
 
     ' Logs a message through the owner's Game. Does nothing if there is no Game to log to.
     '
@@ -369,24 +399,23 @@ namespace BGE
       end for
     end sub
 
-    ' Whether this drawable was actually drawn (not culled) in at least one of the
-    ' renderers it's registered with, as of the last frame. True before this has ever been
-    ' added to a renderer (nothing to say it's off-screen yet), so game code can use this
-    ' to skip expensive per-frame work for an off-screen entity without it defaulting to
-    ' "invisible" before the first frame ever draws. See GameEntity.isOnScreen() and
-    ' issue #75.
+    ' The most visible state among this drawable's scene objects, in the order visible >
+    ' occluded > offCamera > unknown, as of the last frame. unknown before it has been added
+    ' to a renderer. See GameEntity.getVisibility().
     '
-    ' @return {boolean}
-    function isOnScreen() as boolean
-      if m.sceneObjects.count() = 0
-        return true
-      end if
-      for each item in m.sceneObjects.items()
-        if not (item.value as SceneObject).isCulled()
-          return true
+    ' @return {BGE.VisibilityState}
+    function getVisibility() as BGE.VisibilityState
+      result = BGE.VisibilityState.unknown
+      for each id in m.sceneObjects
+        state = (m.sceneObjects[id] as SceneObject).getVisibility()
+        if state = BGE.VisibilityState.visible
+          return state
+        end if
+        if state > result
+          result = state
         end if
       end for
-      return false
+      return result
     end function
 
   end class

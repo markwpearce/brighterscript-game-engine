@@ -1,0 +1,217 @@
+import "OcclusionTypes.bs"
+import "../../drawables/Model3d.bs"
+import "../../../math/vector.bs"
+import "../../../math/math.bs"
+
+namespace BGE.Occlusion
+
+  ' Merges a static model's coplanar, edge-sharing triangles into convex panels that can
+  ' act as occluders. Panels keep the source triangles' winding.
+  '
+  ' @param {BGE.Model3dFace[]} faces triangles in model-local space
+  ' @return {BGE.OccluderPanel[]} one panel per merged region; degenerate triangles are dropped
+  function buildModelPanels(faces as BGE.Model3dFace[]) as BGE.OccluderPanel[]
+    panels = []
+    size = getFacesSize(faces)
+    if size <= 0
+      return panels
+    end if
+    posEpsilon = size * 0.001
+    planeEpsilon = size * 0.01
+
+    ' Each group is one plane: its unit normal, offset and the polygons found on it.
+    groups = []
+    for each face in faces
+      if face.vertices.Count() <> 3
+        continue for
+      end if
+      v0 = face.vertices[0]
+      cross = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.subtract(face.vertices[1], v0), BGE.Math.VectorOps.subtract(face.vertices[2], v0))
+      if BGE.Math.VectorOps.length(cross) < size * size * 0.000001
+        continue for
+      end if
+      normal = BGE.Math.VectorOps.getNormalizedCopy(cross)
+      offset = BGE.Math.VectorOps.dotProduct(normal, v0)
+
+      target = invalid
+      for each group in groups
+        if BGE.Math.VectorOps.dotProduct(normal, group.normal) > 0.999 and Abs(BGE.Math.VectorOps.dotProduct(group.normal, v0) - group.offset) < planeEpsilon
+          target = group
+          exit for
+        end if
+      end for
+      if target = invalid
+        target = {normal: normal, offset: offset, polygons: []}
+        groups.push(target)
+      end if
+      target.polygons.push([face.vertices[0], face.vertices[1], face.vertices[2]])
+    end for
+
+    for each group in groups
+      mergePolygons(group.polygons, group.normal, posEpsilon)
+      for each polygon in group.polygons
+        cleaned = dropCollinear(polygon, group.normal)
+        if cleaned.Count() >= 3
+          ' merging keeps every source corner, so any not on the cleaned edge is inside it
+          hasInnerVertices = false
+          for each vertex in polygon
+            if not isOnPolygonEdge(vertex, cleaned, posEpsilon)
+              hasInnerVertices = true
+              exit for
+            end if
+          end for
+          panels.push({vertices: cleaned, normal: group.normal, hasInnerVertices: hasInnerVertices})
+        end if
+      end for
+    end for
+    return panels
+  end function
+
+  ' Largest extent of the model along any axis.
+  function getFacesSize(faces as BGE.Model3dFace[]) as float
+    points = []
+    for each face in faces
+      for each v in face.vertices
+        points.push(v)
+      end for
+    end for
+    if points.Count() = 0
+      return 0.0
+    end if
+    bounds = BGE.Math.getBounds(points)
+    extent = BGE.Math.VectorOps.subtract(bounds[1], bounds[0])
+    largest = extent.x
+    if extent.y > largest
+      largest = extent.y
+    end if
+    if extent.z > largest
+      largest = extent.z
+    end if
+    return largest
+  end function
+
+  ' Greedily merges polygons that share an edge while the result stays convex.
+  sub mergePolygons(polygons as BGE.Math.Vector[][], normal as BGE.Math.Vector, epsilon as float)
+    merged = true
+    while merged
+      merged = false
+      for i = 0 to polygons.Count() - 2
+        for j = i + 1 to polygons.Count() - 1
+          candidate = tryMerge(polygons[i], polygons[j], normal, epsilon)
+          if candidate <> invalid
+            polygons[i] = candidate
+            polygons.Delete(j)
+            merged = true
+            exit for
+          end if
+        end for
+        if merged
+          exit for
+        end if
+      end for
+    end while
+  end sub
+
+  ' Joins two polygons along a shared edge (walked in opposite directions, as same-winding
+  ' neighbours do), or returns invalid when they share none or the union isn't convex.
+  function tryMerge(p as BGE.Math.Vector[], q as BGE.Math.Vector[], normal as BGE.Math.Vector, epsilon as float) as BGE.Math.Vector[]
+    pCount = p.Count()
+    qCount = q.Count()
+    for i = 0 to pCount - 1
+      a = p[i]
+      b = p[(i + 1) mod pCount]
+      for j = 0 to qCount - 1
+        if not isSamePoint(q[j], b, epsilon) or not isSamePoint(q[(j + 1) mod qCount], a, epsilon)
+          continue for
+        end if
+        result = []
+        for k = 0 to i
+          result.push(p[k])
+        end for
+        for k = 2 to qCount - 1
+          result.push(q[(j + k) mod qCount])
+        end for
+        for k = i + 1 to pCount - 1
+          result.push(p[k])
+        end for
+        cleaned = dropCollinear(result, normal)
+        if cleaned.Count() >= 3 and isConvex(cleaned, normal)
+          return result
+        end if
+        return invalid
+      end for
+    end for
+    return invalid
+  end function
+
+  ' Whether `point` lies within `epsilon` of one of the polygon's edges.
+  function isOnPolygonEdge(point as BGE.Math.Vector, polygon as BGE.Math.Vector[], epsilon as float) as boolean
+    count = polygon.Count()
+    for i = 0 to count - 1
+      a = polygon[i]
+      edge = BGE.Math.VectorOps.subtract(polygon[(i + 1) mod count], a)
+      lengthSquared = BGE.Math.VectorOps.dotProduct(edge, edge)
+      t = 0.0
+      if lengthSquared > 0
+        t = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, a), edge) / lengthSquared
+        t = BGE.Math.Max(0.0, BGE.Math.Min(1.0, t))
+      end if
+      closest = BGE.Math.VectorOps.add(a, BGE.Math.VectorOps.scale(edge, t))
+      if isSamePoint(point, closest, epsilon)
+        return true
+      end if
+    end for
+    return false
+  end function
+
+  function isSamePoint(a as BGE.Math.Vector, b as BGE.Math.Vector, epsilon as float) as boolean
+    return BGE.Math.VectorOps.length(BGE.Math.VectorOps.subtract(a, b)) <= epsilon
+  end function
+
+  ' The turn at b (coming from a, going to c), signed against the plane normal and
+  ' scaled by the edge lengths so it is the sine of the angle.
+  function getTurnSine(a as BGE.Math.Vector, b as BGE.Math.Vector, c as BGE.Math.Vector, normal as BGE.Math.Vector) as float
+    e1 = BGE.Math.VectorOps.subtract(b, a)
+    e2 = BGE.Math.VectorOps.subtract(c, b)
+    lengths = BGE.Math.VectorOps.length(e1) * BGE.Math.VectorOps.length(e2)
+    if lengths = 0
+      return 0.0
+    end if
+    return BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.crossProduct(e1, e2), normal) / lengths
+  end function
+
+  function dropCollinear(polygon as BGE.Math.Vector[], normal as BGE.Math.Vector) as BGE.Math.Vector[]
+    current = polygon
+    changed = true
+    while changed and current.Count() >= 3
+      changed = false
+      count = current.Count()
+      for i = 0 to count - 1
+        sine = getTurnSine(current[(i + count - 1) mod count], current[i], current[(i + 1) mod count], normal)
+        if Abs(sine) < 0.0001
+          kept = []
+          for k = 0 to count - 1
+            if k <> i
+              kept.push(current[k])
+            end if
+          end for
+          current = kept
+          changed = true
+          exit for
+        end if
+      end for
+    end while
+    return current
+  end function
+
+  function isConvex(polygon as BGE.Math.Vector[], normal as BGE.Math.Vector) as boolean
+    count = polygon.Count()
+    for i = 0 to count - 1
+      if getTurnSine(polygon[i], polygon[(i + 1) mod count], polygon[(i + 2) mod count], normal) < 0
+        return false
+      end if
+    end for
+    return true
+  end function
+
+end namespace
