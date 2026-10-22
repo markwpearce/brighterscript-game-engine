@@ -165,7 +165,7 @@ the scale fit does nearly all the work.
 
 ## Prototype (draft #350)
 
-`DrawableModel.useImpostor` turns it on (experimental). The limits come from the quality
+`DrawableModel.useImpostor` (experimental, on by default; set it false to use per-face reuse instead). The limits come from the quality
 level: `modelImpostorError` (error allowed as a fraction of the model's on-screen diagonal,
 2px at least, capped at the model's 64px reuse threshold for an occluder only), `modelImpostorMaxZoom` (how far
 the bitmap may be enlarged) and `modelImpostorMaxAngleDegrees` (how far the view direction
@@ -175,7 +175,7 @@ off while `Renderer.computeOverlapClusters` is on (clusters draw per face), and 
 by an occluder under the `exact` policy. Only scale + translate is drawn - no rotation, no
 corner pin - and the model itself moving or turning still redraws it.
 
-`examples/3d` CarScene, `impostor=1`, holding up/down, Roku Ultra at a fixed Ultra level:
+`examples/3d` CarScene, holding up/down, Roku Ultra at a fixed Ultra level:
 ~330ms per moving frame with the impostor off, ~80ms with it on before the projection
 skip, ~42-46ms after. Some runs came in at 100-150ms: per-face raster reuse was still
 running for a non-occluder, and a frame that reused any face couldn't be captured. With
