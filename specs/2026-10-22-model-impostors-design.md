@@ -1,7 +1,10 @@
 # Model impostors (#345)
 
-Status: investigation, not implemented. The hit-rate probe (see [Results](#results)) says
-it isn't worth building for terrain's chapel.
+Status: experimental prototype (`DrawableModel.useImpostor`, see [Prototype](#prototype-draft-350)).
+The hit-rate probe (see [Results](#results)) said it isn't worth it for terrain's chapel at a
+fixed px tolerance; in `examples/3d`'s car scene it cuts a moving frame from ~330ms to ~20ms.
+The Design and Settings sections below are the original plan - the prototype section says
+what was actually built.
 
 ## Problem
 
@@ -164,12 +167,16 @@ the scale fit does nearly all the work.
 
 `DrawableModel.useImpostor` turns it on (experimental). The limits come from the quality
 level: `modelImpostorError` (error allowed as a fraction of the model's on-screen diagonal,
-2px at least, capped at the model's 64px reuse threshold), `modelImpostorMaxZoom` (how far
+2px at least, capped at the model's 64px reuse threshold for an occluder only), `modelImpostorMaxZoom` (how far
 the bitmap may be enlarged) and `modelImpostorMaxAngleDegrees` (how far the view direction
 may turn) - no frame limit. A reused frame projects only the 8 box corners, not every
-vertex. A quality step down keeps the reused rendering; only a step up redraws it.
+vertex. A quality step down keeps the reused rendering; only a step up redraws it. It's
+off while `Renderer.computeOverlapClusters` is on (clusters draw per face), and never used
+by an occluder under the `exact` policy. Only scale + translate is drawn - no rotation, no
+corner pin - and the model itself moving or turning still redraws it.
 
 `examples/3d` CarScene, `impostor=1`, holding up/down, Roku Ultra at a fixed Ultra level:
 ~330ms per moving frame with the impostor off, ~80ms with it on before the projection
-skip, ~42-46ms after. Runs are bimodal (some come in at 100-150ms) for reasons not yet
-tracked down.
+skip, ~42-46ms after. Some runs came in at 100-150ms: per-face raster reuse was still
+running for a non-occluder, and a frame that reused any face couldn't be captured. With
+that off (as intended), three runs with adaptive quality on came in at 19.5-20ms.

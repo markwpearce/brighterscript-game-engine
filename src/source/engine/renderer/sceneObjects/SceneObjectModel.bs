@@ -214,7 +214,7 @@ namespace BGE
       ' to the LAST redraw's footprint, not this frame's). Require the cache to already be
       ' big enough before cropping it to this size, or a reused frame could ask
       ' getCroppedFaceRegion() for a region larger than its backing bitmap.
-      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
         m.lastDrawWasFullyFresh = false
         return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(cache.bitmap, width, height))
@@ -303,8 +303,8 @@ namespace BGE
         return {worked: false, didFastDraw: false}
       end if
       if m.canvasFacesStale
-        ' the impostor blit was decided but didn't happen - the bitmap is sized from the
-        ' fitted bounds, which are within the tolerance of the real ones
+        ' the impostor blit was decided but failed - the bitmap is sized from the fitted
+        ' bounds, which are within the allowed error of the real ones
         m.projectCanvasFaces(rendererObj, drawMode)
       end if
       someWorked = false
@@ -346,6 +346,7 @@ namespace BGE
       samples.geometryVersion = m.drawable.geometryVersion
       samples.drawMode = drawMode
       samples.triangleSkipSize = rendererObj.qualitySettings.triangleSkipSize
+      samples.triangleQuickDrawStep = rendererObj.qualitySettings.triangleQuickDrawStep
       samples.canvasBounds = m.modelCanvasBounds
       samples.canvasSamplePoints = m.modelCanvasSamplePoints
       m.impostorCapture = samples
@@ -400,10 +401,12 @@ namespace BGE
         return invalid
       end if
       ' the error allowed scales with the model's size on screen (2px at least, so a small
-      ' model can still use it), capped at the reuse threshold, which is what a fastShrink
-      ' occluder's claim already shrinks by
+      ' model can still use it); an occluder's is capped at the reuse threshold, which is
+      ' what a fastShrink occluder's claim already shrinks by
       allowed = BGE.Math.Max(2, settings.modelImpostorError * m.getScreenDiagonal(samples.xs, samples.ys))
-      allowed = BGE.Math.Min(allowed, m.getTempBitmapThreshold(drawMode))
+      if m.isOccluder
+        allowed = BGE.Math.Min(allowed, m.getTempBitmapThreshold(drawMode))
+      end if
       if fit.residual > allowed
         return invalid
       end if
@@ -504,7 +507,8 @@ namespace BGE
     protected override function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       m.impostorThisFrame = invalid
       m.keepImpostorThroughQualityDrop(rendererObj)
-      if m.drawable.useImpostor and m.clusterMemberCount <= 1 and not m.qualityChangedThisDraw and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
+      ' overlap clusters draw per face, from faces this would leave unprojected
+      if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.qualityChangedThisDraw and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorThisFrame = m.attemptImpostor(rendererObj, drawMode)
         if invalid <> m.impostorThisFrame
           m.moveCanvasPointsByImpostor()
@@ -517,6 +521,14 @@ namespace BGE
 
     ' A step down in quality keeps the impostor's rendering, since it was drawn at least as
     ' well as the new level would draw it - only a step up redraws it.
+    protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.canvasFacesStale and invalid = m.impostorThisFrame
+        ' the impostor isn't drawing this frame, and the bitmap is sized from the canvas bounds
+        m.projectCanvasFaces(rendererObj, drawMode)
+      end if
+      return super.performDraw(rendererObj, drawMode)
+    end function
+
     protected override function isRedrawToCanvasRequired(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       m.keepImpostorThroughQualityDrop(rendererObj)
       return super.isRedrawToCanvasRequired(rendererObj, drawMode)
@@ -524,7 +536,8 @@ namespace BGE
 
     private sub keepImpostorThroughQualityDrop(rendererObj as BGE.Renderer)
       if m.qualityChangedThisDraw and m.drawable.useImpostor and invalid <> m.impostorCapture
-        if rendererObj.qualitySettings.triangleSkipSize >= m.impostorCapture.triangleSkipSize
+        settings = rendererObj.qualitySettings
+        if settings.triangleSkipSize >= m.impostorCapture.triangleSkipSize and settings.triangleQuickDrawStep >= m.impostorCapture.triangleQuickDrawStep
           m.qualityChangedThisDraw = false
         end if
       end if
