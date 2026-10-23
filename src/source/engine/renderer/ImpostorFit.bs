@@ -167,6 +167,198 @@ namespace BGE.ImpostorFit
     return {residual: residual, params: {a: a, b: b, c: c, d: d, e: e, f: f}}
   end function
 
+  ' Where fitRotateScale()'s params take the point (x, y).
+  '
+  ' @param {roAssociativeArray} params a fitRotateScale() result's params
+  ' @param {float} x
+  ' @param {float} y
+  ' @return {BGE.Math.Vector}
+  function mapRotateScale(params as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
+    c = Cos(params.rotation)
+    s = Sin(params.rotation)
+    sx = (x - params.fromCentreX) * params.scaleX
+    sy = (y - params.fromCentreY) * params.scaleY
+    return BGE.Math.VectorOps.create(c * sx - s * sy + params.toCentreX, s * sx + c * sy + params.toCentreY)
+  end function
+
+  ' Fits where to pin the 4 corners of a width x height bitmap so the points land where
+  ' they are now - what drawPinnedCorners draws with its top left to bottom right diagonal:
+  ' two triangles, each an affine warp of its half of the bitmap. Least squares over the
+  ' 4 corners at once, so the triangles always agree along the diagonal. `from` points are
+  ' in the bitmap's own pixels. A corner no point constrains is pulled to where the best
+  ' single affine map would put it.
+  '
+  ' @param {float[]} fromX
+  ' @param {float[]} fromY
+  ' @param {float[]} toX
+  ' @param {float[]} toY
+  ' @param {float} width the bitmap's width
+  ' @param {float} height the bitmap's height
+  ' @return {BGE.ImpostorFit.FitResult} params: cornersX/cornersY (top left, top right, bottom right, bottom left), width, height
+  function fitPinnedCorners(fromX as float[], fromY as float[], toX as float[], toY as float[], width as float, height as float) as FitResult
+    n = fromX.count()
+    if n < 4 or width < 1 or height < 1
+      return unusable()
+    end if
+    affine = fitAffine(fromX, fromY, toX, toY)
+    if invalid = affine.params
+      return unusable()
+    end if
+    a = affine.params
+    srcX = [0.0, width, width, 0.0]
+    srcY = [0.0, 0.0, height, height]
+    ' normal equations, shared by both axes, regularised toward the affine fit's corners
+    ata = [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]
+    atx = [0.0, 0.0, 0.0, 0.0]
+    aty = [0.0, 0.0, 0.0, 0.0]
+    prior = 0.00001 * n
+    for k = 0 to 3
+      ata[k][k] = prior
+      atx[k] = prior * (a.a * srcX[k] + a.b * srcY[k] + a.c)
+      aty[k] = prior * (a.d * srcX[k] + a.e * srcY[k] + a.f)
+    end for
+    for i = 0 to n - 1
+      w = pinWeights(fromX[i] / width, fromY[i] / height)
+      for r = 0 to 3
+        if w[r] <> 0
+          for c = 0 to 3
+            ata[r][c] = ata[r][c] + w[r] * w[c]
+          end for
+          atx[r] = atx[r] + w[r] * toX[i]
+          aty[r] = aty[r] + w[r] * toY[i]
+        end if
+      end for
+    end for
+    cornersX = solve4(ata, atx)
+    cornersY = solve4(ata, aty)
+    if invalid = cornersX or invalid = cornersY
+      return unusable()
+    end if
+    ' each triangle must keep the bitmap's winding, or the warp would mirror it
+    if triangleCross(cornersX, cornersY, 0, 1, 2) <= 0 or triangleCross(cornersX, cornersY, 0, 2, 3) <= 0
+      return unusable()
+    end if
+    params = {cornersX: cornersX, cornersY: cornersY, width: width, height: height}
+    residual = 0.0
+    for i = 0 to n - 1
+      p = mapPinnedCorners(params, fromX[i], fromY[i])
+      dx = p.x - toX[i]
+      dy = p.y - toY[i]
+      residual = BGE.Math.Max(residual, Sqr(dx * dx + dy * dy))
+    end for
+    return {residual: residual, params: params}
+  end function
+
+  ' Where fitPinnedCorners()'s params take the bitmap pixel (x, y).
+  '
+  ' @param {roAssociativeArray} params a fitPinnedCorners() result's params
+  ' @param {float} x
+  ' @param {float} y
+  ' @return {BGE.Math.Vector}
+  function mapPinnedCorners(params as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
+    w = pinWeights(x / params.width, y / params.height)
+    px = 0.0
+    py = 0.0
+    for k = 0 to 3
+      px += w[k] * params.cornersX[k]
+      py += w[k] * params.cornersY[k]
+    end for
+    return BGE.Math.VectorOps.create(px, py)
+  end function
+
+  ' The indexes of the points on their convex hull, in order around it.
+  '
+  ' @param {float[]} xs
+  ' @param {float[]} ys
+  ' @return {integer[]}
+  function convexHullIndexes(xs as float[], ys as float[]) as integer[]
+    items = []
+    for i = 0 to xs.count() - 1
+      items.push({i: i, key: xs[i] * 8192 + ys[i]})
+    end for
+    items.SortBy("key")
+    if items.count() < 3
+      result = [] as integer[]
+      for each item in items
+        result.push(item.i)
+      end for
+      return result
+    end if
+    lower = [] as integer[]
+    for each item in items
+      while lower.count() >= 2 and hullTurn(xs, ys, lower[lower.count() - 2], lower[lower.count() - 1], item.i) <= 0
+        lower.pop()
+      end while
+      lower.push(item.i)
+    end for
+    upper = [] as integer[]
+    for k = items.count() - 1 to 0 step -1
+      index = items[k].i
+      while upper.count() >= 2 and hullTurn(xs, ys, upper[upper.count() - 2], upper[upper.count() - 1], index) <= 0
+        upper.pop()
+      end while
+      upper.push(index)
+    end for
+    lower.pop()
+    upper.pop()
+    lower.append(upper)
+    return lower
+  end function
+
+  function hullTurn(xs as float[], ys as float[], a as integer, b as integer, c as integer) as float
+    return (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a])
+  end function
+
+  ' A bitmap point's weight on each pinned corner (top left, top right, bottom right,
+  ' bottom left), from u = x / width and v = y / height.
+  function pinWeights(u as float, v as float) as float[]
+    if u >= v
+      ' the top right triangle
+      return [1.0 - u, u - v, v, 0.0]
+    end if
+    return [1.0 - v, 0.0, u, v - u]
+  end function
+
+  function triangleCross(xs as float[], ys as float[], a as integer, b as integer, c as integer) as float
+    return (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a])
+  end function
+
+  ' Solves the 4x4 system m * x = rhs by Gaussian elimination, or invalid if it's singular.
+  ' Neither argument is changed.
+  function solve4(matrix as object, rhs as float[]) as float[]
+    a = []
+    for r = 0 to 3
+      a.push([matrix[r][0], matrix[r][1], matrix[r][2], matrix[r][3], rhs[r]])
+    end for
+    for col = 0 to 3
+      pivot = col
+      for r = col + 1 to 3
+        if Abs(a[r][col]) > Abs(a[pivot][col])
+          pivot = r
+        end if
+      end for
+      if Abs(a[pivot][col]) < 0.0000001
+        return invalid
+      end if
+      swap = a[col]
+      a[col] = a[pivot]
+      a[pivot] = swap
+      for r = 0 to 3
+        if r <> col
+          factor = a[r][col] / a[col][col]
+          for c = col to 4
+            a[r][c] = a[r][c] - factor * a[col][c]
+          end for
+        end if
+      end for
+    end for
+    result = [] as float[]
+    for r = 0 to 3
+      result.push(a[r][4] / a[r][r])
+    end for
+    return result
+  end function
+
   function fitAxis(fromValues as float[], toValues as float[]) as roAssociativeArray
     n = fromValues.count()
     if n < 2
