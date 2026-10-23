@@ -211,3 +211,8 @@ per moving frame weighted by frames, three runs per setting:
 
 About 20-25% faster with the pin, most of it on the way out. How it looks while pinned
 hasn't been checked by eye yet.
+
+After the review fixes (lazy outline, hull pre-filter, indexed triangle cache), same script,
+two runs each: pin on 47, 44; pin off 54, 43. The runs are noisy enough that the pin's edge
+is now within the spread - zooming out with the pin still has 64-100ms holds, which are
+full redraws (#352).
