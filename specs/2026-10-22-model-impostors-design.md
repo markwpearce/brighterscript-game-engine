@@ -180,3 +180,34 @@ corner pin - and the model itself moving or turning still redraws it.
 skip, ~42-46ms after. Some runs came in at 100-150ms: per-face raster reuse was still
 running for a non-occluder, and a frame that reused any face couldn't be captured. With
 that off (as intended), three runs with adaptive quality on came in at 19.5-20ms.
+
+## Two-level fit (draft, follow-up to #350)
+
+The reuse now tries two fits, each with its own limits in `RenderQualitySettings`:
+
+1. Scale + rotate + translate (`BGE.ImpostorFit.fitRotateScale`) against the 8 box corners,
+   drawn with one `DrawTransformedObject`. `modelImpostorError` is a little tighter than
+   #350's (0.03 at Ultra to 0.10 at Basic).
+2. If that misses, a corner pin of the cached bitmap (`drawPinnedCorners`, top left to
+   bottom right diagonal), fitted against the visible faces' outline (their canvas convex
+   hull, up to 24 points, captured with the rendering). `fitPinnedCorners` solves for all
+   4 corners at once by least squares, each point weighted into the pin triangle it falls
+   in, so the two triangles always agree along the diagonal. Limits:
+   `modelImpostorPinError` (0.05 at Ultra to 0.16 at Basic) and
+   `modelImpostorPinMaxAngleDegrees` (6 to 16). The pin's two triangles are cached under one
+   id per model, dropped when the rendering is recaptured.
+
+`DrawableModel.useImpostorPin` (default true) turns the pin off; `examples/3d` deep link
+`pin=0`. `quality=<0-4>` pins the quality level, and the scenes print
+`[3d moving] <scene> frames= avgMs=` each time the camera stops.
+
+`examples/3d` CarScene, Roku Ultra, `quality=4`, scripted holds (up, down, x3, 3s each), ms
+per moving frame weighted by frames, three runs per setting:
+
+| | runs | zoom in holds | zoom out holds |
+| --- | --- | --- | --- |
+| pin on | 45, 41, 41 | 25-34 | 45-106 |
+| pin off | 56, 52, 54 | 33-44 | 68-162 |
+
+About 20-25% faster with the pin, most of it on the way out. How it looks while pinned
+hasn't been checked by eye yet.
