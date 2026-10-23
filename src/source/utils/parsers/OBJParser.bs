@@ -1,5 +1,6 @@
 import "../../engine/drawables/Model3d.bs"
 import "../../engine/renderer/RendererHelpers.bs"
+import "../../math/math.bs"
 import "../../math/vector.bs"
 import "../../roku_modules/rodash/rodash.d.bs"
 import "../strings.bs"
@@ -35,13 +36,14 @@ namespace BGE.Parsers
   ' UV points; a face where any corner lacks one (`v//vn` or bare `v`) gets no Texture
   ' at all, falling back to flat-color rendering for that face only.
   '
+  ' `usemtl` sets the material of the faces after it (`Model3dFace.material`).
   ' `mtllib <name>.mtl` (first occurrence only, matching this parser's `o`/`g` handling)
-  ' is resolved relative to `baseDir` and read from disk to find the first `map_Kd`
-  ' line, which becomes the returned model's `texturePath` (also resolved relative to
-  ' `baseDir`) - only when `baseDir` is given (parseOBJFile always supplies it; a bare
+  ' is resolved relative to `baseDir` and read from disk: its materials become the
+  ' model's `materials` (each `map_Kd` resolved relative to the .mtl's folder), and its
+  ' first `map_Kd` the model's `texturePath`, used by faces with no material - only when
+  ' `baseDir` is given (parseOBJFile always supplies it; a bare
   ' `parseOBJContent(content)` call, e.g. from a unit test with no real file on disk,
-  ' skips mtllib/map_Kd resolution entirely and just parses geometry). `usemtl` is
-  ' still ignored - a model has at most one texture in this engine's current scope.
+  ' skips mtllib resolution entirely and just parses geometry).
   '
   ' @param {string} content - the raw text content of a .obj file
   ' @param {string} baseDir - the directory the .obj file lives in, for resolving mtllib/map_Kd paths; "" skips that resolution entirely
@@ -104,12 +106,16 @@ namespace BGE.Parsers
   ' @param {BGE.Model3dFace[]} faces
   ' @param {BGE.Math.Vector[]} faceVertices
   ' @param {BGE.Math.Vector[]} faceTexCoords
-  sub appendOBJFace(faces as BGE.Model3dFace[], faceVertices as BGE.Math.Vector[], faceTexCoords as BGE.Math.Vector[])
+  ' @param {string} [material=""] - the material (`usemtl`) in effect for this face, "" for none
+  sub appendOBJFace(faces as BGE.Model3dFace[], faceVertices as BGE.Math.Vector[], faceTexCoords as BGE.Math.Vector[], material = "" as string)
     hasTexture = faceTexCoords.count() = faceVertices.count() and faceVertices.count() > 0
     for i = 1 to faceVertices.count() - 2
       face = BGE.Model3dFaceOps.create([faceVertices[0], faceVertices[i], faceVertices[i + 1]])
       if hasTexture
         face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), [faceTexCoords[0], faceTexCoords[i], faceTexCoords[i + 1]])
+      end if
+      if material <> ""
+        face.material = material
       end if
       faces.push(face)
     end for
@@ -146,6 +152,89 @@ namespace BGE.Parsers
       end if
     end if
     return invalid
+  end function
+
+  ' Reads `baseDir/mtllibName` from disk and returns its materials, with each `map_Kd`
+  ' resolved against the .mtl file's own folder. Empty if the file can't be read.
+  '
+  ' @param {string} baseDir - the .obj file's own directory
+  ' @param {string} mtllibName - the mtllib line's filename, as written in the .obj
+  ' @return {BGE.Model3dMaterial[]} in the order the .mtl defines them
+  function resolveOBJMaterials(baseDir as string, mtllibName as string) as BGE.Model3dMaterial[]
+    mtlPath = joinObjPath(baseDir, mtllibName)
+    mtlContent = ReadAsciiFile(mtlPath)
+    if rodash.isInvalid(mtlContent) or mtlContent = ""
+      return []
+    end if
+    materials = parseMTLContent(mtlContent)
+    mtlDir = mtlPath.Left(BGE.lastInStr(mtlPath, "/"))
+    for each material in materials
+      if material.texturePath <> ""
+        material.texturePath = joinObjPath(mtlDir, material.texturePath)
+      end if
+    end for
+    return materials
+  end function
+
+  ' Sets a model's materials, by name, and its texturePath to the first material's texture
+  ' (used by faces with no material).
+  '
+  ' @param {BGE.Model3d} model
+  ' @param {BGE.Model3dMaterial[]} materials - in the order the .mtl defines them
+  sub setOBJMaterials(model as BGE.Model3d, materials as BGE.Model3dMaterial[])
+    model.materials = {}
+    firstTexturePath = ""
+    for each material in materials
+      model.materials[material.name] = material
+      if firstTexturePath = "" and material.texturePath <> ""
+        firstTexturePath = material.texturePath
+      end if
+    end for
+    if firstTexturePath <> ""
+      model.texturePath = firstTexturePath
+    end if
+  end sub
+
+  ' Parses a .mtl file's materials: each `newmtl` block's name, `map_Kd` texture (as
+  ' written, not resolved) and `Kd` diffuse color. Other properties are ignored.
+  '
+  ' @param {string} mtlContent - the raw text content of a .mtl file
+  ' @return {BGE.Model3dMaterial[]} in the order the file defines them
+  function parseMTLContent(mtlContent as string) as BGE.Model3dMaterial[]
+    materials = [] as BGE.Model3dMaterial[]
+    current = invalid
+    for each rawLine in mtlContent.Split(chr(10))
+      tokens = rodash.compact(rawLine.Trim().Split(" "))
+      if tokens.count() >= 2
+        keyword = LCase(tokens[0])
+        if keyword = "newmtl"
+          current = {name: tokens[1], texturePath: ""} as BGE.Model3dMaterial
+          materials.push(current)
+        else if current <> invalid and keyword = "map_kd"
+          ' option flags (e.g. `-s 1 1 1`) may come before the filename
+          current.texturePath = tokens[tokens.count() - 1]
+        else if current <> invalid and keyword = "kd" and tokens.count() >= 4
+          current.color = mtlColorToRGBA(tokens[1], tokens[2], tokens[3])
+        end if
+      end if
+    end for
+    return materials
+  end function
+
+  ' Converts a .mtl color's 0..1 red, green and blue to packed RGBA (opaque).
+  '
+  ' @param {string} r
+  ' @param {string} g
+  ' @param {string} b
+  ' @return {integer}
+  function mtlColorToRGBA(r as string, g as string, b as string) as integer
+    channels = [r, g, b]
+    rgba = 0
+    for each channel in channels
+      value = Int(BGE.Math.Clamp(BGE.stringToFloat(channel), 0, 1) * 255 + 0.5)
+      rgba = rgba * 256 + value
+    end for
+    return (rgba << 8) or &hFF
   end function
 
   ' Finds the first `map_Kd <path>` line in a .mtl file's raw content. Per the Wavefront

@@ -127,6 +127,94 @@ namespace tests
       m.assertInvalid(model.faces[0].Texture)
     end function
 
+    @describe("Model3dOps.applyTextureToFaces repeating textures")
+
+    @it("gives a face with UVs past 0..1 a copy of the texture tiled across its range")
+    function _()
+      face = m.newUVFace([[-0.5, 0], [1.5, 0], [1.5, 2]])
+      bitmap = CreateObject("roBitmap", {width: 10, height: 20, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([face], bitmap, "tex")
+
+      ' u -1..2 and v 0..2: 3 x 2 copies
+      region = face.Texture.srcRegionWithId.region
+      m.assertEqual(30, region.GetWidth())
+      m.assertEqual(40, region.GetHeight())
+      m.assertEqual("tex|tiled:-1,2,0,2", face.Texture.srcRegionWithId.id)
+      ' x = (u - minU) * tileWidth, y = (maxV - v) * tileHeight
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[0], BGE.Math.VectorOps.create(5, 40, 0)))
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[2], BGE.Math.VectorOps.create(25, 0, 0)))
+    end function
+
+    @it("shares one tiled copy between faces with the same range, and keeps 0..1 faces on the texture")
+    function _()
+      tiled1 = m.newUVFace([[0, 0], [2, 0], [2, 1]])
+      tiled2 = m.newUVFace([[0.5, 0.5], [1.5, 0], [1, 1]])
+      plain = m.newUVFace([[0, 0], [1, 0], [1, 1]])
+      bitmap = CreateObject("roBitmap", {width: 10, height: 10, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([tiled1, tiled2, plain], bitmap, "tex")
+
+      m.assertEqual("tex|tiled:0,2,0,1", tiled1.Texture.srcRegionWithId.id)
+      tiled1.Texture.srcRegionWithId.id = "marked"
+      m.assertEqual("marked", tiled2.Texture.srcRegionWithId.id)
+      m.assertEqual("tex", plain.Texture.srcRegionWithId.id)
+    end function
+
+    @it("shrinks each copy to keep the tiled texture within the size limit")
+    function _()
+      face = m.newUVFace([[0, 0], [16, 0], [16, 1]])
+      bitmap = CreateObject("roBitmap", {width: 128, height: 8, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([face], bitmap, "tex")
+
+      m.assertEqual(16 * (BGE.MODEL_TILED_TEXTURE_MAX_SIZE \ 16), face.Texture.srcRegionWithId.region.GetWidth())
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[1], BGE.Math.VectorOps.create(BGE.MODEL_TILED_TEXTURE_MAX_SIZE, 8, 0)))
+    end function
+
+    @describe("Model3dOps.groupFacesByTexture / finishTextures")
+
+    @it("groups textured faces by their material's texture, and faces with no material by the model's")
+    function _()
+      model = m.newMaterialModel()
+
+      groups = BGE.Model3dOps.groupFacesByTexture(model)
+
+      m.assertEqual(2, groups.count())
+      m.assertEqual(2, groups["wall.png"].count())
+      m.assertEqual(1, groups["roof.png"].count())
+      m.assertEqual("roof", groups["roof.png"][0].material)
+    end function
+
+    @it("puts every textured face under the override path when one is given")
+    function _()
+      model = m.newMaterialModel()
+
+      groups = BGE.Model3dOps.groupFacesByTexture(model, "skin.png")
+
+      m.assertEqual(1, groups.count())
+      m.assertEqual(4, groups["skin.png"].count())
+    end function
+
+    @it("finishTextures clears unloaded textures and fills untextured faces with their material's color")
+    function _()
+      model = m.newMaterialModel()
+      groups = BGE.Model3dOps.groupFacesByTexture(model)
+      bitmap = CreateObject("roBitmap", {width: 8, height: 8, alphaEnable: true})
+      BGE.Model3dOps.applyTextureToFaces(groups["wall.png"], bitmap, "wall.png")
+
+      BGE.Model3dOps.finishTextures(model)
+
+      m.assertEqual("wall.png", model.faces[0].Texture.srcRegionWithId.id)
+      m.assertEqual("wall.png", model.faces[3].Texture.srcRegionWithId.id)
+      ' roof.png never loaded - flat, in the roof's color
+      m.assertInvalid(model.faces[1].Texture)
+      m.assertEqual(&hFF0000FF, model.faces[1].color)
+      ' no texture at all - flat, in the paint's color
+      m.assertInvalid(model.faces[2].Texture)
+      m.assertEqual(&h00FF00FF, model.faces[2].color)
+    end function
+
     @describe("Model3dOps.clearTextures")
 
     @it("clears a textured face's Texture back to invalid")
@@ -146,6 +234,51 @@ namespace tests
       BGE.Model3dOps.clearTextures(model)
 
       m.assertInvalid(model.faces[0].Texture)
+    end function
+
+    ' A face with a placeholder Texture at these normalized UVs ([u, v] pairs)
+    private function newUVFace(uvs as object) as BGE.Model3dFace
+      face = BGE.Model3dFaceOps.create([
+        BGE.Math.VectorOps.create(0, 0, 0),
+        BGE.Math.VectorOps.create(1, 0, 0),
+        BGE.Math.VectorOps.create(0, 1, 0)
+      ])
+      points = [] as BGE.Math.Vector[]
+      for each uv in uvs
+        points.push(BGE.Math.VectorOps.create(uv[0], uv[1], 0))
+      end for
+      face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), points)
+      return face
+    end function
+
+    ' Faces: wall (textured), roof (textured), paint (no texture), no material (textured)
+    private function newMaterialModel() as BGE.Model3d
+      faces = [] as BGE.Model3dFace[]
+      materialNames = ["wall", "roof", "paint", ""]
+      for each name in materialNames
+        face = BGE.Model3dFaceOps.create([
+          BGE.Math.VectorOps.create(0, 0, 0),
+          BGE.Math.VectorOps.create(1, 0, 0),
+          BGE.Math.VectorOps.create(0, 1, 0)
+        ])
+        face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), [
+          BGE.Math.VectorOps.create(0, 0, 0),
+          BGE.Math.VectorOps.create(1, 0, 0),
+          BGE.Math.VectorOps.create(0, 1, 0)
+        ])
+        if name <> ""
+          face.material = name
+        end if
+        faces.push(face)
+      end for
+      model = new BGE.Model3d(faces)
+      model.texturePath = "wall.png"
+      model.materials = {
+        wall: {name: "wall", texturePath: "wall.png"},
+        roof: {name: "roof", texturePath: "roof.png", color: &hFF0000FF},
+        paint: {name: "paint", texturePath: "", color: &h00FF00FF}
+      }
+      return model
     end function
 
   end class

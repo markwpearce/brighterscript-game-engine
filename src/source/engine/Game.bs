@@ -2616,10 +2616,11 @@ namespace BGE
 
 
     ' Loads a 3d model file (.stl or .obj) to be used in the game. For an .obj file,
-    ' also resolves and loads its texture (if any) - either from options.texturePath
-    ' (always takes priority) or from the .obj's own mtllib/map_Kd reference. A missing
-    ' or unreadable texture file logs a warning and leaves the model untextured
-    ' (flat-shaded) rather than failing the whole load - see BGE.Model3dOps.applyTexture.
+    ' also loads its textures: each face is drawn with the `map_Kd` texture of its
+    ' material (`usemtl`) from the .obj's `mtllib` file, unless options.texturePath is
+    ' given, which every textured face uses instead. A missing or unreadable texture
+    ' logs a warning and leaves its faces untextured (filled with their material's `Kd`
+    ' color) rather than failing the whole load.
     ' Local files only - for a URL use game.assets.load3dModel() or GameScene.onLoad().
     '
     ' @param {string} modelName - the name this model will be referenced by later
@@ -2673,37 +2674,48 @@ namespace BGE
       return true
     end function
 
-    ' Loads and finalizes an .obj model's texture, if it has one. Private glue between
-    ' the pure parsing (BGE.Parsers.parseOBJFile) and the pure finalization logic
-    ' (BGE.Model3dOps.applyTexture) - the actual disk read lives here since neither of
-    ' those may depend on Game.
+    ' Loads and applies an .obj model's textures: each distinct texture once, every face
+    ' drawn with its material's texture (or options.texturePath, which overrides them all).
+    ' Faces whose texture is missing or can't be loaded are filled flat, with their
+    ' material's color.
     '
     ' @param {BGE.Model3d} model
     ' @param {BGE.Model3dLoadOptions} options
     private sub loadModelTexture(model as BGE.Model3d, options as BGE.Model3dLoadOptions)
-      texturePath = BGE.Model3dOps.resolveEffectiveTexturePath(options, model)
-      if texturePath = invalid or texturePath = ""
-        BGE.Model3dOps.clearTextures(model)
-        return
+      overridePath = ""
+      if options <> invalid and options.texturePath <> invalid
+        overridePath = options.texturePath
       end if
+      groups = BGE.Model3dOps.groupFacesByTexture(model, overridePath)
+      for each texturePath in groups.Keys()
+        bitmap = m.loadModelTextureBitmap(texturePath)
+        if bitmap <> invalid
+          BGE.Model3dOps.applyTextureToFaces(groups[texturePath], bitmap, texturePath)
+        end if
+      end for
+      BGE.Model3dOps.finishTextures(model)
+    end sub
+
+    ' Loads one of a model's textures, logging why if it can't.
+    '
+    ' @param {string} texturePath
+    ' @return {roBitmap} invalid if it couldn't be loaded
+    private function loadModelTextureBitmap(texturePath as string) as roBitmap
       if BGE.Urls.isUrl(texturePath)
-        m.log("Game.load3dModel() - Texture " + texturePath + " is a URL, model will render untextured. Load the model with game.assets.load3dModel() or in GameScene.onLoad()", BGE.Debug.LogLevel.warning)
-        BGE.Model3dOps.clearTextures(model)
-        return
+        m.log("Game.load3dModel() - Texture " + texturePath + " is a URL, its faces will render untextured. Load the model with game.assets.load3dModel() or in GameScene.onLoad()", BGE.Debug.LogLevel.warning)
+        return invalid
       end if
       if not m.filesystem.Exists(texturePath)
-        m.log("Game.load3dModel() - Texture " + texturePath + " not found, model will render untextured", BGE.Debug.LogLevel.warning)
-        BGE.Model3dOps.clearTextures(model)
-        return
+        m.log("Game.load3dModel() - Texture " + texturePath + " not found, its faces will render untextured", BGE.Debug.LogLevel.warning)
+        return invalid
       end if
       bitmap = CreateObject("roBitmap", texturePath)
       if bitmap = invalid or bitmap.GetWidth() = 0
-        m.log("Game.load3dModel() - Texture " + texturePath + " could not be loaded, model will render untextured", BGE.Debug.LogLevel.warning)
-        BGE.Model3dOps.clearTextures(model)
-        return
+        m.log("Game.load3dModel() - Texture " + texturePath + " could not be loaded, its faces will render untextured", BGE.Debug.LogLevel.warning)
+        return invalid
       end if
-      BGE.Model3dOps.applyTexture(model, bitmap, texturePath)
-    end sub
+      return bitmap
+    end function
 
 
     ' Gets a 3d Model (Model3d) by the name given to it when load3dModel() was called
@@ -2719,11 +2731,12 @@ namespace BGE
     end function
 
 
-    ' Invalidates a 3d Model name, so it can't be loaded again
+    ' Removes a 3d model, so it can't be fetched by name again. Its textures are freed
+    ' once nothing else (e.g. a DrawableModel) still uses the model.
     '
     ' @param {string} modelName
     sub unload3dModel(modelName as string)
-      m.models[modelName] = invalid
+      m.models.Delete(modelName)
     end sub
 
 
