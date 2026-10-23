@@ -1,0 +1,151 @@
+' Deep link `profile=impostor` (#345, specs/2026-10-22-model-impostors-design.md): while the
+' profile path flies, simulates reusing the chapel's captured bitmap instead of redrawing
+' it, for several pixel tolerances and view-angle limits at once, and counts which draw
+' each moving frame would have taken. Nothing is drawn differently.
+class ImpostorProbe
+
+  ' Rough per-frame costs on a Roku Ultra: a redraw from profile=stages (performDraw plus
+  ' canvas position), a pin from rendererTest's impostor-blit-benchmark, plus projecting 8
+  ' points for any reuse.
+  redrawMs = 13.0
+  pinMs = 4.5
+  blitMs = 0.5
+  ' a reused bitmap is redrawn after this many frames whatever the fit
+  maxStaleFrames = 30
+
+  private variants = [] as roAssociativeArray[]
+  private projected = [] as float[]
+  private modelVertices as BGE.Math.Vector[] = invalid
+
+  sub new()
+    ' "box" fits the 8 bounding box corners, "verts" every model vertex - the box's corners
+    ' are farther apart in depth than the model is, so it may overstate the error
+    for each samples in ["box", "verts"]
+      for each tolerance in [1, 2, 4, 8]
+        m.variants.push({
+          samples: samples,
+          tolerance: tolerance,
+          maxAngleDegrees: 5,
+          capture: invalid,
+          staleFrames: 0,
+          counts: {scale: 0, rotate: 0, pin: 0, redraw: 0, hidden: 0}
+        })
+      end for
+    end for
+  end sub
+
+  ' Call once per frame after the game canvas has drawn. Only moving frames are counted,
+  ' since a still model already reuses its bitmap.
+  sub observe(sceneObj as BGE.SceneObject, camera as BGE.Camera3d, moving as boolean)
+    if not moving
+      return
+    end if
+    sets = {
+      box: m.projectSamples(sceneObj.getBoundingPoints(camera), camera),
+      verts: m.projectSamples(m.getModelVertices(sceneObj.drawable as BGE.DrawableModel), camera)
+    }
+    for each variant in m.variants
+      projection = sets[variant.samples]
+      if invalid = projection
+        variant.capture = invalid
+        variant.counts.hidden++
+      else
+        m.observeVariant(variant, projection.xs, projection.ys, projection.direction)
+      end if
+    end for
+  end sub
+
+  ' Canvas x and y of each point, and the direction from the camera to their centre, or
+  ' invalid if any point won't project.
+  private function projectSamples(points as BGE.Math.Vector[], camera as BGE.Camera3d) as roAssociativeArray
+    if points.count() = 0 or not camera.projectPointsWithDepth(points, m.projected)
+      return invalid
+    end if
+    xs = [] as float[]
+    ys = [] as float[]
+    centre = BGE.Math.VectorOps.create()
+    for i = 0 to points.count() - 1
+      xs.push(m.projected[i * 3])
+      ys.push(m.projected[i * 3 + 1])
+      centre = BGE.Math.VectorOps.add(centre, points[i])
+    end for
+    centre = BGE.Math.VectorOps.scale(centre, 1.0 / points.count())
+    direction = BGE.Math.VectorOps.subtract(centre, camera.position)
+    BGE.Math.VectorOps.normalize(direction)
+    return {xs: xs, ys: ys, direction: direction}
+  end function
+
+  ' The model's vertices in world space, once - the chapel is static.
+  private function getModelVertices(drawable as BGE.DrawableModel) as BGE.Math.Vector[]
+    if invalid = m.modelVertices
+      matrix = BGE.Math.Matrix44.multiply(drawable.transformationMatrix, drawable.getOwnerTransformationMatrix())
+      m.modelVertices = []
+      for each face in drawable.model.faces
+        for each vert in face.vertices
+          m.modelVertices.push(BGE.Math.Matrix44.multVecMatrix(vert, matrix))
+        end for
+      end for
+    end if
+    return m.modelVertices
+  end function
+
+  private sub observeVariant(variant as roAssociativeArray, xs as float[], ys as float[], direction as BGE.Math.Vector)
+    capture = variant.capture
+    if invalid = capture or variant.staleFrames >= m.maxStaleFrames or m.angleDegrees(direction, capture.direction) > variant.maxAngleDegrees
+      m.recapture(variant, xs, ys, direction)
+      return
+    end if
+    tolerance = variant.tolerance
+    if BGE.ImpostorFit.fitScaleTranslate(capture.xs, capture.ys, xs, ys).residual <= tolerance
+      variant.counts.scale++
+    else if BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, xs, ys).residual <= tolerance
+      variant.counts.rotate++
+    else if BGE.ImpostorFit.fitAffine(capture.xs, capture.ys, xs, ys).residual <= tolerance
+      variant.counts.pin++
+    else
+      m.recapture(variant, xs, ys, direction)
+      return
+    end if
+    variant.staleFrames++
+  end sub
+
+  private sub recapture(variant as roAssociativeArray, xs as float[], ys as float[], direction as BGE.Math.Vector)
+    variant.capture = {xs: xs, ys: ys, direction: direction}
+    variant.staleFrames = 0
+    variant.counts.redraw++
+  end sub
+
+  private function angleDegrees(a as BGE.Math.Vector, b as BGE.Math.Vector) as float
+    cosine = BGE.Math.Min(1, BGE.Math.Max(-1, BGE.Math.VectorOps.dotProduct(a, b)))
+    return BGE.Math.RadiansToDegrees(BGE.Math.Atan2(Sqr(1 - cosine * cosine), cosine))
+  end function
+
+  ' One line per variant: the share of moving frames each draw would take, and the chapel's
+  ' estimated cost per moving frame against redrawing every frame.
+  function describe() as string[]
+    lines = [] as string[]
+    for each variant in m.variants
+      counts = variant.counts
+      drawn = counts.scale + counts.rotate + counts.pin + counts.redraw
+      if drawn = 0
+        drawn = 1
+      end if
+      estimate = ((counts.scale + counts.rotate) * m.blitMs + counts.pin * m.pinMs + counts.redraw * m.redrawMs) / drawn
+      line = variant.samples + " tol " + variant.tolerance.ToStr() + "px:"
+      line += " scale " + m.percent(counts.scale, drawn) + " rotate " + m.percent(counts.rotate, drawn)
+      line += " pin " + m.percent(counts.pin, drawn) + " redraw " + m.percent(counts.redraw, drawn)
+      line += " | est " + m.format(estimate) + "ms vs " + m.format(m.redrawMs) + "ms (hidden " + counts.hidden.ToStr() + ")"
+      lines.push(line)
+    end for
+    return lines
+  end function
+
+  private function percent(part as integer, whole as integer) as string
+    return Int(100.0 * part / whole + 0.5).ToStr() + "%"
+  end function
+
+  private function format(value as float) as string
+    return (Int(value * 10 + 0.5) / 10).ToStr()
+  end function
+
+end class
