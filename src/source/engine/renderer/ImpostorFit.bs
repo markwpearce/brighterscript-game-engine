@@ -235,7 +235,7 @@ namespace BGE.ImpostorFit
       return unusable()
     end if
     ' each triangle must keep the bitmap's winding, or the warp would mirror it
-    if triangleCross(cornersX, cornersY, 0, 1, 2) <= 0 or triangleCross(cornersX, cornersY, 0, 2, 3) <= 0
+    if cross2d(cornersX, cornersY, 0, 1, 2) <= 0 or cross2d(cornersX, cornersY, 0, 2, 3) <= 0
       return unusable()
     end if
     params = {cornersX: cornersX, cornersY: cornersY, width: width, height: height}
@@ -272,13 +272,16 @@ namespace BGE.ImpostorFit
   ' @param {float[]} ys
   ' @return {integer[]}
   function convexHullIndexes(xs as float[], ys as float[]) as integer[]
+    candidates = hullCandidates(xs, ys)
+    ' sorted by x then y: x to 1/16px (as a double, so y can't spill into it), so floats
+    ' that only differ in rounding still sort as ties broken by y
     items = []
-    for i = 0 to xs.count() - 1
-      items.push({i: i, key: xs[i] * 8192 + ys[i]})
+    for each i in candidates
+      items.push({i: i, key: CDbl(Int(xs[i] * 16 + 0.5)) * 1048576 + ys[i]})
     end for
     items.SortBy("key")
+    result = [] as integer[]
     if items.count() < 3
-      result = [] as integer[]
       for each item in items
         result.push(item.i)
       end for
@@ -286,7 +289,7 @@ namespace BGE.ImpostorFit
     end if
     lower = [] as integer[]
     for each item in items
-      while lower.count() >= 2 and hullTurn(xs, ys, lower[lower.count() - 2], lower[lower.count() - 1], item.i) <= 0
+      while lower.count() >= 2 and cross2d(xs, ys, lower[lower.count() - 2], lower[lower.count() - 1], item.i) <= 0
         lower.pop()
       end while
       lower.push(item.i)
@@ -294,7 +297,7 @@ namespace BGE.ImpostorFit
     upper = [] as integer[]
     for k = items.count() - 1 to 0 step -1
       index = items[k].i
-      while upper.count() >= 2 and hullTurn(xs, ys, upper[upper.count() - 2], upper[upper.count() - 1], index) <= 0
+      while upper.count() >= 2 and cross2d(xs, ys, upper[upper.count() - 2], upper[upper.count() - 1], index) <= 0
         upper.pop()
       end while
       upper.push(index)
@@ -305,7 +308,54 @@ namespace BGE.ImpostorFit
     return lower
   end function
 
-  function hullTurn(xs as float[], ys as float[], a as integer, b as integer, c as integer) as float
+  ' The points that may be on the hull: those outside the octagon through the extreme
+  ' points along x, y and both diagonals, which for a model's vertices is most of them gone
+  ' before the sort.
+  function hullCandidates(xs as float[], ys as float[]) as integer[]
+    n = xs.count()
+    all = [] as integer[]
+    if n < 9
+      for i = 0 to n - 1
+        all.push(i)
+      end for
+      return all
+    end if
+    ' extreme index along each of 8 directions, in order around
+    dirX = [1, 1, 0, -1, -1, -1, 0, 1]
+    dirY = [0, 1, 1, 1, 0, -1, -1, -1]
+    best = [0, 0, 0, 0, 0, 0, 0, 0]
+    bestValue = [] as float[]
+    for d = 0 to 7
+      bestValue.push(dirX[d] * xs[0] + dirY[d] * ys[0])
+    end for
+    for i = 1 to n - 1
+      for d = 0 to 7
+        value = dirX[d] * xs[i] + dirY[d] * ys[i]
+        if value > bestValue[d]
+          bestValue[d] = value
+          best[d] = i
+        end if
+      end for
+    end for
+    ' a point strictly inside has a positive cross2d against every edge
+    for i = 0 to n - 1
+      inside = true
+      for d = 0 to 7
+        a = best[d]
+        b = best[(d + 1) mod 8]
+        if a <> b and cross2d(xs, ys, a, b, i) <= 0
+          inside = false
+          exit for
+        end if
+      end for
+      if not inside
+        all.push(i)
+      end if
+    end for
+    return all
+  end function
+
+  function cross2d(xs as float[], ys as float[], a as integer, b as integer, c as integer) as float
     return (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a])
   end function
 
@@ -319,13 +369,9 @@ namespace BGE.ImpostorFit
     return [1.0 - v, 0.0, u, v - u]
   end function
 
-  function triangleCross(xs as float[], ys as float[], a as integer, b as integer, c as integer) as float
-    return (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a])
-  end function
-
   ' Solves the 4x4 system m * x = rhs by Gaussian elimination, or invalid if it's singular.
   ' Neither argument is changed.
-  function solve4(matrix as object, rhs as float[]) as float[]
+  function solve4(matrix as roArray, rhs as float[]) as float[]
     a = []
     for r = 0 to 3
       a.push([matrix[r][0], matrix[r][1], matrix[r][2], matrix[r][3], rhs[r]])

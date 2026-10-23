@@ -62,6 +62,9 @@ namespace BGE
     private canvasFacesStale as boolean = false
     ' whether a corner pin has been drawn (and its triangles cached) since the last capture
     private pinUsedSinceCapture as boolean = false
+    private impostorCaptureId as integer = 0
+    ' this frame's impostor kind, for tests and profiling: "", "rotate" or "pin"
+    private impostorKindThisFrame as string = ""
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -352,27 +355,37 @@ namespace BGE
       samples.canvasBounds = m.modelCanvasBounds
       samples.canvasSamplePoints = m.modelCanvasSamplePoints
       if m.drawable.useImpostorPin
-        m.captureImpostorOutline(rendererObj, samples)
+        if m.pinUsedSinceCapture
+          ' the triangles cached from the old rendering are stale now
+          rendererObj.triangleCache.removeTrianglesWithId(m.getImpostorPinRegionId())
+          m.pinUsedSinceCapture = false
+        end if
+        ' the outline is only worked out if a pin is tried (see getImpostorOutline()), so it
+        ' costs nothing on this frame, which is already a full redraw; both face lists are
+        ' replaced, not changed, when they're rebuilt
+        samples.canvasFaces = m.modelCanvasFaces
+        samples.worldFaces = m.modelWorldFaces
+        m.impostorCaptureId++
       end if
       m.impostorCapture = samples
     end sub
 
-    ' Most points a pin is fitted against
-    private maxImpostorOutlinePoints as integer = 24
-
     ' The visible faces' outline (their canvas convex hull) as world points, with where they
-    ' sit in the temp bitmap - what a corner pin is fitted against.
-    private sub captureImpostorOutline(rendererObj as BGE.Renderer, capture as roAssociativeArray)
-      if m.pinUsedSinceCapture
-        ' the triangles cached from the old rendering are stale now
-        rendererObj.triangleCache.removeTrianglesWithId(m.getImpostorPinRegionId())
-        m.pinUsedSinceCapture = false
+    ' sat in the temp bitmap - what a corner pin is fitted against. Worked out from the
+    ' capture the first time it's asked for. invalid if there isn't one.
+    private function getImpostorOutline(capture as roAssociativeArray, maxPoints as integer) as roAssociativeArray
+      if invalid <> capture.outline and capture.outline.maxPoints = maxPoints
+        return capture.outline
+      end if
+      bounds = capture.canvasBounds
+      if invalid = capture.canvasFaces or invalid = bounds or bounds.count() < 2
+        return invalid
       end if
       xs = [] as float[]
       ys = [] as float[]
       worldPoints = [] as BGE.Math.Vector[]
-      for each face in m.modelCanvasFaces
-        worldFace = m.modelWorldFaces[face.faceIndex]
+      for each face in capture.canvasFaces
+        worldFace = capture.worldFaces[face.faceIndex]
         for i = 0 to 2
           xs.push(face.vertices[i].x)
           ys.push(face.vertices[i].y)
@@ -380,29 +393,29 @@ namespace BGE
         end for
       end for
       hull = BGE.ImpostorFit.convexHullIndexes(xs, ys)
-      bounds = capture.canvasBounds
-      if hull.count() < 4 or invalid = bounds or bounds.count() < 2
-        return
+      if hull.count() < 4
+        return invalid
       end if
-      stepSize = BGE.Math.Max(1, hull.count() / m.maxImpostorOutlinePoints)
-      capture.outlineWorld = [] as BGE.Math.Vector[]
-      capture.outlineX = [] as float[]
-      capture.outlineY = [] as float[]
+      outline = {maxPoints: maxPoints, world: [] as BGE.Math.Vector[], x: [] as float[], y: [] as float[]}
+      stepSize = BGE.Math.Max(1, hull.count() / BGE.Math.Max(4, maxPoints))
       position = 0.0
       while Int(position) < hull.count()
         index = hull[Int(position)]
-        capture.outlineWorld.push(worldPoints[index])
-        capture.outlineX.push(xs[index] - capture.originX)
-        capture.outlineY.push(ys[index] - capture.originY)
+        outline.world.push(worldPoints[index])
+        outline.x.push(xs[index] - capture.originX)
+        outline.y.push(ys[index] - capture.originY)
         position += stepSize
       end while
       ' the temp bitmap's size - see createTempBitmap()
-      capture.bitmapWidth = Int(bounds[1].x - bounds[0].x + 1)
-      capture.bitmapHeight = Int(bounds[1].y - bounds[0].y + 1)
-    end sub
+      outline.bitmapWidth = Int(bounds[1].x - bounds[0].x + 1)
+      outline.bitmapHeight = Int(bounds[1].y - bounds[0].y + 1)
+      capture.outline = outline
+      return outline
+    end function
 
+    ' a new id per capture, so a pin never draws triangles cached from an older rendering
     private function getImpostorPinRegionId() as string
-      return m.id + "_impostor"
+      return m.id + "_impostor" + m.impostorCaptureId.toStr()
     end function
 
     ' The bounding box corners' canvas x and y this frame and the direction from the camera
@@ -457,14 +470,18 @@ namespace BGE
           return {origin: origin, rotation: -p.rotation, scaleX: p.scaleX, scaleY: p.scaleY}
         end if
       end if
-      if not m.drawable.useImpostorPin or invalid = capture.outlineWorld or cosine < Cos(BGE.Math.DegreesToRadians(settings.modelImpostorPinMaxAngleDegrees))
+      if not m.drawable.useImpostorPin or cosine < Cos(BGE.Math.DegreesToRadians(settings.modelImpostorPinMaxAngleDegrees))
         return invalid
       end if
-      outline = m.projectImpostorOutline(renderObj, capture.outlineWorld)
+      outline = m.getImpostorOutline(capture, settings.modelImpostorPinOutlinePoints)
       if invalid = outline
         return invalid
       end if
-      fit = BGE.ImpostorFit.fitPinnedCorners(capture.outlineX, capture.outlineY, outline.xs, outline.ys, capture.bitmapWidth, capture.bitmapHeight)
+      projected = m.projectImpostorOutline(renderObj, outline.world)
+      if invalid = projected
+        return invalid
+      end if
+      fit = BGE.ImpostorFit.fitPinnedCorners(outline.x, outline.y, projected.xs, projected.ys, outline.bitmapWidth, outline.bitmapHeight)
       p = fit.params
       if invalid = p or fit.residual > m.getImpostorAllowedError(settings.modelImpostorPinError, diagonal, drawMode)
         return invalid
@@ -474,7 +491,7 @@ namespace BGE
       corners.topRight = BGE.Math.VectorOps.create(p.cornersX[1], p.cornersY[1])
       corners.bottomRight = BGE.Math.VectorOps.create(p.cornersX[2], p.cornersY[2])
       corners.bottomLeft = BGE.Math.VectorOps.create(p.cornersX[3], p.cornersY[3])
-      zoom = BGE.Math.Max(corners.getAvgWidth() / capture.bitmapWidth, corners.getAvgHeight() / capture.bitmapHeight)
+      zoom = BGE.Math.Max(corners.getAvgWidth() / outline.bitmapWidth, corners.getAvgHeight() / outline.bitmapHeight)
       if zoom > settings.modelImpostorMaxZoom
         return invalid
       end if
@@ -593,11 +610,13 @@ namespace BGE
     ' by the same fit the blit uses.
     protected override function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       m.impostorThisFrame = invalid
+      m.impostorKindThisFrame = ""
       m.keepImpostorThroughQualityDrop(rendererObj)
       ' overlap clusters draw per face, from faces this would leave unprojected
       if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.qualityChangedThisDraw and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorThisFrame = m.attemptImpostor(rendererObj, drawMode)
         if invalid <> m.impostorThisFrame
+          m.impostorKindThisFrame = m.impostorCapture.fit.kind
           m.moveCanvasPointsByImpostor()
           m.canvasFacesStale = true
           return true
@@ -775,6 +794,14 @@ namespace BGE
         return 24
       end if
       return 64
+    end function
+
+    ' For tests/profiling: how this frame reused the last full rendering - "rotate" (scaled
+    ' and rotated), "pin" (corner pinned), or "" (it didn't).
+    '
+    ' @return {string}
+    function getImpostorKindThisFrame() as string
+      return m.impostorKindThisFrame
     end function
 
     ' For tests/telemetry only - exposes attemptTransformTempBitmap()'s result without
