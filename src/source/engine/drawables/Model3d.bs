@@ -1,5 +1,7 @@
+import "../../math/math.bs"
 import "../../math/vector.bs"
 import "../../utils/colors.bs"
+import "../../utils/deviceRenderTier.bs"
 import "../GameEntity.bs"
 import "../renderer/Renderer.bs"
 import "../renderer/RendererHelpers.bs"
@@ -20,13 +22,26 @@ namespace BGE
 
   ' The options accepted by Game.load3dModel() for an .obj model's texture.
   interface Model3dLoadOptions
+    ' A texture to draw every textured face with, instead of the textures its .mtl file gives
     optional texturePath as string
+  end interface
+
+  ' A material from an .obj model's .mtl file (a `newmtl` block).
+  interface Model3dMaterial
+    name as string
+    ' Its texture (`map_Kd`), resolved against the .mtl file's folder or URL; "" if it has none
+    texturePath as string
+    ' Its diffuse color (`Kd`) as packed RGBA - what a face with this material is filled with
+    ' when it isn't textured
+    optional color as integer
   end interface
 
   interface Model3dFace
     vertices as BGE.Math.Vector[]
     normal as BGE.Math.Vector
     optional Texture as Model3dTexture
+    ' The name of this face's material (the .obj's `usemtl`), if it has one
+    optional material as string
     brightness as float
     priority as float
     color as integer
@@ -81,59 +96,222 @@ namespace BGE
     end function
   end namespace
 
+  ' The largest a model texture tiled for UVs past 0..1 may be on each side, in pixels
+  ' (half this on an HD or SD device - see Model3dOps.getTiledTextureMaxSize())
+  const MODEL_TILED_TEXTURE_MAX_SIZE = 1024
+
+  ' The whole texture repeats a face's UVs cover - see Model3dOps.getUVTileRange()
+  interface UVTileRange
+    minU as integer
+    maxU as integer
+    minV as integer
+    maxV as integer
+  end interface
+
+  ' A texture (or a tiled copy of one) that faces map their UVs into
+  interface ModelFaceTexture
+    regionWithId as BGE.RendererHelpers.RegionWithId
+    ' the size of one repeat of the texture, in pixels
+    tileWidth as float
+    tileHeight as float
+  end interface
+
   namespace Model3dOps
 
-    ' Picks the texture path an .obj model should actually use: an explicit override
-    ' always wins over whatever `mtllib`/`map_Kd` resolution found while parsing.
-    '
-    ' @param {BGE.Model3dLoadOptions} options
-    ' @param {BGE.Model3d} model
-    ' @return {string}
-    function resolveEffectiveTexturePath(options as BGE.Model3dLoadOptions, model as BGE.Model3d) as dynamic
-      if options <> invalid and options.texturePath <> invalid and options.texturePath <> ""
-        return options.texturePath
-      end if
-      return model.texturePath
-    end function
-
-    ' Finalizes every face's texture data now that the texture bitmap is loaded and its
-    ' dimensions are known: wraps `bitmap` in one shared region+id (every face on this
-    ' model points at the same RegionWithId - one texture per model, per issue #89's v1
-    ' scope), and converts each textured face's normalized (0..1) UV points to pixel
-    ' space, flipping v since .obj UVs are bottom-up and bitmaps are top-down. Faces
-    ' with no Texture (a corner was missing a vt index while parsing) are left alone.
+    ' Points every textured face of a model at one texture - see applyTextureToFaces().
     '
     ' @param {BGE.Model3d} model
     ' @param {roBitmap} bitmap
     ' @param {string} cacheId - a stable, unique-per-texture id (the resolved texture path works well) used as the triangle-cache key for every draw of this texture
     sub applyTexture(model as BGE.Model3d, bitmap as roBitmap, cacheId as string)
+      applyTextureToFaces(model.faces, bitmap, cacheId)
+    end sub
+
+    ' Groups the faces that have UV points by the texture each should be drawn with:
+    ' `overridePath` for all of them if it isn't "", otherwise its material's texture, and
+    ' for a face with no material the model's own `texturePath`. Faces that get no
+    ' texture aren't included.
+    '
+    ' @param {BGE.Model3d} model
+    ' @param {string} [overridePath=""] - a texture for every textured face (Model3dLoadOptions.texturePath)
+    ' @return {roAssociativeArray} texture path -> the faces (Model3dFace[]) that use it
+    function groupFacesByTexture(model as BGE.Model3d, overridePath = "" as string) as roAssociativeArray
+      groups = {}
+      for each face in model.faces
+        if face.Texture <> invalid
+          path = overridePath
+          if path = ""
+            path = getMaterialTexturePath(model, face)
+          end if
+          if path <> ""
+            if groups[path] = invalid
+              groups[path] = []
+            end if
+            groups[path].push(face)
+          end if
+        end if
+      end for
+      return groups
+    end function
+
+    ' The texture a face's material gives it, or the model's own texturePath for a face
+    ' with no material.
+    '
+    ' @param {BGE.Model3d} model
+    ' @param {BGE.Model3dFace} face
+    ' @return {string} the path, or "" for none
+    function getMaterialTexturePath(model as BGE.Model3d, face as BGE.Model3dFace) as string
+      if face.material <> invalid and face.material <> ""
+        material = model.materials[face.material]
+        if material <> invalid
+          return material.texturePath
+        end if
+        return ""
+      end if
+      if model.texturePath <> invalid
+        return model.texturePath
+      end if
+      return ""
+    end function
+
+    ' Points each of these faces at one texture, converting their normalized UV points to
+    ' pixel space (flipping v, since .obj UVs are bottom-up and bitmaps are top-down). A
+    ' face whose UVs reach past 0..1 repeats the texture, the .obj default: it's given a
+    ' copy of the texture tiled as many times as its UVs span (one per size, shared by
+    ' every face that spans the same number of repeats). Faces with no Texture are left
+    ' alone.
+    '
+    ' @param {BGE.Model3dFace[]} faces
+    ' @param {roBitmap} bitmap
+    ' @param {string} cacheId - a stable, unique-per-texture id (the resolved texture path works well) used as the triangle-cache key for every draw of this texture
+    sub applyTextureToFaces(faces as BGE.Model3dFace[], bitmap as roBitmap, cacheId as string)
       width = bitmap.GetWidth()
       height = bitmap.GetHeight()
       region = CreateObject("roRegion", bitmap, 0, 0, width, height)
-      regionWithId = BGE.RendererHelpers.createRegionWithId(region, cacheId)
+      untiled = {regionWithId: BGE.RendererHelpers.createRegionWithId(region, cacheId), tileWidth: width, tileHeight: height} as BGE.ModelFaceTexture
+      tiledBySize = {}
+      maxSize = invalid
 
-      for each face in model.faces
+      for each face in faces
         if face.Texture <> invalid
+          texture = untiled
+          range = getUVTileRange(face.Texture.points)
+          tilesX = range.maxU - range.minU
+          tilesY = range.maxV - range.minV
+          ' a whole-repeat tiling looks the same from any starting repeat, so faces only
+          ' need a copy per size, and one repeat anywhere is the texture itself
+          if tilesX > 1 or tilesY > 1
+            key = `${tilesX}x${tilesY}`
+            if tiledBySize[key] = invalid
+              if maxSize = invalid
+                maxSize = getTiledTextureMaxSize()
+              end if
+              tiledBySize[key] = createTiledTexture(bitmap, tilesX, tilesY, maxSize, cacheId + "|tiled:" + key)
+              if tiledBySize[key] = invalid
+                print `[BGE.Model3dOps] warning: couldn't allocate a ${key} tiled copy of "${cacheId}" - its repeats will be stretched`
+                tiledBySize[key] = {regionWithId: untiled.regionWithId, tileWidth: width / tilesX, tileHeight: height / tilesY} as BGE.ModelFaceTexture
+              end if
+            end if
+            texture = tiledBySize[key]
+          end if
           pixelPoints = [] as BGE.Math.Vector[]
           for each uv in face.Texture.points
-            pixelPoints.push(BGE.Math.VectorOps.create(uv.x * width, (1 - uv.y) * height, 0))
+            pixelPoints.push(BGE.Math.VectorOps.create((uv.x - range.minU) * texture.tileWidth, (range.maxV - uv.y) * texture.tileHeight, 0))
           end for
-          face.Texture = new BGE.Model3dTexture(regionWithId, pixelPoints)
+          face.Texture = new BGE.Model3dTexture(texture.regionWithId, pixelPoints)
         end if
       end for
     end sub
 
-    ' Clears every face's placeholder Texture, so the model falls back to flat-color
-    ' rendering. Call this on every path where texture resolution/loading fails, so a
-    ' face's Texture is never left as a placeholder whose srcRegionWithId.region is
-    ' invalid - SceneObjectModel's draw path only checks `face.Texture <> invalid`,
-    ' not the region inside it, so an uncleared placeholder crashes at draw time
-    ' instead of degrading gracefully.
+    ' The whole texture repeats a UV range covers, e.g. {minU: -1, maxU: 2, minV: 0, maxV: 1}
+    ' for u from -0.5 to 1.5 - 0..1 for UVs within a single copy of the texture. A UV
+    ' within 0.001 of a whole number counts as that number.
+    '
+    ' @param {BGE.Math.Vector[]} uvPoints - normalized UV points
+    ' @return {BGE.UVTileRange}
+    function getUVTileRange(uvPoints as BGE.Math.Vector[]) as BGE.UVTileRange
+      minU = uvPoints[0].x
+      maxU = minU
+      minV = uvPoints[0].y
+      maxV = minV
+      for each uv in uvPoints
+        minU = BGE.Math.Min(minU, uv.x)
+        maxU = BGE.Math.Max(maxU, uv.x)
+        minV = BGE.Math.Min(minV, uv.y)
+        maxV = BGE.Math.Max(maxV, uv.y)
+      end for
+      ' a UV of exactly 1 is the far edge of the first copy, not the start of a second -
+      ' and exported UVs are often a hair either side of a whole number
+      epsilon = 0.001
+      range = {minU: Int(minU + epsilon), maxU: -Int(-(maxU - epsilon)), minV: Int(minV + epsilon), maxV: -Int(-(maxV - epsilon))} as BGE.UVTileRange
+      if range.maxU <= range.minU
+        range.maxU = range.minU + 1
+      end if
+      if range.maxV <= range.minV
+        range.maxV = range.minV + 1
+      end if
+      return range
+    end function
+
+    ' The largest a tiled model texture may be on each side on this device: an HD or SD
+    ' Roku has only 64MB of texture memory.
+    '
+    ' @return {integer}
+    function getTiledTextureMaxSize() as integer
+      tier = BGE.getDeviceRenderTier()
+      if tier = BGE.DeviceRenderTier.hd or tier = BGE.DeviceRenderTier.sd
+        return BGE.MODEL_TILED_TEXTURE_MAX_SIZE \ 2
+      end if
+      return BGE.MODEL_TILED_TEXTURE_MAX_SIZE
+    end function
+
+    ' Draws a texture repeated tilesX x tilesY times into a new bitmap, shrinking each copy
+    ' if needed to keep the bitmap within maxSize on each side.
+    '
+    ' @param {roBitmap} bitmap - the texture
+    ' @param {integer} tilesX
+    ' @param {integer} tilesY
+    ' @param {integer} maxSize
+    ' @param {string} cacheId
+    ' @return {BGE.ModelFaceTexture} invalid if a bitmap couldn't be allocated
+    function createTiledTexture(bitmap as roBitmap, tilesX as integer, tilesY as integer, maxSize as integer, cacheId as string) as BGE.ModelFaceTexture
+      tileWidth = Int(BGE.Math.Max(1, BGE.Math.Min(bitmap.GetWidth(), maxSize \ tilesX)))
+      tileHeight = Int(BGE.Math.Max(1, BGE.Math.Min(bitmap.GetHeight(), maxSize \ tilesY)))
+      scaleX = tileWidth / bitmap.GetWidth()
+      scaleY = tileHeight / bitmap.GetHeight()
+      tiled = CreateObject("roBitmap", {width: tilesX * tileWidth, height: tilesY * tileHeight, AlphaEnable: true})
+      ' one row of copies into a strip, then the strip once per row - a Roku drops
+      ' everything drawn to a bitmap once ~13k draws queue up
+      strip = CreateObject("roBitmap", {width: tilesX * tileWidth, height: tileHeight, AlphaEnable: true})
+      if tiled = invalid or strip = invalid
+        return invalid
+      end if
+      for column = 0 to tilesX - 1
+        strip.DrawScaledObject(column * tileWidth, 0, scaleX, scaleY, bitmap)
+      end for
+      for row = 0 to tilesY - 1
+        tiled.DrawObject(0, row * tileHeight, strip)
+      end for
+      region = CreateObject("roRegion", tiled, 0, 0, tiled.GetWidth(), tiled.GetHeight())
+      return {regionWithId: BGE.RendererHelpers.createRegionWithId(region, cacheId), tileWidth: tileWidth, tileHeight: tileHeight} as BGE.ModelFaceTexture
+    end function
+
+    ' Call once a model's textures are applied: any face still waiting for a texture (none
+    ' was given, or it failed to load) falls back to a flat fill, and an untextured face
+    ' with a material takes that material's color (`Kd`).
     '
     ' @param {BGE.Model3d} model
-    sub clearTextures(model as BGE.Model3d)
+    sub finishTextures(model as BGE.Model3d)
       for each face in model.faces
-        face.Texture = invalid
+        if face.Texture <> invalid and face.Texture.srcRegionWithId.region = invalid
+          face.Texture = invalid
+        end if
+        if face.Texture = invalid and face.material <> invalid and face.material <> ""
+          material = model.materials[face.material]
+          if material <> invalid and material.color <> invalid
+            face.color = material.color
+          end if
+        end if
       end for
     end sub
 
@@ -142,10 +320,15 @@ namespace BGE
   class Model3d
     faces as Model3dFace[]
     name as string = "Model3d"
+    ' The texture for faces with no material: the first `map_Kd` in the .obj's .mtl file
     texturePath as string = invalid
+    ' The materials from the .obj's .mtl file, by name (Model3dMaterial)
+    materials as roAssociativeArray
+
 
     sub new(faces as Model3dFace[])
       m.faces = faces
+      m.materials = {}
     end sub
 
     function toStr() as string

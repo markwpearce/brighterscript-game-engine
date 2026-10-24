@@ -490,34 +490,34 @@ See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `exa
 
 ## Textured 3D models (`Model3d` / `OBJParser`)
 
-An `.obj` model can carry a diffuse texture, sampled via UV coordinates and affine-mapped onto each
+An `.obj` model can carry diffuse textures, sampled via UV coordinates and affine-mapped onto each
 triangular face (not perspective-correct - see the "Bitmap Triangle Warp" demo in `rendererTest` for
-the underlying primitive, `Renderer.drawBitmapTriangle(To)`). Two ways to get a texture onto a model:
+the underlying primitive, `Renderer.drawBitmapTriangle(To)`). Two ways to get textures onto a model:
 
-- **Standard convention**: the `.obj` references a `mtllib <file>.mtl`, and that file has a
-  `map_Kd <image>` line - both resolved relative to the `.obj`'s own directory. `examples/3d`'s
-  `D20Scene` uses this path with no explicit override at all.
+- **Materials**: the `.obj` references a `mtllib <file>.mtl`, and each `usemtl <name>` line sets the
+  material of the faces after it. Each material's `map_Kd <image>` is its texture, resolved relative
+  to the `.mtl` file. Every distinct texture is loaded once. `examples/3d`'s `CarScene` (nine
+  materials) and `D20Scene` (one) use this, as does `examples/terrain`'s chapel.
 - **Explicit override**: pass `{texturePath: "pkg:/..."}` as the third argument to
-  `Game.load3dModel(modelName, modelPath, options)` - this always wins over anything the `.obj`/
-  `.mtl` files reference. Needed for a model that carries UV data but no `mtllib` at all (a common
-  case for exported assets that ship their texture separately) - `examples/3d`'s `CarScene` is this
-  case.
+  `Game.load3dModel(modelName, modelPath, options)` - every textured face uses it instead of its
+  material's texture. Handy for a model that carries UV data but ships its texture separately, with
+  no `mtllib` at all.
 
 ```brighterscript
-' mtllib/map_Kd resolution, no override needed:
-game.load3dModel("d20", "pkg:/models/d20.obj")
+' textures from the model's .mtl file:
+game.load3dModel("car", "pkg:/models/car/car.obj")
 
-' explicit override - always wins, needed when the .obj has no mtllib:
-game.load3dModel("car", "pkg:/models/car.obj", {texturePath: "pkg:/sprites/car_texture.png"})
+' one texture for every face, whatever the .mtl says:
+game.load3dModel("crate", "pkg:/models/crate.obj", {texturePath: "pkg:/sprites/crate.png"})
 ```
 
-A face missing UV data on any of its corners renders flat-shaded instead - texturing degrades
-per-face, not per-model. The same is true if the texture itself can't be resolved or loaded (a
-missing file, a `mtllib` with no `map_Kd`): a warning is logged and the whole model renders
-flat-shaded rather than the load failing. v1 supports exactly one texture per model - `usemtl`/
-multi-material meshes aren't parsed into separate textures.
+UVs outside 0..1 repeat the texture, the usual `.obj` convention for tiling a small texture across a
+big face. A face with no texture of its own - no UV data on one of its corners, a material with no
+`map_Kd`, or a texture that can't be found or loaded (a warning is logged) - is filled flat, in its
+material's `Kd` color when it has one. The rest of the model stays textured; a load never fails over a
+texture. Other `.mtl` properties (`map_Bump`, `Ks`/`Ns`, `d` transparency, `illum`) are ignored.
 
-![A textured car model rendered by examples/3d's CarScene, showing windshield glass and tire tread detail - loaded via an explicit texturePath override](images/textured-obj-car.jpg)
+![A textured car model rendered by examples/3d's CarScene](images/textured-obj-car.jpg)
 
 ![A textured D20 model rendered by examples/3d's D20Scene, showing distinct colored/numbered faces - loaded via mtllib/map_Kd auto-resolution, no override](images/textured-obj-d20.jpg)
 

@@ -314,8 +314,9 @@ namespace BGE
   end class
 
   ' Loads a .obj or .stl model a slice at a time: downloads it if it's a URL, reads the file,
-  ' parses it over as many steps as it needs, downloads a remote texture if there is one, then
-  ' adds it to the game (loading an .obj's texture).
+  ' parses it over as many steps as it needs, downloads any remote textures (a remote .obj's
+  ' .mtl and every texture it names, or a URL texturePath), then adds it to the game (loading
+  ' an .obj's textures).
   class ModelLoadTask extends FileLoadTask
 
     ' Makes this model's texture downloads. Set by AssetLoader.
@@ -331,10 +332,17 @@ namespace BGE
     private isObj as boolean = false
     private parsed as boolean = false
     private modelUrl as string = ""
-    private textureDownload as BGE.DownloadTask = invalid
+    ' Texture downloads still running, by URL
+    private textureDownloads as roAssociativeArray
+    ' Finished texture downloads' local paths by URL ("" for one that failed)
+    private downloadedTextures as roAssociativeArray
     private mtlDownload as BGE.DownloadTask = invalid
     private localTexturePath as string = ""
     private unknownExtension as boolean = false
+    ' Faces (Model3dFace[]) by the texture they're drawn with, once the downloads finish
+    private textureGroups as roAssociativeArray = invalid
+    ' Textures in textureGroups not yet loaded and applied
+    private pendingTexturePaths as string[]
 
     sub new(game as BGE.Game, modelName as string, path as string, options as BGE.Model3dLoadOptions)
       super(path)
@@ -343,6 +351,8 @@ namespace BGE
       m.modelName = modelName
       m.options = options
       m.downloadOptions = {}
+      m.textureDownloads = {}
+      m.downloadedTextures = {}
       m.downloadShare = 0.5
       if BGE.Urls.isUrl(path)
         m.modelUrl = path
@@ -373,6 +383,10 @@ namespace BGE
         m.startTextureDownloads(mtllibName)
       end if
       if not m.stepTextureDownloads(budgetMs)
+        m.waitingForNextFrame = true
+        return false
+      end if
+      if not m.applyTextures(budgetMs)
         m.waitingForNextFrame = true
         return false
       end if
@@ -438,20 +452,26 @@ namespace BGE
       return not m.unknownExtension
     end function
 
-    ' Starts whichever download the texture needs, if any.
+    ' Starts whichever downloads the textures need, if any.
     private sub startTextureDownloads(mtllibName as string)
       texturePath = ""
       if m.options <> invalid and m.options.texturePath <> invalid
         texturePath = m.options.texturePath
       end if
       if BGE.Urls.isUrl(texturePath)
-        m.textureDownload = m.newDownload(texturePath)
+        m.startTextureDownload(texturePath)
       else if texturePath = "" and m.isObj and m.modelUrl <> "" and mtllibName <> ""
         m.mtlDownload = m.newDownload(BGE.Urls.resolveRelative(m.modelUrl, mtllibName))
       end if
     end sub
 
-    ' Steps the .mtl then texture download. Returns true when there's nothing left to download.
+    private sub startTextureDownload(url as string)
+      if m.textureDownloads[url] = invalid and m.downloadedTextures[url] = invalid
+        m.textureDownloads[url] = m.newDownload(url)
+      end if
+    end sub
+
+    ' Steps the .mtl then texture downloads. Returns true when there's nothing left to download.
     private function stepTextureDownloads(budgetMs as integer) as boolean
       if m.mtlDownload <> invalid
         if not m.mtlDownload.step(budgetMs)
@@ -469,54 +489,132 @@ namespace BGE
           m.warnUntextured(mtl.url + " isn't a .mtl file; the downloaded copy was discarded")
           return true
         end if
-        mapKdPath = BGE.Parsers.extractMapKdPath(mtlContent)
-        if mapKdPath = ""
+        materials = BGE.Parsers.parseMTLContent(mtlContent)
+        for each material in materials
+          if material.texturePath <> ""
+            ' map_Kd is relative to the .mtl, which may be in a different folder to the model
+            material.texturePath = BGE.Urls.resolveRelative(mtl.url, material.texturePath)
+            m.startTextureDownload(material.texturePath)
+          end if
+        end for
+        BGE.Parsers.setOBJMaterials(m.model, materials)
+        if m.textureDownloads.count() = 0
           m.warnUntextured(mtl.url + " has no map_Kd texture")
           return true
         end if
-        ' map_Kd is relative to the .mtl, which may be in a different folder to the model
-        m.textureDownload = m.newDownload(BGE.Urls.resolveRelative(mtl.url, mapKdPath))
       end if
-      if m.textureDownload <> invalid
-        if not m.textureDownload.step(budgetMs)
-          return false
+      ' the downloads share this step's budget - each always gets one step on its first frame
+      timer = CreateObject("roTimespan")
+      for each url in m.textureDownloads.Keys()
+        remainingMs = budgetMs - timer.TotalMilliseconds()
+        if remainingMs <= 0
+          exit for
         end if
-        texture = m.textureDownload
-        m.textureDownload = invalid
-        if texture.error <> invalid
-          m.warnUntextured(texture.error)
-          return true
+        texture = m.textureDownloads[url]
+        if texture.step(remainingMs)
+          m.textureDownloads.Delete(url)
+          m.downloadedTextures[url] = m.getDownloadedTexturePath(texture)
         end if
-        if not BGE.FileTypes.isImageExtension(BGE.FileTypes.sniffExtension(texture.localPath))
-          CreateObject("roFileSystem").Delete(texture.localPath)
-          m.warnUntextured(texture.url + " isn't an image; the downloaded copy was discarded")
-          return true
-        end if
-        m.localTexturePath = texture.localPath
+      end for
+      if m.textureDownloads.count() > 0
+        return false
       end if
+      m.useDownloadedTextures()
       return true
     end function
 
-    ' Also releases a texture or .mtl download's slot.
+    ' A finished texture download's local path, or "" (with a warning) if it failed.
+    private function getDownloadedTexturePath(texture as BGE.DownloadTask) as string
+      if texture.error <> invalid
+        m.warnUntextured(texture.error)
+        return ""
+      end if
+      if not BGE.FileTypes.isImageExtension(BGE.FileTypes.sniffExtension(texture.localPath))
+        CreateObject("roFileSystem").Delete(texture.localPath)
+        m.warnUntextured(texture.url + " isn't an image; the downloaded copy was discarded")
+        return ""
+      end if
+      return texture.localPath
+    end function
+
+    ' Points the model's materials (or the URL texturePath) at the downloaded files.
+    private sub useDownloadedTextures()
+      if m.options <> invalid and BGE.Urls.isUrl(m.options.texturePath)
+        localPath = m.downloadedTextures[m.options.texturePath]
+        if localPath <> invalid
+          m.localTexturePath = localPath
+        end if
+        return
+      end if
+      if m.model = invalid or m.downloadedTextures.count() = 0
+        return
+      end if
+      for each name in m.model.materials.Keys()
+        material = m.model.materials[name]
+        localPath = m.downloadedTextures[material.texturePath]
+        if localPath <> invalid
+          material.texturePath = localPath
+        end if
+      end for
+      ' faces with no material use the first texture, now a local path too
+      if m.model.texturePath <> invalid and m.downloadedTextures[m.model.texturePath] <> invalid
+        m.model.texturePath = m.downloadedTextures[m.model.texturePath]
+      end if
+    end sub
+
+    ' Also releases the .mtl and texture downloads' slots.
     override sub abort()
       super.abort()
       if m.mtlDownload <> invalid
         m.mtlDownload.abort()
       end if
-      if m.textureDownload <> invalid
-        m.textureDownload.abort()
-      end if
+      for each url in m.textureDownloads.Keys()
+        m.textureDownloads[url].abort()
+      end for
+      m.textureDownloads = {}
     end sub
 
-    private function addModel() as boolean
-      addOptions = m.options
-      if m.localTexturePath <> ""
-        addOptions = {texturePath: m.localTexturePath}
-      else if m.options <> invalid and BGE.Urls.isUrl(m.options.texturePath)
-        ' the URL texture failed - don't let addLoadedModel try it as a path
-        addOptions = {}
+    ' Loads and applies an .obj's textures, at least one per step, until the budget runs
+    ' out. Returns true once every texture is done.
+    private function applyTextures(budgetMs as integer) as boolean
+      if not m.isObj or m.model = invalid
+        return true
       end if
-      if not m.game.addLoadedModel(m.modelName, m.model, addOptions, m.isObj)
+      if m.textureGroups = invalid
+        m.textureGroups = BGE.Model3dOps.groupFacesByTexture(m.model, m.getOverrideTexturePath())
+        m.pendingTexturePaths = m.textureGroups.Keys()
+      end if
+      timer = CreateObject("roTimespan")
+      while m.pendingTexturePaths.count() > 0
+        texturePath = m.pendingTexturePaths.Shift()
+        bitmap = m.game.loadModelTextureBitmap(texturePath)
+        if bitmap <> invalid
+          BGE.Model3dOps.applyTextureToFaces(m.textureGroups[texturePath], bitmap, texturePath)
+        end if
+        if m.pendingTexturePaths.count() > 0 and timer.TotalMilliseconds() >= budgetMs
+          return false
+        end if
+      end while
+      BGE.Model3dOps.finishTextures(m.model)
+      m.textureGroups = invalid
+      return true
+    end function
+
+    ' The texture every textured face uses instead of its material's, or "" for none.
+    private function getOverrideTexturePath() as string
+      if m.localTexturePath <> ""
+        return m.localTexturePath
+      end if
+      if m.options = invalid or m.options.texturePath = invalid or BGE.Urls.isUrl(m.options.texturePath)
+        ' a URL texture that failed shouldn't be tried as a path
+        return ""
+      end if
+      return m.options.texturePath
+    end function
+
+    private function addModel() as boolean
+      ' the textures are already applied
+      if not m.game.addLoadedModel(m.modelName, m.model, {}, false)
         m.error = "could not parse model " + m.source
       end if
       m.model = invalid

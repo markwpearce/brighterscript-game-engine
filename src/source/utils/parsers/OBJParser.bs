@@ -1,5 +1,6 @@
 import "../../engine/drawables/Model3d.bs"
 import "../../engine/renderer/RendererHelpers.bs"
+import "../../math/math.bs"
 import "../../math/vector.bs"
 import "../../roku_modules/rodash/rodash.d.bs"
 import "../strings.bs"
@@ -35,13 +36,14 @@ namespace BGE.Parsers
   ' UV points; a face where any corner lacks one (`v//vn` or bare `v`) gets no Texture
   ' at all, falling back to flat-color rendering for that face only.
   '
+  ' `usemtl` sets the material of the faces after it (`Model3dFace.material`).
   ' `mtllib <name>.mtl` (first occurrence only, matching this parser's `o`/`g` handling)
-  ' is resolved relative to `baseDir` and read from disk to find the first `map_Kd`
-  ' line, which becomes the returned model's `texturePath` (also resolved relative to
-  ' `baseDir`) - only when `baseDir` is given (parseOBJFile always supplies it; a bare
+  ' is resolved relative to `baseDir` and read from disk: its materials become the
+  ' model's `materials` (each `map_Kd` resolved relative to the .mtl's folder), and its
+  ' first `map_Kd` the model's `texturePath`, used by faces with no material - only when
+  ' `baseDir` is given (parseOBJFile always supplies it; a bare
   ' `parseOBJContent(content)` call, e.g. from a unit test with no real file on disk,
-  ' skips mtllib/map_Kd resolution entirely and just parses geometry). `usemtl` is
-  ' still ignored - a model has at most one texture in this engine's current scope.
+  ' skips mtllib resolution entirely and just parses geometry).
   '
   ' @param {string} content - the raw text content of a .obj file
   ' @param {string} baseDir - the directory the .obj file lives in, for resolving mtllib/map_Kd paths; "" skips that resolution entirely
@@ -104,12 +106,16 @@ namespace BGE.Parsers
   ' @param {BGE.Model3dFace[]} faces
   ' @param {BGE.Math.Vector[]} faceVertices
   ' @param {BGE.Math.Vector[]} faceTexCoords
-  sub appendOBJFace(faces as BGE.Model3dFace[], faceVertices as BGE.Math.Vector[], faceTexCoords as BGE.Math.Vector[])
+  ' @param {string} [material=""] - the material (`usemtl`) in effect for this face, "" for none
+  sub appendOBJFace(faces as BGE.Model3dFace[], faceVertices as BGE.Math.Vector[], faceTexCoords as BGE.Math.Vector[], material = "" as string)
     hasTexture = faceTexCoords.count() = faceVertices.count() and faceVertices.count() > 0
     for i = 1 to faceVertices.count() - 2
       face = BGE.Model3dFaceOps.create([faceVertices[0], faceVertices[i], faceVertices[i + 1]])
       if hasTexture
         face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), [faceTexCoords[0], faceTexCoords[i], faceTexCoords[i + 1]])
+      end if
+      if material <> ""
+        face.material = material
       end if
       faces.push(face)
     end for
@@ -129,42 +135,137 @@ namespace BGE.Parsers
     return index - 1
   end function
 
-  ' Reads `baseDir/mtllibName` from disk and returns the resolved path to its first
-  ' `map_Kd` texture, or invalid if the file can't be read or has no map_Kd line. The texture
-  ' path is relative to the .mtl file's own folder, which may differ from the .obj's.
+  ' Reads `baseDir/mtllibName` from disk and returns its materials, with each `map_Kd`
+  ' resolved against the .mtl file's own folder. Empty if the file can't be read.
   '
   ' @param {string} baseDir - the .obj file's own directory
   ' @param {string} mtllibName - the mtllib line's filename, as written in the .obj
-  ' @return {dynamic}
-  function resolveOBJTexturePath(baseDir as string, mtllibName as string) as dynamic
+  ' @return {BGE.Model3dMaterial[]} in the order the .mtl defines them
+  function resolveOBJMaterials(baseDir as string, mtllibName as string) as BGE.Model3dMaterial[]
     mtlPath = joinObjPath(baseDir, mtllibName)
     mtlContent = ReadAsciiFile(mtlPath)
-    if rodash.isNotInvalid(mtlContent)
-      mapKdPath = extractMapKdPath(mtlContent)
-      if mapKdPath <> ""
-        return joinObjPath(mtlPath.Left(BGE.lastInStr(mtlPath, "/")), mapKdPath)
-      end if
+    if rodash.isInvalid(mtlContent) or mtlContent = ""
+      return []
     end if
-    return invalid
-  end function
-
-  ' Finds the first `map_Kd <path>` line in a .mtl file's raw content. Per the Wavefront
-  ' MTL spec, `map_Kd` may carry option flags (e.g. `-s 1 1 1`, `-o 0 0 0`, `-clamp on`)
-  ' before the filename, so the filename is taken as the LAST token on the line rather
-  ' than assuming it's always immediately after `map_Kd` - a bare `map_Kd diffuse.png`
-  ' still works the same way, since its last token is the filename too.
-  '
-  ' @param {string} mtlContent - the raw text content of a .mtl file
-  ' @return {string} the path, or "" if no map_Kd line was found
-  function extractMapKdPath(mtlContent as string) as string
-    lines = mtlContent.Split(chr(10))
-    for each rawLine in lines
-      tokens = rodash.compact(rawLine.Trim().Split(" "))
-      if tokens.count() >= 2 and tokens[0] = "map_Kd"
-        return tokens[tokens.count() - 1]
+    materials = parseMTLContent(mtlContent)
+    mtlDir = mtlPath.Left(BGE.lastInStr(mtlPath, "/"))
+    for each material in materials
+      if material.texturePath <> ""
+        material.texturePath = joinObjPath(mtlDir, material.texturePath)
       end if
     end for
-    return ""
+    return materials
+  end function
+
+  ' Sets a model's materials, by name, and its texturePath to the first material's texture
+  ' (used by faces with no material).
+  '
+  ' @param {BGE.Model3d} model
+  ' @param {BGE.Model3dMaterial[]} materials - in the order the .mtl defines them
+  sub setOBJMaterials(model as BGE.Model3d, materials as BGE.Model3dMaterial[])
+    model.materials = {}
+    firstTexturePath = ""
+    for each material in materials
+      model.materials[material.name] = material
+      if firstTexturePath = "" and material.texturePath <> ""
+        firstTexturePath = material.texturePath
+      end if
+    end for
+    if firstTexturePath <> ""
+      model.texturePath = firstTexturePath
+    end if
+  end sub
+
+  ' Parses a .mtl file's materials: each `newmtl` block's name, `map_Kd` texture (as
+  ' written, not resolved) and `Kd` diffuse color. Other properties are ignored.
+  '
+  ' @param {string} mtlContent - the raw text content of a .mtl file
+  ' @return {BGE.Model3dMaterial[]} in the order the file defines them
+  function parseMTLContent(mtlContent as string) as BGE.Model3dMaterial[]
+    materials = [] as BGE.Model3dMaterial[]
+    current = invalid
+    for each rawLine in mtlContent.Split(chr(10))
+      tokens = splitOBJLine(rawLine)
+      if tokens.count() >= 2
+        keyword = LCase(tokens[0])
+        if keyword = "newmtl"
+          current = {name: joinOBJTokens(tokens, 1), texturePath: ""} as BGE.Model3dMaterial
+          materials.push(current)
+        else if current <> invalid and keyword = "map_kd"
+          current.texturePath = getMTLMapFileName(tokens)
+        else if current <> invalid and keyword = "kd" and tokens.count() >= 4
+          current.color = mtlColorToRGBA(tokens[1], tokens[2], tokens[3])
+        end if
+      end if
+    end for
+    return materials
+  end function
+
+  ' Converts a .mtl color's 0..1 red, green and blue to packed RGBA (opaque).
+  '
+  ' @param {string} r
+  ' @param {string} g
+  ' @param {string} b
+  ' @return {integer}
+  function mtlColorToRGBA(r as string, g as string, b as string) as integer
+    channels = [r, g, b]
+    rgba = 0
+    for each channel in channels
+      value = Int(BGE.Math.Clamp(BGE.stringToFloat(channel), 0, 1) * 255 + 0.5)
+      rgba = rgba * 256 + value
+    end for
+    return (rgba << 8) or &hFF
+  end function
+
+  ' Splits an .obj or .mtl line into its space- or tab-separated tokens.
+  '
+  ' @param {string} rawLine
+  ' @return {string[]}
+  function splitOBJLine(rawLine as string) as string[]
+    return rodash.compact(rawLine.Replace(chr(9), " ").Trim().Split(" "))
+  end function
+
+  ' Joins a line's tokens from `start` on with single spaces - a name or filename that
+  ' contains spaces.
+  '
+  ' @param {string[]} tokens
+  ' @param {integer} start
+  ' @return {string}
+  function joinOBJTokens(tokens as string[], start as integer) as string
+    parts = [] as string[]
+    for i = start to tokens.count() - 1
+      parts.push(tokens[i])
+    end for
+    return parts.join(" ")
+  end function
+
+  ' The filename in a .mtl texture line (e.g. `map_Kd -s 1 1 1 my texture.png`): the
+  ' tokens after the keyword and any option flags (`-name` and its values).
+  '
+  ' @param {string[]} tokens - the line's tokens, the keyword first
+  ' @return {string}
+  function getMTLMapFileName(tokens as string[]) as string
+    i = 1
+    while i < tokens.count() - 1 and tokens[i].StartsWith("-")
+      i++
+      ' an option's values are numbers, or on/off
+      while i < tokens.count() - 1 and isMTLOptionValue(tokens[i])
+        i++
+      end while
+    end while
+    return joinOBJTokens(tokens, i)
+  end function
+
+  ' Whether a .mtl option token is a value (a number, or on/off) rather than a filename.
+  '
+  ' @param {string} token
+  ' @return {boolean}
+  function isMTLOptionValue(token as string) as boolean
+    lowerToken = LCase(token)
+    if lowerToken = "on" or lowerToken = "off"
+      return true
+    end if
+    return CreateObject("roRegex", "^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$", "").IsMatch(token)
   end function
 
   ' Joins a base directory and a relative path, regardless of whether baseDir already

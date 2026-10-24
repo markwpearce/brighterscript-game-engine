@@ -50,31 +50,6 @@ namespace tests
       m.assertEqual(1, model.faces.count())
     end function
 
-    @describe("Model3dOps.resolveEffectiveTexturePath")
-
-    @it("prefers the explicit options.texturePath over the model's own texturePath")
-    function _()
-      model = new BGE.Model3d([])
-      model.texturePath = "pkg:/models/from-mtllib.png"
-      options = {texturePath: "pkg:/models/explicit.png"} as BGE.Model3dLoadOptions
-      m.assertEqual("pkg:/models/explicit.png", BGE.Model3dOps.resolveEffectiveTexturePath(options, model))
-    end function
-
-    @it("falls back to the model's own texturePath when no explicit override is given")
-    function _()
-      model = new BGE.Model3d([])
-      model.texturePath = "pkg:/models/from-mtllib.png"
-      options = {} as BGE.Model3dLoadOptions
-      m.assertEqual("pkg:/models/from-mtllib.png", BGE.Model3dOps.resolveEffectiveTexturePath(options, model))
-    end function
-
-    @it("returns invalid when neither an override nor a model texturePath exists")
-    function _()
-      model = new BGE.Model3d([])
-      options = {} as BGE.Model3dLoadOptions
-      m.assertInvalid(BGE.Model3dOps.resolveEffectiveTexturePath(options, model))
-    end function
-
     @describe("Model3dOps.applyTexture")
 
     @it("converts normalized UV points to pixel space and shares one RegionWithId across faces")
@@ -127,25 +102,161 @@ namespace tests
       m.assertInvalid(model.faces[0].Texture)
     end function
 
-    @describe("Model3dOps.clearTextures")
+    @describe("Model3dOps.applyTextureToFaces repeating textures")
 
-    @it("clears a textured face's Texture back to invalid")
+    @it("gives a face with UVs past 0..1 a copy of the texture tiled across its range")
     function _()
+      face = m.newUVFace([[-0.5, 0], [1.5, 0], [1.5, 2]])
+      bitmap = CreateObject("roBitmap", {width: 10, height: 20, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([face], bitmap, "tex")
+
+      ' u -1..2 and v 0..2: 3 x 2 copies
+      region = face.Texture.srcRegionWithId.region
+      m.assertEqual(30, region.GetWidth())
+      m.assertEqual(40, region.GetHeight())
+      m.assertEqual("tex|tiled:3x2", face.Texture.srcRegionWithId.id)
+      ' x = (u - minU) * tileWidth, y = (maxV - v) * tileHeight
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[0], BGE.Math.VectorOps.create(5, 40, 0)))
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[2], BGE.Math.VectorOps.create(25, 0, 0)))
+    end function
+
+    @it("shares one tiled copy between faces spanning the same number of repeats, and keeps single-repeat faces on the texture")
+    function _()
+      tiled1 = m.newUVFace([[0, 0], [2, 0], [2, 1]])
+      tiled2 = m.newUVFace([[3.5, 5.5], [4.5, 5], [4, 6]])
+      plain = m.newUVFace([[0, 0], [1, 0], [1, 1]])
+      bitmap = CreateObject("roBitmap", {width: 10, height: 10, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([tiled1, tiled2, plain], bitmap, "tex")
+
+      m.assertEqual("tex|tiled:2x1", tiled1.Texture.srcRegionWithId.id)
+      tiled1.Texture.srcRegionWithId.id = "marked"
+      m.assertEqual("marked", tiled2.Texture.srcRegionWithId.id)
+      ' u 3.5 is half way into the 3..5 range
+      m.assertTrue(BGE.Math.VectorOps.equals(tiled2.Texture.points[0], BGE.Math.VectorOps.create(5, 5, 0)))
+      m.assertEqual("tex", plain.Texture.srcRegionWithId.id)
+    end function
+
+    @it("maps a face within one repeat offset from 0..1 onto the texture itself")
+    function _()
+      face = m.newUVFace([[2, -1], [3, -1], [2.5, 0]])
+      bitmap = CreateObject("roBitmap", {width: 10, height: 20, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([face], bitmap, "tex")
+
+      m.assertEqual("tex", face.Texture.srcRegionWithId.id)
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[0], BGE.Math.VectorOps.create(0, 20, 0)))
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[2], BGE.Math.VectorOps.create(5, 0, 0)))
+    end function
+
+    @it("treats UVs a hair past a whole number as that number")
+    function _()
+      range = BGE.Model3dOps.getUVTileRange([BGE.Math.VectorOps.create(-0.0001, 0.00002, 0), BGE.Math.VectorOps.create(1.0003, 0.9999, 0)])
+      m.assertEqual(0, range.minU)
+      m.assertEqual(1, range.maxU)
+      m.assertEqual(0, range.minV)
+      m.assertEqual(1, range.maxV)
+    end function
+
+    @it("shrinks each copy to keep the tiled texture within the size limit")
+    function _()
+      face = m.newUVFace([[0, 0], [16, 0], [16, 1]])
+      bitmap = CreateObject("roBitmap", {width: 128, height: 8, alphaEnable: true})
+
+      BGE.Model3dOps.applyTextureToFaces([face], bitmap, "tex")
+
+      maxSize = BGE.Model3dOps.getTiledTextureMaxSize()
+      m.assertEqual(16 * (maxSize \ 16), face.Texture.srcRegionWithId.region.GetWidth())
+      m.assertTrue(BGE.Math.VectorOps.equals(face.Texture.points[1], BGE.Math.VectorOps.create(maxSize, 8, 0)))
+    end function
+
+    @describe("Model3dOps.groupFacesByTexture / finishTextures")
+
+    @it("groups textured faces by their material's texture, and faces with no material by the model's")
+    function _()
+      model = m.newMaterialModel()
+
+      groups = BGE.Model3dOps.groupFacesByTexture(model)
+
+      m.assertEqual(2, groups.count())
+      m.assertEqual(2, groups["wall.png"].count())
+      m.assertEqual(1, groups["roof.png"].count())
+      m.assertEqual("roof", groups["roof.png"][0].material)
+    end function
+
+    @it("puts every textured face under the override path when one is given")
+    function _()
+      model = m.newMaterialModel()
+
+      groups = BGE.Model3dOps.groupFacesByTexture(model, "skin.png")
+
+      m.assertEqual(1, groups.count())
+      m.assertEqual(4, groups["skin.png"].count())
+    end function
+
+    @it("finishTextures clears unloaded textures and fills untextured faces with their material's color")
+    function _()
+      model = m.newMaterialModel()
+      groups = BGE.Model3dOps.groupFacesByTexture(model)
+      bitmap = CreateObject("roBitmap", {width: 8, height: 8, alphaEnable: true})
+      BGE.Model3dOps.applyTextureToFaces(groups["wall.png"], bitmap, "wall.png")
+
+      BGE.Model3dOps.finishTextures(model)
+
+      m.assertEqual("wall.png", model.faces[0].Texture.srcRegionWithId.id)
+      m.assertEqual("wall.png", model.faces[3].Texture.srcRegionWithId.id)
+      ' roof.png never loaded - flat, in the roof's color
+      m.assertInvalid(model.faces[1].Texture)
+      m.assertEqual(&hFF0000FF, model.faces[1].color)
+      ' no texture at all - flat, in the paint's color
+      m.assertInvalid(model.faces[2].Texture)
+      m.assertEqual(&h00FF00FF, model.faces[2].color)
+    end function
+
+    ' A face with a placeholder Texture at these normalized UVs ([u, v] pairs)
+    private function newUVFace(uvs as roArray) as BGE.Model3dFace
       face = BGE.Model3dFaceOps.create([
         BGE.Math.VectorOps.create(0, 0, 0),
         BGE.Math.VectorOps.create(1, 0, 0),
         BGE.Math.VectorOps.create(0, 1, 0)
       ])
-      face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), [
-        BGE.Math.VectorOps.create(0, 0, 0),
-        BGE.Math.VectorOps.create(1, 0, 0),
-        BGE.Math.VectorOps.create(0.5, 1, 0)
-      ])
-      model = new BGE.Model3d([face])
+      points = [] as BGE.Math.Vector[]
+      for each uv in uvs
+        points.push(BGE.Math.VectorOps.create(uv[0], uv[1], 0))
+      end for
+      face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), points)
+      return face
+    end function
 
-      BGE.Model3dOps.clearTextures(model)
-
-      m.assertInvalid(model.faces[0].Texture)
+    ' Faces: wall (textured), roof (textured), paint (no texture), no material (textured)
+    private function newMaterialModel() as BGE.Model3d
+      faces = [] as BGE.Model3dFace[]
+      materialNames = ["wall", "roof", "paint", ""]
+      for each name in materialNames
+        face = BGE.Model3dFaceOps.create([
+          BGE.Math.VectorOps.create(0, 0, 0),
+          BGE.Math.VectorOps.create(1, 0, 0),
+          BGE.Math.VectorOps.create(0, 1, 0)
+        ])
+        face.Texture = new BGE.Model3dTexture(BGE.RendererHelpers.createRegionWithId(invalid, ""), [
+          BGE.Math.VectorOps.create(0, 0, 0),
+          BGE.Math.VectorOps.create(1, 0, 0),
+          BGE.Math.VectorOps.create(0, 1, 0)
+        ])
+        if name <> ""
+          face.material = name
+        end if
+        faces.push(face)
+      end for
+      model = new BGE.Model3d(faces)
+      model.texturePath = "wall.png"
+      model.materials = {
+        wall: {name: "wall", texturePath: "wall.png"},
+        roof: {name: "roof", texturePath: "roof.png", color: &hFF0000FF},
+        paint: {name: "paint", texturePath: "", color: &h00FF00FF}
+      }
+      return model
     end function
 
   end class
