@@ -135,25 +135,6 @@ namespace BGE.Parsers
     return index - 1
   end function
 
-  ' Reads `baseDir/mtllibName` from disk and returns the resolved path to its first
-  ' `map_Kd` texture, or invalid if the file can't be read or has no map_Kd line. The texture
-  ' path is relative to the .mtl file's own folder, which may differ from the .obj's.
-  '
-  ' @param {string} baseDir - the .obj file's own directory
-  ' @param {string} mtllibName - the mtllib line's filename, as written in the .obj
-  ' @return {dynamic}
-  function resolveOBJTexturePath(baseDir as string, mtllibName as string) as dynamic
-    mtlPath = joinObjPath(baseDir, mtllibName)
-    mtlContent = ReadAsciiFile(mtlPath)
-    if rodash.isNotInvalid(mtlContent)
-      mapKdPath = extractMapKdPath(mtlContent)
-      if mapKdPath <> ""
-        return joinObjPath(mtlPath.Left(BGE.lastInStr(mtlPath, "/")), mapKdPath)
-      end if
-    end if
-    return invalid
-  end function
-
   ' Reads `baseDir/mtllibName` from disk and returns its materials, with each `map_Kd`
   ' resolved against the .mtl file's own folder. Empty if the file can't be read.
   '
@@ -204,15 +185,14 @@ namespace BGE.Parsers
     materials = [] as BGE.Model3dMaterial[]
     current = invalid
     for each rawLine in mtlContent.Split(chr(10))
-      tokens = rodash.compact(rawLine.Trim().Split(" "))
+      tokens = splitOBJLine(rawLine)
       if tokens.count() >= 2
         keyword = LCase(tokens[0])
         if keyword = "newmtl"
-          current = {name: tokens[1], texturePath: ""} as BGE.Model3dMaterial
+          current = {name: joinOBJTokens(tokens, 1), texturePath: ""} as BGE.Model3dMaterial
           materials.push(current)
         else if current <> invalid and keyword = "map_kd"
-          ' option flags (e.g. `-s 1 1 1`) may come before the filename
-          current.texturePath = tokens[tokens.count() - 1]
+          current.texturePath = getMTLMapFileName(tokens)
         else if current <> invalid and keyword = "kd" and tokens.count() >= 4
           current.color = mtlColorToRGBA(tokens[1], tokens[2], tokens[3])
         end if
@@ -237,23 +217,55 @@ namespace BGE.Parsers
     return (rgba << 8) or &hFF
   end function
 
-  ' Finds the first `map_Kd <path>` line in a .mtl file's raw content. Per the Wavefront
-  ' MTL spec, `map_Kd` may carry option flags (e.g. `-s 1 1 1`, `-o 0 0 0`, `-clamp on`)
-  ' before the filename, so the filename is taken as the LAST token on the line rather
-  ' than assuming it's always immediately after `map_Kd` - a bare `map_Kd diffuse.png`
-  ' still works the same way, since its last token is the filename too.
+  ' Splits an .obj or .mtl line into its space- or tab-separated tokens.
   '
-  ' @param {string} mtlContent - the raw text content of a .mtl file
-  ' @return {string} the path, or "" if no map_Kd line was found
-  function extractMapKdPath(mtlContent as string) as string
-    lines = mtlContent.Split(chr(10))
-    for each rawLine in lines
-      tokens = rodash.compact(rawLine.Trim().Split(" "))
-      if tokens.count() >= 2 and tokens[0] = "map_Kd"
-        return tokens[tokens.count() - 1]
-      end if
+  ' @param {string} rawLine
+  ' @return {string[]}
+  function splitOBJLine(rawLine as string) as string[]
+    return rodash.compact(rawLine.Replace(chr(9), " ").Trim().Split(" "))
+  end function
+
+  ' Joins a line's tokens from `start` on with single spaces - a name or filename that
+  ' contains spaces.
+  '
+  ' @param {string[]} tokens
+  ' @param {integer} start
+  ' @return {string}
+  function joinOBJTokens(tokens as string[], start as integer) as string
+    parts = [] as string[]
+    for i = start to tokens.count() - 1
+      parts.push(tokens[i])
     end for
-    return ""
+    return parts.join(" ")
+  end function
+
+  ' The filename in a .mtl texture line (e.g. `map_Kd -s 1 1 1 my texture.png`): the
+  ' tokens after the keyword and any option flags (`-name` and its values).
+  '
+  ' @param {string[]} tokens - the line's tokens, the keyword first
+  ' @return {string}
+  function getMTLMapFileName(tokens as string[]) as string
+    i = 1
+    while i < tokens.count() - 1 and tokens[i].StartsWith("-")
+      i++
+      ' an option's values are numbers, or on/off
+      while i < tokens.count() - 1 and isMTLOptionValue(tokens[i])
+        i++
+      end while
+    end while
+    return joinOBJTokens(tokens, i)
+  end function
+
+  ' Whether a .mtl option token is a value (a number, or on/off) rather than a filename.
+  '
+  ' @param {string} token
+  ' @return {boolean}
+  function isMTLOptionValue(token as string) as boolean
+    lowerToken = LCase(token)
+    if lowerToken = "on" or lowerToken = "off"
+      return true
+    end if
+    return CreateObject("roRegex", "^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$", "").IsMatch(token)
   end function
 
   ' Joins a base directory and a relative path, regardless of whether baseDir already

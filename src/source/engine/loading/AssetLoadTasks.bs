@@ -339,6 +339,10 @@ namespace BGE
     private mtlDownload as BGE.DownloadTask = invalid
     private localTexturePath as string = ""
     private unknownExtension as boolean = false
+    ' Faces (Model3dFace[]) by the texture they're drawn with, once the downloads finish
+    private textureGroups as roAssociativeArray = invalid
+    ' Textures in textureGroups not yet loaded and applied
+    private pendingTexturePaths as string[]
 
     sub new(game as BGE.Game, modelName as string, path as string, options as BGE.Model3dLoadOptions)
       super(path)
@@ -379,6 +383,10 @@ namespace BGE
         m.startTextureDownloads(mtllibName)
       end if
       if not m.stepTextureDownloads(budgetMs)
+        m.waitingForNextFrame = true
+        return false
+      end if
+      if not m.applyTextures(budgetMs)
         m.waitingForNextFrame = true
         return false
       end if
@@ -495,9 +503,15 @@ namespace BGE
           return true
         end if
       end if
+      ' the downloads share this step's budget - each always gets one step on its first frame
+      timer = CreateObject("roTimespan")
       for each url in m.textureDownloads.Keys()
+        remainingMs = budgetMs - timer.TotalMilliseconds()
+        if remainingMs <= 0
+          exit for
+        end if
         texture = m.textureDownloads[url]
-        if texture.step(budgetMs)
+        if texture.step(remainingMs)
           m.textureDownloads.Delete(url)
           m.downloadedTextures[url] = m.getDownloadedTexturePath(texture)
         end if
@@ -560,15 +574,47 @@ namespace BGE
       m.textureDownloads = {}
     end sub
 
-    private function addModel() as boolean
-      addOptions = m.options
-      if m.localTexturePath <> ""
-        addOptions = {texturePath: m.localTexturePath}
-      else if m.options <> invalid and BGE.Urls.isUrl(m.options.texturePath)
-        ' the URL texture failed - don't let addLoadedModel try it as a path
-        addOptions = {}
+    ' Loads and applies an .obj's textures, at least one per step, until the budget runs
+    ' out. Returns true once every texture is done.
+    private function applyTextures(budgetMs as integer) as boolean
+      if not m.isObj or m.model = invalid
+        return true
       end if
-      if not m.game.addLoadedModel(m.modelName, m.model, addOptions, m.isObj)
+      if m.textureGroups = invalid
+        m.textureGroups = BGE.Model3dOps.groupFacesByTexture(m.model, m.getOverrideTexturePath())
+        m.pendingTexturePaths = m.textureGroups.Keys()
+      end if
+      timer = CreateObject("roTimespan")
+      while m.pendingTexturePaths.count() > 0
+        texturePath = m.pendingTexturePaths.Shift()
+        bitmap = m.game.loadModelTextureBitmap(texturePath)
+        if bitmap <> invalid
+          BGE.Model3dOps.applyTextureToFaces(m.textureGroups[texturePath], bitmap, texturePath)
+        end if
+        if m.pendingTexturePaths.count() > 0 and timer.TotalMilliseconds() >= budgetMs
+          return false
+        end if
+      end while
+      BGE.Model3dOps.finishTextures(m.model)
+      m.textureGroups = invalid
+      return true
+    end function
+
+    ' The texture every textured face uses instead of its material's, or "" for none.
+    private function getOverrideTexturePath() as string
+      if m.localTexturePath <> ""
+        return m.localTexturePath
+      end if
+      if m.options = invalid or m.options.texturePath = invalid or BGE.Urls.isUrl(m.options.texturePath)
+        ' a URL texture that failed shouldn't be tried as a path
+        return ""
+      end if
+      return m.options.texturePath
+    end function
+
+    private function addModel() as boolean
+      ' the textures are already applied
+      if not m.game.addLoadedModel(m.modelName, m.model, {}, false)
         m.error = "could not parse model " + m.source
       end if
       m.model = invalid
