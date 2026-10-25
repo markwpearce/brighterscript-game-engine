@@ -204,25 +204,34 @@ namespace BGE
       faceOffsetX = modelOffsetX + bounds[0].x
       faceOffsetY = modelOffsetY + bounds[0].y
 
-      width = fix(bounds[1].x - bounds[0].x) + 1
-      height = fix(bounds[1].y - bounds[0].y) + 1
+      ' Only keep the part on the canvas, plus enough margin to reuse it while it drifts
+      frame = rendererObj.camera.frameSize
+      margin = m.drawable.maxFaceDriftDistance
+      clipX = 0
+      clipY = 0
+      right = bounds[1].x
+      bottom = bounds[1].y
+      if frame.x > 0 and frame.y > 0
+        clipX = fix(BGE.Math.Max(0, -margin - bounds[0].x))
+        clipY = fix(BGE.Math.Max(0, -margin - bounds[0].y))
+        right = BGE.Math.Min(right, frame.x + margin)
+        bottom = BGE.Math.Min(bottom, frame.y + margin)
+      end if
+      width = fix(right - bounds[0].x) + 1 - clipX
+      height = fix(bottom - bounds[0].y) + 1 - clipY
       if width < 1 or height < 1
         return false
       end if
 
       cache = m.getFaceRasterCache(face.faceIndex)
 
-      ' The drift check below only bounds each vertex's own movement since the cache's
-      ' last real redraw, not the resulting bounding-box size - three vertices can each
-      ' drift by just under maxFaceDriftDistance and still grow this frame's width/height
-      ' beyond what the cached bitmap was actually allocated for (grow-only sizing is tied
-      ' to the LAST redraw's footprint, not this frame's). Require the cache to already be
-      ' big enough before cropping it to this size, or a reused frame could ask
-      ' getCroppedFaceRegion() for a region larger than its backing bitmap.
-      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+      ' Reuse only if the cached bitmap holds all of this frame's on-canvas part - the drift
+      ' check alone doesn't bound the bounding box's growth.
+      holdsThisPart = cache.clipX <= clipX and cache.clipY <= clipY and cache.clipX + cache.clipWidth >= clipX + width and cache.clipY + cache.clipHeight >= clipY + height
+      if invalid <> cache.bitmap and holdsThisPart and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
         m.lastDrawWasFullyFresh = false
-        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(cache.bitmap, width, height))
+        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + cache.clipX, faceOffsetY + cache.clipY, m.getCroppedFaceRegion(cache.bitmap, cache.clipWidth, cache.clipHeight))
       end if
 
       faceBitmap = BGE.RendererHelpers.growOrClearBitmap(cache.bitmap, width, height)
@@ -230,8 +239,8 @@ namespace BGE
         return false
       end if
 
-      localOffsetX = -bounds[0].x
-      localOffsetY = -bounds[0].y
+      localOffsetX = -bounds[0].x - clipX
+      localOffsetY = -bounds[0].y - clipY
       shadedColor = BGE.colorBrightness(face.color, face.brightness)
       drawn = false
       if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
@@ -247,7 +256,11 @@ namespace BGE
       cache.bitmap = faceBitmap
       cache.staleFrameCount = 0
       cache.triangleAtCapture = BGE.Math.vectorArrayCopy(face.vertices)
-      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(faceBitmap, width, height))
+      cache.clipX = clipX
+      cache.clipY = clipY
+      cache.clipWidth = width
+      cache.clipHeight = height
+      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
     end function
 
     ' Whether a face may reuse its cached raster this draw. A fastShrink occluder only reuses
