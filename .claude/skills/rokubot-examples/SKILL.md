@@ -5,7 +5,7 @@ description: Drive brighterscript-game-engine example apps on a real or simulate
 
 # Driving BGE examples with rokubot
 
-`rokubot` (npm, `^0.3.0`, installed as a devDependency of this repo) is a CLI for driving any
+`rokubot` (npm, `^0.4.0`, installed as a devDependency of this repo) is a CLI for driving any
 Roku device over ECP: sideload, launch, press keys, screenshot, stream the debug console. It's
 the tool to use whenever a task requires actually running one of `examples/*` rather than just
 reading/editing its source.
@@ -159,6 +159,11 @@ node node_modules/rokubot/dist/cli.js debugger-state
 This tells you paused-at-breakpoint vs. idle/unchanged in one call — no more manually streaming
 `console` for a few seconds and grepping for the debugger prompt. `active-app` is still useful
 alongside it to confirm which app is in the foreground.
+
+To check texture (graphics) memory - e.g. on a 64MB HD-tier device - use
+`node node_modules/rokubot/dist/cli.js textures` (used/free/max plus the largest bitmaps; `--group`
+totals them by file, `--watch` samples it over time). It needs developer mode and "Control by
+mobile apps" enabled on the device.
 
 `screenshot` (and `press ... --screenshot`) intermittently fails with `Error: Screenshot not ok`
 even when the app is running fine — this looks like a transient ECP/ screenshot-service hiccup on
