@@ -67,19 +67,15 @@ namespace BGE
     private doPooling = true
 
     ' Only for tests: setUpBasedOnDevice() normally force-disables pooling under the
-    ' simulator/brs-cli (it doesn't need pooling), which makes the self-flush behavior
+    ' simulator/brs-cli (it doesn't need pooling), which makes the per-frame reuse behavior
     ' below unobservable in headless Rooibos runs. Setting this bypasses that override
     ' so tests can exercise the real pooling path. Never set outside a test.
     private forcePoolingRegardlessOfDevice = false
 
-    private stagedRegions as ScratchRegion[] = []
-
-    ' Once stagedRegions reaches this many entries, stageRegionsForReturn() flushes
-    ' them itself instead of waiting for a caller to call returnStagedRegions(). Set
-    ' relative to maxPoolCount (rather than a fixed magic number) so a caller batching
-    ' many draws (e.g. one drawBitmapTriangleTo per textured model face, which stages 3
-    ' regions per call) can never exhaust the pool before a flush happens - see #129.
-    private selfFlushThreshold = 10
+    ' Bitmaps returned this frame. A real Roku can still have queued draws reading
+    ' from them after Finish(), so they only go back in the pool at onFrameEnd() -
+    ' reusing (and clearing) one mid-frame wiped triangles drawn from it (#345).
+    private usedThisFrame as ScratchBitmap[] = []
 
     ' initialCount < 0 uses the device tier's default (see setUpBasedOnDevice())
     sub new(doPooling = true as boolean, initialCount = -1 as integer, forcePoolingRegardlessOfDevice = false as boolean)
@@ -88,10 +84,6 @@ namespace BGE
       m.setUpBasedOnDevice()
       if initialCount < 0
         initialCount = m.defaultInitialCount
-      end if
-      m.selfFlushThreshold = m.maxPoolCount \ 2
-      if m.selfFlushThreshold < 1
-        m.selfFlushThreshold = 1
       end if
       for i = 0 to initialCount - 1
         m.addNewBitmapToPool()
@@ -124,8 +116,10 @@ namespace BGE
       end if
 
       if m.scratchHeight >= 1080
-        ' for higher-end devices, we have more memory to work with, so we can have a bigger pool
-        m.maxPoolCount = 30
+        ' Each is ~4.5MB of texture memory, and nothing is reused within a frame, so a
+        ' busy frame used to grow the pool to 30 (~140MB) and starve other bitmaps (#345).
+        ' Past this, regions are exact-size one-off bitmaps, freed when the frame is done.
+        m.maxPoolCount = 10
       end if
     end sub
 
@@ -172,9 +166,8 @@ namespace BGE
 
       region as roRegion = invalid
       if bmp = invalid
-        print "BMP Pool has been drained"
-        print m.toStr()
-        return invalid
+        ' every pooled bitmap is in use this frame - a one-off bitmap is safe to draw into
+        return getNewMemoryScratchRegion(width, height)
       end if
       if not onTopRight
         ' create region on top left
@@ -198,15 +191,14 @@ namespace BGE
       return result
     end function
 
+    ' Hands a region back. Its bitmap is reused from the next frame on (see onFrameEnd()).
+    '
+    ' @param {ScratchRegion} usedRegion
     sub returnRegion(usedRegion as ScratchRegion)
-      if usedRegion = invalid or not m.doPooling
+      if usedRegion = invalid or not m.doPooling or usedRegion.scratchBmp.id = "temp"
         return
       end if
-
-      inProgBmp = usedRegion.scratchBmp
-      ' NOTE: in the future, it may be necessary to "finish" the bitmap: inProgBmp.bitmap.finish(), but this slows things down
-      inProgBmp.bitmap.Finish()
-      m.pool.push(inProgBmp)
+      m.usedThisFrame.push(usedRegion.scratchBmp)
     end sub
 
     sub returnRegions(usedRegions as ScratchRegion[])
@@ -221,61 +213,49 @@ namespace BGE
     end sub
 
 
-    ' Stages regions for later return to the pool via returnStagedRegions(). A caller
-    ' may still call returnStagedRegions() itself whenever it's convenient (e.g. once at
-    ' the end of a frame) - that's still correct, just a no-op if nothing is staged. But
-    ' it's no longer required for correctness: once stagedRegions crosses
-    ' selfFlushThreshold, this flushes them itself, so a caller that stages many regions
-    ' across many draws (e.g. a textured model's per-face triangle draws) can't exhaust
-    ' the pool by batching too long between manual flushes - see #129.
+    ' Same as returnRegions() - kept for callers that draw from the regions later this frame.
+    '
+    ' @param {ScratchRegion[]} usedRegions
     sub stageRegionsForReturn(usedRegions as ScratchRegion[])
-      if not m.doPooling
-        return
-      end if
-
-      for i = usedRegions.count() - 1 to 0 step -1
-        region = usedRegions[i]
-        m.stagedRegions.Push(region)
-      end for
-
-      if m.stagedRegions.count() >= m.selfFlushThreshold
-        m.returnStagedRegions()
-      end if
+      m.returnRegions(usedRegions)
     end sub
 
+    ' No-op, kept for existing callers: returned regions are reused from the next frame.
     sub returnStagedRegions()
-      if not m.doPooling
-        return
-      end if
+    end sub
 
-      m.returnRegions(m.stagedRegions)
-      m.stagedRegions = []
+    ' Makes every bitmap returned this frame available again. Call once per frame, after
+    ' the screen has been swapped (Renderer.onSwapBuffers() does).
+    sub onFrameEnd()
+      for each bmp in m.usedThisFrame
+        m.pool.push(bmp)
+      end for
+      m.usedThisFrame = []
     end sub
 
     sub clearPool()
       m.pool = []
+      m.usedThisFrame = []
       m.activePoolCount = 0
     end sub
+
+    ' Whether regions come from pooled bitmaps (and so are limited to getMaxSize()).
+    function isPooling() as boolean
+      return m.doPooling
+    end function
 
     function getMaxSize() as SizeWH
       return {width: m.scratchWidth, height: m.scratchHeight}
     end function
 
-    ' Number of regions currently staged awaiting return to the pool (i.e. not yet
-    ' flushed by returnStagedRegions()). Exposed mainly for tests of the self-flush
-    ' behavior in stageRegionsForReturn() - see #129.
-    function getStagedCount() as integer
-      return m.stagedRegions.count()
+    ' How many returned bitmaps are waiting for onFrameEnd().
+    function getUsedThisFrameCount() as integer
+      return m.usedThisFrame.count()
     end function
 
     ' The hard cap on how many ScratchBitmap instances this pool will ever create.
     function getMaxPoolCount() as integer
       return m.maxPoolCount
-    end function
-
-    ' The staged-region count at which stageRegionsForReturn() self-flushes.
-    function getSelfFlushThreshold() as integer
-      return m.selfFlushThreshold
     end function
 
     function toStr() as string

@@ -49,6 +49,10 @@ namespace BGE
     ' face instead reuses its own cached raster (drawFaceWithReuse()'s reuse branch).
     ' See attemptTransformTempBitmap()'s gate on it.
     private lastDrawWasFullyFresh as boolean = true
+    ' Whether a face drawn into the temp bitmap this draw left out its off-canvas part
+    private facesClippedThisDraw as boolean = false
+    ' How far past the canvas edges face images still hold, as a fraction of the canvas size
+    private FACE_CLIP_MARGIN_FRACTION = 0.1
 
     ' The impostor's capture (see DrawableModel.useImpostor): the bounding box corners'
     ' canvas x/y when the temp bitmap was last drawn fully fresh, the direction it was seen
@@ -121,9 +125,8 @@ namespace BGE
     '
     ' A textured face (face.Texture <> invalid) draws via drawBitmapTriangle, warping
     ' the texture's UV points onto this face's canvas points, tinted by the same
-    ' brightness-shaded color a flat face gets. ScratchBitmapPool self-flushes its
-    ' staged regions once enough build up (see #129), so a caller batching many faces
-    ' (drawToCanvas/drawToTempBitmap) doesn't need to flush the pool itself.
+    ' brightness-shaded color a flat face gets. Once the scratch pool is used up for the
+    ' frame, ScratchBitmapPool hands out one-off bitmaps, so many faces can't exhaust it.
     '
     ' @param {Renderer} rendererObj
     ' @param {Model3dFace} face
@@ -204,25 +207,36 @@ namespace BGE
       faceOffsetX = modelOffsetX + bounds[0].x
       faceOffsetY = modelOffsetY + bounds[0].y
 
-      width = fix(bounds[1].x - bounds[0].x) + 1
-      height = fix(bounds[1].y - bounds[0].y) + 1
+      ' Only keep the part on the canvas, plus enough margin to reuse it while it drifts
+      frame = rendererObj.camera.frameSize
+      margin = m.getFaceClipMargin(rendererObj)
+      clipX = 0
+      clipY = 0
+      right = bounds[1].x
+      bottom = bounds[1].y
+      if frame.x > 0 and frame.y > 0
+        clipX = fix(BGE.Math.Max(0, -margin.x - bounds[0].x))
+        clipY = fix(BGE.Math.Max(0, -margin.y - bounds[0].y))
+        right = BGE.Math.Min(right, frame.x + margin.x)
+        bottom = BGE.Math.Min(bottom, frame.y + margin.y)
+      end if
+      clipped = clipX > 0 or clipY > 0 or right < bounds[1].x or bottom < bounds[1].y
+      width = fix(right - bounds[0].x) + 1 - clipX
+      height = fix(bottom - bounds[0].y) + 1 - clipY
       if width < 1 or height < 1
         return false
       end if
 
       cache = m.getFaceRasterCache(face.faceIndex)
 
-      ' The drift check below only bounds each vertex's own movement since the cache's
-      ' last real redraw, not the resulting bounding-box size - three vertices can each
-      ' drift by just under maxFaceDriftDistance and still grow this frame's width/height
-      ' beyond what the cached bitmap was actually allocated for (grow-only sizing is tied
-      ' to the LAST redraw's footprint, not this frame's). Require the cache to already be
-      ' big enough before cropping it to this size, or a reused frame could ask
-      ' getCroppedFaceRegion() for a region larger than its backing bitmap.
-      if invalid <> cache.bitmap and cache.bitmap.GetWidth() >= width and cache.bitmap.GetHeight() >= height and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+      ' Reuse only if the cached bitmap holds all of this frame's on-canvas part - the drift
+      ' check alone doesn't bound the bounding box's growth.
+      holdsThisPart = cache.clipX <= clipX and cache.clipY <= clipY and cache.clipX + cache.clipWidth >= clipX + width and cache.clipY + cache.clipHeight >= clipY + height
+      if invalid <> cache.bitmap and holdsThisPart and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
         cache.staleFrameCount++
         m.lastDrawWasFullyFresh = false
-        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(cache.bitmap, width, height))
+        m.facesClippedThisDraw = m.facesClippedThisDraw or cache.clipped
+        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + cache.clipX, faceOffsetY + cache.clipY, m.getCroppedFaceRegion(cache.bitmap, cache.clipWidth, cache.clipHeight))
       end if
 
       faceBitmap = BGE.RendererHelpers.growOrClearBitmap(cache.bitmap, width, height)
@@ -230,8 +244,8 @@ namespace BGE
         return false
       end if
 
-      localOffsetX = -bounds[0].x
-      localOffsetY = -bounds[0].y
+      localOffsetX = -bounds[0].x - clipX
+      localOffsetY = -bounds[0].y - clipY
       shadedColor = BGE.colorBrightness(face.color, face.brightness)
       drawn = false
       if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
@@ -247,7 +261,21 @@ namespace BGE
       cache.bitmap = faceBitmap
       cache.staleFrameCount = 0
       cache.triangleAtCapture = BGE.Math.vectorArrayCopy(face.vertices)
-      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX, faceOffsetY, m.getCroppedFaceRegion(faceBitmap, width, height))
+      cache.clipX = clipX
+      cache.clipY = clipY
+      cache.clipWidth = width
+      cache.clipHeight = height
+      cache.clipped = clipped
+      m.facesClippedThisDraw = m.facesClippedThisDraw or clipped
+      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
+    end function
+
+    ' How far past each canvas edge a face image holds: 10% of the canvas, and at least the
+    ' whole-model stretch's reuse threshold, so zooming out while reusing doesn't show a gap.
+    private function getFaceClipMargin(rendererObj as BGE.Renderer) as BGE.Math.Vector
+      frame = rendererObj.camera.frameSize
+      least = BGE.Math.Max(m.drawable.maxFaceDriftDistance, m.getTempBitmapThreshold(BGE.SceneObjectDrawMode.oriented))
+      return BGE.Math.VectorOps.create(BGE.Math.Max(least, frame.x * m.FACE_CLIP_MARGIN_FRACTION), BGE.Math.Max(least, frame.y * m.FACE_CLIP_MARGIN_FRACTION))
     end function
 
     ' Whether a face may reuse its cached raster this draw. A fastShrink occluder only reuses
@@ -320,6 +348,7 @@ namespace BGE
       ' content - see the field's own doc comment. Flipped false by drawFaceWithReuse()
       ' the moment any face takes the reuse path this frame.
       m.lastDrawWasFullyFresh = true
+      m.facesClippedThisDraw = false
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
@@ -354,6 +383,12 @@ namespace BGE
       samples.triangleQuickDrawStep = rendererObj.qualitySettings.triangleQuickDrawStep
       samples.canvasBounds = m.modelCanvasBounds
       samples.canvasSamplePoints = m.modelCanvasSamplePoints
+      samples.clipped = m.facesClippedThisDraw
+      if samples.clipped
+        margin = m.getFaceClipMargin(rendererObj)
+        frame = rendererObj.camera.frameSize
+        samples.clipRect = {x0: -margin.x, y0: -margin.y, x1: frame.x + margin.x, y1: frame.y + margin.y}
+      end if
       if m.drawable.useImpostorPin
         if m.pinUsedSinceCapture
           ' the triangles cached from the old rendering are stale now
@@ -464,13 +499,17 @@ namespace BGE
         fit = BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, samples.xs, samples.ys)
         p = fit.params
         if invalid <> p and BGE.Math.Max(p.scaleX, p.scaleY) <= settings.modelImpostorMaxZoom and fit.residual <= m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode)
+          if capture.clipped and not m.clipRectStillCoversCanvas(renderObj, capture.clipRect, p)
+            return invalid
+          end if
           capture.fit = {kind: "rotate", params: p}
           origin = BGE.ImpostorFit.mapRotateScale(p, capture.originX, capture.originY)
           ' DrawTransformedObject turns counterclockwise on screen, the fit's angle clockwise (y down)
           return {origin: origin, rotation: -p.rotation, scaleX: p.scaleX, scaleY: p.scaleY}
         end if
       end if
-      if not m.drawable.useImpostorPin or cosine < Cos(BGE.Math.DegreesToRadians(settings.modelImpostorPinMaxAngleDegrees))
+      ' a pin can't tell where the capture's clipped edges would land
+      if capture.clipped or not m.drawable.useImpostorPin or cosine < Cos(BGE.Math.DegreesToRadians(settings.modelImpostorPinMaxAngleDegrees))
         return invalid
       end if
       outline = m.getImpostorOutline(capture, settings.modelImpostorPinOutlinePoints)
@@ -498,6 +537,17 @@ namespace BGE
       capture.fit = {kind: "pin", params: p}
       m.pinUsedSinceCapture = true
       return {origin: corners.topLeft, rotation: 0, scaleX: zoom, scaleY: zoom, pinCorners: corners, pinRegionId: m.getImpostorPinRegionId()}
+    end function
+
+    ' Whether a capture that left out its off-canvas parts, moved by `params`, still covers the
+    ' whole canvas - if not, part of what's now on screen was never drawn.
+    private function clipRectStillCoversCanvas(rendererObj as BGE.Renderer, clipRect as roAssociativeArray, params as roAssociativeArray) as boolean
+      frame = rendererObj.camera.frameSize
+      topLeft = BGE.ImpostorFit.mapRotateScale(params, clipRect.x0, clipRect.y0)
+      topRight = BGE.ImpostorFit.mapRotateScale(params, clipRect.x1, clipRect.y0)
+      bottomRight = BGE.ImpostorFit.mapRotateScale(params, clipRect.x1, clipRect.y1)
+      bottomLeft = BGE.ImpostorFit.mapRotateScale(params, clipRect.x0, clipRect.y1)
+      return topLeft.x <= 0 and topLeft.y <= 0 and topRight.x >= frame.x and topRight.y <= 0 and bottomRight.x >= frame.x and bottomRight.y >= frame.y and bottomLeft.x <= 0 and bottomLeft.y >= frame.y
     end function
 
     ' The error allowed scales with the model's size on screen (2px at least, so a small
