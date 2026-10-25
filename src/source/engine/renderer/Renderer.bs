@@ -87,6 +87,13 @@ namespace BGE
     ' padPointAwayFrom() - to hide the seam left by warping each triangle independently.
     private pinnedCornersSeamPadding as float = 2.0
 
+    ' The largest scratch bitmap (in pixels per side) a textured triangle is warped in.
+    ' A bigger triangle is warped smaller and scaled back up as it's drawn, so it's a little
+    ' softer but doesn't need a huge bitmap - a face seen edge-on across the screen used to
+    ' need one ~1700px square, and those ran a Roku out of texture memory (#345).
+    ' 0 uses the scratch bitmap pool's size when it pools (real devices), else no limit.
+    maxTriangleWarpSize as integer = 0
+
     private draw2d as ifDraw2D = invalid
 
     private sceneObjects as SceneObject[] = []
@@ -1813,6 +1820,17 @@ namespace BGE
       if invalid = srcTriangleBmp
         return false
       end if
+
+      ' Warp a too-big triangle at a smaller size, about (0,0), and scale it back up at the end
+      warpScale = m.getTriangleWarpScale(destPoints)
+      if warpScale < 1
+        scaledDestPoints = []
+        for each p in destPoints
+          scaledDestPoints.push(BGE.Math.VectorOps.create(p.x * warpScale, p.y * warpScale))
+        end for
+        destPoints = scaledDestPoints
+      end if
+
       srcTriangle = srcTriangleBmp.triangle
       destTriangle = BGE.Math.TriangleOps.create(destPoints)
       srcOriginIndex = BGE.Math.TriangleOps.getOriginIndex(srcTriangle)
@@ -1840,8 +1858,7 @@ namespace BGE
       '  finalBitmapExtraScale = finalBitmapExtraScale * 2
       'end while
 
-      ' WAS:
-      finalBitmapWidth = BGE.Math.TriangleOps.getLongestSide(destTriangle) * 1.33
+      finalBitmapWidth = BGE.Math.TriangleOps.getLongestSide(destTriangle) * m.TRIANGLE_WARP_BITMAP_FACTOR
       finalBitmapExtraScale = 1
 
 
@@ -1977,9 +1994,9 @@ namespace BGE
       m.addDebugCell(finalRegion, "finalRegion")
       scalesAreNonZero = (scaleDueToScratchBitmapSize.x <> 0) and (srcTriangleBmp.scale.x <> 0) and (scaleDueToScratchBitmapSize.y <> 0) and (srcTriangleBmp.scale.y <> 0)
       if didDraw and scalesAreNonZero
-        finalScaleX = finalBitmapExtraScale / (scaleDueToScratchBitmapSize.x * srcTriangleBmp.scale.x)
-        finalScaleY = finalBitmapExtraScale / (scaleDueToScratchBitmapSize.y * srcTriangleBmp.scale.y)
-        didDraw = m.drawTransformedObjectTo(draw2d, destOrigin.x, destOrigin.y, finalScaleX, finalScaleY, -finalAngle, finalRegion, rgba)
+        finalScaleX = finalBitmapExtraScale / (warpScale * scaleDueToScratchBitmapSize.x * srcTriangleBmp.scale.x)
+        finalScaleY = finalBitmapExtraScale / (warpScale * scaleDueToScratchBitmapSize.y * srcTriangleBmp.scale.y)
+        didDraw = m.drawTransformedObjectTo(draw2d, destOrigin.x / warpScale, destOrigin.y / warpScale, finalScaleX, finalScaleY, -finalAngle, finalRegion, rgba)
         'didDraw = m.drawTransformedObjectTo(draw2d, destOrigin.x, destOrigin.y, 1 / (scaleDueToScratchBitmapSize.x * srcTriangleBmp.scale.x), 1 / (scaleDueToScratchBitmapSize.y * srcTriangleBmp.scale.y), -finalAngle, finalRegion, rgba)
       else
         didDraw = false
@@ -1987,6 +2004,29 @@ namespace BGE
       m.bmpPool.stageRegionsForReturn([scratchRegion1, scratchRegion2, scratchRegion3])
       '   draw2d.finish()
       return didDraw
+    end function
+
+    ' The warp's final bitmap is this much bigger than the dest triangle's longest side.
+    private TRIANGLE_WARP_BITMAP_FACTOR = 1.33
+
+    ' How much to shrink destPoints by so drawBitmapTriangleTo()'s bitmaps fit maxTriangleWarpSize.
+    private function getTriangleWarpScale(destPoints as BGE.Math.Vector[]) as float
+      maxSize = m.maxTriangleWarpSize
+      if maxSize <= 0 and m.bmpPool.isPooling()
+        maxSize = m.bmpPool.getMaxSize().width
+      end if
+      if maxSize <= 0
+        return 1.0
+      end if
+      longest = 0.0
+      for i = 0 to 2
+        longest = BGE.Math.Max(longest, BGE.Math.TotalDistance(destPoints[i], destPoints[(i + 1) mod 3]))
+      end for
+      needed = longest * m.TRIANGLE_WARP_BITMAP_FACTOR
+      if needed <= maxSize
+        return 1.0
+      end if
+      return maxSize / needed
     end function
 
     ' Whether mapping srcPoints onto destPoints is a reflection - their windings differ.
