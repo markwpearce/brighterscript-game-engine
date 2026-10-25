@@ -10,6 +10,7 @@ import "../../math/vector.bs"
 import "../../utils/colors.bs"
 import "../../utils/deviceRenderTier.bs"
 import "../../utils/quickhull.bs"
+import "../../utils/strings.bs"
 import "../../utils/tweens.bs"
 import "../../utils/utils.bs"
 import "../Game.bs"
@@ -1094,10 +1095,9 @@ namespace BGE
       end for
       primitiveEntries.SortBy("depth")
       for each entry in primitiveEntries
-        ' A drawPrimitive() call here may stage scratch bitmaps (e.g. a textured
-        ' Model3d face) via drawBitmapTriangleTo - ScratchBitmapPool self-flushes those
-        ' once enough build up (see #129), so a cluster with far more faces than the
-        ' pool's max size can't exhaust it here.
+        ' A drawPrimitive() call here may use scratch bitmaps (e.g. a textured Model3d
+        ' face via drawBitmapTriangleTo) - once the pool is used up for this frame,
+        ' ScratchBitmapPool hands out one-off bitmaps, so a big cluster can't exhaust it.
         entry.sceneObj.drawPrimitive(m, entry.index)
       end for
       for each sceneObj in m.pendingClusterDraws
@@ -1312,6 +1312,8 @@ namespace BGE
     end sub
 
 
+    ' Call once per frame, after the screen is swapped (Game does this). Scratch bitmaps used
+    ' this frame are only reused after it, so a Renderer used without a Game must call it too.
     sub onSwapBuffers()
       m.bmpPool.onFrameEnd()
       m.frameCount++
@@ -1786,11 +1788,8 @@ namespace BGE
       return m.drawBitmapTriangleTo(m.draw2d, srcRegionWithId, srcPoints, destPoints, rgba)
     end function
 
-    ' NOTE: This method uses temporary bitmaps. In order not to re-use them for subsequent calls
-    ' they are staged for return to the bitmap pool via bmpPool.stageRegionsForReturn(), which
-    ' self-flushes once enough regions build up (see #129) - a caller may still call
-    ' bmpPool.returnStagedRegions() itself once done drawing (e.g. at end of frame) to flush
-    ' any remainder early, but it's no longer required for correctness.
+    ' NOTE: This method uses scratch bitmaps, which are only reused from the next frame on -
+    ' call onSwapBuffers() once per frame if you use a Renderer without a Game.
     '
     ' @param  draw2d Surface to draw to
     ' @param {BGE.RendererHelpers.RegionWithId} srcRegionWithId the region to draw from
@@ -2205,6 +2204,28 @@ namespace BGE
 
       firstRotation = srcTriangle.anglesToPrevious[nextIndex]
 
+      ' Scaling from Y-axis will mean the ratio between triangle legs will be constant
+      ' So we can set that ratio equal to tan(newNextAngle) and use atn() to get newNextAngle
+      ' Once We know newNextAngle, we can use its complement to find the distance of the acuteAngle of the scaled triangle
+      ' from the y-axis
+      ' And from that, get the scale
+      newPrevPointY = srcNextLength * cos(firstRotation)
+      newPrevPointX = srcNextLength * sin(firstRotation)
+      ratio = srcPrevLength / srcNextLength
+      newNextAngle = atn(ratio)
+      scaleYToMakeAcute = 1.2
+      bottomYForRightTriangle = srcNextLength / sin(newNextAngle)
+      acuteNextY = scaleYToMakeAcute * bottomYForRightTriangle
+      scaleY = acuteNextY / newPrevPointY
+      newSrcLongest = srcLongestLength
+      newNextLength = sqr(newPrevPointX * newPrevPointX + acuteNextY * acuteNextY)
+      newBitmapSize = BGE.Math.Max(srcLongestLength * scaleYToMakeAcute, newNextLength)
+      ' the pool would clamp a bigger scratch region and clip the stretched triangle
+      maxSize = m.bmpPool.getMaxSize()
+      if m.bmpPool.isPooling() and newBitmapSize > BGE.Math.Min(maxSize.width, maxSize.height)
+        return invalid
+      end if
+
 
       'rotatedSrcBitmap = CreateObject("roBitmap", {width: srcLongestLength, height: srcLongestLength, AlphaEnable: true})
       'rotatedSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
@@ -2219,39 +2240,7 @@ namespace BGE
 
       m.drawRotatedObjectTo(rotatedSrcRegion, 0, 0, firstRotation, srcTriangleBmp.bitmap)
 
-      newPrevPointY = srcNextLength * cos(firstRotation)
-      newPrevPointX = srcNextLength * sin(firstRotation)
-
       m.addDebugCell(rotatedSrcRegion, "rotatedSrcRegion")
-
-
-      ' Scaling from Y-axis will mean the ratio between triangle legs will be constant
-      ' So we can set that ratio equal to tan(newNextAngle) and use atn() to get newNextAngle
-      ' Once We know newNextAngle, we can use its complement to find the distance of the acuteAngle of the scaled triangle
-      ' from the y-axis
-      ' And from that, get the scale
-
-      ratio = srcPrevLength / srcNextLength
-      newNextAngle = atn(ratio)
-
-      scaleYToMakeAcute = 1.2
-      bottomYForRightTriangle = srcNextLength / sin(newNextAngle)
-
-      ' = srcTriangle.height * tan(BGE.Math.HALF_PI - newNextAngle)
-
-      acuteNextY = scaleYToMakeAcute * bottomYForRightTriangle
-
-      scaleY = acuteNextY / newPrevPointY
-
-      newSrcLongest = srcLongestLength
-      newNextLength = sqr(newPrevPointX * newPrevPointX + acuteNextY * acuteNextY)
-      newBitmapSize = BGE.Math.Max(srcLongestLength * scaleYToMakeAcute, newNextLength)
-      ' the pool would clamp a bigger scratch region and clip the stretched triangle
-      maxSize = m.bmpPool.getMaxSize()
-      if m.bmpPool.isPooling() and newBitmapSize > BGE.Math.Min(maxSize.width, maxSize.height)
-        m.bmpPool.returnRegions([scratchRegion1])
-        return invalid
-      end if
 
       'acuteTriBitmap = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
       '  acuteTriangleSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
@@ -2509,7 +2498,6 @@ namespace BGE
         worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, bottomRightSrc, bottomRightDest, color)
       end if
       m.forceDraw(draw2d)
-      m.bmpPool.returnStagedRegions()
 
       return worked
     end function
