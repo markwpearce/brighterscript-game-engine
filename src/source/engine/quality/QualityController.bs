@@ -13,8 +13,15 @@ namespace BGE
     optional maxLevel as integer
     ' Seconds of frames averaged (default 1.0)
     optional windowSeconds as float
-    ' Frames longer than this are ignored, e.g. garbage collection (default 0.25)
+    ' Frames longer than this are left out of the average, e.g. garbage collection (default 0.25)
     optional outlierFrameSeconds as float
+    ' A frame longer than this many target frames is a hitch (default 2.5)
+    optional hitchFrameMultiple as float
+    ' Step down when this many hitches happen within hitchWindowSeconds, whatever the
+    ' average; 0 disables (default 2)
+    optional hitchesToStepDown as integer
+    ' (default 2.0)
+    optional hitchWindowSeconds as float
     ' Seconds ignored after a level or scene change (default 0.25)
     optional settleSeconds as float
     ' Step down when average fps < targetFps * this (default 0.9)
@@ -44,6 +51,9 @@ namespace BGE
     maxLevel as integer = RenderQualityLevel.ultra
     windowSeconds as float = 1.0
     outlierFrameSeconds as float = 0.25
+    hitchFrameMultiple as float = 2.5
+    hitchesToStepDown as integer = 2
+    hitchWindowSeconds as float = 2.0
     settleSeconds as float = 0.25
     stepDownBelowFraction as float = 0.9
     stepUpHeadroomFraction as float = 1.25
@@ -62,6 +72,8 @@ namespace BGE
     private timeSinceStepDown as float = 1000
     private timeSinceStepUp as float = 1000
     private lastProbeLevel as integer = -1
+    ' clock times of recent hitches
+    private hitchTimes as float[] = []
     ' level (as string) -> clock time it may be retried / its current backoff length
     private backoffUntil as roAssociativeArray = {}
     private backoffLength as roAssociativeArray = {}
@@ -83,6 +95,15 @@ namespace BGE
       end if
       if options.DoesExist("outlierFrameSeconds")
         m.outlierFrameSeconds = options.outlierFrameSeconds
+      end if
+      if options.DoesExist("hitchFrameMultiple")
+        m.hitchFrameMultiple = options.hitchFrameMultiple
+      end if
+      if options.DoesExist("hitchesToStepDown")
+        m.hitchesToStepDown = options.hitchesToStepDown
+      end if
+      if options.DoesExist("hitchWindowSeconds")
+        m.hitchWindowSeconds = options.hitchWindowSeconds
       end if
       if options.DoesExist("settleSeconds")
         m.settleSeconds = options.settleSeconds
@@ -129,6 +150,11 @@ namespace BGE
       ' can't use up the probe-fail window.
       m.timeSinceStepDown += dt
       m.timeSinceStepUp += dt
+      ' A one-second average barely moves for a few long frames, but repeated hitches
+      ' (e.g. a model redrawing in full while the camera moves) are what players notice.
+      if m.isRepeatedHitch(dt) and currentLevel > m.minLevel and m.timeSinceStepDown >= m.stepDownCooldownSeconds
+        return m.stepDown(currentLevel)
+      end if
       if dt > m.outlierFrameSeconds or dt <= 0
         return currentLevel
       end if
@@ -149,11 +175,7 @@ namespace BGE
       if avgFps < m.targetFps * m.stepDownBelowFraction
         m.headroomTime = 0
         if currentLevel > m.minLevel and m.timeSinceStepDown >= m.stepDownCooldownSeconds
-          if currentLevel = m.lastProbeLevel and m.timeSinceStepUp <= m.probeFailWindowSeconds
-            m.markProbeFailed(currentLevel)
-          end if
-          m.timeSinceStepDown = 0
-          return currentLevel - 1
+          return m.stepDown(currentLevel)
         end if
       else if avgFps >= upThreshold
         m.headroomTime += dt
@@ -185,7 +207,30 @@ namespace BGE
       m.resetWindow()
     end sub
 
+    private function stepDown(currentLevel as integer) as integer
+      if currentLevel = m.lastProbeLevel and m.timeSinceStepUp <= m.probeFailWindowSeconds
+        m.markProbeFailed(currentLevel)
+      end if
+      m.timeSinceStepDown = 0
+      m.headroomTime = 0
+      m.hitchTimes = []
+      return currentLevel - 1
+    end function
+
+    ' Records a hitch, and whether enough have happened recently to step down
+    private function isRepeatedHitch(dt as float) as boolean
+      if m.hitchesToStepDown <= 0 or m.targetFps <= 0 or dt <= m.hitchFrameMultiple / m.targetFps
+        return false
+      end if
+      m.hitchTimes.push(m.clock)
+      while m.hitchTimes.count() > 0 and m.clock - m.hitchTimes[0] > m.hitchWindowSeconds
+        m.hitchTimes.shift()
+      end while
+      return m.hitchTimes.count() >= m.hitchesToStepDown
+    end function
+
     private sub resetWindow()
+      m.hitchTimes = []
       m.samples = []
       m.sampleTime = 0
       m.headroomTime = 0

@@ -113,6 +113,9 @@ Options (`BGE.AdaptiveQualityOptions`, all optional):
 | `minLevel` / `maxLevel` | basic / ultra | Bounds the controller never leaves |
 | `windowSeconds` | 1.0 | Rolling average window of full frame time (`Game.dt`, includes swap) |
 | `outlierFrameSeconds` | 0.25 | Frames longer than this are excluded (GC, loading, stalls) |
+| `hitchFrameMultiple` | 2.5 | A frame longer than this many target frames is a hitch (#352) |
+| `hitchesToStepDown` | 2 | Hitches within `hitchWindowSeconds` that step down whatever the average; 0 disables |
+| `hitchWindowSeconds` | 2.0 | |
 | `settleSeconds` | 0.25 | Samples ignored after a level change or scene change |
 | `stepDownBelowFraction` | 0.9 | Step down when average FPS < targetFps × this |
 | `stepUpHeadroomFraction` | 1.25 | Step up when average FPS ≥ targetFps × this ... |
