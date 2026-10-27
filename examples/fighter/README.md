@@ -1,6 +1,6 @@
 # Fighter
 
-A two-player, *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)). This is a rough first pass at the fight itself. Menus, a title screen and an intro come later, and the fighters are still placeholder rectangles.
+A two-player, *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)). This is a rough first pass at the fight itself. Menus, a title screen and an intro come later.
 
 ## Playing
 
@@ -31,7 +31,8 @@ node node_modules/rokubot/dist/cli.js launch dev --param dummy=crouch
 
 ### Art
 
-- [ ] **Fighter sprites.** The planned source is the [Mustermann 2 karate template](https://opengameart.org/content/fighting-character-template-mustermann-2-a001aaaa001-karate) (CC0, Puffolotti): `Orangeblack.png` for P1, `Blueehite.png` for P2. Each sheet is about 8000x6900 with 997 unlabelled frames, far too big for a Roku texture, so it needs a build script that cuts out the frames we use into small atlases, plus a pass to pick which frames make up each animation. Animations needed: idle, walk forward/back, crouch, pre-jump, jump (neutral/forward/back), landing, the 12 attacks in `MoveData.bs`, stand/crouch block, hitstun (stand/crouch/air), knockdown, KO, victory. Mirror with negative `scale.x` for facing (#237). Hitboxes in `MoveData.bs` will need retuning to the art.
+- [x] **Fighter sprites**, from the [Mustermann 2 karate template](https://opengameart.org/content/fighting-character-template-mustermann-2-a001aaaa001-karate): `art/Orangeblack.png` for P1, `art/Blueehite.png` for P2. Each sheet is a 35x29 grid of 997 unlabelled frames, about 8000x6900 px, far too big for a Roku texture. `npm run build-sprites` cuts the frames named in `src/sprites/fighters/animations.json` out of both sheets, at half size with the feet aligned, into `p1.png`/`p2.png` (158 frames, 3264x868, ~11MB of texture memory each) plus `atlas.json`. Attack animations list `startup`/`active`/`recovery` frames, and each list is stretched over that phase of the move, so the extended limb shows exactly while the hitbox is out. Facing left mirrors with a negative `scale.x`.
+- [ ] Frame picks are a first pass from eyeballing the sheet. Still to do: a proper walk cycle, crouch hit and block poses, a pre-jump squat, and retuning the hitboxes in `MoveData.bs` to the art.
 - [ ] Floor/ground strip for the stage (the industrial pack has none, so the floor is a flat rectangle).
 - [ ] Hit and block spark animations (currently a growing square).
 - [ ] HUD art: health bar frame, round-win markers, a KO badge and character portraits.
@@ -56,5 +57,6 @@ The `sounds/` files are generated tone/noise placeholders.
 
 ## Credits
 
+- Fighters: [Fighting character template Mustermann 2 (karate)](https://opengameart.org/content/fighting-character-template-mustermann-2-a001aaaa001-karate) by Puffolotti, CC0.
 - Stage: [Industrial Parallax Background](https://opengameart.org/content/industrial-parallax-background) by Luis Zuno ([@ansimuz](https://ansimuz.com)), CC0.
 - Font: Viper Command, from [FontSpace](https://www.fontspace.com/viper-command-font-f157886) (see `src/fonts/CREDITS.md`).

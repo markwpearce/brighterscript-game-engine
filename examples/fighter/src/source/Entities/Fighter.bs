@@ -1,6 +1,7 @@
 import "../Fight/MoveData.bs"
 import "../Fight/FrameLogic.bs"
 import "../Fight/MatchRules.bs"
+import "../Fight/FighterAnimations.bs"
 
 const GROUND_Y = 48.0
 const FIGHTER_HALF_WIDTH = 18.0
@@ -35,7 +36,8 @@ end enum
 
 ' One player's fighter. FightScene drives it with tick() at a fixed 60 Hz and resolves
 ' hits; this class owns movement, the move state machine, and its colliders/visuals.
-' Placeholder art: coloured rectangles (body, head, attacking limb).
+' Drawn from a per-player sprite atlas (see scripts/build-sprites.js); the sheets face
+' right, so facing left mirrors with a negative scale.x.
 class Fighter extends BGE.GameEntity
 
   playerIndex as integer
@@ -61,26 +63,28 @@ class Fighter extends BGE.GameEntity
   ' isn't missed by the once-per-frame collision pass.
   private wasActiveThisFrame as boolean = false
 
-  private baseColor as integer
-  private body as BGE.DrawableRectangle
-  private head as BGE.DrawableRectangle
-  private limb as BGE.DrawableRectangle
+  private atlasKey as string
+  private animations as roAssociativeArray
+  private layout as FighterAtlasLayout
+  private sprite as BGE.AnimatedImage
+  private landingAnim as string = "landing"
   private hurtCollider as BGE.RectangleCollider
   private attackCollider as BGE.RectangleCollider
 
-  sub new(game as BGE.Game, playerIndex as integer, baseColor as integer)
+  sub new(game as BGE.Game, playerIndex as integer, atlasKey as string, animations as roAssociativeArray, layout as FighterAtlasLayout)
     super(game)
     m.name = "Fighter" + playerIndex.toStr()
     m.playerIndex = playerIndex
-    m.baseColor = baseColor
+    m.atlasKey = atlasKey
+    m.animations = animations
+    m.layout = layout
     m.tagsList.add("fighter")
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.body = m.addRectangle("body", FIGHTER_HALF_WIDTH * 2, STAND_HEIGHT, {color: m.baseColor})
-    m.head = m.addRectangle("head", 22, 22, {color: &hF0C8A0})
-    m.limb = m.addRectangle("limb", 10, 10, {color: m.baseColor})
-    m.limb.enabled = false
+    regions = buildFighterRegions(m.game.getBitmap(m.atlasKey), m.layout)
+    m.sprite = m.addAnimatedImage("sprite", regions, {animationDurationMs: 0})
+    m.sprite.setAnchor(m.layout.feetX / m.layout.cellWidth, m.layout.feetY / m.layout.cellHeight)
     m.hurtCollider = m.addRectangleCollider("hurt", FIGHTER_HALF_WIDTH * 2, STAND_HEIGHT, -FIGHTER_HALF_WIDTH, STAND_HEIGHT)
     m.attackCollider = m.addRectangleCollider("attack", 1, 1, 0, 0, false)
   end sub
@@ -262,12 +266,14 @@ class Fighter extends BGE.GameEntity
     m.game.playSound("land", 40)
     if m.state = FighterState.airHit
       m.setState(FighterState.landing)
+      m.landingAnim = "knockdown"
       m.timer = KNOCKDOWN_TICKS
     else if m.state = FighterState.ko
       m.knockbackVx = 0.0
     else
       m.crouching = false
       m.setState(FighterState.landing)
+      m.landingAnim = "landing"
       m.timer = LANDING_TICKS
     end if
   end sub
@@ -332,8 +338,7 @@ class Fighter extends BGE.GameEntity
     end if
   end sub
 
-  ' Moves colliders and placeholder rectangles to match the current pose. Called after
-  ' each frame's ticks.
+  ' Moves colliders and the sprite to match the current pose. Called after each frame's ticks.
   sub syncVisuals()
     height = STAND_HEIGHT
     if m.crouching
@@ -343,40 +348,62 @@ class Fighter extends BGE.GameEntity
     end if
     m.hurtCollider.height = height
     m.hurtCollider.offset.y = height
-    m.body.setSize(FIGHTER_HALF_WIDTH * 2, height)
-    m.body.offset.x = -FIGHTER_HALF_WIDTH
-    m.body.offset.y = height
-    m.head.offset.x = -11 + m.facing * 4
-    m.head.offset.y = height + 20
 
-    color = m.baseColor
+    m.sprite.index = m.currentAnimationFrame()
+    m.sprite.update()
+    m.sprite.scale.x = m.facing
     if m.state = FighterState.hitstun or m.state = FighterState.airHit
-      color = &hFFFFFF
-    else if m.state = FighterState.blockstun
-      color = &h8090A0
+      m.sprite.color = &hFFA0A0
+    else
+      m.sprite.color = &hFFFFFF
     end if
-    m.body.color = color
 
     hitbox = m.getHitbox()
-    m.limb.enabled = hitbox <> invalid
     active = m.wasActiveThisFrame or m.isAttackActive()
     m.attackCollider.enabled = active and not m.moveHasHit
     if hitbox <> invalid
       area = hitbox as FightBox
-      ' Limb drawn relative to the entity; dimmer outside the active window.
-      m.limb.setSize(area.w, area.h)
-      m.limb.offset.x = area.x - m.position.x
-      m.limb.offset.y = area.y - m.position.y + area.h
-      m.limb.color = m.baseColor
-      if active
-        m.limb.color = &hFFE040
-      end if
-      m.attackCollider.offset.x = m.limb.offset.x
-      m.attackCollider.offset.y = m.limb.offset.y
+      m.attackCollider.offset.x = area.x - m.position.x
+      m.attackCollider.offset.y = area.y - m.position.y + area.h
       m.attackCollider.width = area.w
       m.attackCollider.height = area.h
     end if
   end sub
+
+  private function currentAnimationFrame() as integer
+    if m.state = FighterState.attack and m.currentMove <> invalid
+      move = m.currentMove as MoveDef
+      return attackAnimationFrame(m.animations[move.id], move, m.stateTicks)
+    end if
+    return plainAnimationFrame(m.animations[m.animationName()], m.stateTicks)
+  end function
+
+  private function animationName() as string
+    s = m.state
+    if s = FighterState.idle or s = FighterState.walk or s = FighterState.preJump or s = FighterState.airHit or s = FighterState.ko or s = FighterState.win
+      return s
+    else if s = FighterState.crouch
+      if m.guarding
+        return "crouchBlock"
+      end if
+      return "crouch"
+    else if s = FighterState.air
+      return "jump"
+    else if s = FighterState.landing
+      return m.landingAnim
+    else if s = FighterState.blockstun
+      if m.crouching
+        return "crouchBlock"
+      end if
+      return "block"
+    else if s = FighterState.hitstun
+      if m.crouching
+        return "crouch"
+      end if
+      return "hitstun"
+    end if
+    return "idle"
+  end function
 
   private sub setState(newState as string)
     m.state = newState

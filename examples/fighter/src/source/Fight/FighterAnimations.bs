@@ -1,0 +1,131 @@
+import "MoveData.bs"
+import "FrameLogic.bs"
+
+' Fighter sprite animations, from src/sprites/fighters/animations.json (frame numbers in
+' the original sheets) and atlas.json (written by scripts/build-sprites.js: the atlas cell
+' layout and which sheet frame sits in each cell).
+
+interface FighterAnimation
+  frames as integer[] ' atlas indices, for plain animations
+  startup as integer[] ' atlas indices, for attacks (each list spans its move phase)
+  active as integer[]
+  recovery as integer[]
+  ticksPerFrame as integer
+  loop as boolean
+end interface
+
+interface FighterAtlasLayout
+  cellWidth as integer
+  cellHeight as integer
+  columns as integer
+  feetX as integer
+  feetY as integer
+  frames as integer[]
+end interface
+
+function loadFighterAtlasLayout() as FighterAtlasLayout
+  return ParseJson(ReadAsciiFile("pkg:/sprites/fighters/atlas.json"))
+end function
+
+' @return {roAssociativeArray} animation name -> FighterAnimation, in atlas indices
+function loadFighterAnimations(layout as FighterAtlasLayout) as roAssociativeArray
+  atlasIndexOf = {}
+  for i = 0 to layout.frames.count() - 1
+    atlasIndexOf[layout.frames[i].toStr()] = i
+  end for
+  source = ParseJson(ReadAsciiFile("pkg:/sprites/fighters/animations.json"))
+  result = {}
+  for each animName in source
+    raw = source[animName]
+    anim = {ticksPerFrame: 1, loop: false} as FighterAnimation
+    if raw.ticksPerFrame <> invalid
+      anim.ticksPerFrame = raw.ticksPerFrame
+    end if
+    if raw.loop = true
+      anim.loop = true
+    end if
+    for each listName in ["frames", "startup", "active", "recovery"]
+      if raw[listName] <> invalid
+        anim[listName] = toAtlasIndices(expandFrameList(raw[listName]), atlasIndexOf)
+      end if
+    end for
+    result[animName] = anim
+  end for
+  return result
+end function
+
+' Expands ["3-5", 9] into [3, 4, 5, 9].
+function expandFrameList(items as object) as integer[]
+  frames = [] as integer[]
+  for each item in items
+    if type(item) = "roString" or type(item) = "String"
+      parts = item.split("-")
+      for f = parts[0].toInt() to parts[1].toInt()
+        frames.push(f)
+      end for
+    else
+      frames.push(Int(item))
+    end if
+  end for
+  return frames
+end function
+
+function toAtlasIndices(sheetFrames as integer[], atlasIndexOf as roAssociativeArray) as integer[]
+  indices = [] as integer[]
+  for each f in sheetFrames
+    indices.push(atlasIndexOf[f.toStr()])
+  end for
+  return indices
+end function
+
+' Which atlas cell a plain animation shows `ticks` after it started. Non-looping ones hold
+' their last frame.
+function plainAnimationFrame(anim as FighterAnimation, ticks as integer) as integer
+  frameCount = anim.frames.count()
+  cell = Int(ticks / anim.ticksPerFrame)
+  if anim.loop
+    return anim.frames[cell mod frameCount]
+  end if
+  if cell >= frameCount
+    cell = frameCount - 1
+  end if
+  return anim.frames[cell]
+end function
+
+' Which atlas cell an attack shows `ticks` after it started: each of the animation's
+' startup/active/recovery lists is stretched over the matching phase of the move, so the
+' extended limb is on screen exactly while the hitbox is out.
+function attackAnimationFrame(anim as FighterAnimation, move as MoveDef, ticks as integer) as integer
+  phase = movePhaseAt(move, ticks)
+  if phase = MovePhase.startup
+    return frameAcross(anim.startup, ticks, move.startup)
+  else if phase = MovePhase.active
+    return frameAcross(anim.active, ticks - move.startup, move.active)
+  end if
+  recoveryTicks = move.recovery
+  if move.endsOnLanding
+    recoveryTicks = 1
+  end if
+  return frameAcross(anim.recovery, ticks - move.startup - move.active, recoveryTicks)
+end function
+
+function frameAcross(frames as integer[], ticksIn as integer, phaseTicks as integer) as integer
+  index = Int(ticksIn * frames.count() / phaseTicks)
+  if index >= frames.count()
+    index = frames.count() - 1
+  else if index < 0
+    index = 0
+  end if
+  return frames[index]
+end function
+
+' One roRegion per atlas cell.
+function buildFighterRegions(atlas as roBitmap, layout as FighterAtlasLayout) as roRegion[]
+  regions = [] as roRegion[]
+  for i = 0 to layout.frames.count() - 1
+    x = (i mod layout.columns) * layout.cellWidth
+    y = Int(i / layout.columns) * layout.cellHeight
+    regions.push(CreateObject("roRegion", atlas, x, y, layout.cellWidth, layout.cellHeight))
+  end for
+  return regions
+end function
