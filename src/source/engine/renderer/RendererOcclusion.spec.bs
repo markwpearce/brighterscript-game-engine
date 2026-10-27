@@ -60,12 +60,41 @@ namespace tests
     end function
 
     ' A cube centred on the origin, registered as an occluder.
-    private function newCube(renderer as BGE.Renderer, size = 100 as float) as BGE.SceneObjectModel
+    private function newCube(renderer as BGE.Renderer, size = 100 as float, useImpostor = true as boolean) as BGE.SceneObjectModel
       entity = new BGE.GameEntity(m.game, {name: "cube", isStatic: true})
       entity.position = BGE.Math.VectorOps.create(-size / 2, -size / 2, -size / 2)
       entity.updateTransformationMatrix()
       drawable = new BGE.DrawableModel(entity, m.cubeModel(size), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solid})
+      drawable.useImpostor = useImpostor
       return drawable.addToRenderer(renderer) as BGE.SceneObjectModel
+    end function
+
+    ' A 300x300 square occluder model in the z=0 plane, centred on the origin, made of four
+    ' triangles around its centre - one panel with a vertex inside it.
+    private function newFanModel(renderer as BGE.Renderer, useImpostor as boolean) as BGE.SceneObjectModel
+      entity = new BGE.GameEntity(m.game, {name: "fan", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-150, -150, 0)
+      entity.updateTransformationMatrix()
+      corners = [[0, 0], [300, 0], [300, 300], [0, 300]]
+      faces = []
+      for i = 0 to 3
+        a = corners[i]
+        b = corners[(i + 1) mod 4]
+        faces.push(BGE.Model3dFaceOps.create([
+          BGE.Math.VectorOps.create(a[0], a[1], 0),
+          BGE.Math.VectorOps.create(b[0], b[1], 0),
+          BGE.Math.VectorOps.create(150, 150, 0)
+        ]))
+      end for
+      drawable = new BGE.DrawableModel(entity, new BGE.Model3d(faces), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solidDrawBackFace})
+      drawable.useImpostor = useImpostor
+      return drawable.addToRenderer(renderer) as BGE.SceneObjectModel
+    end function
+
+    private function countOccluderPolygons(renderer as BGE.Renderer, sceneObj as BGE.SceneObject) as integer
+      polygons = [] as BGE.OccluderPolygon[]
+      sceneObj.appendOccluderPolygons(renderer, polygons)
+      return polygons.count()
     end function
 
     ' A static occluder wall in the z=0 plane, centred on (centerX, 0).
@@ -582,7 +611,7 @@ namespace tests
     @it("shrinks a model's panels by at least the face drift distance while the camera moves")
     function _()
       renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -400)))
-      cube = m.newCube(renderer, 300)
+      cube = m.newCube(renderer, 300, false)
       m.renderFrames(renderer, 3)
       renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -400)
       m.renderFrames(renderer, 1)
@@ -603,32 +632,55 @@ namespace tests
     @it("leaves out a model panel with a corner inside it while the camera moves")
     function _()
       renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -400)))
-      entity = new BGE.GameEntity(m.game, {name: "fan", isStatic: true})
-      entity.position = BGE.Math.VectorOps.create(-150, -150, 0)
-      entity.updateTransformationMatrix()
-      ' four triangles around the square's centre, which a skipped tiny face could sit at
-      corners = [[0, 0], [300, 0], [300, 300], [0, 300]]
-      faces = []
-      for i = 0 to 3
-        a = corners[i]
-        b = corners[(i + 1) mod 4]
-        faces.push(BGE.Model3dFaceOps.create([
-          BGE.Math.VectorOps.create(a[0], a[1], 0),
-          BGE.Math.VectorOps.create(b[0], b[1], 0),
-          BGE.Math.VectorOps.create(150, 150, 0)
-        ]))
-      end for
-      drawable = new BGE.DrawableModel(entity, new BGE.Model3d(faces), {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.solidDrawBackFace})
-      sceneObj = drawable.addToRenderer(renderer)
+      sceneObj = m.newFanModel(renderer, false)
       m.renderFrames(renderer, 3)
-      polygons = [] as BGE.OccluderPolygon[]
-      sceneObj.appendOccluderPolygons(renderer, polygons)
-      m.assertEqual(1, polygons.count(), "a still model claims the panel")
+      m.assertEqual(1, m.countOccluderPolygons(renderer, sceneObj), "a still model claims the panel")
       renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -400)
       m.renderFrames(renderer, 1)
-      polygons = [] as BGE.OccluderPolygon[]
-      sceneObj.appendOccluderPolygons(renderer, polygons)
-      m.assertEqual(0, polygons.count())
+      m.assertEqual(0, m.countOccluderPolygons(renderer, sceneObj))
+    end function
+
+    @it("keeps an impostor model's panel with a corner inside it while the camera moves")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -400)))
+      sceneObj = m.newFanModel(renderer, true)
+      m.renderFrames(renderer, 3)
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -400)
+      m.renderFrames(renderer, 1)
+      m.assertEqual(1, m.countOccluderPolygons(renderer, sceneObj))
+    end function
+
+    @it("shrinks an impostor model's panels by only the error its fit allows while the camera moves")
+    function _()
+      renderer = m.newRenderer3d(m.newCamera3d(BGE.Math.VectorOps.create(0, 0, -800)))
+      cube = m.newCube(renderer, 300)
+      m.renderFrames(renderer, 3)
+      renderer.camera.position = BGE.Math.VectorOps.create(1, 0, -800)
+      m.renderFrames(renderer, 1)
+      claimed = m.claimedBounds(renderer, cube)
+      corners = [] as BGE.Math.Vector[]
+      for each x in [-150, 150]
+        for each y in [-150, 150]
+          for each z in [-150, 150]
+            corners.push(BGE.Math.VectorOps.create(x, y, z))
+          end for
+        end for
+      end for
+      boxBounds = m.projectedBounds(renderer, corners)
+      settings = renderer.qualitySettings
+      diagonal = Sqr((boxBounds.maxX - boxBounds.minX) ^ 2 + (boxBounds.maxY - boxBounds.minY) ^ 2)
+      fraction = BGE.Math.Max(settings.modelImpostorError, settings.modelImpostorPinError)
+      expected = BGE.Math.Min(64, BGE.Math.Max(2, fraction * diagonal)) + 1
+      exact = m.projectedBounds(renderer, [
+        BGE.Math.VectorOps.create(-150, -150, -150),
+        BGE.Math.VectorOps.create(150, -150, -150),
+        BGE.Math.VectorOps.create(150, 150, -150),
+        BGE.Math.VectorOps.create(-150, 150, -150)
+      ])
+      m.assertTrue(expected < 64, `the test cube should be small enough on screen to be under the cap, expected ${expected}`)
+      for each shrink in [claimed.minX - exact.minX, exact.maxX - claimed.maxX, claimed.minY - exact.minY, exact.maxY - claimed.maxY]
+        m.assertTrue(Abs(shrink - expected) < 1.5, `shrunk by ${shrink}, expected ${expected}: claimed ${FormatJson(claimed)} vs exact ${FormatJson(exact)}`)
+      end for
     end function
 
     @it("claims a rotated or mirrored fast-path image's own quad, inset 1px")
