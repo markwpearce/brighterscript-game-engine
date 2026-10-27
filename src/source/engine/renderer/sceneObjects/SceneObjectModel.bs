@@ -69,6 +69,9 @@ namespace BGE
     private impostorCaptureId as integer = 0
     ' this frame's impostor kind, for tests and profiling: "", "rotate" or "pin"
     private impostorKindThisFrame as string = ""
+    ' the bounding box's canvas diagonal when last projected, which sizes the error an
+    ' impostor may have - see getOccluderInset()
+    private impostorLastDiagonal as float = 0.0
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -374,6 +377,7 @@ namespace BGE
       if invalid = samples or not m.lastDrawWasFullyFresh
         return
       end if
+      m.impostorLastDiagonal = m.getScreenDiagonal(samples.xs, samples.ys)
       samples.originX = origin.x
       samples.originY = origin.y
       samples.transformVersion = m.transformVersion
@@ -495,6 +499,7 @@ namespace BGE
       ' which faces show, and their shading, depend on the direction the model is seen from
       cosine = BGE.Math.VectorOps.dotProduct(samples.direction, capture.direction)
       diagonal = m.getScreenDiagonal(samples.xs, samples.ys)
+      m.impostorLastDiagonal = diagonal
       if cosine >= Cos(BGE.Math.DegreesToRadians(settings.modelImpostorMaxAngleDegrees))
         fit = BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, samples.xs, samples.ys)
         p = fit.params
@@ -935,8 +940,8 @@ namespace BGE
 
     ' Adds one polygon per panel the draw path draws this frame: facing the camera (or
     ' any panel in a *DrawBackFace mode), with every vertex projecting. While moving, each
-    ' panel is shrunk by getOccluderInset(), and a panel with a vertex inside it is left out,
-    ' since a tiny face there may be skipped.
+    ' panel is shrunk by getOccluderInset(), and without an impostor a panel with a vertex
+    ' inside it is left out, since a tiny face there may be skipped.
     '
     ' @param {Renderer} rendererObj
     ' @param {BGE.OccluderPolygon[]} out
@@ -952,7 +957,7 @@ namespace BGE
         m.occluderPanelsWorldValid = true
       end if
       for each panel in m.occluderPanelsWorld
-        if inset > 0 and panel.hasInnerVertices
+        if inset > 0 and panel.hasInnerVertices and not m.drawable.useImpostor
           continue for
         end if
         if not drawBackFaces and not isOutwardNormalFacingCamera(rendererObj, panel.vertices[0], panel.normal)
@@ -992,6 +997,9 @@ namespace BGE
       if not m.shrinksOccluderClaim() or not m.objMovedInRelationToCamera(rendererObj.camera)
         return 0.0
       end if
+      if m.drawable.useImpostor
+        return m.getImpostorOccluderInset(rendererObj, drawMode)
+      end if
       inset = 0.0
       if m.drawable.maxStaleFrames > 0
         ' a reused raster sits at this frame's bounding box, so each vertex can be off by
@@ -1004,6 +1012,20 @@ namespace BGE
       inset += rendererObj.getQuickDrawFillError()
       ' a skipped face lies within its own bounding box's diagonal of the panel's edge
       return BGE.Math.Max(inset, rendererObj.qualitySettings.triangleSkipSize * Sqr(2))
+    end function
+
+    ' An impostor model draws its faces exactly (never skipped or coarse-filled), so only a
+    ' reused rendering is off: by at most the error its fit is allowed, plus 1px for the blit.
+    private function getImpostorOccluderInset(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as float
+      if invalid = m.impostorCapture or not m.mayReuseTransformedTempBitmap(drawMode)
+        return 0.0
+      end if
+      settings = rendererObj.qualitySettings
+      fraction = settings.modelImpostorError
+      if m.drawable.useImpostorPin and settings.modelImpostorPinMaxAngleDegrees > 0
+        fraction = BGE.Math.Max(fraction, settings.modelImpostorPinError)
+      end if
+      return m.getImpostorAllowedError(fraction, m.impostorLastDiagonal, drawMode) + 1
     end function
 
     ' Also needs the cached bitmap to be every face freshly drawn - see attemptTransformTempBitmap().
