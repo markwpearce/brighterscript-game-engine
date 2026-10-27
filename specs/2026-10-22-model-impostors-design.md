@@ -216,3 +216,18 @@ After the review fixes (lazy outline, hull pre-filter, indexed triangle cache), 
 two runs each: pin on 47, 44; pin off 54, 43. The runs are noisy enough that the pin's edge
 is now within the spread - zooming out with the pin still has 64-100ms holds, which are
 full redraws (#352).
+
+## Tighter limits and a four-triangle pin (#360)
+
+With #345 cutting model texture memory, the limits were tightened so models redraw more:
+
+- High/Ultra view angle 6°/4° → 3°/2°, max zoom 3x/2.5x → 2x/1.5x.
+- High/Ultra no longer corner pin at all (`modelImpostorPinMaxAngleDegrees` = 0 turns the
+  pin off); Basic to Medium are unchanged.
+
+The pin is now four triangles meeting at a fitted centre (`drawPinnedCorners` with
+`splitIntoFour` and `center`) instead of two along the top left to bottom right diagonal.
+`fitPinnedCorners` solves for 5 points (4 corners + centre) the same way. A free centre
+follows perspective foreshortening better: worst-case error on a 9x7 grid of a bitmap seen
+with its far edge 1.1x / 1.25x / 1.5x / 2x as far away drops from 3.9 / 9.4 / 17.5 / 30.8px
+to 2.9 / 6.9 / 12.3 / 20.4px (200x150 bitmap). It costs 4 triangle warps instead of 2.
