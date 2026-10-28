@@ -1,0 +1,419 @@
+import "../Entities/Fighter.bs"
+import "../Entities/HitSpark.bs"
+import "../UI/FightHud.bs"
+import "../Fight/MatchRules.bs"
+import "../Fight/FrameLogic.bs"
+
+const STAGE_LEFT = 0.0
+const STAGE_RIGHT = 960.0
+const START_GAP = 200.0
+' Fighters can't be further apart than the camera can show.
+const MAX_SEPARATION = 560.0
+const ROUND_INTRO_TICKS = 90
+const FIGHT_CALL_TICKS = 50
+const ROUND_END_TICKS = 150
+
+enum MatchPhase
+  intro = "intro"
+  fight = "fight"
+  roundEnd = "roundEnd"
+  matchOver = "matchOver"
+end enum
+
+' The whole fight: stage, two fighters, best-of-3 rounds. Reads both players' controls,
+' runs the fixed-step simulation, resolves hits and drives the HUD.
+class FightScene extends BGE.GameScene
+
+  fighters as Fighter[] = []
+  inputs as FighterInput[] = []
+  hudState as HudState
+  p2Joined as boolean = false
+  ' "", "stand" or "crouch": how an unjoined P2 dummy guards (launch param dummy=).
+  dummyGuard as string = ""
+  private hud as FightHud
+  private clock as FightClock
+  private trails as HealthTrail[] = []
+  private phase as string = MatchPhase.intro
+  private phaseTicks as integer = 0
+  private round as integer = 1
+  private roundTicksLeft as integer = 0
+  private hitPauseTicks as integer = 0
+  private showColliders as boolean = false
+  private panel as dynamic = invalid ' BGE.UI.MessagePanel while the match-over panel is up
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "FightScene"
+    m.clock = new FightClock()
+    m.hudState = new HudState()
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.buildStage()
+    m.fighters = []
+    m.inputs = []
+    m.trails = []
+    layout = loadFighterAtlasLayout()
+    animations = loadFighterAnimations(layout)
+    for i = 0 to 1
+      f = new Fighter(m.game, i, "fighterP" + (i + 1).toStr(), animations, layout)
+      m.game.addEntity(f)
+      m.fighters.push(f)
+      m.inputs.push(new FighterInput())
+      m.trails.push(new HealthTrail())
+    end for
+    if args.p2 = "1"
+      m.p2Joined = true
+    end if
+    if args.dummy <> invalid
+      m.dummyGuard = args.dummy
+    end if
+    m.hud = new FightHud(m.game, m.hudState)
+    m.game.gameUi.addChild(m.hud)
+
+    camera = m.game.canvas.renderer.camera as BGE.Camera2d
+    camera.setBounds(STAGE_LEFT, 0, STAGE_RIGHT - STAGE_LEFT, m.game.canvas.getHeight())
+    m.startMatch()
+  end sub
+
+  override sub onChangeScene(newScene as BGE.GameScene)
+    m.game.gameUi.removeChild(m.hud)
+    m.closePanel()
+  end sub
+
+  ' Parallax layers (back to front, drifting more the closer they are) and a placeholder floor.
+  private sub buildStage()
+    canvasW = m.game.canvas.getWidth()
+    canvasH = m.game.canvas.getHeight()
+    layers = [
+      {key: "bgSky", factor: 0.1, targetX: 0},
+      {key: "bgFar", factor: 0.25, targetX: 90},
+      {key: "bgBuildings", factor: 0.45, targetX: 200},
+      {key: "bgFront", factor: 0.7, targetX: 310}
+    ]
+    for each layer in layers
+      bmp = m.game.getBitmap(layer.key)
+      region = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
+      m.addDrawable(layer.key, BGE.newFullHeightParallaxLayer(m, region, canvasW, canvasH, layer.factor, layer.targetX, 0.0))
+    end for
+    ' TODO(art): a real floor. The industrial pack has no ground layer.
+    floor = m.addRectangle("floor", STAGE_RIGHT - STAGE_LEFT + canvasW, GROUND_Y, {color: &h20251E})
+    floor.offset.x = STAGE_LEFT - canvasW / 2
+    floor.offset.y = GROUND_Y
+    edge = m.addRectangle("floorEdge", STAGE_RIGHT - STAGE_LEFT + canvasW, 3, {color: &h4A5A40})
+    edge.offset.x = floor.offset.x
+    edge.offset.y = GROUND_Y
+  end sub
+
+  private sub startMatch()
+    m.closePanel()
+    m.hudState.wins = [0, 0]
+    m.round = 1
+    m.startRound()
+  end sub
+
+  private sub startRound()
+    middle = (STAGE_LEFT + STAGE_RIGHT) / 2
+    m.fighters[0].resetForRound(middle - START_GAP / 2, 1)
+    m.fighters[1].resetForRound(middle + START_GAP / 2, -1)
+    for i = 0 to 1
+      m.trails[i].reset(MAX_HEALTH)
+      m.inputs[i].clear()
+    end for
+    m.roundTicksLeft = ROUND_SECONDS * 60
+    m.hitPauseTicks = 0
+    m.clock.reset()
+    m.setPhase(MatchPhase.intro)
+    m.game.playSound("announceRound", 90)
+  end sub
+
+  private sub setPhase(newPhase as string)
+    m.phase = newPhase
+    m.phaseTicks = 0
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    ' Any press from a second controller joins P2 and restarts the match against them.
+    if not m.p2Joined and input.press and input.playerIndex = 1
+      m.p2Joined = true
+      m.startMatch()
+      return
+    end if
+    if input.press and input.isButton("options")
+      m.showColliders = not m.showColliders
+      m.game.debugDrawColliders(m.showColliders)
+    end if
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    if m.phase = MatchPhase.matchOver
+      m.updateHud()
+      return
+    end if
+    m.readControls()
+    ticks = m.clock.advance(deltaTime)
+    for each f in m.fighters
+      f.beginFrame()
+    end for
+    m.resolveHits()
+    for t = 1 to ticks
+      m.tick()
+      if m.phase = MatchPhase.matchOver
+        exit for
+      end if
+    end for
+    for each f in m.fighters
+      f.syncVisuals()
+    end for
+    m.updateCamera()
+    m.updateHud()
+  end sub
+
+  private sub readControls()
+    for i = 0 to 1
+      input = m.inputs[i]
+      if i = 1 and not m.p2Joined
+        m.readDummy(input)
+        continue for
+      end if
+      prefix = "p" + i.toStr()
+      move = m.game.controls.getAxis(prefix + "move")
+      input.moveX = move.x
+      input.moveY = move.y
+      for each button in [AttackButton.lightPunch, AttackButton.heavyPunch, AttackButton.lightKick, AttackButton.heavyKick]
+        if m.game.controls.isActionPressed(prefix + button)
+          input.latchPress(button)
+        end if
+      end for
+    end for
+  end sub
+
+  ' An unjoined P2 stands still, optionally guarding, so P1 can practise.
+  private sub readDummy(input as FighterInput)
+    input.clear()
+    ' Only holds back while attacked, since holding back also walks away.
+    if (m.dummyGuard = "stand" or m.dummyGuard = "crouch") and m.fighters[0].state = FighterState.attack
+      input.moveX = -m.fighters[1].facing
+    end if
+    if m.dummyGuard = "crouch"
+      input.moveY = -1.0
+    end if
+  end sub
+
+  private sub tick()
+    m.phaseTicks++
+    if m.phase = MatchPhase.intro
+      m.tickIntro()
+      return
+    end if
+    if m.hitPauseTicks > 0
+      m.hitPauseTicks--
+      return
+    end if
+    canAct = m.phase = MatchPhase.fight
+    for i = 0 to 1
+      input = m.inputs[i]
+      if not canAct
+        input.clear()
+      end if
+      m.fighters[i].tick(input, m.fighters[1 - i].position.x)
+      m.trails[i].tick(m.fighters[i].health)
+    end for
+    m.separateFighters()
+    if m.phase = MatchPhase.fight
+      m.roundTicksLeft--
+      m.checkRoundOver()
+    else if m.phase = MatchPhase.roundEnd and m.phaseTicks >= ROUND_END_TICKS
+      m.finishRound()
+    end if
+  end sub
+
+  private sub tickIntro()
+    for i = 0 to 1
+      m.inputs[i].clear()
+    end for
+    if m.phaseTicks = ROUND_INTRO_TICKS
+      m.game.playSound("announceFight", 90)
+    else if m.phaseTicks >= ROUND_INTRO_TICKS + FIGHT_CALL_TICKS
+      m.setPhase(MatchPhase.fight)
+    end if
+  end sub
+
+  ' Pushboxes, stage edges, and the max camera separation.
+  private sub separateFighters()
+    a = m.fighters[0]
+    b = m.fighters[1]
+    ' Airborne fighters can cross over each other.
+    if not a.isAirborne() and not b.isAirborne()
+      shift = pushApartShift(a.position.x, b.position.x, PUSH_WIDTH)
+      if a.position.x > b.position.x
+        shift = -shift
+      end if
+      a.position.x += shift
+      b.position.x -= shift
+    end if
+    gap = b.position.x - a.position.x
+    if Abs(gap) > MAX_SEPARATION
+      excess = (Abs(gap) - MAX_SEPARATION) / 2 * Sgn(gap)
+      a.position.x += excess
+      b.position.x -= excess
+    end if
+    for each f in m.fighters
+      f.position.x = clampToStage(f.position.x, FIGHTER_HALF_WIDTH, STAGE_LEFT, STAGE_RIGHT)
+    end for
+  end sub
+
+  ' Hits found by last frame's collision pass.
+  private sub resolveHits()
+    for i = 0 to 1
+      attacker = m.fighters[i]
+      if attacker.pendingHitOn = invalid
+        continue for
+      end if
+      attacker.pendingHitOn = invalid
+      if attacker.moveHasHit or attacker.currentMove = invalid
+        continue for
+      end if
+      defender = m.fighters[1 - i]
+      if defender.isKnockedOut()
+        continue for
+      end if
+      move = attacker.currentMove as MoveDef
+      attacker.moveHasHit = true
+      healthBefore = defender.health
+      blocked = defender.receiveHit(move, attacker.facing)
+      if defender.health < healthBefore
+        m.trails[1 - i].onDamage()
+      end if
+      m.hitPauseTicks = move.hitPause
+      m.spawnSpark(attacker, defender, blocked)
+      if blocked
+        m.game.playSound("block", 70)
+      else if move.damage >= 80
+        m.game.playSound("hitHeavy", 90)
+      else
+        m.game.playSound("hitLight", 80)
+      end if
+      ' Pushed into a wall, the attacker takes the knockback instead.
+      if not defender.isAirborne()
+        atWall = defender.position.x <= STAGE_LEFT + FIGHTER_HALF_WIDTH + 1 or defender.position.x >= STAGE_RIGHT - FIGHTER_HALF_WIDTH - 1
+        if atWall
+          attacker.knockbackVx = -attacker.facing * move.knockback
+        end if
+      end if
+    end for
+  end sub
+
+  private sub spawnSpark(attacker as Fighter, defender as Fighter, blocked as boolean)
+    hitbox = attacker.getHitbox()
+    if hitbox = invalid
+      return
+    end if
+    a = hitbox as FightBox
+    b = defender.getHurtbox()
+    x = (BGE.Math.Max(a.x, b.x) + BGE.Math.Min(a.x + a.w, b.x + b.w)) / 2
+    y = (BGE.Math.Max(a.y, b.y) + BGE.Math.Min(a.y + a.h, b.y + b.h)) / 2
+    spark = new HitSpark(m.game, blocked)
+    m.game.addEntity(spark)
+    spark.position.x = x
+    spark.position.y = y
+  end sub
+
+  private sub checkRoundOver()
+    koCount = 0
+    for each f in m.fighters
+      if f.isKnockedOut()
+        koCount++
+      end if
+    end for
+    if koCount > 0
+      m.endRound("K.O.")
+      m.game.playSound("announceKo", 100)
+    else if m.roundTicksLeft <= 0
+      m.endRound("TIME")
+      m.game.playSound("announceTime", 100)
+    end if
+  end sub
+
+  private sub endRound(callout as string)
+    m.hudState.announcement = callout
+    winner = roundWinnerByHealth(m.fighters[0].health, m.fighters[1].health)
+    if winner = -1
+      m.hudState.wins[0]++
+      m.hudState.wins[1]++
+    else
+      m.hudState.wins[winner]++
+      m.fighters[winner].celebrate()
+    end if
+    m.setPhase(MatchPhase.roundEnd)
+  end sub
+
+  private sub finishRound()
+    winner = matchWinner(m.hudState.wins)
+    if winner >= 0
+      m.setPhase(MatchPhase.matchOver)
+      m.showMatchOver(winner)
+      return
+    end if
+    m.round++
+    m.startRound()
+  end sub
+
+  private sub showMatchOver(winner as integer)
+    m.game.playSound("announceWin", 100)
+    rematch = new BGE.UI.MessagePanelButton("Rematch", sub(button as BGE.UI.Button)
+      scene = button.game.getEntityByName("FightScene") as FightScene
+      scene.rematch()
+    end sub)
+    m.panel = new BGE.UI.MessagePanel(m.game, 300.0, 160.0, [rematch], "Player " + (winner + 1).toStr() + " wins!")
+    m.panel.show(m.game.gameUi, m.game.uiCanvas.getWidth(), m.game.uiCanvas.getHeight())
+    m.game.focusManager.focusWidget(m.panel.buttonWidgets[0])
+  end sub
+
+  sub rematch()
+    m.startMatch()
+  end sub
+
+  private sub closePanel()
+    if m.panel <> invalid
+      panel = m.panel as BGE.UI.MessagePanel
+      panel.hide(m.game.gameUi)
+      m.panel = invalid
+    end if
+  end sub
+
+  private sub updateCamera()
+    camera = m.game.canvas.renderer.camera as BGE.Camera2d
+    midX = (m.fighters[0].position.x + m.fighters[1].position.x) / 2
+    camera.setTarget(BGE.Math.VectorOps.create(midX, m.game.canvas.getHeight() / 2))
+  end sub
+
+  private sub updateHud()
+    for i = 0 to 1
+      m.hudState.health[i] = m.fighters[i].health
+      m.hudState.trail[i] = m.trails[i].value
+    end for
+    m.hudState.secondsLeft = Int((m.roundTicksLeft + 59) / 60)
+    if m.hudState.secondsLeft < 0
+      m.hudState.secondsLeft = 0
+    end if
+    if m.phase = MatchPhase.intro
+      if m.phaseTicks < ROUND_INTRO_TICKS
+        m.hudState.announcement = "ROUND " + m.round.toStr()
+      else
+        m.hudState.announcement = "FIGHT!"
+      end if
+    else if m.phase = MatchPhase.fight
+      m.hudState.announcement = ""
+    end if
+    if m.phase = MatchPhase.matchOver
+      m.hudState.announcement = ""
+    end if
+    if m.p2Joined
+      m.hudState.p2Prompt = ""
+    else
+      m.hudState.p2Prompt = "P2: press A to join"
+    end if
+  end sub
+
+end class

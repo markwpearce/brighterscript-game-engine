@@ -1,0 +1,119 @@
+' Round and match rules, and the fixed-step clock that turns frame time into fight ticks.
+
+const FIGHT_TICK_SECONDS = 1.0 / 60.0
+' A slow frame never runs more than this many ticks, so a hitch doesn't fast-forward the fight.
+const FIGHT_MAX_TICKS_PER_FRAME = 4
+const MAX_HEALTH = 1000
+const ROUNDS_TO_WIN = 2
+const ROUND_SECONDS = 99
+' The recent-damage trail waits this long, then drains at TRAIL_DRAIN per tick.
+const TRAIL_DELAY_TICKS = 40
+const TRAIL_DRAIN = 8
+
+' Turns variable frame time into whole 60 Hz ticks.
+class FightClock
+  private accumulator as float = 0.0
+
+  ' @return {integer} how many ticks to run this frame
+  function advance(deltaTime as float) as integer
+    m.accumulator += deltaTime
+    ' The epsilon stops float error dropping a tick that has exactly accumulated.
+    ticks = Int(m.accumulator / FIGHT_TICK_SECONDS + 0.001)
+    m.accumulator -= ticks * FIGHT_TICK_SECONDS
+    if ticks > FIGHT_MAX_TICKS_PER_FRAME
+      ticks = FIGHT_MAX_TICKS_PER_FRAME
+      m.accumulator = 0.0
+    end if
+    return ticks
+  end function
+
+  sub reset()
+    m.accumulator = 0.0
+  end sub
+end class
+
+' @return {integer} 0 or 1 for the player with more health, -1 for a draw
+function roundWinnerByHealth(health0 as integer, health1 as integer) as integer
+  if health0 > health1
+    return 0
+  else if health1 > health0
+    return 1
+  end if
+  return -1
+end function
+
+' @return {integer} the player who has won the match, or -1 if it isn't over. A draw round
+'   counts as a win for both, as in SF2, so both can reach ROUNDS_TO_WIN together - that's
+'   another draw, and the match goes on.
+function matchWinner(wins as integer[]) as integer
+  p0Won = wins[0] >= ROUNDS_TO_WIN
+  p1Won = wins[1] >= ROUNDS_TO_WIN
+  if p0Won and not p1Won
+    return 0
+  else if p1Won and not p0Won
+    return 1
+  end if
+  return -1
+end function
+
+' A health bar's "recent damage" trail: holds at the old value for a moment, then drains
+' down to the current health.
+class HealthTrail
+  value as integer = MAX_HEALTH
+  private delay as integer = 0
+
+  sub reset(health as integer)
+    m.value = health
+    m.delay = 0
+  end sub
+
+  ' Call when health drops, so the drain waits again.
+  sub onDamage()
+    m.delay = TRAIL_DELAY_TICKS
+  end sub
+
+  sub tick(health as integer)
+    if m.value <= health
+      m.value = health
+      return
+    end if
+    if m.delay > 0
+      m.delay--
+      return
+    end if
+    m.value -= TRAIL_DRAIN
+    if m.value < health
+      m.value = health
+    end if
+  end sub
+end class
+
+' One player's controls for one tick. Presses latch until a tick consumes them, so a press
+' isn't lost on a frame that runs no ticks.
+class FighterInput
+  moveX as float = 0.0
+  moveY as float = 0.0
+  ' AttackButton -> true while a press waits for a tick
+  pressed as roAssociativeArray = {}
+
+  sub latchPress(button as string)
+    m.pressed[button] = true
+  end sub
+
+  ' @return {string} the strongest waiting press (heavy beats light, kick beats punch), or ""
+  function takePress() as string
+    for each button in [AttackButton.heavyKick, AttackButton.heavyPunch, AttackButton.lightKick, AttackButton.lightPunch]
+      if m.pressed[button] = true
+        m.pressed = {}
+        return button
+      end if
+    end for
+    return ""
+  end function
+
+  sub clear()
+    m.moveX = 0.0
+    m.moveY = 0.0
+    m.pressed = {}
+  end sub
+end class
