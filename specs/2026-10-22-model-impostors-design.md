@@ -231,3 +231,9 @@ The pin is now four triangles meeting at a fitted centre (`drawPinnedCorners` wi
 follows perspective foreshortening better: worst-case error on a 9x7 grid of a bitmap seen
 with its far edge 1.1x / 1.25x / 1.5x / 2x as far away drops from 3.9 / 9.4 / 17.5 / 30.8px
 to 2.9 / 6.9 / 12.3 / 20.4px (200x150 bitmap). It costs 4 triangle warps instead of 2.
+
+Review follow-ups: a pinned impostor's bounds now include every breakpoint of the pin
+(`ImpostorFit.mapPinnedRect()`: where the bounds' edges cross the pin's triangle edges, and
+the centre), the zoom limit is checked against the pin's most stretched triangle edge
+(`pinMaxStretch()`), and the four-triangle pin is a quality setting,
+`modelImpostorPinFourTriangles` - off at Basic, which keeps the cheaper two-triangle pin.

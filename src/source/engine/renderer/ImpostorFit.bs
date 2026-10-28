@@ -2,7 +2,7 @@ import "../../math/math.bs"
 
 namespace BGE.ImpostorFit
 
-  ' The points a corner pin fits: 4 corners and the centre
+  ' The points a four triangle corner pin fits: 4 corners and the centre
   const PIN_POINTS = 5
 
   ' How well one 2D mapping takes a set of captured canvas points to where they are now -
@@ -187,10 +187,12 @@ namespace BGE.ImpostorFit
   ' Fits where to pin the 4 corners and the centre of a width x height bitmap so the points
   ' land where they are now - what drawPinnedCorners draws with `splitIntoFour` and that
   ' `center`: four triangles meeting at the centre, each an affine warp of its quarter of the
-  ' bitmap. A free centre follows perspective better than one diagonal can. Least squares
-  ' over all 5 points at once, so the triangles always agree along their shared edges.
-  ' `from` points are in the bitmap's own pixels. A point no sample constrains is pulled to
-  ' where the best single affine map would put it.
+  ' bitmap. A free centre follows perspective better than one diagonal can. With
+  ' `fourTriangles` false, just the 4 corners, for the cheaper `alwaysUseTLtoBR` draw: two
+  ' triangles along the top left to bottom right diagonal. Least squares over every point
+  ' at once, so the triangles always agree along their shared edges. `from` points are in
+  ' the bitmap's own pixels. A point no sample constrains is pulled to where the best single
+  ' affine map would put it.
   '
   ' @param {float[]} fromX
   ' @param {float[]} fromY
@@ -198,8 +200,9 @@ namespace BGE.ImpostorFit
   ' @param {float[]} toY
   ' @param {float} width the bitmap's width
   ' @param {float} height the bitmap's height
-  ' @return {BGE.ImpostorFit.FitResult} params: cornersX/cornersY (top left, top right, bottom right, bottom left, centre), width, height
-  function fitPinnedCorners(fromX as float[], fromY as float[], toX as float[], toY as float[], width as float, height as float) as FitResult
+  ' @param {boolean} [fourTriangles=true] whether to fit four triangles around a centre, or two
+  ' @return {BGE.ImpostorFit.FitResult} params: cornersX/cornersY (top left, top right, bottom right, bottom left, then the centre with fourTriangles), width, height
+  function fitPinnedCorners(fromX as float[], fromY as float[], toX as float[], toY as float[], width as float, height as float, fourTriangles = true as boolean) as FitResult
     n = fromX.count()
     if n < 4 or width < 1 or height < 1
       return unusable()
@@ -209,6 +212,10 @@ namespace BGE.ImpostorFit
       return unusable()
     end if
     a = affine.params
+    pointCount = 4
+    if fourTriangles
+      pointCount = PIN_POINTS
+    end if
     srcX = [0.0, width, width, 0.0, width * 0.5]
     srcY = [0.0, 0.0, height, height, height * 0.5]
     ' normal equations, shared by both axes, regularised toward the affine fit's points
@@ -216,17 +223,17 @@ namespace BGE.ImpostorFit
     atx = [] as float[]
     aty = [] as float[]
     prior = 0.00001 * n
-    for k = 0 to PIN_POINTS - 1
+    for k = 0 to pointCount - 1
       ata.push([0.0, 0.0, 0.0, 0.0, 0.0])
       ata[k][k] = prior
       atx.push(prior * (a.a * srcX[k] + a.b * srcY[k] + a.c))
       aty.push(prior * (a.d * srcX[k] + a.e * srcY[k] + a.f))
     end for
     for i = 0 to n - 1
-      w = pinWeights(fromX[i] / width, fromY[i] / height)
-      for r = 0 to PIN_POINTS - 1
+      w = pinWeights(fromX[i] / width, fromY[i] / height, fourTriangles)
+      for r = 0 to pointCount - 1
         if w[r] <> 0
-          for c = 0 to PIN_POINTS - 1
+          for c = 0 to pointCount - 1
             ata[r][c] = ata[r][c] + w[r] * w[c]
           end for
           atx[r] = atx[r] + w[r] * toX[i]
@@ -240,11 +247,15 @@ namespace BGE.ImpostorFit
       return unusable()
     end if
     ' each triangle must keep the bitmap's winding, or the warp would mirror it
-    for k = 0 to 3
-      if cross2d(cornersX, cornersY, k, (k + 1) mod 4, 4) <= 0
-        return unusable()
-      end if
-    end for
+    if fourTriangles
+      for k = 0 to 3
+        if cross2d(cornersX, cornersY, k, (k + 1) mod 4, 4) <= 0
+          return unusable()
+        end if
+      end for
+    else if cross2d(cornersX, cornersY, 0, 1, 2) <= 0 or cross2d(cornersX, cornersY, 0, 2, 3) <= 0
+      return unusable()
+    end if
     params = {cornersX: cornersX, cornersY: cornersY, width: width, height: height}
     residual = 0.0
     for i = 0 to n - 1
@@ -263,14 +274,101 @@ namespace BGE.ImpostorFit
   ' @param {float} y
   ' @return {BGE.Math.Vector}
   function mapPinnedCorners(params as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
-    w = pinWeights(x / params.width, y / params.height)
+    w = pinWeights(x / params.width, y / params.height, isFourTrianglePin(params))
     px = 0.0
     py = 0.0
-    for k = 0 to PIN_POINTS - 1
+    for k = 0 to params.cornersX.count() - 1
       px += w[k] * params.cornersX[k]
       py += w[k] * params.cornersY[k]
     end for
     return BGE.Math.VectorOps.create(px, py)
+  end function
+
+  ' Whether fitPinnedCorners()'s params are four triangles around a centre, rather than two.
+  '
+  ' @param {roAssociativeArray} params a fitPinnedCorners() result's params
+  ' @return {boolean}
+  function isFourTrianglePin(params as roAssociativeArray) as boolean
+    return params.cornersX.count() = PIN_POINTS
+  end function
+
+  ' Where fitPinnedCorners()'s params take every point of the bitmap rectangle from
+  ' (loX, loY) to (hiX, hiY) that can be extreme: its corners, where its edges cross the
+  ' pin's triangle edges, and the centre if it's inside. Their bounds are the bounds of the
+  ' whole pinned rectangle, which its 4 corners alone may not be.
+  '
+  ' @param {roAssociativeArray} params a fitPinnedCorners() result's params
+  ' @param {float} loX
+  ' @param {float} loY
+  ' @param {float} hiX
+  ' @param {float} hiY
+  ' @return {BGE.Math.Vector[]}
+  function mapPinnedRect(params as roAssociativeArray, loX as float, loY as float, hiX as float, hiY as float) as BGE.Math.Vector[]
+    w = params.width
+    h = params.height
+    four = isFourTrianglePin(params)
+    xs = [loX, hiX, hiX, loX] as float[]
+    ys = [loY, loY, hiY, hiY] as float[]
+    for each edgeY in [loY, hiY]
+      ' the top left to bottom right diagonal, then the other one
+      crossings = [edgeY * w / h]
+      if four
+        crossings.push((h - edgeY) * w / h)
+      end if
+      for each crossX in crossings
+        if crossX > loX and crossX < hiX
+          xs.push(crossX)
+          ys.push(edgeY)
+        end if
+      end for
+    end for
+    for each edgeX in [loX, hiX]
+      crossings = [edgeX * h / w]
+      if four
+        crossings.push(h - edgeX * h / w)
+      end if
+      for each crossY in crossings
+        if crossY > loY and crossY < hiY
+          xs.push(edgeX)
+          ys.push(crossY)
+        end if
+      end for
+    end for
+    if four and w * 0.5 > loX and w * 0.5 < hiX and h * 0.5 > loY and h * 0.5 < hiY
+      xs.push(w * 0.5)
+      ys.push(h * 0.5)
+    end if
+    mapped = [] as BGE.Math.Vector[]
+    for i = 0 to xs.count() - 1
+      mapped.push(mapPinnedCorners(params, xs[i], ys[i]))
+    end for
+    return mapped
+  end function
+
+  ' How much fitPinnedCorners()'s params stretch the bitmap at most: the largest ratio of a
+  ' pinned triangle edge's length to its length in the bitmap.
+  '
+  ' @param {roAssociativeArray} params a fitPinnedCorners() result's params
+  ' @return {float}
+  function pinMaxStretch(params as roAssociativeArray) as float
+    srcX = [0.0, params.width, params.width, 0.0, params.width * 0.5]
+    srcY = [0.0, 0.0, params.height, params.height, params.height * 0.5]
+    ' the four sides, then the spokes to the centre or the one diagonal
+    edges = [[0, 1], [1, 2], [2, 3], [3, 0]]
+    if isFourTrianglePin(params)
+      edges.append([[0, 4], [1, 4], [2, 4], [3, 4]])
+    else
+      edges.push([0, 2])
+    end if
+    stretch = 0.0
+    for each edge in edges
+      a = edge[0]
+      b = edge[1]
+      srcLength = Sqr((srcX[b] - srcX[a]) ^ 2 + (srcY[b] - srcY[a]) ^ 2)
+      destLength = Sqr((params.cornersX[b] - params.cornersX[a]) ^ 2 + (params.cornersY[b] - params.cornersY[a]) ^ 2)
+      stretch = BGE.Math.Max(stretch, destLength / srcLength)
+    end for
+    return stretch
   end function
 
   ' The indexes of the points on their convex hull, in order around it.
@@ -367,8 +465,15 @@ namespace BGE.ImpostorFit
   end function
 
   ' A bitmap point's weight on each pinned point (top left, top right, bottom right,
-  ' bottom left, centre), from u = x / width and v = y / height.
-  function pinWeights(u as float, v as float) as float[]
+  ' bottom left, then the centre for four triangles), from u = x / width and v = y / height.
+  function pinWeights(u as float, v as float, fourTriangles as boolean) as float[]
+    if not fourTriangles
+      if u >= v
+        ' the top right triangle
+        return [1.0 - u, u - v, v, 0.0]
+      end if
+      return [1.0 - v, 0.0, u, v - u]
+    end if
     if u >= v
       if u + v <= 1
         ' the top triangle
