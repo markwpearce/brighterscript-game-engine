@@ -203,6 +203,92 @@ namespace BGE.Lighting
     return BGE.Math.VectorOps.create(BGE.Math.Min(r, 1), BGE.Math.Min(g, 1), BGE.Math.Min(b, 1))
   end function
 
+  ' The patch of a plane one point light reaches - see getPlaneLightPools().
+  interface PlaneLightPool extends roAssociativeArray
+    ' the light's foot on the plane
+    center as BGE.Math.Vector
+    ' world-space radius where the light runs out
+    radius as float
+    ' the light's height above the plane as a fraction of its range, 0-1 - sets the
+    ' pool's falloff shape (see lightPoolFalloff())
+    heightRatio as float
+    ' light per channel at the pool's centre
+    r as float
+    g as float
+    b as float
+  end interface
+
+  ' Whether a light is drawn as a pool on a plane rather than in its uniform tint: a
+  ' point light with a range. One with no range reaches the whole plane.
+  '
+  ' @param {BGE.Lighting.PreparedLight} light
+  ' @return {boolean}
+  function isPoolLight(light as BGE.Lighting.PreparedLight) as boolean
+    return light.type = BGE.LightType.point and light.range > 0
+  end function
+
+  ' `lights` without the ones isPoolLight() picks out.
+  '
+  ' @param {BGE.Lighting.PreparedLight[]} lights
+  ' @return {BGE.Lighting.PreparedLight[]}
+  function withoutPoolLights(lights as BGE.Lighting.PreparedLight[]) as BGE.Lighting.PreparedLight[]
+    uniform = [] as BGE.Lighting.PreparedLight[]
+    for each light in lights
+      if not BGE.Lighting.isPoolLight(light)
+        uniform.push(light)
+      end if
+    end for
+    return uniform
+  end function
+
+  ' The pool of light each ranged point light casts on a plane, seen from the side
+  ' `normal` points to. Lights behind that side, or too high to reach it, cast none.
+  '
+  ' @param {BGE.Lighting.PreparedLight[]} lights
+  ' @param {BGE.Math.Vector} planePoint any point on the plane
+  ' @param {BGE.Math.Vector} normal unit normal of the visible side
+  ' @return {BGE.Lighting.PlaneLightPool[]}
+  function getPlaneLightPools(lights as BGE.Lighting.PreparedLight[], planePoint as BGE.Math.Vector, normal as BGE.Math.Vector) as BGE.Lighting.PlaneLightPool[]
+    pools = [] as BGE.Lighting.PlaneLightPool[]
+    for each light in lights
+      if BGE.Lighting.isPoolLight(light)
+        height = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(light.position, planePoint), normal)
+        if height > 0 and height < light.range
+          heightRatio = height / light.range
+          peak = 1 - heightRatio
+          pools.push({
+            center: BGE.Math.VectorOps.subtract(light.position, BGE.Math.VectorOps.scale(normal, height)),
+            radius: Sqr(light.range * light.range - height * height),
+            heightRatio: heightRatio,
+            r: light.r * peak,
+            g: light.g * peak,
+            b: light.b * peak
+          } as BGE.Lighting.PlaneLightPool)
+        end if
+      end if
+    end for
+    return pools
+  end function
+
+  ' A pool's brightness `fraction` of the way out from its centre to its edge, relative
+  ' to the centre - computeLightAmount()'s point light falloff on a plane.
+  '
+  ' @param {float} fraction 0 at the centre, 1 at the edge
+  ' @param {float} heightRatio the light's height over its range, as in PlaneLightPool
+  ' @return {float} 1 at the centre, 0 at the edge
+  function lightPoolFalloff(fraction as float, heightRatio as float) as float
+    if fraction >= 1
+      return 0
+    end if
+    if heightRatio <= 0
+      ' a light on the plane lights it edge-on; keep the plain linear falloff
+      return 1 - fraction
+    end if
+    ' distances in units of range: d = sqrt(r^2 + h^2), r = fraction * sqrt(1 - h^2)
+    distance = Sqr(fraction * fraction * (1 - heightRatio * heightRatio) + heightRatio * heightRatio)
+    return (heightRatio / distance) * (1 - distance) / (1 - heightRatio)
+  end function
+
   ' `rgba` lit by `lightAmount` (from computeLightAmount()), with no channel darker than
   ' `floor` - see Drawable.ambientBrightness.
   '

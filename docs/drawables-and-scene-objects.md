@@ -296,11 +296,16 @@ the renderer notices and relights whatever they reach. `game.removeLight(light)`
 belong to the game canvas's renderer, not a scene, so remove a scene's own lights in its
 `onDestroy()`.
 
-Ground planes take lights too: set `isShaded = true` on a `DrawablePlane`. A plane is flat, so it's
-lit evenly - its cached drawing is just tinted as it's drawn, which costs nothing extra. A point
-light is measured on the plane right under the camera, so the ground brightens as you walk toward
-a lamp rather than showing a pool of light around it. Unlike other drawables, a plane with no lights
-isn't shaded at all.
+Ground planes take lights too: set `isShaded = true` on a `DrawablePlane`. A plane is flat, so
+directional and ambient light it evenly - its cached drawing is just tinted as it's drawn, which
+costs nothing extra. On a `tiledImage` plane, a point light with a `range` casts a pool of light on
+the ground beneath it, as wide as its range reaches and fading out toward the edge. Pools are
+blended over the texture (Roku can't multiply one image into another), so a bright pool fades the
+texture toward the light's color; `lightPoolOpacity` (0.6 by default) caps how far, so the ground
+still shows through. While a pool is in view, a light change redraws the plane rather than just
+re-tinting it - see the cost note below. A `staticImage` or `color` plane, and a point light with
+no `range`, fall back to measuring the light on the plane right under the camera, so the ground
+brightens as you walk toward a lamp instead. Unlike other drawables, a plane with no lights isn't shaded at all.
 
 > **Cost.** Lights are free while they stay still: objects keep their cached drawings until
 > something moves. A light that moves or changes every frame relights everything it reaches
@@ -309,7 +314,9 @@ isn't shaded at all.
 > small light changes - while each light has turned less than the quality level's
 > `modelImpostorMaxAngleDegrees` and changed brightness by less than
 > `modelImpostorMaxLightChange` since it was drawn - so a slowly moving lamp only redraws it
-> now and then. Shading is per triangle, from each one's centre, so a point light very
+> now and then. A lamp that moves while its pool is on screen redraws the ground plane's pools
+> and re-slices it, but not its texture, once the pool has drifted more than the quality level's
+> `planeLightPoolMaxDriftPixels` or changed color by more than `planeLightPoolMaxLightChange`. Shading is per triangle, from each one's centre, so a point light very
 > close to a large flat face can light its triangles noticeably differently. There's no
 > shadowing: a surface facing a light is lit even when something stands in between.
 
