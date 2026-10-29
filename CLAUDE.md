@@ -85,6 +85,7 @@ Callbacks can delete entities or change scene mid-frame, so engine code re-check
 Device-confirmed renderer gotchas (headless brs-engine can't see most of these):
 
 - Never pass a negative scale together with a nonzero rotation to a native draw call — real Roku only mirrors at rotation 0.
+- Roku queues bitmap draws: never draw into a bitmap after reading from it in the same frame, or the earlier read can pick up the later draw.
 - `ScratchBitmapPool` bitmaps are not cleared on reuse — clear before drawing into them. They are never reused within a frame (mid-frame reuse breaks warps on device), and scratch regions must start at their bitmap's (0,0).
 - Roku silently drops all draws into a bitmap once ~13,000 queue in a frame. Keep loops well under that.
 - HD devices have only 64MB of texture memory (`rokubot textures` to inspect); FHD scratch bitmaps are ~4.5MB each.

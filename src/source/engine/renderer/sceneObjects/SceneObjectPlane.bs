@@ -240,16 +240,28 @@ namespace BGE
         if pools.count() > 0
           textureTint = m.getLightTintRGBA(rendererObj)
         end if
+        ' With pools, the lit texture goes into poolBaseBmp, kept so a lamp moving on its
+        ' own skips the warp, and is copied from there. Roku queues draws, so a bitmap
+        ' read earlier in the frame can't be drawn into after - copying the other way
+        ' would catch the pools in the kept copy.
+        textureDest = m.prePerspectiveBmp
+        if pools.count() > 0
+          m.poolBaseBmp = m.allocateBitmapLike(m.prePerspectiveBmp, m.poolBaseBmp)
+          if invalid <> m.poolBaseBmp
+            textureDest = m.poolBaseBmp
+          end if
+        else
+          m.poolBaseBmp = invalid
+        end if
         wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
-        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale, textureTint)
+        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, textureDest, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale, textureTint)
         if gotPreBmp and pools.count() > 0
-          ' keep the lit texture without pools, so a lamp moving on its own skips the warp
-          m.poolBaseBmp = m.copyBitmap(m.prePerspectiveBmp, m.poolBaseBmp)
+          if invalid <> m.poolBaseBmp
+            m.copyBitmap(m.poolBaseBmp, m.prePerspectiveBmp)
+          end if
           m.drawLightPools(rendererObj, pools)
           m.hasBakedLighting = true
           m.bakedTintRGBA = textureTint
-        else
-          m.poolBaseBmp = invalid
         end if
       else
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
@@ -403,25 +415,26 @@ namespace BGE
       return true
     end function
 
-    ' Copies `src` exactly (alpha included) into `dest`, (re)allocating it at src's size
-    ' if needed.
+    ' `existing` if it's the same size as `like`, otherwise a new bitmap that is.
     '
-    ' @return {roBitmap} dest, or invalid if it couldn't be allocated
-    private function copyBitmap(src as roBitmap, dest as roBitmap) as roBitmap
-      if invalid = dest or dest.GetWidth() <> src.GetWidth() or dest.GetHeight() <> src.GetHeight()
-        dest = invalid
-        dest = CreateObject("roBitmap", {width: src.GetWidth(), height: src.GetHeight(), AlphaEnable: true})
-        if invalid = dest
-          print "[BGE.SceneObjectPlane] warning: couldn't allocate the plane's light pool base bitmap"
-          return invalid
-        end if
+    ' @return {roBitmap} invalid if it couldn't be allocated
+    private function allocateBitmapLike(like as roBitmap, existing as roBitmap) as roBitmap
+      if invalid <> existing and existing.GetWidth() = like.GetWidth() and existing.GetHeight() = like.GetHeight()
+        return existing
       end if
-      ' alpha off, so the copy replaces pixels rather than blending over them
-      dest.SetAlphaEnable(false)
-      dest.DrawObject(0, 0, src)
-      dest.SetAlphaEnable(true)
-      return dest
+      existing = invalid
+      bmp = CreateObject("roBitmap", {width: like.GetWidth(), height: like.GetHeight(), AlphaEnable: true})
+      if invalid = bmp
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate the plane's light pool base bitmap - pools will redraw the whole plane"
+      end if
+      return bmp
     end function
+
+    ' Replaces `dest`'s pixels with `src`'s (the same size).
+    private sub copyBitmap(src as roBitmap, dest as roBitmap)
+      dest.Clear(&h00000000)
+      dest.DrawObject(0, 0, src)
+    end sub
 
     ' Whether ranged point lights are drawn as pools on this plane rather than sampled
     ' under the camera. A color fill has no top-down bitmap to draw them into, and a
