@@ -246,9 +246,10 @@ namespace tests
       m.renderer.addLight(new BGE.PointLight(m.v(0, 40, 0), 100))
       m.renderer.updateLighting()
       m.assertEqual(&h000000FF, sceneObj.getLightTintRGBA(m.renderer))
-      ' without pools, the lamp is sampled under the camera as before
-      m.renderer.setQualitySettings(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
-      m.assertNotEqual(&h000000FF, sceneObj.getLightTintRGBA(m.renderer))
+      ' a static decal has no pools, so the lamp is sampled under the camera as before
+      decal = new BGE.DrawablePlane(m.entity, CreateObject("roRegion", tile, 0, 0, 8, 8), {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.staticImage, isShaded: true, ambientBrightness: 0})
+      decalObj = new BGE.SceneObjectPlane("decal", decal)
+      m.assertNotEqual(&h000000FF, decalObj.getLightTintRGBA(m.renderer))
     end function
 
     @it("draw a pool where a lamp reaches a tiled plane in view")
@@ -262,14 +263,74 @@ namespace tests
       m.assertEqual(0, sceneObj.getLightPoolCountLastDraw())
     end function
 
-    @it("draw no pools at quality levels without them")
+    @it("draw pools at every quality level, so adaptive quality never switches them off")
     function _()
       m.renderer.setQualitySettings(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
       sceneObj = m.drawTiledPlaneWithLamp(m.v(0, 40, -80))
-      m.assertEqual(0, sceneObj.getLightPoolCountLastDraw())
+      m.assertEqual(1, sceneObj.getLightPoolCountLastDraw())
+    end function
+
+    @it("blit a drawing with a pool untinted, since its lighting is drawn in")
+    function _()
+      m.renderer.addLight(new BGE.AmbientLight(BGE.ColorsRGB.White, 0.5))
+      sceneObj = m.drawTiledPlaneWithLamp(m.v(0, 40, -80))
+      m.assertNotEqual(-1, sceneObj.getLightTintRGBA(m.renderer))
+      m.assertEqual(-1, sceneObj.getCompositeTintRGBA(m.renderer))
+      ' with no pool in view it goes back to tinting the blit
+      m.lamp.position = m.v(0, 40, 5000)
+      m.renderer.updateLighting()
+      sceneObj.draw(m.renderer)
+      m.assertEqual(sceneObj.getLightTintRGBA(m.renderer), sceneObj.getCompositeTintRGBA(m.renderer))
+    end function
+
+    @it("keep the cached drawing while a pool moves less than the quality level allows")
+    function _()
+      sceneObj = m.drawTiledPlaneWithLamp(m.v(0, 40, -80))
+      m.drawStillFrame(sceneObj)
+      m.lamp.position = m.v(0.01, 40, -80)
+      m.renderer.updateLighting()
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @it("redraw only the pools, not the texture, when only a pool light moves")
+    function _()
+      m.renderer.setQualitySettings(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.ultra))
+      sceneObj = m.drawTiledPlaneWithLamp(m.v(0, 40, -80))
+      ' a camera move redraws everything
+      camera = m.renderer.camera as BGE.Camera3d
+      camera.position.x = 1
+      camera.checkMovement()
+      sceneObj.update(camera)
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      fullRedraw = m.renderer.getDrawCallsLastFrame()
+      m.drawStillFrame(sceneObj)
+      m.lamp.position = m.v(10, 40, -80)
+      m.renderer.updateLighting()
+      m.renderer.resetDrawCallCounter()
+      sceneObj.draw(m.renderer)
+      poolsOnly = m.renderer.getDrawCallsLastFrame()
+      m.assertTrue(poolsOnly > 1 and poolsOnly < fullRedraw, poolsOnly.toStr() + " vs " + fullRedraw.toStr())
+      m.assertEqual(1, sceneObj.getLightPoolCountLastDraw())
     end function
 
     lamp as BGE.PointLight
+
+    ' Draws a frame with nothing moving, so camera and drawable motion has settled.
+    private sub drawStillFrame(sceneObj as BGE.SceneObjectPlane)
+      camera = m.renderer.camera as BGE.Camera3d
+      for i = 1 to 2
+        m.entity.updateTransformationMatrix()
+        camera.checkMovement()
+        sceneObj.update(camera)
+        sceneObj.draw(m.renderer)
+      end for
+      m.entity.updateTransformationMatrix()
+      camera.checkMovement()
+      sceneObj.update(camera)
+    end sub
 
     ' A shaded tiled ground seen from above and ahead, drawn once with a lamp at `lampPosition`.
     private function drawTiledPlaneWithLamp(lampPosition as BGE.Math.Vector) as BGE.SceneObjectPlane

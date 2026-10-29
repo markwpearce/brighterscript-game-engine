@@ -48,6 +48,8 @@ namespace BGE
     y as float
     width as float
     height as float
+    ' the gradient's draw color: the light's hue, its strength as alpha
+    rgba as integer
   end interface
 
   class SceneObjectPlane extends SceneObject
@@ -65,7 +67,15 @@ namespace BGE
     ' Whether the cached composite has its lighting drawn in (because it shows a light
     ' pool), rather than taking it as a tint at the final blit
     private hasBakedLighting = false
-    private lightPoolCountLastDraw as integer = 0
+    ' the texture tint baked in alongside the pools
+    private bakedTintRGBA as integer = -1
+    ' the pools in the cached drawing, as drawn
+    private lightPoolsDrawn as PlaneLightPoolPlacement[] = []
+    ' the lit top-down bitmap before its pools were drawn in, while it has any
+    private poolBaseBmp as roBitmap = invalid
+    ' getUniformLights()'s result, and the renderer lightingVersion it's for
+    private uniformLights as BGE.Lighting.PreparedLight[] = invalid
+    private uniformLightsVersion as integer = -1
     ' White discs fading out like a pool of light, by getLightPoolGradientKey()
     private lightPoolGradients as roAssociativeArray = invalid
 
@@ -168,9 +178,25 @@ namespace BGE
         isRolled = (camera as Camera3d).rollDegrees <> 0
       end if
       isTiled = m.drawable.fillMode = PlaneFillMode.tiledImage
-      ' Baked-in lighting needs a redraw to change, as does a pool coming into view.
-      relit = m.lightingChangedThisDraw and (m.hasBakedLighting or m.getVisibleLightPools(rendererObj).count() > 0)
-      if not m.objMovedInRelationToCamera(camera) and not planeDistanceChanged and m.hasAccurateTempBitmap and not m.qualityChangedThisDraw and not relit
+      needsFullRedraw = m.objMovedInRelationToCamera(camera) or planeDistanceChanged or not m.hasAccurateTempBitmap or m.qualityChangedThisDraw
+      pools = [] as PlaneLightPoolPlacement[]
+      if isTiled and not needsFullRedraw and m.lightingChangedThisDraw
+        pools = m.getVisibleLightPools(rendererObj)
+      end if
+      redrawPoolsOnly = false
+      if not needsFullRedraw and m.lightingChangedThisDraw and (m.hasBakedLighting or pools.count() > 0)
+        ' Baked-in lighting needs a redraw to change, as does a pool coming into view.
+        ' While only the pools changed, and by little enough, keep the cached drawing.
+        if m.hasBakedLighting and m.getLightTintRGBA(rendererObj) = m.bakedTintRGBA
+          redrawPoolsOnly = not m.lightPoolsFit(rendererObj, pools)
+        else
+          needsFullRedraw = true
+        end if
+      end if
+      if redrawPoolsOnly and m.redrawLightPools(rendererObj, pools)
+        return m.hasAccurateTempBitmap
+      end if
+      if not needsFullRedraw and not redrawPoolsOnly
         ' If nothing has moved (including no roll change - Camera3d.checkMovement's
         ' own roll dirty-check forces movedLastFrame true only on the frame roll
         ' actually changes), redraw whichever cached bitmap is correct for the
@@ -201,13 +227,14 @@ namespace BGE
 
       gotPreBmp = false
       m.hasBakedLighting = false
-      m.lightPoolCountLastDraw = 0
+      m.lightPoolsDrawn = [] as PlaneLightPoolPlacement[]
       if isTiled
         if not m.buildSuperTextureIfNeeded(rendererObj)
           return false
         end if
         ' With a pool in view, all the lighting is drawn in: the rest of it tints the
-        ' texture so the pool isn't dimmed along with it at the final blit.
+        ' texture so the pool isn't dimmed along with it at the final blit. Found here,
+        ' since they're placed in prePerspectiveBmp, which may have just been allocated.
         pools = m.getVisibleLightPools(rendererObj)
         textureTint = -1
         if pools.count() > 0
@@ -216,9 +243,13 @@ namespace BGE
         wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, m.prePerspectiveBmp, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale, textureTint)
         if gotPreBmp and pools.count() > 0
+          ' keep the lit texture without pools, so a lamp moving on its own skips the warp
+          m.poolBaseBmp = m.copyBitmap(m.prePerspectiveBmp, m.poolBaseBmp)
           m.drawLightPools(rendererObj, pools)
           m.hasBakedLighting = true
-          m.lightPoolCountLastDraw = pools.count()
+          m.bakedTintRGBA = textureTint
+        else
+          m.poolBaseBmp = invalid
         end if
       else
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
@@ -277,11 +308,20 @@ namespace BGE
       normal = m.getVisibleNormal(rendererObj.camera)
       height = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(rendererObj.camera.position, plane.point), normal)
       underCamera = BGE.Math.VectorOps.subtract(rendererObj.camera.position, BGE.Math.VectorOps.scale(normal, height))
-      lights = rendererObj.getPreparedLights()
-      if m.usesLightPools(rendererObj)
-        lights = BGE.Lighting.withoutPoolLights(lights)
+      return BGE.Lighting.computeLightAmount(m.getUniformLights(rendererObj), underCamera, normal)
+    end function
+
+    ' The lights that reach the whole plane evenly. Read every frame for the final blit's
+    ' tint, so the filtered list is kept until the lights change.
+    private function getUniformLights(rendererObj as BGE.Renderer) as BGE.Lighting.PreparedLight[]
+      if not m.usesLightPools()
+        return rendererObj.getPreparedLights()
       end if
-      return BGE.Lighting.computeLightAmount(lights, underCamera, normal)
+      if invalid = m.uniformLights or m.uniformLightsVersion <> rendererObj.lightingVersion
+        m.uniformLights = BGE.Lighting.withoutPoolLights(rendererObj.getPreparedLights())
+        m.uniformLightsVersion = rendererObj.lightingVersion
+      end if
+      return m.uniformLights
     end function
 
     ' The plane's unit normal on the side the camera sees.
@@ -306,27 +346,88 @@ namespace BGE
       return BGE.Lighting.applyLightAmount(&hFFFFFFFF, lightAmount, m.drawable.ambientBrightness)
     end function
 
-    ' The color the cached composite is blitted with: its lighting, unless that's drawn in.
-    private function getCompositeTintRGBA(rendererObj as BGE.Renderer) as integer
+    ' The color the cached composite is blitted with: its lighting, unless that's drawn
+    ' in. Public for tests/telemetry only.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {integer} packed RGBA, -1 (unchanged) when unlit or baked in
+    function getCompositeTintRGBA(rendererObj as BGE.Renderer) as integer
       if m.hasBakedLighting
         return -1
       end if
       return m.getLightTintRGBA(rendererObj)
     end function
 
-    ' How many light pools the last full redraw drew. Public for tests/telemetry only.
+    ' How many light pools the cached drawing shows. Public for tests/telemetry only.
     '
     ' @return {integer}
     function getLightPoolCountLastDraw() as integer
-      return m.lightPoolCountLastDraw
+      return m.lightPoolsDrawn.count()
+    end function
+
+    ' Whether `pools` are close enough to the ones already drawn - within the quality
+    ' level's `planeLightPoolMaxDriftPixels` and `planeLightPoolMaxLightChange` - to keep
+    ' the cached drawing.
+    private function lightPoolsFit(rendererObj as BGE.Renderer, pools as PlaneLightPoolPlacement[]) as boolean
+      drawn = m.lightPoolsDrawn
+      if pools.count() <> drawn.count()
+        return false
+      end if
+      maxDrift = rendererObj.qualitySettings.planeLightPoolMaxDriftPixels
+      maxChange = rendererObj.qualitySettings.planeLightPoolMaxLightChange * 255
+      for i = 0 to pools.count() - 1
+        a = drawn[i]
+        b = pools[i]
+        if Abs(a.x - b.x) > maxDrift or Abs(a.y - b.y) > maxDrift or Abs(a.width - b.width) > maxDrift or Abs(a.height - b.height) > maxDrift
+          return false
+        end if
+        for shift = 0 to 24 step 8
+          if Abs((a.rgba >> shift and &hFF) - (b.rgba >> shift and &hFF)) > maxChange
+            return false
+          end if
+        end for
+      end for
+      return true
+    end function
+
+    ' Redraws just the pools over the kept lit texture, and re-slices it.
+    '
+    ' @return {boolean} false if there's no kept texture to redraw over
+    private function redrawLightPools(rendererObj as BGE.Renderer, pools as PlaneLightPoolPlacement[]) as boolean
+      if invalid = m.poolBaseBmp or invalid = m.prePerspectiveBmp
+        return false
+      end if
+      m.copyBitmap(m.poolBaseBmp, m.prePerspectiveBmp)
+      m.drawLightPools(rendererObj, pools)
+      m.hasAccurateTempBitmap = m.drawPerspectiveBmpSlicesToByCamera(rendererObj, m.prePerspectiveBmp, m.perspectivePoints, rendererObj.qualitySettings.planeSliceCount)
+      return true
+    end function
+
+    ' Copies `src` exactly (alpha included) into `dest`, (re)allocating it at src's size
+    ' if needed.
+    '
+    ' @return {roBitmap} dest, or invalid if it couldn't be allocated
+    private function copyBitmap(src as roBitmap, dest as roBitmap) as roBitmap
+      if invalid = dest or dest.GetWidth() <> src.GetWidth() or dest.GetHeight() <> src.GetHeight()
+        dest = invalid
+        dest = CreateObject("roBitmap", {width: src.GetWidth(), height: src.GetHeight(), AlphaEnable: true})
+        if invalid = dest
+          print "[BGE.SceneObjectPlane] warning: couldn't allocate the plane's light pool base bitmap"
+          return invalid
+        end if
+      end if
+      ' alpha off, so the copy replaces pixels rather than blending over them
+      dest.SetAlphaEnable(false)
+      dest.DrawObject(0, 0, src)
+      dest.SetAlphaEnable(true)
+      return dest
     end function
 
     ' Whether ranged point lights are drawn as pools on this plane rather than sampled
-    ' under the camera - see `RenderQualitySettings.planeLightPools`. A color fill has no
-    ' top-down bitmap to draw them into, and a static decal's transparent edges would
-    ' show them, so both keep the uniform sample.
-    private function usesLightPools(rendererObj as BGE.Renderer) as boolean
-      return m.drawable.isShaded and m.drawable.fillMode = PlaneFillMode.tiledImage and rendererObj.qualitySettings.planeLightPools
+    ' under the camera. A color fill has no top-down bitmap to draw them into, and a
+    ' static decal's transparent edges would show them, so both keep the uniform sample.
+    private function usesLightPools() as boolean
+      return m.drawable.isShaded and m.drawable.fillMode = PlaneFillMode.tiledImage
     end function
 
     ' The light pools that overlap the plane's top-down bitmap, placed in its pixels.
@@ -335,7 +436,7 @@ namespace BGE
     ' @return {BGE.PlaneLightPoolPlacement[]}
     private function getVisibleLightPools(rendererObj as BGE.Renderer) as PlaneLightPoolPlacement[]
       placements = [] as PlaneLightPoolPlacement[]
-      if not m.usesLightPools(rendererObj) or not rendererObj.hasLights() or invalid = m.prePerspectiveBmp or invalid = m.perspectivePoints
+      if not m.usesLightPools() or not rendererObj.hasLights() or invalid = m.prePerspectiveBmp or invalid = m.perspectivePoints
         return placements
       end if
       bmpWidth = m.prePerspectiveBmp.GetWidth()
@@ -359,33 +460,42 @@ namespace BGE
         centreY = BGE.Math.VectorOps.dotProduct(offset, bmpDown) * pixelsPerUnitY
         halfWidth = Abs(pool.radius * pixelsPerUnitX)
         halfHeight = Abs(pool.radius * pixelsPerUnitY)
-        if centreX + halfWidth > 0 and centreX - halfWidth < bmpWidth and centreY + halfHeight > 0 and centreY - halfHeight < bmpHeight
-          placements.push({pool: pool, x: centreX - halfWidth, y: centreY - halfHeight, width: 2 * halfWidth, height: 2 * halfHeight})
+        rgba = m.getLightPoolRGBA(pool)
+        if rgba <> 0 and centreX + halfWidth > 0 and centreX - halfWidth < bmpWidth and centreY + halfHeight > 0 and centreY - halfHeight < bmpHeight
+          placements.push({pool: pool, x: centreX - halfWidth, y: centreY - halfHeight, width: 2 * halfWidth, height: 2 * halfHeight, rgba: rgba})
         end if
       end for
       return placements
     end function
 
+    ' A pool's draw color. ifDraw2D can only alpha-blend, so a pool fades the texture
+    ' toward the light's hue, as far as its strength, capped at `lightPoolOpacity` so the
+    ' texture shows through.
+    '
+    ' @return {integer} packed RGBA; 0 for a pool too faint to draw
+    private function getLightPoolRGBA(pool as BGE.Lighting.PlaneLightPool) as integer
+      strength = BGE.Math.Max(pool.r, BGE.Math.Max(pool.g, pool.b))
+      alpha% = cint(255 * BGE.Math.Min(strength, 1) * BGE.Math.Clamp(m.drawable.lightPoolOpacity, 0, 1))
+      if alpha% <= 0
+        return 0
+      end if
+      r% = cint(255 * pool.r / strength)
+      g% = cint(255 * pool.g / strength)
+      b% = cint(255 * pool.b / strength)
+      return (r% << 24) + (g% << 16) + (b% << 8) + alpha%
+    end function
+
     ' Blends each pool's light over the top-down bitmap, which then takes the ground's
-    ' perspective with it. ifDraw2D can only alpha-blend, so a pool fades the texture
-    ' toward the light's color, capped at `lightPoolOpacity` so the texture shows through.
+    ' perspective with it.
     private sub drawLightPools(rendererObj as BGE.Renderer, placements as PlaneLightPoolPlacement[])
-      opacity = BGE.Math.Clamp(m.drawable.lightPoolOpacity, 0, 1)
       for each placement in placements
-        pool = placement.pool
-        strength = BGE.Math.Max(pool.r, BGE.Math.Max(pool.g, pool.b))
-        alpha% = cint(255 * BGE.Math.Min(strength, 1) * opacity)
-        gradient = m.getLightPoolGradient(pool.heightRatio)
-        if alpha% > 0 and invalid <> gradient
-          ' the light's hue at full brightness; its strength goes into the alpha
-          r% = cint(255 * pool.r / strength)
-          g% = cint(255 * pool.g / strength)
-          b% = cint(255 * pool.b / strength)
-          rgba = (r% << 24) + (g% << 16) + (b% << 8) + alpha%
+        gradient = m.getLightPoolGradient(placement.pool.heightRatio)
+        if invalid <> gradient
           size = gradient.GetWidth()
-          rendererObj.drawScaledObjectTo(m.prePerspectiveBmp, placement.x, placement.y, placement.width / size, placement.height / size, gradient, rgba)
+          rendererObj.drawScaledObjectTo(m.prePerspectiveBmp, placement.x, placement.y, placement.width / size, placement.height / size, gradient, placement.rgba)
         end if
       end for
+      m.lightPoolsDrawn = placements
     end sub
 
     ' Pool shapes depend on the light's height over its range; a few steps of it are
