@@ -1,46 +1,228 @@
 import "../../utils/strings.bs"
 import "../Game.bs"
 import "../GameInput.bs"
-import "../ui/Label.bs"
 import "DebugWindow.bs"
+import "InputPlayerState.bs"
+import "InputStateTracker.bs"
 
 namespace BGE.Debug
 
+  ' Debug window showing one picture per player - a Roku remote or a gamepad - with
+  ' every held button highlighted and stick positions shown, plus a line of held times.
   class InputDisplay extends DebugWindow
 
-    private lastInputButton as string = ""
-    private heldTimeSeconds as float = 0
-    private inputLabel as BGE.UI.Label
+    ' Size multiplier for the pictures
+    diagramScale as float = 2
+
+    private tracker as BGE.Debug.InputStateTracker
+
+    ' Panel layout units, before diagramScale
+    private panelWidth = 170
+    private panelHeight = 165
+    private panelGap = 10
+    private maxHeldTimesShown = 2
+
+    private highlightColor = &h30D060A0
+    ' Opaque: drawRoundedRectangle overlaps its corner pieces, so alpha shows seams
+    private offColor = &h505050FF
+    private onColor = &h30D060FF
+    private textColor = &hFFFFFFFF
+
+    private remoteImage as dynamic = invalid
+    private gamepadImage as dynamic = invalid
+
+    ' Top-left of the panel being drawn
+    private originX as float = 0
+    private originY as float = 0
+    ' Placement of the picture being drawn, in panel layout units
+    private imageX as float = 0
+    private imageY as float = 0
+    private imageScale as float = 1
 
     sub new(game as BGE.Game)
       super(game)
+      m.tracker = new BGE.Debug.InputStateTracker()
       m.width = 240
       m.height = 40
       m.vertAlign = "bottom"
-      m.inputLabel = new BGE.UI.Label(game)
-      m.inputLabel.drawableText.font = m.game.getFont("debugUI")
-      m.addChild(m.inputLabel)
     end sub
 
     override sub onInput(input as BGE.GameInput)
-      m.lastInputButton = input.button
-      m.heldTimeSeconds = input.heldTimeMs / 1000
+      m.tracker.onInput(input)
     end sub
 
     override sub onUpdate(dt as float)
-      buttonName = "none"
-      heldTimeStr = "0"
-      if invalid <> m.lastInputButton
-        buttonName = m.lastInputButton
-        heldTimeStr = BGE.NumberToFixed(m.heldTimeSeconds, 2)
+      m.tracker.update(dt, m.game.controls)
+      playerCount = m.tracker.getPlayers().Count()
+      if playerCount = 0
+        m.width = m.game.getFont("debugUI").GetOneLineWidth("Input: none", 1000) + m.padding.left + m.padding.right
+        m.height = 40
+      else
+        m.width = m.padding.left + m.padding.right + (playerCount * m.panelWidth + (playerCount - 1) * m.panelGap) * m.diagramScale
+        m.height = m.padding.top + m.padding.bottom + m.panelHeight * m.diagramScale
       end if
-
-      m.inputLabel.setText(`Input: ${buttonName} (${heldTimeStr}s)`)
-      m.lastInputButton = ""
-
-      m.width = m.inputLabel.width + 20
     end sub
 
+    override sub draw(parent = invalid as BGE.UI.UiWidget)
+      super.draw(parent)
+      renderer = m.canvas.renderer
+      left = m.position.x + m.padding.left
+      top = m.position.y + m.padding.top
+      players = m.tracker.getPlayers()
+      if players.Count() = 0
+        renderer.drawText("Input: none", left, top, m.textColor, m.game.getFont("debugUI"))
+        return
+      end if
+      for each state in players
+        m.originX = left
+        m.originY = top
+        m.drawPlayer(renderer, state)
+        left += (m.panelWidth + m.panelGap) * m.diagramScale
+      end for
+    end sub
+
+    private sub drawPlayer(renderer as BGE.Renderer, state as BGE.Debug.InputPlayerState)
+      font = m.game.getFont("debugUI")
+      kind = "remote"
+      if state.isGamepad
+        kind = "gamepad"
+        m.drawGamepad(renderer, state)
+      else
+        m.drawRemote(renderer, state)
+      end if
+      renderer.drawText(`P${state.playerIndex + 1} ${kind}`, m.originX, m.originY, m.textColor, font)
+      heldTimesY = m.originY + m.panelHeight * m.diagramScale - font.GetOneLineHeight()
+      renderer.drawText(m.heldTimesText(state), m.originX, heldTimesY, m.textColor, font)
+    end sub
+
+    ' Highlight positions are in roku-remote.png (200x400) pixels.
+    private sub drawRemote(renderer as BGE.Renderer, state as BGE.Debug.InputPlayerState)
+      if m.remoteImage = invalid
+        m.remoteImage = m.loadImage("pkg:/source/engine/debug/images/roku-remote.png")
+      end if
+      m.placeImage(renderer, m.remoteImage, 54, 18, 0.31)
+      m.highlightRect(renderer, state, ["back"], 26, 64, 63, 28)
+      m.highlightCircle(renderer, state, ["up"], 100, 143, 18)
+      m.highlightCircle(renderer, state, ["down"], 100, 250, 18)
+      m.highlightCircle(renderer, state, ["left"], 47, 197, 18)
+      m.highlightCircle(renderer, state, ["right"], 152, 197, 18)
+      m.highlightCircle(renderer, state, ["ok"], 100, 197, 26)
+      m.highlightCircle(renderer, state, ["replay"], 40, 318, 17)
+      m.highlightCircle(renderer, state, ["options"], 155, 318, 17)
+      m.highlightCircle(renderer, state, ["rewind"], 37, 370, 17)
+      m.highlightRect(renderer, state, ["play"], 72, 350, 58, 40)
+      m.highlightCircle(renderer, state, ["fastforward"], 162, 370, 17)
+    end sub
+
+    ' Highlight positions are in gamepad.png (295x208) pixels. The picture has no
+    ' triggers, so L2/R2 are tabs drawn above it.
+    private sub drawGamepad(renderer as BGE.Renderer, state as BGE.Debug.InputPlayerState)
+      if m.gamepadImage = invalid
+        m.gamepadImage = m.loadImage("pkg:/source/engine/debug/images/gamepad.png")
+      end if
+      m.roundedRect(renderer, 31, 18, 21, 6, 3, m.colorFor(state, ["l2"]))
+      m.roundedRect(renderer, 118, 18, 21, 6, 3, m.colorFor(state, ["r2"]))
+      m.placeImage(renderer, m.gamepadImage, 4, 28, 0.55)
+      m.highlightRect(renderer, state, ["l1"], 50, 14, 38, 10)
+      m.highlightRect(renderer, state, ["r1"], 207, 14, 38, 10)
+      m.highlightCircle(renderer, state, ["back"], 126, 59, 7)
+      m.highlightCircle(renderer, state, ["options", "play"], 168, 59, 7)
+      m.highlightCircle(renderer, state, ["y"], 224, 38, 10)
+      m.highlightCircle(renderer, state, ["x"], 204, 59, 10)
+      m.highlightCircle(renderer, state, ["b"], 245, 59, 10)
+      m.highlightCircle(renderer, state, ["a", "ok"], 224, 79, 10)
+      m.highlightCircle(renderer, state, ["up"], 108, 93, 7)
+      m.highlightCircle(renderer, state, ["down"], 108, 122, 7)
+      m.highlightCircle(renderer, state, ["left"], 93, 107, 7)
+      m.highlightCircle(renderer, state, ["right"], 123, 107, 7)
+      m.drawStick(renderer, state.leftStick, 71, 58)
+      m.drawStick(renderer, state.rightStick, 187, 102)
+    end sub
+
+    ' A dot that moves with the stick, only while it's off center.
+    private sub drawStick(renderer as BGE.Renderer, stick as BGE.Math.Vector, imageX as float, imageY as float)
+      if BGE.Math.VectorOps.isZero(stick)
+        return
+      end if
+      travel = 10
+      ' Stick y is world space (+y up); the canvas is y-down.
+      k = m.imageScale
+      m.circle(renderer, m.imageX + (imageX + stick.x * travel) * k, m.imageY + (imageY - stick.y * travel) * k, 8 * k, m.onColor)
+    end sub
+
+    private function loadImage(path as string) as dynamic
+      bitmap = CreateObject("roBitmap", path)
+      if bitmap = invalid
+        return invalid
+      end if
+      region = CreateObject("roRegion", bitmap, 0, 0, bitmap.GetWidth(), bitmap.GetHeight())
+      ' Smooth downscaling keeps the thin outlines from breaking up.
+      region.SetScaleMode(1)
+      return region
+    end function
+
+    ' Draws a picture and sets where the following highlight calls are placed.
+    private sub placeImage(renderer as BGE.Renderer, image as dynamic, x as float, y as float, scale as float)
+      m.imageX = x
+      m.imageY = y
+      m.imageScale = scale
+      if image <> invalid
+        s = m.diagramScale
+        renderer.drawScaledObject(m.originX + x * s, m.originY + y * s, scale * s, scale * s, image)
+      end if
+    end sub
+
+    private sub highlightCircle(renderer as BGE.Renderer, state as BGE.Debug.InputPlayerState, buttonNames as string[], imageX as float, imageY as float, imageRadius as float)
+      if state.isAnyHeld(buttonNames)
+        k = m.imageScale
+        m.circle(renderer, m.imageX + imageX * k, m.imageY + imageY * k, imageRadius * k, m.highlightColor)
+      end if
+    end sub
+
+    ' A plain rectangle, not a rounded one - translucent rounded rectangles show seams.
+    private sub highlightRect(renderer as BGE.Renderer, state as BGE.Debug.InputPlayerState, buttonNames as string[], imageX as float, imageY as float, imageWidth as float, imageHeight as float)
+      if state.isAnyHeld(buttonNames)
+        k = m.imageScale
+        s = m.diagramScale
+        renderer.drawRectangle(m.originX + (m.imageX + imageX * k) * s, m.originY + (m.imageY + imageY * k) * s, imageWidth * k * s, imageHeight * k * s, m.highlightColor)
+      end if
+    end sub
+
+    ' Draws a circle in panel layout units.
+    private sub circle(renderer as BGE.Renderer, cx as float, cy as float, radius as float, rgba as integer)
+      s = m.diagramScale
+      renderer.drawCircle(m.originX + cx * s, m.originY + cy * s, radius * s, rgba)
+    end sub
+
+    ' Draws a rounded rectangle in panel layout units.
+    private sub roundedRect(renderer as BGE.Renderer, x as float, y as float, width as float, height as float, radius as float, rgba as integer)
+      s = m.diagramScale
+      renderer.drawRoundedRectangle(m.originX + x * s, m.originY + y * s, width * s, height * s, radius * s, rgba)
+    end sub
+
+    private function colorFor(state as BGE.Debug.InputPlayerState, buttonNames as string[]) as integer
+      if state.isAnyHeld(buttonNames)
+        return m.onColor
+      end if
+      return m.offColor
+    end function
+
+    ' Longest-held first, so a quick tap doesn't push out a long hold.
+    private function heldTimesText(state as BGE.Debug.InputPlayerState) as string
+      held = []
+      for each buttonName in state.pressedAt
+        held.Push({name: buttonName, seconds: m.tracker.getHeldSeconds(state, buttonName)})
+      end for
+      held.SortBy("seconds", "r")
+      parts = []
+      for each entry in held
+        if parts.Count() = m.maxHeldTimesShown
+          exit for
+        end if
+        parts.Push(`${entry.name} ${BGE.NumberToFixed(entry.seconds, 1)}s`)
+      end for
+      return parts.Join("  ")
+    end function
 
   end class
 
