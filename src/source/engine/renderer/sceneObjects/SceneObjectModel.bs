@@ -3,6 +3,7 @@ import "../../../math/Matrix44.bs"
 import "../../../math/vector.bs"
 import "../../../utils/colors.bs"
 import "../../drawables/Model3d.bs"
+import "../lighting/Lighting.bs"
 import "../occlusion/OccluderPanels.bs"
 import "../Renderer.bs"
 import "../ImpostorFit.bs"
@@ -43,6 +44,10 @@ namespace BGE
     ' stable across frames even though modelCanvasFaces itself is re-filtered/re-sorted
     ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
     private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
+
+    ' Each face's shaded color as of its last projection, by faceIndex - lets a light
+    ' change that didn't alter any face's color skip the redraw.
+    private lastFaceShadedColors as integer[] = []
 
     ' Whether every face drawn in the most recent drawToTempBitmap() call was a genuine
     ' fresh redraw - reset true at the top of that call, flipped false the moment any
@@ -136,7 +141,7 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     private function drawFaceToCanvas(rendererObj as BGE.Renderer, face as BGE.Model3dFace, drawMode as SceneObjectDrawMode) as boolean
-      shadedColor = BGE.RendererHelpers.applyAlphaFade(BGE.colorBrightness(face.color, face.brightness), m.distanceFadeAlpha)
+      shadedColor = BGE.RendererHelpers.applyAlphaFade(face.shadedColor, m.distanceFadeAlpha)
       if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
         if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
           return rendererObj.drawBitmapTriangle(face.Texture.srcRegionWithId, face.Texture.points, face.vertices, shadedColor)
@@ -235,9 +240,13 @@ namespace BGE
       ' Reuse only if the cached bitmap holds all of this frame's on-canvas part - the drift
       ' check alone doesn't bound the bounding box's growth.
       holdsThisPart = cache.clipX <= clipX and cache.clipY <= clipY and cache.clipX + cache.clipWidth >= clipX + width and cache.clipY + cache.clipHeight >= clipY + height
-      if invalid <> cache.bitmap and holdsThisPart and cache.staleFrameCount < m.drawable.maxStaleFrames and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
-        cache.staleFrameCount++
-        m.lastDrawWasFullyFresh = false
+      ' relit, but unmoved and the same color, so the cached raster is exact, not stale
+      exact = m.lightingChangedThisDraw and invalid <> cache.bitmap and cache.color = face.shadedColor and m.isSameTriangle(face.vertices, cache.triangleAtCapture)
+      if invalid <> cache.bitmap and holdsThisPart and (exact or cache.staleFrameCount < m.drawable.maxStaleFrames) and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and (not m.lightingChangedThisDraw or cache.color = face.shadedColor) and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
+        if not exact
+          cache.staleFrameCount++
+          m.lastDrawWasFullyFresh = false
+        end if
         m.facesClippedThisDraw = m.facesClippedThisDraw or cache.clipped
         return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + cache.clipX, faceOffsetY + cache.clipY, m.getCroppedFaceRegion(cache.bitmap, cache.clipWidth, cache.clipHeight))
       end if
@@ -249,7 +258,7 @@ namespace BGE
 
       localOffsetX = -bounds[0].x - clipX
       localOffsetY = -bounds[0].y - clipY
-      shadedColor = BGE.colorBrightness(face.color, face.brightness)
+      shadedColor = face.shadedColor
       drawn = false
       if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
         drawn = rendererObj.drawBitmapTriangleTo(faceBitmap, face.Texture.srcRegionWithId, face.Texture.points, m.getOffsetTriangleBuffer(face.vertices, localOffsetX, localOffsetY), shadedColor)
@@ -269,6 +278,7 @@ namespace BGE
       cache.clipWidth = width
       cache.clipHeight = height
       cache.clipped = clipped
+      cache.color = shadedColor
       m.facesClippedThisDraw = m.facesClippedThisDraw or clipped
       return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
     end function
@@ -308,6 +318,23 @@ namespace BGE
     ' @return {roRegion}
     private function getCroppedFaceRegion(bitmap as roBitmap, width as integer, height as integer) as roRegion
       return CreateObject("roRegion", bitmap, 0, 0, width, height)
+    end function
+
+    ' Whether `capturedVertices` are exactly `currentVertices`.
+    '
+    ' @param {BGE.Math.Vector[]} currentVertices
+    ' @param {BGE.Math.Vector[]} capturedVertices invalid if there is no cache yet
+    ' @return {boolean}
+    private function isSameTriangle(currentVertices as BGE.Math.Vector[], capturedVertices as BGE.Math.Vector[]) as boolean
+      if invalid = capturedVertices
+        return false
+      end if
+      for i = 0 to 2
+        if currentVertices[i].x <> capturedVertices[i].x or currentVertices[i].y <> capturedVertices[i].y
+          return false
+        end if
+      end for
+      return true
     end function
 
     ' Whether any of this face's 3 vertices has moved more than
@@ -679,7 +706,7 @@ namespace BGE
       m.impostorKindThisFrame = ""
       m.keepImpostorThroughQualityDrop(rendererObj)
       ' overlap clusters draw per face, from faces this would leave unprojected
-      if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.qualityChangedThisDraw and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
+      if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.qualityChangedThisDraw and not m.lightingChangedThisDraw and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorThisFrame = m.attemptImpostor(rendererObj, drawMode)
         if invalid <> m.impostorThisFrame
           m.impostorKindThisFrame = m.impostorCapture.fit.kind
@@ -771,6 +798,10 @@ namespace BGE
       ' end for
 
       isShaded = m.drawable.isShaded
+      lights = rendererObj.getPreparedLights()
+      useLights = isShaded and lights.count() > 0
+      ambientBrightness = m.drawable.ambientBrightness
+      faceColorsChanged = false
 
       worldFaceIndex = 0
       for each worldFace in m.modelWorldFaces
@@ -804,7 +835,17 @@ namespace BGE
             canvasFace = BGE.Model3dFaceOps.create(canvasPoints)
             canvasFace.Texture = worldFace.Texture
             canvasFace.color = worldFace.color
-            canvasFace.brightness = isShaded? BGE.Math.Max(getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal), m.drawable.ambientBrightness) : 1
+            if useLights
+              m.lightCanvasFace(canvasFace, worldFace, lights, getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal) < 0, ambientBrightness)
+            else
+              canvasFace.brightness = isShaded? BGE.Math.Max(getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal), ambientBrightness) : 1
+              canvasFace.shadedColor = BGE.colorBrightness(worldFace.color, canvasFace.brightness)
+            end if
+            previousColor = m.lastFaceShadedColors[thisFaceIndex]
+            if invalid = previousColor or previousColor <> canvasFace.shadedColor
+              faceColorsChanged = true
+              m.lastFaceShadedColors[thisFaceIndex] = canvasFace.shadedColor
+            end if
             canvasFace.priority = -BGE.Math.arrayMax(negDistances)
             canvasFace.faceIndex = thisFaceIndex
             m.modelCanvasFaces.Push(canvasFace)
@@ -813,9 +854,32 @@ namespace BGE
         end if
       end for
 
+      if not faceColorsChanged
+        ' relit, but no face looks any different
+        m.lightingChangedThisDraw = false
+      end if
       m.modelCanvasFaces.SortBy("priority", "r")
       return true
     end function
+
+    ' Shades `canvasFace` by the renderer's lights, from its world-space twin.
+    '
+    ' @param {BGE.Model3dFace} canvasFace
+    ' @param {BGE.Model3dFace} worldFace
+    ' @param {BGE.Lighting.PreparedLight[]} lights
+    ' @param {boolean} isBackFace whether the face's inside is the side being seen
+    ' @param {float} ambientBrightness
+    private sub lightCanvasFace(canvasFace as BGE.Model3dFace, worldFace as BGE.Model3dFace, lights as BGE.Lighting.PreparedLight[], isBackFace as boolean, ambientBrightness as float)
+      normal = worldFace.normal
+      if isBackFace
+        normal = BGE.Math.VectorOps.scale(normal, -1)
+      end if
+      v = worldFace.vertices
+      center = BGE.Math.VectorOps.create((v[0].x + v[1].x + v[2].x) / 3, (v[0].y + v[1].y + v[2].y) / 3, (v[0].z + v[1].z + v[2].z) / 3)
+      amount = BGE.Lighting.computeLightAmount(lights, center, normal)
+      canvasFace.brightness = BGE.Math.Max(BGE.Math.Max(BGE.Math.Max(amount.x, amount.y), amount.z), ambientBrightness)
+      canvasFace.shadedColor = BGE.Lighting.applyLightAmount(worldFace.color, amount, ambientBrightness)
+    end sub
 
     ' A rotation this small (radians) is treated as "no real rotation happened" - see
     ' attemptTransformTempBitmap() below. Small enough that no visible face orientation

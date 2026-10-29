@@ -1,0 +1,138 @@
+import "../../../math/math.bs"
+import "../../../math/vector.bs"
+import "../../../utils/colors.bs"
+import "Light.bs"
+
+namespace BGE.Lighting
+
+  ' A light reduced to what shading needs, built once per lighting change so shading a
+  ' surface doesn't re-normalize or unpack anything.
+  interface PreparedLight extends roAssociativeArray
+    type as BGE.LightType
+    ' color * intensity, per channel, as fractions of full brightness
+    r as float
+    g as float
+    b as float
+    ' directional only: unit vector from a surface toward the light
+    toLight as BGE.Math.Vector
+    ' point only
+    position as BGE.Math.Vector
+    range as float
+  end interface
+
+  ' The enabled lights in `lights`, prepared for shading.
+  '
+  ' @param {BGE.Light[]} lights
+  ' @return {BGE.Lighting.PreparedLight[]}
+  function prepareLights(lights as BGE.Light[]) as BGE.Lighting.PreparedLight[]
+    prepared = [] as BGE.Lighting.PreparedLight[]
+    for each light in lights
+      if light.enabled and light.intensity > 0
+        scale = light.intensity / 255.0
+        p = {
+          type: light.type,
+          r: (light.color >> 16 and &hFF) * scale,
+          g: (light.color >> 8 and &hFF) * scale,
+          b: (light.color and &hFF) * scale,
+          toLight: invalid,
+          position: invalid,
+          range: 0.0
+        } as BGE.Lighting.PreparedLight
+        if light.type = BGE.LightType.directional
+          directional = light as BGE.DirectionalLight
+          p.toLight = BGE.Math.VectorOps.scale(directional.direction, -1)
+          BGE.Math.VectorOps.normalize(p.toLight)
+        else if light.type = BGE.LightType.point
+          pointLight = light as BGE.PointLight
+          p.position = BGE.Math.VectorOps.copy(pointLight.position)
+          p.range = pointLight.range
+        end if
+        prepared.push(p)
+      end if
+    end for
+    return prepared
+  end function
+
+  ' A string that changes whenever anything about `lights` that affects shading does, so
+  ' a renderer can tell when its cached drawings need relighting.
+  '
+  ' @param {BGE.Light[]} lights
+  ' @return {string} "" when no light is enabled
+  function getLightingSignature(lights as BGE.Light[]) as string
+    signature = ""
+    for each light in lights
+      if light.enabled and light.intensity > 0
+        signature += light.type + "," + light.color.toStr() + "," + light.intensity.toStr()
+        if light.type = BGE.LightType.directional
+          signature += "," + BGE.Math.VectorOps.toStr((light as BGE.DirectionalLight).direction)
+        else if light.type = BGE.LightType.point
+          pointLight = light as BGE.PointLight
+          signature += "," + BGE.Math.VectorOps.toStr(pointLight.position) + "," + pointLight.range.toStr()
+        end if
+        signature += ";"
+      end if
+    end for
+    return signature
+  end function
+
+  ' How much light reaches a surface, per channel: a diffuse (Lambert) sum over every
+  ' light, capped at 1. `normal` must be the unit normal of the side being seen.
+  '
+  ' @param {BGE.Lighting.PreparedLight[]} lights
+  ' @param {BGE.Math.Vector} point a point on the surface, in world space
+  ' @param {BGE.Math.Vector} normal unit normal of the visible side
+  ' @return {BGE.Math.Vector} x/y/z = red/green/blue light, each 0-1
+  function computeLightAmount(lights as BGE.Lighting.PreparedLight[], point as BGE.Math.Vector, normal as BGE.Math.Vector) as BGE.Math.Vector
+    r = 0.0
+    g = 0.0
+    b = 0.0
+    for each light in lights
+      amount = 1.0
+      if light.type = BGE.LightType.directional
+        amount = BGE.Math.VectorOps.dotProduct(normal, light.toLight)
+      else if light.type = BGE.LightType.point
+        toLight = BGE.Math.VectorOps.subtract(light.position, point)
+        distance = BGE.Math.VectorOps.length(toLight)
+        if distance > 0
+          amount = BGE.Math.VectorOps.dotProduct(normal, toLight) / distance
+        end if
+        if light.range > 0
+          amount = amount * BGE.Math.Max(0, 1 - distance / light.range)
+        end if
+      end if
+      if amount > 0
+        r += light.r * amount
+        g += light.g * amount
+        b += light.b * amount
+      end if
+    end for
+    return BGE.Math.VectorOps.create(BGE.Math.Min(r, 1), BGE.Math.Min(g, 1), BGE.Math.Min(b, 1))
+  end function
+
+  ' `rgba` lit by `lightAmount` (from computeLightAmount()), with no channel darker than
+  ' `floor` - see Drawable.ambientBrightness.
+  '
+  ' @param {integer} rgba packed RGBA color
+  ' @param {BGE.Math.Vector} lightAmount red/green/blue light, each 0-1
+  ' @param {float} floor the least light any channel gets, 0-1
+  ' @return {integer} packed RGBA color, alpha unchanged
+  function applyLightAmount(rgba as integer, lightAmount as BGE.Math.Vector, floor as float) as integer
+    r% = cint((rgba >> 24 and &hFF) * BGE.Math.Max(lightAmount.x, floor))
+    g% = cint((rgba >> 16 and &hFF) * BGE.Math.Max(lightAmount.y, floor))
+    b% = cint((rgba >> 8 and &hFF) * BGE.Math.Max(lightAmount.z, floor))
+    return (r% << 24) + (g% << 16) + (b% << 8) + (rgba and &hFF)
+  end function
+
+  ' `rgba` as seen on a surface lit by `lights`.
+  '
+  ' @param {integer} rgba packed RGBA color
+  ' @param {BGE.Lighting.PreparedLight[]} lights
+  ' @param {BGE.Math.Vector} point a point on the surface, in world space
+  ' @param {BGE.Math.Vector} normal unit normal of the visible side
+  ' @param {float} floor the least light any channel gets, 0-1
+  ' @return {integer} packed RGBA color
+  function shadeColor(rgba as integer, lights as BGE.Lighting.PreparedLight[], point as BGE.Math.Vector, normal as BGE.Math.Vector, floor as float) as integer
+    return applyLightAmount(rgba, computeLightAmount(lights, point, normal), floor)
+  end function
+
+end namespace
