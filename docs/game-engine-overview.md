@@ -348,7 +348,9 @@ A few things fall out of this that matter in practice:
   `BGE.Debug.InputDisplay`/`MemoryDisplay`/`GarbageCollectorDisplay`/`LogDisplay` are ready-made
   debug widgets - every example wires up at least the FPS display in `main.bs`. `InputDisplay`
   draws a remote or gamepad per player with every held button highlighted and the analog sticks
-  shown, so you can check simultaneous input from several controllers at a glance.
+  shown, so you can check simultaneous input from several controllers at a glance. Set its
+  `mode` to `BGE.Debug.InputDisplayMode.text` (or pass `{inputDisplayMode: "text"}` to
+  `enableStandardDebugUi()`) for a compact line of text per player instead.
 - `Game.log(message, level)` records a message (`BGE.Debug.LogLevel.info`/`warning`/`error`,
   defaulting to `info`) that's both printed and kept in a short history `BGE.Debug.LogDisplay`
   reads from - prefer it over a raw `print` in your own game code so failures are visible
