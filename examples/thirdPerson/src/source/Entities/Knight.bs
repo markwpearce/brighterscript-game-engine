@@ -1,0 +1,217 @@
+import "../World.bs"
+import "../ThirdPersonCamera.bs"
+
+enum KnightState
+  idle = "idle"
+  run = "run"
+  attack = "attack"
+  block = "block"
+  parry = "parry"
+  dodge = "dodge"
+end enum
+
+' The player: Flare's male hero knight (sprites/male_hero_knight.png, prepared by
+' tools/prepare-sheet.js) shown as an 8-direction oriented sprite. Moves relative to the
+' camera and has light attacks (chained), a held block, a timed parry and a dodge.
+class Knight extends BGE.GameEntity
+
+  sprite as BGE.DrawableOrientedSprite
+  cameraRig as ThirdPersonCamera = invalid
+  state as KnightState = KnightState.idle
+  ' 0..1 of full run speed this frame, for the camera's follow drift
+  moveAmount as float = 0
+  ' True during the middle of a dodge
+  invulnerable as boolean = false
+
+  runSpeed as float = World.metres(5)
+  blockWalkSpeed as float = World.metres(1.5)
+  turnSpeed as float = 12 ' radians/sec
+  attackSeconds as float = 0.45
+  attackLunge as float = World.metres(0.6)
+  parrySeconds as float = 0.4
+  dodgeSeconds as float = 0.4
+  dodgeDistance as float = World.metres(4)
+
+  private stateSeconds as float = 0
+  private attackQueued as boolean = false
+  ' Alternates so a chained attack restarts the animation
+  private attackIndex as integer = 0
+  private dodgeDirection as BGE.Math.Vector = BGE.Math.VectorOps.create()
+
+  ' Prepared sheet layout: 20 frames per direction (stance 0-3, run 4-11, melee 12-15,
+  ' block 16-17, hit 18-19), directions in Flare row order l, ul, u, ur, r, dr, d, dl.
+  private framesPerDirection as integer = 20
+  ' Oriented sprite bucket (front, then clockwise from above) -> Flare row
+  private bucketRows as integer[] = [6, 5, 4, 3, 2, 1, 0, 7]
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Knight"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.position = BGE.Math.VectorOps.create(args.x ?? 0, 0, args.z ?? 0)
+    m.rotation = BGE.Math.VectorOps.create(0, args.heading ?? 0, 0)
+
+    m.sprite = m.addOrientedSprite("body", m.game.getBitmap("knight"), 115, 89, 8, 1, {
+      drawMode: BGE.SceneObjectDrawMode.directScaled,
+      banksWithCameraRoll: true
+    })
+    ' Feet sit where the baked-in shadow is centred
+    m.sprite.setAnchor(0.504, 0.656)
+    ' The knight is ~43 px tall in the sheet; make him 2 m
+    pixelScale = World.metres(2) / 43.0
+    m.sprite.scale = BGE.Math.VectorOps.create(pixelScale, pixelScale, 1)
+
+    m.sprite.addOrientedAnimation("idle", m.framesFor([0, 1, 2, 3]), 4, BGE.SpritePlayMode.PingPong)
+    m.sprite.addOrientedAnimation("run", m.framesFor([4, 5, 6, 7, 8, 9, 10, 11]), 12)
+    m.sprite.addOrientedAnimation("attack0", m.framesFor([12, 13, 14, 15]), 9, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("attack1", m.framesFor([12, 13, 14, 15]), 9, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("block", m.framesFor([16]), 1)
+    m.sprite.addOrientedAnimation("parry", m.framesFor([16, 17, 17, 16]), 10, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("roll", m.framesFor([4, 5, 6, 7, 8, 9, 10, 11]), 22)
+    m.sprite.addOrientedAnimation("backstep", m.framesFor([11, 10, 9, 8, 7, 6, 5, 4]), 22)
+    m.sprite.playOrientedAnimation("idle")
+  end sub
+
+  ' The same frame columns for every direction bucket.
+  private function framesFor(columns as integer[]) as integer[][]
+    buckets = []
+    for each row in m.bucketRows
+      frames = []
+      for each column in columns
+        frames.push(row * m.framesPerDirection + column)
+      end for
+      buckets.push(frames)
+    end for
+    return buckets
+  end function
+
+  override sub onUpdate(dt as float)
+    controls = m.game.controls
+    m.stateSeconds += dt
+    move = m.cameraRelativeMove()
+    m.moveAmount = 0
+
+    if m.state = KnightState.attack
+      m.updateAttack(dt, controls.isActionPressed("attack"))
+    else if m.state = KnightState.parry
+      if m.stateSeconds >= m.parrySeconds
+        m.setState(KnightState.idle)
+      end if
+    else if m.state = KnightState.dodge
+      m.updateDodge(dt)
+    else if controls.isActionPressed("dodge")
+      m.startDodge(move)
+    else if controls.isActionPressed("attack")
+      m.startAttack(move)
+    else if controls.isActionPressed("parry")
+      m.setState(KnightState.parry)
+    else if controls.isActionHeld("block")
+      m.setState(KnightState.block)
+      ' Walk slowly behind the shield without turning
+      m.moveBy(move, m.blockWalkSpeed * dt)
+    else if BGE.Math.VectorOps.length(move) > 0.1
+      m.setState(KnightState.run)
+      m.rotation.y = World.turnToward(m.rotation.y, World.headingOf(move), m.turnSpeed * dt)
+      m.moveAmount = BGE.Math.Min(1, BGE.Math.VectorOps.length(move))
+      m.moveBy(move, m.runSpeed * dt)
+    else
+      m.setState(KnightState.idle)
+    end if
+
+    ' The camera follows after the knight has moved this frame
+    if invalid <> m.cameraRig
+      m.cameraRig.update(dt, m.moveAmount)
+    end if
+  end sub
+
+  ' Move stick turned into a world direction relative to the camera (length 0..1).
+  private function cameraRelativeMove() as BGE.Math.Vector
+    axis = m.game.controls.getAxis("move")
+    heading = m.rotation.y
+    if invalid <> m.cameraRig
+      heading = m.cameraRig.heading
+    end if
+    forward = BGE.Math.VectorOps.scale(World.headingForward(heading), axis.y)
+    right = BGE.Math.VectorOps.scale(World.headingRight(heading), axis.x)
+    move = BGE.Math.VectorOps.add(forward, right)
+    if BGE.Math.VectorOps.length(move) > 1
+      move = BGE.Math.VectorOps.scale(move, 1 / BGE.Math.VectorOps.length(move))
+    end if
+    return move
+  end function
+
+  private sub moveBy(direction as BGE.Math.Vector, distance as float)
+    m.position.x += direction.x * distance
+    m.position.z += direction.z * distance
+  end sub
+
+  private sub setState(state as KnightState)
+    if m.state = state
+      return
+    end if
+    m.state = state
+    m.stateSeconds = 0
+    m.invulnerable = false
+    if state = KnightState.attack
+      m.sprite.playOrientedAnimation("attack" + m.attackIndex.toStr())
+    else if state <> KnightState.dodge
+      m.sprite.playOrientedAnimation(state)
+    end if
+  end sub
+
+  private sub startAttack(move as BGE.Math.Vector)
+    ' A stick direction aims the swing
+    if BGE.Math.VectorOps.length(move) > 0.3
+      m.rotation.y = World.headingOf(move)
+    end if
+    m.attackQueued = false
+    m.setState(KnightState.attack)
+  end sub
+
+  private sub updateAttack(dt as float, attackPressed as boolean)
+    ' A press in the second half of a swing chains the next one
+    if attackPressed and m.stateSeconds > m.attackSeconds * 0.4
+      m.attackQueued = true
+    end if
+    lungeSeconds = m.attackSeconds * 0.5
+    if m.stateSeconds < lungeSeconds
+      m.moveBy(World.headingForward(m.rotation.y), m.attackLunge * dt / lungeSeconds)
+    end if
+    if m.stateSeconds >= m.attackSeconds
+      if m.attackQueued
+        m.attackIndex = 1 - m.attackIndex
+        m.state = KnightState.idle
+        m.startAttack(m.cameraRelativeMove())
+      else
+        m.setState(KnightState.idle)
+      end if
+    end if
+  end sub
+
+  ' Rolls toward the stick, or steps back (still facing forward) with the stick centred.
+  private sub startDodge(move as BGE.Math.Vector)
+    m.setState(KnightState.dodge)
+    if BGE.Math.VectorOps.length(move) > 0.3
+      m.dodgeDirection = BGE.Math.VectorOps.scale(move, 1 / BGE.Math.VectorOps.length(move))
+      m.rotation.y = World.headingOf(move)
+      m.sprite.playOrientedAnimation("roll")
+    else
+      m.dodgeDirection = BGE.Math.VectorOps.scale(World.headingForward(m.rotation.y), -1)
+      m.sprite.playOrientedAnimation("backstep")
+    end if
+  end sub
+
+  private sub updateDodge(dt as float)
+    t = m.stateSeconds / m.dodgeSeconds
+    m.invulnerable = t > 0.1 and t < 0.75
+    ' Fast out, easing to a stop
+    speed = 2 * (1 - BGE.Math.Min(t, 1)) * m.dodgeDistance / m.dodgeSeconds
+    m.moveBy(m.dodgeDirection, speed * dt)
+    if t >= 1
+      m.setState(KnightState.idle)
+    end if
+  end sub
+
+end class
