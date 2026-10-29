@@ -41,9 +41,28 @@ light that doesn't reach it), the flag is cleared and the cached drawing is just
 changed, only those faces redraw; the rest reuse their exact cached raster without counting as
 stale.
 
+## Planes
+
+A plane has one normal, so directional and ambient light is uniform across it. Its cached drawing
+is tinted at the final blit (the same place the draw-distance fade would go), so lighting never
+re-rasterizes a plane; color fills shade their fill color. Point lights are sampled once, at the
+point on the plane under the camera - per-slice shading would show distance falloff but costs a
+tinted draw per slice and bakes into the cache. Planes are only shaded by lights (no headlight),
+so existing `isShaded` planes don't change.
+
+## Impostors
+
+An impostor's capture bakes in its lighting, and is only reused while the model's own transform is
+unchanged - so with world lights, a camera-only move never makes the baked shading wrong. A light
+change used to always force a redraw. Now the capture keeps a snapshot of each light as it reaches
+the model's centre (direction to it, per-channel strength after falloff). A light change is
+absorbed while every light has turned less than `modelImpostorMaxAngleDegrees` (the same knob as
+the view-direction check) and no channel has moved more than the new
+`modelImpostorMaxLightChange` quality setting, both measured against the capture, so drift can't
+accumulate unnoticed.
+
 ## Measured (HD Roku, `rendererTest --param demo=lighting`)
 
 - Static directional light: 62 fps / 7 draw calls, the same as no lights.
-- Orbiting point light reaching a ~170-visible-face scene: 12-26 fps, about the cost of rotating
-  the same models. That's the scene being re-composited, which is inherent to the cached-raster
-  design.
+- Orbiting point light reaching a ~170-visible-face scene: 12 fps before the impostor
+  threshold, 17-23 fps with it (all three lights, plus a tinted tiled ground).
