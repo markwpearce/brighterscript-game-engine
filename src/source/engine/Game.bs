@@ -102,10 +102,8 @@ namespace BGE
     private paused = false
     sortedEntities as GameEntity[] = []
 
-    ' Per-remote-id held-button tracking (playerIndex.ToStr() -> {buttonCode, timer}),
-    ' replacing a single global that could only track one remote's held button at
-    ' a time - two remotes each holding a different button now both repeat
-    ' correctly instead of one clobbering the other's state.
+    ' Held buttons, keyed by remote id and button code ("<remoteId>|<code>" -> {remoteId, buttonCode, timer}),
+    ' so a gamepad holding several buttons at once repeats each of them.
     private remoteHeldButtons = {}
     ' Characters typed on a keyboard this frame, kept out of the button events - see getControlEventKind().
     private keyboardCharsThisFrame as integer[] = []
@@ -430,13 +428,8 @@ namespace BGE
             ' only the press reaches onECPKeyboard()
           else if type(screenMsg) = "roUniversalControlEvent"
             universalControlEvents.Push(screenMsg as roUniversalControlEvent)
-            remoteId = (screenMsg as roUniversalControlEvent).GetRemoteID()
-            if screenMsg.GetInt() < 100
-              timer = CreateObject("roTimespan")
-              timer.Mark()
-              m.remoteHeldButtons[remoteId] = {buttonCode: screenMsg.GetInt(), timer: timer}
-            else
-              m.remoteHeldButtons.Delete(remoteId)
+            m.trackRemoteHeldButton((screenMsg as roUniversalControlEvent).GetRemoteID(), screenMsg.GetInt())
+            if screenMsg.GetInt() >= 100
               if m.enableAudioGuideSuppression
                 if screenMsg.GetInt() = 110
                   audio_guide_suppression_ticker++
@@ -669,16 +662,26 @@ namespace BGE
       return new GameInput(msg.GetInt(), 0, playerIndex)
     end function
 
-    ' One synthesized held/repeat GameInput per remote currently holding a
-    ' button down, replacing the old single m.buttonHeld-driven check at
-    ' every call site that needs it.
+    ' Starts tracking a pressed remote button as held, or stops tracking a released one.
+    ' Only the released button's entry is removed, so other buttons held on the same remote keep repeating.
+    private sub trackRemoteHeldButton(remoteId as string, code as integer)
+      if code < 100
+        timer = CreateObject("roTimespan")
+        timer.Mark()
+        m.remoteHeldButtons[`${remoteId}|${code}`] = {remoteId: remoteId, buttonCode: code, timer: timer}
+      else if code < 1000
+        m.remoteHeldButtons.Delete(`${remoteId}|${code - 100}`)
+      end if
+    end sub
+
+    ' One synthesized held/repeat GameInput per button currently held down on any remote.
     '
     ' @return {GameInput[]}
     private function remoteHeldGameInputs() as GameInput[]
       inputs = [] as GameInput[]
-      for each remoteId in m.remoteHeldButtons
-        entry = m.remoteHeldButtons[remoteId]
-        playerIndex = m.controllerRegistry.assignPlayerIndexForRemoteId(remoteId)
+      for each heldKey in m.remoteHeldButtons
+        entry = m.remoteHeldButtons[heldKey]
+        playerIndex = m.controllerRegistry.assignPlayerIndexForRemoteId(entry.remoteId)
         heldTimeMs = entry.timer.TotalMilliseconds()
         inputs.Push(new GameInput(1000 + entry.buttonCode, heldTimeMs, playerIndex))
       end for
