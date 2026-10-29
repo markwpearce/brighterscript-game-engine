@@ -17,7 +17,7 @@ Run from the repo root.
 - `npm run validate` — type-check with and without tests (`bsconfig.build.json`, `bsconfig.test.json`).
 - `npm run lint` / `npm run build` / `npm run clean` / `npm run docs` / `npm run docs-server` (serves under the `/brighterscript-game-engine` basePath, as deployed).
 - `npm run test:ci` — build and run tests headlessly via `brs-cli` (what CI runs). `npm run test:device` runs them on a device/brs-desktop (`ROKU_HOST`/`ROKU_PASSWORD`).
-- Examples: `prepare-examples`, `build-examples` (zips to `examples/<name>/out/`), `validate-examples`, `clean-all` — all fan out via `scripts/examples.js`. For one example, `cd examples/<name>` and use its own npm scripts (some, e.g. `rpg`, `visualnovel`, have their own `npm test`, not part of CI).
+- Examples: `prepare-examples`, `build-examples` (zips to `examples/<name>/out/`), `validate-examples`, `clean-all` — all fan out via `scripts/examples.js`. `npm run run-example -- <name> [key=value ...]` builds the engine, packages one example, sideloads it and launches it with deep-link params (`scripts/run-example.js`). Otherwise, for one example, `cd examples/<name>` and use its own npm scripts (some, e.g. `rpg`, `visualnovel`, have their own `npm test`, not part of CI).
 - Scaffolding: `npm run create-example -- <name> ["Title"]`, `create-entity -- <example> <Entity>`, `create-scene -- <example> <Scene>` (then wire up `defineScene`/`changeScene` by hand).
 - `npm run audio -- <sfx|music|silences|info> ...` — `ffmpeg`-based audio tools (`roAudioResource` plays WAV only; `roAudioPlayer` can't play OGG).
 

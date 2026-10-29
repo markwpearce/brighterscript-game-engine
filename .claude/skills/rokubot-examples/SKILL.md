@@ -136,6 +136,15 @@ Use the repo's own fan-out scripts rather than hand-rolling `bsc`/zip calls:
   a paddle-position crash) that the proper packaged zip didn't reproduce. If you only need one
   example, `cd examples/<name> && npm run package` builds just that zip.
 
+For the usual build → sideload → launch loop, one command from the repo root does it all
+(engine build, package, sideload with `--deleteDevChannel`, `press home`, launch with params):
+
+```
+npm run run-example -- <name> [key=value ...]     # e.g. rendererTest demo=lighting
+```
+
+By hand:
+
 ```
 node node_modules/rokubot/dist/cli.js sideload ./examples/<name>/out/bge-<name>.zip --deleteDevChannel
 node node_modules/rokubot/dist/cli.js launch dev

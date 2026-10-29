@@ -166,6 +166,12 @@ npm run build-examples
 
 The above command will generate example .zip files like `./examples/asteroids/out/bge-asteroids.zip`
 
+To build one example and run it on your Roku in one step, put `ROKU_HOST` and `ROKU_PASSWORD` in a `.env` file at the repo root, then pass the example's folder name and any deep-link params:
+
+```
+npm run run-example -- rendererTest demo=lighting
+```
+
 ### Open the Workspace in VS Code:
 
 We recommend you install the great [Brightscript Language VSCode Extension](https://marketplace.visualstudio.com/items?itemName=RokuCommunity.brightscript).
