@@ -1,0 +1,164 @@
+import "../controller/ControlMap.bs"
+import "../../utils/strings.bs"
+import "../GameInput.bs"
+import "InputPlayerState.bs"
+
+namespace BGE.Debug
+
+  ' Tracks every button each player is holding, from GameInput press/release events.
+  class InputStateTracker
+
+    ' playerIndex.ToStr() -> InputPlayerState
+    private players = {}
+    private clockSeconds as float = 0
+
+    ' Browser gamepads also send standard-mapping button indexes as names.
+    private standardGamepadButtons = {
+      "0": "a",
+      "1": "b",
+      "2": "x",
+      "3": "y",
+      "4": "l1",
+      "5": "r1",
+      "6": "l2",
+      "7": "r2",
+      "8": "options",
+      "9": "back",
+      "12": "up",
+      "13": "down",
+      "14": "left",
+      "15": "right"
+    }
+    private gamepadOnlyButtons = {a: true, b: true, x: true, y: true, l1: true, r1: true, l2: true, r2: true}
+
+    ' @param {BGE.GameInput} input
+    ' @return {void}
+    sub onInput(input as BGE.GameInput)
+      if input.button = invalid or input.button = "" or input.button = "unknown"
+        return
+      end if
+      name = m.normalizeButtonName(input.button)
+      state = m.getOrCreatePlayer(input.playerIndex)
+      if m.gamepadOnlyButtons.DoesExist(name)
+        state.isGamepad = true
+      end if
+      if input.release
+        state.pressedAt.Delete(name)
+      else if input.press
+        state.pressedAt[name] = m.clockSeconds
+      else if not state.pressedAt.DoesExist(name)
+        ' A held event without a press we saw, e.g. pressed before the window existed
+        state.pressedAt[name] = m.clockSeconds - input.heldTimeMs / 1000
+      end if
+    end sub
+
+    ' Advances the clock and reads every known player's sticks.
+    '
+    ' @param {float} dt - seconds since last frame
+    ' @param {BGE.Controller.ControlMap} [controls=invalid] - stick source; sticks stay neutral without one
+    ' @return {void}
+    sub update(dt as float, controls = invalid as BGE.Controller.ControlMap)
+      m.clockSeconds += dt
+      if controls = invalid
+        return
+      end if
+      for each key in m.players
+        state = m.players[key] as BGE.Debug.InputPlayerState
+        state.leftStick = controls.getPlayerStick(state.playerIndex, "1")
+        state.rightStick = controls.getPlayerStick(state.playerIndex, "2")
+        if not BGE.Math.VectorOps.isZero(state.leftStick) or not BGE.Math.VectorOps.isZero(state.rightStick)
+          state.isGamepad = true
+        end if
+      end for
+    end sub
+
+    ' @return {BGE.Debug.InputPlayerState[]} - every player seen so far, by ascending playerIndex
+    function getPlayers() as BGE.Debug.InputPlayerState[]
+      result = [] as BGE.Debug.InputPlayerState[]
+      for each key in m.players
+        result.Push(m.players[key])
+      end for
+      result.SortBy("playerIndex")
+      return result
+    end function
+
+    ' @param {BGE.Debug.InputPlayerState} state
+    ' @param {string} buttonName - lowercased button name
+    ' @return {float} - seconds this button has been held, 0 if it isn't
+    function getHeldSeconds(state as BGE.Debug.InputPlayerState, buttonName as string) as float
+      pressedAt = state.pressedAt[buttonName]
+      if pressedAt = invalid
+        return 0
+      end if
+      return m.clockSeconds - pressedAt
+    end function
+
+    ' Held buttons with their held times, longest-held first so a quick tap doesn't push out a long hold.
+    '
+    ' @param {BGE.Debug.InputPlayerState} state
+    ' @param {integer} [maxShown=-1] - most buttons to list, -1 for all
+    ' @return {string} - e.g. "ok 1.2s  right 0.4s", "" if nothing is held
+    function describeHeld(state as BGE.Debug.InputPlayerState, maxShown = -1 as integer) as string
+      held = []
+      for each buttonName in state.pressedAt
+        held.Push({name: buttonName, seconds: m.getHeldSeconds(state, buttonName)})
+      end for
+      held.SortBy("seconds", "r")
+      parts = []
+      for each entry in held
+        if parts.Count() = maxShown
+          exit for
+        end if
+        parts.Push(`${entry.name} ${BGE.NumberToFixed(entry.seconds, 1)}s`)
+      end for
+      return parts.Join("  ")
+    end function
+
+    ' One line summing up a player, for the text mode of BGE.Debug.InputDisplay.
+    '
+    ' @param {BGE.Debug.InputPlayerState} state
+    ' @return {string} - e.g. "P1 gamepad: a 0.5s  L(0.50, 1.00)", with "-" when idle
+    function describePlayer(state as BGE.Debug.InputPlayerState) as string
+      kind = "remote"
+      if state.isGamepad
+        kind = "gamepad"
+      end if
+      parts = []
+      held = m.describeHeld(state)
+      if held <> ""
+        parts.Push(held)
+      end if
+      if not BGE.Math.VectorOps.isZero(state.leftStick)
+        parts.Push("L" + m.describeStick(state.leftStick))
+      end if
+      if not BGE.Math.VectorOps.isZero(state.rightStick)
+        parts.Push("R" + m.describeStick(state.rightStick))
+      end if
+      if parts.Count() = 0
+        parts.Push("-")
+      end if
+      return `P${state.playerIndex + 1} ${kind}: ${parts.Join("  ")}`
+    end function
+
+    private function describeStick(stick as BGE.Math.Vector) as string
+      return `(${BGE.NumberToFixed(stick.x, 2)}, ${BGE.NumberToFixed(stick.y, 2)})`
+    end function
+
+    private function normalizeButtonName(buttonName as string) as string
+      name = LCase(buttonName)
+      return m.standardGamepadButtons[name] ?? name
+    end function
+
+    private function getOrCreatePlayer(playerIndex as integer) as BGE.Debug.InputPlayerState
+      key = playerIndex.ToStr()
+      state = m.players[key]
+      if state = invalid
+        state = new BGE.Debug.InputPlayerState(playerIndex)
+        m.players[key] = state
+      end if
+      return state
+    end function
+
+  end class
+
+end namespace
