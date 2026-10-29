@@ -1,0 +1,254 @@
+import "lighting/Light.bs"
+import "lighting/Lighting.bs"
+import "Renderer.bs"
+
+namespace tests
+
+  ' Renderer-level lighting (#189): the light list, change tracking, and how shaded
+  ' models and billboards pick their colors from the lights.
+  @suite("BGE.Renderer lighting")
+  class RendererLightingTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    entity as BGE.GameEntity
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.entity = new BGE.GameEntity(m.game, {name: "LitEntity"})
+      bitmap = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      m.renderer = new BGE.Renderer(bitmap, m.game, new BGE.Camera3d())
+      ' fading isn't under test here; these fixtures sit at z=0, past the headless 900 draw distance
+      (m.renderer.camera as BGE.Camera3d).drawDistanceFadeFraction = 0
+      ' in front of the camera, which starts at (0, 0, 1000) looking down -z
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+    end function
+
+    private function v(x as float, y as float, z as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(x, y, z)
+    end function
+
+    private sub renderFrame()
+      m.entity.updateTransformationMatrix()
+      m.renderer.setupCameraForFrame()
+      m.renderer.render()
+    end sub
+
+    ' One shaded triangle whose outward normal is +z, toward the camera.
+    private function addFacingModel() as BGE.SceneObjectModel
+      face = BGE.Model3dFaceOps.create([m.v(-50, -50, 0), m.v(50, -50, 0), m.v(0, 50, 0)])
+      drawableModel = new BGE.DrawableModel(m.entity, new BGE.Model3d([face]))
+      drawableModel.isShaded = true
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solid
+      return drawableModel.addToRenderer(m.renderer) as BGE.SceneObjectModel
+    end function
+
+    @describe("light list")
+
+    @it("gives each added light an id and removes it by that id")
+    function _()
+      a = new BGE.AmbientLight()
+      b = new BGE.AmbientLight()
+      m.renderer.addLight(a)
+      m.renderer.addLight(b)
+      m.assertNotEqual(a.id, b.id)
+      m.assertTrue(m.renderer.removeLight(a))
+      m.assertFalse(m.renderer.removeLight(a))
+      m.assertEqual(1, m.renderer.lights.count())
+      m.renderer.clearLights()
+      m.assertEqual(0, m.renderer.lights.count())
+    end function
+
+    @it("adds a light only once")
+    function _()
+      light = new BGE.AmbientLight()
+      m.renderer.addLight(light)
+      m.renderer.addLight(light)
+      m.assertEqual(1, m.renderer.lights.count())
+    end function
+
+    @it("gives lights unique ids across renderers")
+    function _()
+      other = new BGE.Renderer(CreateObject("roBitmap", {width: 32, height: 32}), m.game, new BGE.Camera3d())
+      a = new BGE.AmbientLight()
+      b = new BGE.AmbientLight()
+      m.renderer.addLight(a)
+      other.addLight(b)
+      other.addLight(a)
+      m.assertNotEqual(a.id, b.id)
+      m.assertTrue(other.removeLight(a))
+      m.assertEqual(b.id, other.lights[0].id)
+    end function
+
+    @it("bumps lightingVersion only when a light changes")
+    function _()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderer.updateLighting()
+      version = m.renderer.lightingVersion
+      m.assertTrue(m.renderer.hasLights())
+      m.renderer.updateLighting()
+      m.assertEqual(version, m.renderer.lightingVersion)
+      light.direction.x = 1
+      m.renderer.updateLighting()
+      m.assertEqual(version + 1, m.renderer.lightingVersion)
+      light.enabled = false
+      m.renderer.updateLighting()
+      m.assertFalse(m.renderer.hasLights())
+    end function
+
+    @describe("models")
+
+    @it("are lit from the camera when there are no lights")
+    function _()
+      sceneObj = m.addFacingModel()
+      m.renderFrame()
+      m.assertTrue(sceneObj.getFaceBrightness(0) > 0.99)
+    end function
+
+    @it("are lit by a light rather than the camera once one is added")
+    function _()
+      sceneObj = m.addFacingModel()
+      ' shining from behind the face, which still faces the camera
+      m.renderer.addLight(new BGE.DirectionalLight(m.v(0, 0, 1)))
+      m.renderFrame()
+      m.assertTrue(abs(sceneObj.getFaceBrightness(0) - sceneObj.drawable.ambientBrightness) < 0.0001)
+    end function
+
+    @it("relight a model that hasn't moved when a light changes")
+    function _()
+      sceneObj = m.addFacingModel()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderFrame()
+      m.assertTrue(sceneObj.getFaceBrightness(0) > 0.99)
+      light.direction = m.v(0, 0, 1)
+      m.renderFrame()
+      m.assertTrue(sceneObj.getFaceBrightness(0) < 0.3, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @it("light the visible side of a back face")
+    function _()
+      ' wound the other way, so its outward normal points away from the camera
+      face = BGE.Model3dFaceOps.create([m.v(50, -50, 0), m.v(-50, -50, 0), m.v(0, 50, 0)])
+      drawableModel = new BGE.DrawableModel(m.entity, new BGE.Model3d([face]))
+      drawableModel.isShaded = true
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
+      sceneObj = drawableModel.addToRenderer(m.renderer) as BGE.SceneObjectModel
+      m.renderer.addLight(new BGE.DirectionalLight(m.v(0, 0, -1)))
+      m.renderFrame()
+      m.assertEqual(1, sceneObj.getPrimitiveCount())
+      m.assertTrue(sceneObj.getFaceBrightness(0) > 0.99)
+    end function
+
+    @it("just blit their cached drawing after a light change that leaves every face's color alone")
+    function _()
+      m.addFacingModel()
+      ' behind the face, so moving it leaves the face at the ambient floor
+      lamp = new BGE.PointLight(m.v(0, 0, -100))
+      m.renderer.addLight(lamp)
+      m.renderFrame()
+      m.renderFrame()
+      lamp.position = m.v(50, 0, -100)
+      m.renderer.resetDrawCallCounter()
+      m.renderFrame()
+      m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @it("redraw a face's cached raster when a light change alters its color")
+    function _()
+      sceneObj = m.addFacingModel()
+      sceneObj.drawable.useImpostor = false
+      lamp = new BGE.PointLight(m.v(0, 0, -100))
+      m.renderer.addLight(lamp)
+      m.renderFrame()
+      lamp.position = m.v(0, 0, 100)
+      m.renderFrame()
+      m.assertEqual(0, sceneObj.getFaceStaleFrameCount(0))
+      m.assertTrue(sceneObj.getFaceBrightness(0) > 0.9, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @it("reuse an unmoved face's raster without counting it stale when only another face relights")
+    function _()
+      faceA = BGE.Model3dFaceOps.create([m.v(-150, -50, 0), m.v(-50, -50, 0), m.v(-100, 50, 0)])
+      faceB = BGE.Model3dFaceOps.create([m.v(50, -50, 0), m.v(150, -50, 0), m.v(100, 50, 0)])
+      drawableModel = new BGE.DrawableModel(m.entity, new BGE.Model3d([faceA, faceB]))
+      drawableModel.drawMode = BGE.SceneObjectDrawMode.solid
+      drawableModel.useImpostor = false
+      sceneObj = drawableModel.addToRenderer(m.renderer) as BGE.SceneObjectModel
+      ' reaches face A only
+      lamp = new BGE.PointLight(m.v(-100, 0, 60), 100)
+      m.renderer.addLight(lamp)
+      m.renderFrame()
+      ' at the stale limit, so only an exact reuse can keep face B's raster
+      (sceneObj as dynamic).faceRasterCaches[1].staleFrameCount = drawableModel.maxStaleFrames
+      lamp.position = m.v(-100, 0, 50)
+      m.renderFrame()
+      m.assertEqual(0, sceneObj.getFaceStaleFrameCount(0))
+      m.assertEqual(drawableModel.maxStaleFrames, sceneObj.getFaceStaleFrameCount(1))
+    end function
+
+    @it("keep an impostor's rendering through a light change too small to see")
+    function _()
+      sceneObj = m.addFacingModel()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderFrame()
+      m.renderFrame()
+      ' ~6 degrees: enough to change the face's color, within Medium's 8 degree limit
+      light.direction = m.v(0.1, 0, -1)
+      m.renderer.resetDrawCallCounter()
+      m.renderFrame()
+      m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
+      ' turned well past modelImpostorMaxAngleDegrees
+      light.direction = m.v(1, 0, -1)
+      m.renderFrame()
+      m.assertTrue(sceneObj.getFaceBrightness(0) < 0.8, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @describe("planes")
+
+    @it("are tinted by the lights reaching them")
+    function _()
+      plane = new BGE.DrawablePlane(m.entity, invalid, {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.color, isShaded: true})
+      sceneObj = new BGE.SceneObjectPlane("plane", plane)
+      m.assertEqual(-1, sceneObj.getLightTintRGBA(m.renderer))
+      m.renderer.addLight(new BGE.DirectionalLight(m.v(0, -1, 0), BGE.ColorsRGB.Red))
+      m.renderer.updateLighting()
+      m.assertEqual(&hFF4040FF, sceneObj.getLightTintRGBA(m.renderer))
+    end function
+
+    @it("aren't tinted unless shaded")
+    function _()
+      plane = new BGE.DrawablePlane(m.entity, invalid, {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.color})
+      sceneObj = new BGE.SceneObjectPlane("plane", plane)
+      m.renderer.addLight(new BGE.DirectionalLight(m.v(0, -1, 0), BGE.ColorsRGB.Red))
+      m.renderer.updateLighting()
+      m.assertEqual(-1, sceneObj.getLightTintRGBA(m.renderer))
+    end function
+
+    @it("light the side they're seen from")
+    function _()
+      plane = new BGE.DrawablePlane(m.entity, invalid, {normal: m.v(0, -1, 0), point: m.v(0, -100, 0)}, {fillMode: BGE.PlaneFillMode.color, isShaded: true})
+      sceneObj = new BGE.SceneObjectPlane("plane", plane)
+      ' camera is above the plane, which faces down; the sun shines down onto its top
+      m.renderer.addLight(new BGE.DirectionalLight(m.v(0, -1, 0)))
+      m.renderer.updateLighting()
+      m.assertEqual(&hFFFFFFFF, sceneObj.getLightTintRGBA(m.renderer))
+    end function
+
+    @describe("billboards")
+
+    @it("take on a colored light's color")
+    function _()
+      sourceBitmap = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: true})
+      image = new BGE.Image(m.entity, CreateObject("roRegion", sourceBitmap, 0, 0, 64, 64), {isShaded: true})
+      sceneObj = image.addToRenderer(m.renderer) as BGE.SceneObjectImage
+      m.renderer.addLight(new BGE.DirectionalLight(m.v(0, 0, -1), BGE.ColorsRGB.Red))
+      m.renderFrame()
+      m.assertEqual(&hFF4040FF, sceneObj.getShadedColorRGBA(m.renderer))
+    end function
+
+  end class
+
+end namespace

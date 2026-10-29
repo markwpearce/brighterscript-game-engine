@@ -8,6 +8,7 @@ import "../../../utils/deviceRenderTier.bs"
 import "../../drawables/DrawablePlane.bs"
 import "../../interfaces.bs"
 import "../cameras/Camera.bs"
+import "../lighting/Lighting.bs"
 import "../cameras/Camera3d.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
@@ -161,9 +162,9 @@ namespace BGE
         ' fixed bank angle hits this path exactly as cheaply as a level one - only
         ' an actual roll/position/orientation change forces a recompute.
         if isRolled and m.rotatedTempBitmap <> invalid
-          return rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
+          return rendererObj.drawObject(0, 0, m.rotatedTempBitmap, m.getLightTintRGBA(rendererObj))
         else if not isRolled and m.tempBitmap <> invalid
-          return rendererObj.drawObject(0, 0, m.tempBitmap)
+          return rendererObj.drawObject(0, 0, m.tempBitmap, m.getLightTintRGBA(rendererObj))
         end if
       end if
       m.hasAccurateTempBitmap = false
@@ -223,7 +224,46 @@ namespace BGE
 
       ' 3 of 4 corners valid (one behind the camera) fills a triangle instead of the
       ' full quad - the correct approximation of a plane straddling the near plane.
-      return rendererObj.drawPolygon(canvasPoints, 0, 0, m.drawable.getFillColorRGBA())
+      color = m.drawable.getFillColorRGBA()
+      lightAmount = m.getLightAmount(rendererObj)
+      if invalid <> lightAmount
+        color = BGE.Lighting.applyLightAmount(color, lightAmount, m.drawable.ambientBrightness)
+      end if
+      return rendererObj.drawPolygon(canvasPoints, 0, 0, color)
+    end function
+
+    ' The light reaching this plane, if it's `isShaded` and the renderer has lights - a
+    ' plane has one normal, so one value covers all of it. Point lights are measured at the
+    ' spot on the plane under the camera.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {BGE.Math.Vector} red/green/blue light, or invalid for none
+    private function getLightAmount(rendererObj as BGE.Renderer) as BGE.Math.Vector
+      if not m.drawable.isShaded or not rendererObj.hasLights()
+        return invalid
+      end if
+      plane = m.drawable.plane
+      normal = BGE.Math.VectorOps.getNormalizedCopy(plane.normal)
+      height = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(rendererObj.camera.position, plane.point), normal)
+      underCamera = BGE.Math.VectorOps.subtract(rendererObj.camera.position, BGE.Math.VectorOps.scale(normal, height))
+      if height < 0
+        ' seen from below, so light that side
+        normal = BGE.Math.VectorOps.scale(normal, -1)
+      end if
+      return BGE.Lighting.computeLightAmount(rendererObj.getPreparedLights(), underCamera, normal)
+    end function
+
+    ' The color the cached plane drawing is blitted with, so lighting never needs a redraw.
+    ' Public for tests/telemetry only.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {integer} packed RGBA, -1 (unchanged) when unlit
+    function getLightTintRGBA(rendererObj as BGE.Renderer) as integer
+      lightAmount = m.getLightAmount(rendererObj)
+      if invalid = lightAmount
+        return -1
+      end if
+      return BGE.Lighting.applyLightAmount(&hFFFFFFFF, lightAmount, m.drawable.ambientBrightness)
     end function
 
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -857,7 +897,7 @@ namespace BGE
       end for
 
       if not isRolled
-        finalBlitWorked = rendererObj.drawObject(0, 0, m.tempBitmap)
+        finalBlitWorked = rendererObj.drawObject(0, 0, m.tempBitmap, m.getLightTintRGBA(rendererObj))
         worked = worked and finalBlitWorked
         return worked
       end if
@@ -885,7 +925,7 @@ namespace BGE
       m.rotatedTempBitmap.Clear(&h00000000)
 
       worked = worked and rendererObj.drawRotatedImageWithCenterTo(m.rotatedTempBitmap, m.tempBitmap, center, rollRad, BGE.Math.VectorOps.negative(cropOffset))
-      worked = worked and rendererObj.drawObject(0, 0, m.rotatedTempBitmap)
+      worked = worked and rendererObj.drawObject(0, 0, m.rotatedTempBitmap, m.getLightTintRGBA(rendererObj))
       return worked
     end function
 

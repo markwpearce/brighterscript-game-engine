@@ -1,0 +1,164 @@
+import "Light.bs"
+import "Lighting.bs"
+
+namespace tests
+
+  @suite("BGE.Lighting")
+  class LightingTests extends rooibos.BaseTestSuite
+
+    private function v(x as float, y as float, z as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(x, y, z)
+    end function
+
+    private function amountAt(lights as BGE.Light[], normal as BGE.Math.Vector, point = invalid as dynamic) as BGE.Math.Vector
+      if invalid = point
+        point = m.v(0, 0, 0)
+      end if
+      return BGE.Lighting.computeLightAmount(BGE.Lighting.prepareLights(lights), point, normal)
+    end function
+
+    @describe("prepareLights")
+
+    @it("skips disabled and zero-intensity lights")
+    function _()
+      off = new BGE.AmbientLight()
+      off.enabled = false
+      dark = new BGE.AmbientLight(BGE.ColorsRGB.White, 0)
+      m.assertEqual(0, BGE.Lighting.prepareLights([off, dark]).count())
+    end function
+
+    @it("normalizes a directional light and points it back toward the light")
+    function _()
+      prepared = BGE.Lighting.prepareLights([new BGE.DirectionalLight(m.v(0, -5, 0))])
+      m.assertEqual(1, prepared.count())
+      m.assertTrue(abs(prepared[0].toLight.y - 1) < 0.0001)
+    end function
+
+    @describe("computeLightAmount")
+
+    @it("fully lights a surface facing a directional light head on")
+    function _()
+      amount = m.amountAt([new BGE.DirectionalLight(m.v(0, 0, -1))], m.v(0, 0, 1))
+      m.assertTrue(abs(amount.x - 1) < 0.0001)
+      m.assertTrue(abs(amount.z - 1) < 0.0001)
+    end function
+
+    @it("doesn't light a surface edge-on to or facing away from a directional light")
+    function _()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.assertTrue(m.amountAt([light], m.v(1, 0, 0)).x < 0.0001)
+      m.assertTrue(m.amountAt([light], m.v(0, 0, -1)).x < 0.0001)
+    end function
+
+    @it("lights by the cosine of the angle to a directional light")
+    function _()
+      amount = m.amountAt([new BGE.DirectionalLight(m.v(0, -1, -1))], m.v(0, 0, 1))
+      m.assertTrue(abs(amount.y - 0.7071) < 0.001, amount.y.toStr())
+    end function
+
+    @it("lights every surface equally with an ambient light")
+    function _()
+      light = new BGE.AmbientLight(BGE.ColorsRGB.White, 0.5)
+      m.assertTrue(abs(m.amountAt([light], m.v(0, 0, 1)).x - 0.5) < 0.01)
+      m.assertTrue(abs(m.amountAt([light], m.v(0, 0, -1)).x - 0.5) < 0.01)
+    end function
+
+    @it("fades a point light linearly to nothing at its range")
+    function _()
+      light = new BGE.PointLight(m.v(0, 0, 100), 200)
+      m.assertTrue(abs(m.amountAt([light], m.v(0, 0, 1)).x - 0.5) < 0.01)
+      light.range = 100
+      m.assertTrue(m.amountAt([light], m.v(0, 0, 1)).x < 0.0001)
+    end function
+
+    @it("never lights a surface facing away from an out-of-range point light")
+    function _()
+      light = new BGE.PointLight(m.v(0, 0, 100), 50)
+      m.assertTrue(m.amountAt([light], m.v(0, 0, -1)).x < 0.0001)
+    end function
+
+    @it("doesn't light a surface from a point light right on it")
+    function _()
+      m.assertTrue(m.amountAt([new BGE.PointLight(m.v(0, 0, 0))], m.v(0, 0, 1)).x < 0.0001)
+    end function
+
+    @it("doesn't fade a point light with no range")
+    function _()
+      light = new BGE.PointLight(m.v(0, 0, 10000))
+      m.assertTrue(abs(m.amountAt([light], m.v(0, 0, 1)).x - 1) < 0.0001)
+    end function
+
+    @it("sums lights per channel and caps each at full brightness")
+    function _()
+      amount = m.amountAt([new BGE.AmbientLight(BGE.ColorsRGB.Red, 0.75), new BGE.AmbientLight(BGE.ColorsRGB.Red, 0.75), new BGE.AmbientLight(BGE.ColorsRGB.Blue, 0.5)], m.v(0, 0, 1))
+      m.assertTrue(abs(amount.x - 1) < 0.0001)
+      m.assertTrue(amount.y < 0.0001)
+      m.assertTrue(abs(amount.z - 0.5) < 0.01)
+    end function
+
+    @describe("applyLightAmount")
+
+    @it("tints a color by the light, floored per channel and keeping its alpha")
+    function _()
+      color = BGE.Lighting.applyLightAmount(&hFFFFFF80, m.v(1, 0, 0), 0.25)
+      m.assertEqual(&hFF404080, color)
+    end function
+
+    @describe("light snapshots")
+
+    @it("measures a point light's direction and falloff at the point")
+    function _()
+      snapshots = BGE.Lighting.snapshotLightsAt(BGE.Lighting.prepareLights([new BGE.PointLight(m.v(0, 100, 0), 200)]), m.v(0, 0, 0))
+      m.assertTrue(abs(snapshots[0].toLight.y - 1) < 0.0001)
+      m.assertTrue(abs(snapshots[0].r - 0.5) < 0.01)
+    end function
+
+    @it("fits a small change and rejects a turn, a brightness change or a different light set")
+    function _()
+      light = new BGE.DirectionalLight(m.v(0, -1, 0))
+      point = m.v(0, 0, 0)
+      before = BGE.Lighting.snapshotLightsAt(BGE.Lighting.prepareLights([light]), point)
+      light.direction = m.v(0.01, -1, 0)
+      m.assertTrue(BGE.Lighting.lightSnapshotsFit(before, BGE.Lighting.snapshotLightsAt(BGE.Lighting.prepareLights([light]), point), 5, 0.05))
+      light.direction = m.v(0.5, -1, 0)
+      m.assertFalse(BGE.Lighting.lightSnapshotsFit(before, BGE.Lighting.snapshotLightsAt(BGE.Lighting.prepareLights([light]), point), 5, 0.05))
+      light.direction = m.v(0, -1, 0)
+      light.intensity = 0.9
+      m.assertFalse(BGE.Lighting.lightSnapshotsFit(before, BGE.Lighting.snapshotLightsAt(BGE.Lighting.prepareLights([light]), point), 5, 0.05))
+      m.assertFalse(BGE.Lighting.lightSnapshotsFit(before, [], 5, 0.05))
+    end function
+
+    @describe("getLightingSignature")
+
+    @it("is empty with no enabled light")
+    function _()
+      off = new BGE.AmbientLight()
+      off.enabled = false
+      m.assertEqual(0, BGE.Lighting.getLightingSignature([off]).count())
+    end function
+
+    @it("changes when a light's fields are changed in place")
+    function _()
+      light = new BGE.PointLight(m.v(0, 0, 0), 100)
+      before = BGE.Lighting.getLightingSignature([light])
+      m.assertTrue(BGE.Lighting.isSameLightingSignature(before, BGE.Lighting.getLightingSignature([light])))
+      light.position.x = 5
+      m.assertFalse(BGE.Lighting.isSameLightingSignature(before, BGE.Lighting.getLightingSignature([light])))
+      before = BGE.Lighting.getLightingSignature([light])
+      light.color = BGE.ColorsRGB.Red
+      m.assertFalse(BGE.Lighting.isSameLightingSignature(before, BGE.Lighting.getLightingSignature([light])))
+    end function
+
+    @it("notices a change too small to show when printed")
+    function _()
+      ' both print as 1e+06
+      light = new BGE.PointLight(m.v(1000000, 0, 0))
+      before = BGE.Lighting.getLightingSignature([light])
+      light.position = m.v(1000000.5, 0, 0)
+      m.assertEqual(before[3].toStr(), light.position.x.toStr())
+      m.assertFalse(BGE.Lighting.isSameLightingSignature(before, BGE.Lighting.getLightingSignature([light])))
+    end function
+
+  end class
+
+end namespace

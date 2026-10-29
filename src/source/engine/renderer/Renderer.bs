@@ -20,6 +20,8 @@ import "cameras/Camera.bs"
 import "cameras/Camera2d.bs"
 import "cameras/Camera3d.bs"
 import "DepthSortHelpers.bs"
+import "lighting/Light.bs"
+import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
 import "sceneObjects/SceneObject.bs"
 import "ScratchBitmap.bs"
@@ -221,6 +223,18 @@ namespace BGE
     ' Bumped by every setQualitySettings() call, so scene objects know to redraw their
     ' cached bitmaps at the new quality even when nothing moved.
     qualityVersion as integer = 0
+    ' The lights shading this renderer's `isShaded` drawables - see addLight(). With no
+    ' enabled light, a shaded surface is lit from the camera instead, by how directly it
+    ' faces it.
+    lights as BGE.Light[] = []
+
+    ' Bumped whenever a light is added, removed or changed, so scene objects know to
+    ' relight their cached drawings even when nothing moved.
+    lightingVersion as integer = 0
+
+    private preparedLights as BGE.Lighting.PreparedLight[] = []
+    private lightingSignature as object[] = []
+
     ' Derived from qualitySettings once per change, since triangle drawing reads it per call.
     private triangleQuickDrawParams as TriangleQuickDrawParams = invalid
     ' Counts triangles drawn with a coarse or skipped fill - see getLossyTriangleFillCount().
@@ -408,6 +422,70 @@ namespace BGE
       m.hasPlaneDrawDistanceRange = true
       m.planeDrawDistanceScale = scale
       m.planeDrawDistanceOverride = override
+    end sub
+
+    ' Adds a light that shades this renderer's `isShaded` drawables. Adding the first
+    ' light switches shading from camera-facing to these lights.
+    '
+    ' @param {BGE.Light} light e.g. `new BGE.DirectionalLight(BGE.Math.VectorOps.create(1, -1, -1))`
+    sub addLight(light as BGE.Light)
+      if light.id = ""
+        ' global, so a light shared between renderers can't collide with another's id
+        globals = GetGlobalAA()
+        nextId = globals.bgeNextLightId ?? 0
+        globals.bgeNextLightId = nextId + 1
+        light.id = "light_" + nextId.toStr()
+      end if
+      for each existing in m.lights
+        if existing.id = light.id
+          return
+        end if
+      end for
+      m.lights.push(light)
+    end sub
+
+    ' Removes a light added with addLight().
+    '
+    ' @param {BGE.Light} light
+    ' @return {boolean} true if it was found
+    function removeLight(light as BGE.Light) as boolean
+      for i = 0 to m.lights.count() - 1
+        if m.lights[i].id = light.id
+          m.lights.delete(i)
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' Removes every light, returning shading to camera-facing.
+    sub clearLights()
+      m.lights = []
+    end sub
+
+    ' Whether shading uses this renderer's lights (at least one is enabled) as of this frame.
+    '
+    ' @return {boolean}
+    function hasLights() as boolean
+      return m.preparedLights.count() > 0
+    end function
+
+    ' This frame's enabled lights, ready for BGE.Lighting.computeLightAmount().
+    '
+    ' @return {BGE.Lighting.PreparedLight[]}
+    function getPreparedLights() as BGE.Lighting.PreparedLight[]
+      return m.preparedLights
+    end function
+
+    ' Picks up any light change since last frame. render() calls this first; lights are
+    ' compared by value, so changing a light's fields directly is noticed too.
+    sub updateLighting()
+      signature = BGE.Lighting.getLightingSignature(m.lights)
+      if not BGE.Lighting.isSameLightingSignature(signature, m.lightingSignature)
+        m.lightingSignature = signature
+        m.preparedLights = BGE.Lighting.prepareLights(m.lights)
+        m.lightingVersion++
+      end if
     end sub
 
     ' Replaces this renderer's draw-quality values. Takes effect from the next draw.
@@ -1137,6 +1215,7 @@ namespace BGE
       end if
       ' a free-running timer, so both readings round down alike and averages stay unbiased
       lap = m.occlusionTimer.TotalMilliseconds()
+      m.updateLighting()
       m.applyOccluderDrawPolicy()
       m.updateSceneObjects()
       occlusionStart = m.occlusionTimer.TotalMilliseconds()

@@ -242,7 +242,8 @@ This is what gives a fundamentally 2D-raster engine its pseudo-3D/billboard capa
 
 For a model, a face's front is the side it's wound counter-clockwise from - the usual .obj/.stl
 convention, so its outside. The modes without `DrawBackFace` draw only faces turned toward the
-camera, and `isShaded` lights each face by how squarely it faces the camera.
+camera, and `isShaded` shades each face - by how squarely it faces the camera, or by the scene's
+lights once it has some (see [Lighting](#lighting)).
 
 `matchCamera`, `directToCamera` and `directScaled` are the **screen-aligned** (billboard) modes -
 `isScreenAlignedDrawMode()` - and they keep an object square to the screen instead of turning it
@@ -255,6 +256,65 @@ its size, so a sprite turned edge-on would squash. For the same reason a screen-
 never backface culled: it has no face to turn away.
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
 lets you cycle through them (`examples/3d`'s BaseScene displays it on screen).
+
+## Lighting
+
+A drawable with `isShaded = true` (models are shaded by default) is darkened by how it's lit. With
+no lights, that's a headlight: each surface is as bright as it is square-on to the camera. Add
+lights to light the scene from fixed directions and positions instead, in color:
+
+```brighterscript
+' a blue-ish sun, shining down and away from the camera (+y is up)
+sun = new BGE.DirectionalLight(BGE.Math.VectorOps.create(-1, -1, -0.5), &h6080FF, 0.8)
+game.addLight(sun)
+
+' a red lamp that fades out 600 units away
+lamp = new BGE.PointLight(BGE.Math.VectorOps.create(0, 60, 200), 600, BGE.ColorsRGB.Red, 1.5)
+game.addLight(lamp)
+
+' a little light everywhere, so nothing in shadow is flat black
+game.addLight(new BGE.AmbientLight(BGE.ColorsRGB.White, 0.15))
+```
+
+There are three kinds:
+
+| Light              | Lights a surface by                                                        |
+| ------------------ | -------------------------------------------------------------------------- |
+| `DirectionalLight` | how squarely it faces into `direction` (the way the light travels)         |
+| `PointLight`       | how squarely it faces `position`, fading linearly to nothing at `range` (0 never fades) |
+| `AmbientLight`     | nothing - every surface gets the same amount                               |
+
+Colors are RGB (`0xRRGGBB`, `BGE.ColorsRGB`). Each light's `color * intensity` is added up per
+channel, capped at full brightness, and multiplied into the surface's own color, so a red light on
+a white wall makes it red, and on a blue wall leaves it as dark as `ambientBrightness` allows.
+`Drawable.ambientBrightness` still applies, now per channel: it's the darkest any channel gets, so
+lower it to 0 if your lights (an `AmbientLight`, say) should decide how dark shadows are.
+
+Lights can be changed any time - move a lamp, change its color, set `enabled = false` - and
+the renderer notices and relights whatever they reach. `game.removeLight(light)` and
+`game.clearLights()` take them away again (clearing them all goes back to the headlight). Lights
+belong to the game canvas's renderer, not a scene, so remove a scene's own lights in its
+`onDestroy()`.
+
+Ground planes take lights too: set `isShaded = true` on a `DrawablePlane`. A plane is flat, so it's
+lit evenly - its cached drawing is just tinted as it's drawn, which costs nothing extra. A point
+light is measured on the plane right under the camera, so the ground brightens as you walk toward
+a lamp rather than showing a pool of light around it. Unlike other drawables, a plane with no lights
+isn't shaded at all.
+
+> **Cost.** Lights are free while they stay still: objects keep their cached drawings until
+> something moves. A light that moves or changes every frame relights everything it reaches
+> every frame - about what it costs for those objects to rotate - so keep animated lights to
+> the few that need it. A model with `useImpostor` (the default) keeps its drawing through
+> small light changes - while each light has turned less than the quality level's
+> `modelImpostorMaxAngleDegrees` and changed brightness by less than
+> `modelImpostorMaxLightChange` since it was drawn - so a slowly moving lamp only redraws it
+> now and then. Shading is per triangle, from each one's centre, so a point light very
+> close to a large flat face can light its triangles noticeably differently. There's no
+> shadowing: a surface facing a light is lit even when something stands in between.
+
+`examples/rendererTest`'s Lighting demo (`--param demo=lighting`) cycles through these lights over
+a sphere, a cube, a flat panel and a tiled ground plane.
 
 ## Draw-distance fade
 
