@@ -244,6 +244,7 @@ and perspective:
 | `matchCamera`                          | Follows the camera's rotation/perspective like a normal 3D object.      |
 | `directToCamera`                       | Always faces the camera (billboard), ignoring its own rotation.         |
 | `directScaled`                         | Like `directToCamera`, but sized by camera distance - a Doom-style sprite. |
+| `axisAligned`                          | Stands upright in the world and turns to face the camera's yaw; foreshortens with pitch. |
 | `oriented` / `orientedDrawBackFace`    | Respects its own rotation in 3D, optionally drawing back faces.         |
 | `wireFrame` / `wireFrameDrawBackFace`  | Outline-only rendering of the triangle mesh.                           |
 | `solid` / `solidDrawBackFace`          | Filled triangle rendering.                                             |
@@ -265,6 +266,26 @@ world space and then projects it (`updateCanvasPointsForCameraFacingQuad`), rath
 the object's own projected quad - measuring the latter would fold the object's orientation into
 its size, so a sprite turned edge-on would squash. For the same reason a screen-aligned object is
 never backface culled: it has no face to turn away.
+`axisAligned` is the upright version of `directScaled`, for characters, trees and props standing
+on the ground. It turns to face the camera around the world's vertical axis only, so it never
+goes side-on, but it stays upright in 3D: as the camera looks further down on it, it gets shorter
+with the real perspective instead of leaning back at the camera like a cardboard cutout. Anchor
+it at its feet so they stay planted while the top tilts away. `axisAlignedFullHeightPitch` is
+the angle (degrees) the camera looks down from when it's drawn full height. Set it to the
+elevation your art was rendered from:
+
+```brighterscript
+knight = m.addOrientedSprite("body", sheet, 128, 128)
+knight.drawMode = BGE.SceneObjectDrawMode.axisAligned
+' the sheet was rendered looking 12 degrees down on the character
+knight.axisAlignedFullHeightPitch = 12
+knight.setAnchor(0.5, 1)
+```
+
+Unlike the other billboards it banks when the camera rolls, tilting with the ground it stands on
+(`banksWithCameraRoll` doesn't apply). `examples/rendererTest`'s "axisAligned Billboards" demo shows it
+next to `directScaled`.
+
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
 lets you cycle through them (`examples/3d`'s BaseScene displays it on screen).
 
