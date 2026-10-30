@@ -21,7 +21,7 @@ Movement is relative to the camera, and the camera stays put until you move it.
 
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
 - `ThirdPersonCamera.bs`: the chase camera. It sits 3.4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
-- `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite` and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks alternate between two identical animations because replaying the one already playing doesn't restart it.
+- `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks alternate between two identical animations because replaying the one already playing doesn't restart it.
 - `Scenes/FieldScene.bs`: the ground plane and the control hints.
 
 ## Sprite sheets
