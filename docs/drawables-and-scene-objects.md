@@ -223,6 +223,17 @@ render correctly through `directScaled`'s blit path; see the spec's Non-goals). 
 `examples/terrain`'s `Guard` entity for a runnable demo, and
 `specs/2026-09-22-oriented-sprite-billboards-design.md` for the full design.
 
+Both `Sprite` and `DrawableOrientedSprite` accept an array of sheet bitmaps instead of one, so a
+large character can be split across sheets that each fit the device's bitmap size limit (or by
+animation, loading only what a scene needs). Every sheet uses the same cell size, and frame
+numbers run across them in order:
+
+```brighterscript
+' 16 frames in walk.png (0-15), then 16 in attack.png (16-31)
+sheets = [m.game.getBitmap("walk"), m.game.getBitmap("attack")]
+sprite = m.addOrientedSprite("body", sheets, 128, 128)
+```
+
 ## SceneObjectDrawMode
 
 Every `SceneObject` has a `SceneObjectDrawMode`, controlling how it reacts to the camera's rotation

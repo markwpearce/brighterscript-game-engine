@@ -135,7 +135,8 @@ A few other `Drawable` types for common cases, all added the same way (`m.addWha
 in `onCreate`):
 
 - `addSprite(name, spriteSheet, cellWidth, cellHeight)` - a `Sprite` for a single frame cut out of
-  a larger sprite sheet.
+  a larger sprite sheet. Pass an array of sheets (same cell size) when the frames don't fit in one
+  bitmap: cells are numbered across them in order, sheet 0's first.
 - `addAnimatedImage(name, regions)` - cycles through an array of `roRegion`s for a walk/idle/attack
   animation; see `examples/pixels`.
 - `addDrawableRectangle`/`addDrawableLine`/`addDrawablePolygon`/`addDrawableText` - simple vector
