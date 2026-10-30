@@ -234,6 +234,14 @@ sheets = [m.game.getBitmap("walk"), m.game.getBitmap("attack")]
 sprite = m.addOrientedSprite("body", sheets, 128, 128)
 ```
 
+Playing the animation that's already playing keeps its place, so you can call it every frame, and
+so does turning to another direction of it.
+To replay a one-shot from its first frame, such as a second attack in a combo, pass `restart`:
+
+```brighterscript
+sprite.playOrientedAnimation("attack", true) ' Sprite.playAnimation() takes it too
+```
+
 ## SceneObjectDrawMode
 
 Every `SceneObject` has a `SceneObjectDrawMode`, controlling how it reacts to the camera's rotation
