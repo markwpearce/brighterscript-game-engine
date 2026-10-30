@@ -701,6 +701,30 @@ clamps it per-device (900 on the BrightScript Simulator and, pending real hardwa
 SD/HD devices too; effectively unlimited on FHD) every frame, so a plane's actual far distance and
 supertexture size follow the capped value, not the requested one.
 
+### Texture scale
+
+A plane draws one texture pixel per world unit by default. Set its `scale` to stretch the texture
+over more of the world: `scale.x` along world x and `scale.y` along world z (the texture's own y).
+A 600x600 layout image at scale (1.5, 2) covers 900x1200 world units:
+
+```brighterscript
+mapDecal = new BGE.DrawablePlane(m, mapRegion, groundPlaneDef, {
+  fillMode: BGE.PlaneFillMode.staticImage,
+  scale: BGE.Math.VectorOps.create(1.5, 2, 1)
+})
+' a 64px grass tile repeating every 256 world units
+grass = new BGE.DrawablePlane(m, grassTile, groundPlaneDef, {
+  fillMode: BGE.PlaneFillMode.tiledImage,
+  scale: BGE.Math.VectorOps.create(4, 4, 1)
+})
+```
+
+The device cap above limits the plane's bitmaps, which are sized in texture pixels, so a coarser
+plane draws the ground farther: up to the cap times the smaller of its two scales, if the camera
+asks for that much (`Camera3d.getPlaneDrawDistanceForTexelScale()`). Objects' draw distance doesn't
+change. A non-square scale stretches a `staticImage` into one extra copy of its texture (a square
+scale needs none). `examples/rendererTest`'s "Plane Texture Scale" demo cycles through a few scales.
+
 ### Roll
 
 `Camera3d.rollDegrees` (rotation about the camera's own forward axis) can't be represented by this
