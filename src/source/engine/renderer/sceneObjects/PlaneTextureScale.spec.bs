@@ -1,0 +1,193 @@
+namespace tests
+
+  ' DrawablePlane texture scale (issue #389): scale.x/.y stretch the texture over world
+  ' units, and a coarser plane draws the ground farther.
+  @suite("BGE.DrawablePlane texture scale")
+  class PlaneTextureScaleTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    testScene as BGE.GameScene
+    renderer as BGE.Renderer
+    camera as BGE.Camera3d
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(200, 200)
+      m.game.setCamera(new BGE.Camera3d())
+      m.renderer = m.game.canvas.renderer
+      m.camera = m.renderer.camera as BGE.Camera3d
+      m.camera.setFrameSize(200, 100)
+      m.testScene = new BGE.GameScene(m.game, {name: "TestScene"})
+      m.game.defineScene(m.testScene)
+      m.game.changeScene("TestScene")
+    end function
+
+    private function v(x as float, y as float, z as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(x, y, z)
+    end function
+
+    private function newPlane(width as integer, height as integer, fillMode as BGE.PlaneFillMode, scale as BGE.Math.Vector, rgba = &hFFFFFFFF as integer) as BGE.DrawablePlane
+      bmp = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+      bmp.Clear(rgba)
+      region = CreateObject("roRegion", bmp, 0, 0, width, height)
+      return new BGE.DrawablePlane(m.testScene, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: fillMode, scale: scale})
+    end function
+
+    private sub lookAhead()
+      m.camera.position = m.v(0, 50, 0)
+      m.camera.setTarget(m.v(0, 38, -100))
+      m.camera.checkMovement()
+    end sub
+
+    @describe("Camera3d.getPlaneDrawDistanceForTexelScale")
+
+    @it("matches getPlaneDrawDistance() at a texel scale of 1 or less")
+    function _()
+      m.camera.planeDrawDistanceOverride = 100000
+      m.assertEqual(m.camera.getPlaneDrawDistance(), m.camera.getPlaneDrawDistanceForTexelScale(1))
+      m.assertEqual(m.camera.getPlaneDrawDistance(), m.camera.getPlaneDrawDistanceForTexelScale(0.5))
+    end function
+
+    @it("raises the device cap by the texel scale")
+    function _()
+      ' 900 is the headless (simulator) cap
+      m.camera.planeDrawDistanceOverride = 100000
+      m.assertEqual(3600.0, m.camera.getPlaneDrawDistanceForTexelScale(4))
+    end function
+
+    @it("never reaches past what the camera asks for")
+    function _()
+      m.camera.planeDrawDistanceOverride = 2000
+      m.assertEqual(2000.0, m.camera.getPlaneDrawDistanceForTexelScale(4))
+    end function
+
+    @describe("texture mapping")
+
+    @it("worldPointToTexturePixel divides by world units per pixel")
+    function _()
+      texel = BGE.Math.worldPointToTexturePixel(m.v(40, 0, -20), m.v(0, 0, 0), 100, 100, 4)
+      m.assertEqual(60.0, texel.x)
+      m.assertEqual(45.0, texel.y)
+    end function
+
+    @it("makes a 600x600 image at (1.5, 2) cover 900x1200 world units")
+    function _()
+      sceneObj = new BGE.SceneObjectPlane("plane", m.newPlane(600, 600, BGE.PlaneFillMode.staticImage, m.v(1.5, 2, 1)))
+      size = sceneObj.getTextureSize()
+      m.assertEqual(600, cint(size.width))
+      m.assertEqual(800, cint(size.height))
+      farCorner = sceneObj.worldPointToTexel(m.v(450, 0, 600))
+      m.assertEqual(600, cint(farCorner.x))
+      m.assertEqual(800, cint(farCorner.y))
+      nearCorner = sceneObj.worldPointToTexel(m.v(-450, 0, -600))
+      m.assertEqual(0, cint(nearCorner.x))
+      m.assertEqual(0, cint(nearCorner.y))
+    end function
+
+    @it("leaves an unscaled plane's mapping alone")
+    function _()
+      sceneObj = new BGE.SceneObjectPlane("plane", m.newPlane(64, 32, BGE.PlaneFillMode.staticImage, m.v(1, 1, 1)))
+      m.assertEqual(1.0, sceneObj.getTexelScale())
+      texel = sceneObj.worldPointToTexel(m.v(10, 0, 5))
+      m.assertEqual(42, cint(texel.x))
+      m.assertEqual(21, cint(texel.y))
+    end function
+
+    @it("draws a scaled decal over its whole scaled footprint")
+    function _()
+      ' 64 px at scale 8 covers world x -256..256
+      decal = m.newPlane(64, 64, BGE.PlaneFillMode.staticImage, m.v(8, 8, 1), &hFF0000FF)
+      m.testScene.addDrawable("Decal", decal)
+      m.camera.position = m.v(0, 50, 0)
+      m.camera.setTarget(m.v(0, 50, -100))
+      for i = 1 to 4
+        m.testScene.updateTransformationMatrix()
+        m.renderer.setupCameraForFrame()
+        m.renderer.render()
+      end for
+      plane = decal.getSceneObjects()[0] as object
+      bmp = plane.prePerspectiveBmp
+      m.assertNotInvalid(bmp)
+      farLeft = plane.perspectivePoints.actual.topLeft
+      farRight = plane.perspectivePoints.actual.topRight
+      column = Int((200 - farLeft.x) / (farRight.x - farLeft.x) * bmp.GetWidth())
+      foundRed = false
+      for row = 0 to bmp.GetHeight() - 1 step 4
+        pixel = bmp.GetByteArray(column, row, 1, 1)
+        if pixel[0] > 200 and pixel[3] > 200
+          foundRed = true
+          exit for
+        end if
+      end for
+      m.assertTrue(foundRed, `no decal pixels in column ${column} of a ${bmp.GetWidth()}x${bmp.GetHeight()} bitmap`)
+    end function
+
+    @describe("tiledImage")
+
+    @it("needs fewer tiles when each covers more of the world")
+    function _()
+      m.camera.maxDrawDistance = 400
+      m.lookAhead()
+      unscaled = new BGE.SceneObjectPlane("unscaled", m.newPlane(16, 16, BGE.PlaneFillMode.tiledImage, m.v(1, 1, 1)))
+      unscaled.update(m.camera)
+      unscaled.draw(m.renderer)
+      scaled = new BGE.SceneObjectPlane("scaled", m.newPlane(16, 16, BGE.PlaneFillMode.tiledImage, m.v(4, 4, 1)))
+      scaled.update(m.camera)
+      scaled.draw(m.renderer)
+
+      unscaledTiles = (unscaled as object).tilesPerAxis
+      scaledTiles = (scaled as object).tilesPerAxis
+      m.assertTrue(scaledTiles * 3 < unscaledTiles, `scaled ${scaledTiles} vs unscaled ${unscaledTiles} tiles per axis`)
+    end function
+
+    @it("stretches its tiles for a non-square scale")
+    function _()
+      m.camera.maxDrawDistance = 200
+      m.lookAhead()
+      sceneObj = new BGE.SceneObjectPlane("plane", m.newPlane(8, 8, BGE.PlaneFillMode.tiledImage, m.v(2, 4, 1)))
+      sceneObj.update(m.camera)
+      sceneObj.draw(m.renderer)
+      m.assertEqual(8, cint((sceneObj as object).tileWidth))
+      m.assertEqual(16, cint((sceneObj as object).tileHeight))
+    end function
+
+    @it("still draws a pool where a lamp reaches a scaled plane")
+    function _()
+      tile = CreateObject("roBitmap", {width: 8, height: 8, alphaEnable: true})
+      plane = new BGE.DrawablePlane(m.testScene, CreateObject("roRegion", tile, 0, 0, 8, 8), {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.tiledImage, isShaded: true, scale: m.v(4, 4, 1)})
+      sceneObj = new BGE.SceneObjectPlane("plane", plane)
+      m.camera.maxDrawDistance = 200
+      m.lookAhead()
+      m.renderer.addLight(new BGE.PointLight(m.v(0, 40, -80), 100))
+      m.renderer.updateLighting()
+      sceneObj.update(m.camera)
+      sceneObj.draw(m.renderer)
+      m.assertEqual(1, sceneObj.getLightPoolCountLastDraw())
+    end function
+
+    @describe("draw distance")
+
+    @it("lets a scaled plane reach past the device cap, leaving objects' distance alone")
+    function _()
+      ' the renderer resets the plane override from the quality settings every frame;
+      ' objects stay at the 900 device cap however far the camera asks
+      m.camera.maxDrawDistance = 100000
+      colorDrawable = new BGE.DrawablePlane(m.testScene, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, scale: m.v(4, 4, 1)})
+      m.testScene.addDrawable("Ground", colorDrawable)
+      m.camera.position = m.v(0, 50, 0)
+      m.camera.setTarget(m.v(0, 50, -100))
+      for i = 1 to 4
+        m.testScene.updateTransformationMatrix()
+        m.renderer.setupCameraForFrame()
+        m.renderer.render()
+      end for
+      plane = colorDrawable.getSceneObjects()[0] as object
+      farCorner = plane.perspectivePoints.actual.topLeft
+      depth = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(farCorner, m.camera.position), m.camera.orientation)
+      m.assertTrue(depth > 3000, `far edge at depth ${depth}`)
+      m.assertEqual(900.0, m.camera.getPlaneDrawDistance())
+      m.assertEqual(900.0, m.camera.getEffectiveMaxDrawDistance())
+    end function
+
+  end class
+
+end namespace
