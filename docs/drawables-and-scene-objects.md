@@ -223,6 +223,17 @@ render correctly through `directScaled`'s blit path; see the spec's Non-goals). 
 `examples/terrain`'s `Guard` entity for a runnable demo, and
 `specs/2026-09-22-oriented-sprite-billboards-design.md` for the full design.
 
+Both `Sprite` and `DrawableOrientedSprite` accept an array of sheet bitmaps instead of one, so a
+large character can be split across sheets that each fit the device's bitmap size limit (or by
+animation, loading only what a scene needs). Every sheet uses the same cell size, and frame
+numbers run across them in order:
+
+```brighterscript
+' 16 frames in walk.png (0-15), then 16 in attack.png (16-31)
+sheets = [m.game.getBitmap("walk"), m.game.getBitmap("attack")]
+sprite = m.addOrientedSprite("body", sheets, 128, 128)
+```
+
 ## SceneObjectDrawMode
 
 Every `SceneObject` has a `SceneObjectDrawMode`, controlling how it reacts to the camera's rotation
@@ -233,6 +244,7 @@ and perspective:
 | `matchCamera`                          | Follows the camera's rotation/perspective like a normal 3D object.      |
 | `directToCamera`                       | Always faces the camera (billboard), ignoring its own rotation.         |
 | `directScaled`                         | Like `directToCamera`, but sized by camera distance - a Doom-style sprite. |
+| `axisAligned`                          | Stands upright in the world and turns to face the camera's yaw; foreshortens with pitch. |
 | `oriented` / `orientedDrawBackFace`    | Respects its own rotation in 3D, optionally drawing back faces.         |
 | `wireFrame` / `wireFrameDrawBackFace`  | Outline-only rendering of the triangle mesh.                           |
 | `solid` / `solidDrawBackFace`          | Filled triangle rendering.                                             |
@@ -254,6 +266,26 @@ world space and then projects it (`updateCanvasPointsForCameraFacingQuad`), rath
 the object's own projected quad - measuring the latter would fold the object's orientation into
 its size, so a sprite turned edge-on would squash. For the same reason a screen-aligned object is
 never backface culled: it has no face to turn away.
+`axisAligned` is the upright version of `directScaled`, for characters, trees and props standing
+on the ground. It turns to face the camera around the world's vertical axis only, so it never
+goes side-on, but it stays upright in 3D: as the camera looks further down on it, it gets shorter
+with the real perspective instead of leaning back at the camera like a cardboard cutout. Anchor
+it at its feet so they stay planted while the top tilts away. `axisAlignedFullHeightPitch` is
+the angle (degrees) the camera looks down from when it's drawn full height. Set it to the
+elevation your art was rendered from:
+
+```brighterscript
+knight = m.addOrientedSprite("body", sheet, 128, 128)
+knight.drawMode = BGE.SceneObjectDrawMode.axisAligned
+' the sheet was rendered looking 12 degrees down on the character
+knight.axisAlignedFullHeightPitch = 12
+knight.setAnchor(0.5, 1)
+```
+
+Unlike the other billboards it banks when the camera rolls, tilting with the ground it stands on
+(`banksWithCameraRoll` doesn't apply). `examples/rendererTest`'s "axisAligned Billboards" demo shows it
+next to `directScaled`.
+
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that
 lets you cycle through them (`examples/3d`'s BaseScene displays it on screen).
 
@@ -700,6 +732,30 @@ Note that `maxDrawDistance` itself may be silently capped below whatever you set
 clamps it per-device (900 on the BrightScript Simulator and, pending real hardware testing, on
 SD/HD devices too; effectively unlimited on FHD) every frame, so a plane's actual far distance and
 supertexture size follow the capped value, not the requested one.
+
+### Texture scale
+
+A plane draws one texture pixel per world unit by default. Set its `scale` to stretch the texture
+over more of the world: `scale.x` along world x and `scale.y` along world z (the texture's own y).
+A 600x600 layout image at scale (1.5, 2) covers 900x1200 world units:
+
+```brighterscript
+mapDecal = new BGE.DrawablePlane(m, mapRegion, groundPlaneDef, {
+  fillMode: BGE.PlaneFillMode.staticImage,
+  scale: BGE.Math.VectorOps.create(1.5, 2, 1)
+})
+' a 64px grass tile repeating every 256 world units
+grass = new BGE.DrawablePlane(m, grassTile, groundPlaneDef, {
+  fillMode: BGE.PlaneFillMode.tiledImage,
+  scale: BGE.Math.VectorOps.create(4, 4, 1)
+})
+```
+
+The device cap above limits the plane's bitmaps, which are sized in texture pixels, so a coarser
+plane draws the ground farther: up to the cap times the smaller of its two scales, if the camera
+asks for that much (`Camera3d.getPlaneDrawDistanceForTexelScale()`). Objects' draw distance doesn't
+change. A non-square scale stretches a `staticImage` into one extra copy of its texture (a square
+scale needs none). `examples/rendererTest`'s "Plane Texture Scale" demo cycles through a few scales.
 
 ### Roll
 
