@@ -8,11 +8,12 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | --- | --- | --- |
 | Move (relative to the camera) | Left stick | D-pad |
 | Orbit the camera | Right stick | - |
-| Recenter the camera | Y | `*` |
+| Recenter the camera | Y | Rewind |
 | Attack (press again late in a swing to chain) | R1 or A | OK |
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | L2 | Fast-forward |
 | Dodge (roll toward the stick, or step back) | B | Back or Replay |
+| Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
 
 Movement is relative to the camera, and the camera stays put until you move it.
 
