@@ -271,8 +271,8 @@ knight.axisAlignedFullHeightPitch = 12
 knight.setAnchor(0.5, 1)
 ```
 
-Like the other billboards it stays upright on screen when the camera rolls, unless
-`banksWithCameraRoll` is set. `examples/rendererTest`'s "axisAligned Billboards" demo shows it
+Unlike the other billboards it banks when the camera rolls, tilting with the ground it stands on
+(`banksWithCameraRoll` doesn't apply). `examples/rendererTest`'s "axisAligned Billboards" demo shows it
 next to `directScaled`.
 
 `BGE.getDrawModeName(drawMode)` gives you a mode's name, for debug overlays or for an example that

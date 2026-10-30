@@ -25,7 +25,8 @@ Neither existing mode does this:
   of the line from the camera down to it) at which the art is drawn at full height. The default
   is 0° (camera level with the object).
 - The anchor (`setAnchor`, e.g. feet at `(0.5, 1)`) stays planted while the top leans away.
-- Honour `banksWithCameraRoll` the way the other billboard modes do.
+- Bank with camera roll, always, like the ground it stands on. (Mark, after seeing it on device;
+  `banksWithCameraRoll` doesn't apply.)
 - One native draw call per frame, the same cost as `directScaled`.
 
 ## Non-goals
@@ -80,10 +81,9 @@ fixed point.
 
 ### Camera roll
 
-The world-up quad, projected through a rolled camera, rolls on screen with the world. That is
-the `banksWithCameraRoll = true` behaviour. For the default (`false`), rotate the projected
-canvas quad back by the camera's roll around the anchor's canvas point, so the image stays
-upright on screen. Without a `Camera3d` (2D cameras), `axisAligned` behaves exactly like
+The world-up quad, projected through a rolled camera, rolls on screen with the world, so the
+image banks with the ground it stands on. That's always the behaviour; `banksWithCameraRoll`
+doesn't apply. Without a `Camera3d` (2D cameras), `axisAligned` behaves exactly like
 `directScaled`.
 
 ### Drawing
@@ -125,7 +125,7 @@ it. My expectation:
   - with a 12° full-height angle, pitched 12° → full height;
   - the anchor's canvas point stays fixed as pitch changes;
   - camera yaw changes don't change the on-screen width (it always faces the camera);
-  - rolled camera with and without `banksWithCameraRoll`;
+  - rolled camera: banks with the roll, with or without `banksWithCameraRoll`;
   - `getDrawModeName(axisAligned) = "axisAligned"`.
 - `examples/rendererTest`: a demo with a few upright sprites anchored at their feet on a ground
   plane, with the camera orbiting and pitching, plus `directScaled` copies alongside to compare.
