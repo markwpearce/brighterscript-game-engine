@@ -14,7 +14,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Parry | L2 | Fast-forward |
 | Dodge (roll toward the stick, or step back) | B | Back or Replay |
 
-With no camera input, the camera drifts back behind the knight while he runs.
+Movement is relative to the camera, and the camera stays put until you move it.
 
 ## How it works
 
