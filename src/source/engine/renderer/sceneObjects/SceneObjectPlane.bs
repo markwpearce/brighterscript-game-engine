@@ -98,6 +98,9 @@ namespace BGE
     ' either. A same-sized region swap isn't caught by this - see issue #140.
     private superTextureBuiltForTileWidth as float = -1
     private superTextureBuiltForTileHeight as float = -1
+    ' A staticImage's region stretched by getTextureStretch(), for a non-square scale
+    private stretchedSourceRegion as roRegion = invalid
+    private stretchedSourceKey as string = ""
     ' Physical/logical pixel ratio: 1.0 until logical size exceeds getMaxSuperTextureDimension()'s
     ' budget, then tiles downscale and every pixel-space consumer must apply this factor.
     private superTextureScale as float = 1.0
@@ -143,7 +146,7 @@ namespace BGE
       if cameraObj.name <> "Camera3d"
         return false
       end if
-      return (cameraObj as Camera3d).getPlaneDrawDistance() <> m.planeDrawDistanceAtLastDraw
+      return m.getWorldDrawDistance(cameraObj as Camera3d) <> m.planeDrawDistanceAtLastDraw
     end function
 
     protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
@@ -165,7 +168,7 @@ namespace BGE
       ' read before recording, since recording clears it from objMovedInRelationToCamera()
       planeDistanceChanged = m.planeDrawDistanceChanged(rendererObj.camera)
       if rendererObj.camera.name = "Camera3d"
-        m.planeDrawDistanceAtLastDraw = (rendererObj.camera as Camera3d).getPlaneDrawDistance()
+        m.planeDrawDistanceAtLastDraw = m.getWorldDrawDistance(rendererObj.camera as Camera3d)
       end if
 
       if m.drawable.fillMode = PlaneFillMode.color
@@ -212,7 +215,8 @@ namespace BGE
       end if
       m.hasAccurateTempBitmap = false
 
-      maxDrawDistance = (camera as Camera3d).getPlaneDrawDistance()
+      ' the bitmap is sized by the distance in texels (see getPrePerspectiveBmp())
+      maxDrawDistance = m.getWorldDrawDistance(camera as Camera3d) / m.getTexelScale()
       if invalid = m.prePerspectiveBmp or m.prePerspectiveBmpBuiltForMaxDrawDistance <> maxDrawDistance
         ' Release the old bitmap first so the old and new aren't both alive at once.
         m.prePerspectiveBmp = invalid
@@ -264,7 +268,11 @@ namespace BGE
           m.bakedTintRGBA = textureTint
         end if
       else
-        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.drawable.region, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
+        sourceRegion = m.getStaticSourceRegion(rendererObj)
+        if invalid = sourceRegion
+          return false
+        end if
+        gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, sourceRegion, m.prePerspectiveBmp, m.perspectivePoints.mapped.topLeft)
       end if
       if not gotPreBmp
         return false
@@ -570,7 +578,7 @@ namespace BGE
 
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
       camera = rendererObj.camera as Camera3d
-      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, camera.getPlaneDrawDistance())
+      m.perspectivePoints = m.getPerspectivePointsByCamera(rendererObj, m.drawable.plane, m.worldPosition, m.getWorldDrawDistance(camera))
       if invalid = m.perspectivePoints
         return false
       end if
@@ -586,7 +594,8 @@ namespace BGE
       ' partially-out-of-bounds view correctly shows real texture where
       ' valid and background where not, rather than needing an all-or-
       ' nothing gate here.
-      return BGE.Math.boundsOverlapRect(m.perspectivePoints.mapped.toArray(), m.drawable.region.GetWidth(), m.drawable.region.GetHeight())
+      textureSize = m.getTextureSize()
+      return BGE.Math.boundsOverlapRect(m.perspectivePoints.mapped.toArray(), textureSize.width, textureSize.height)
     end function
 
 
@@ -694,15 +703,17 @@ namespace BGE
       ' directly as source-bitmap pixel coordinates, pinning the visible
       ' texture to a fixed absolute-world-space footprint regardless of
       ' where the plane (or camera) actually is.
-      textureWidth = m.drawable.region.GetWidth()
-      textureHeight = m.drawable.region.GetHeight()
+      textureSize = m.getTextureSize()
+      textureWidth = textureSize.width
+      textureHeight = textureSize.height
+      texelScale = m.getTexelScale()
 
       mapped = new BGE.Math.CornerPoints()
 
-      mapped.topRight = BGE.Math.worldPointToTexturePixel(output.topRight, mapOffset, textureWidth, textureHeight)
-      mapped.topLeft = BGE.Math.worldPointToTexturePixel(output.topLeft, mapOffset, textureWidth, textureHeight)
-      mapped.bottomRight = BGE.Math.worldPointToTexturePixel(output.bottomRight, mapOffset, textureWidth, textureHeight)
-      mapped.bottomLeft = BGE.Math.worldPointToTexturePixel(output.bottomLeft, mapOffset, textureWidth, textureHeight)
+      mapped.topRight = BGE.Math.worldPointToTexturePixel(output.topRight, mapOffset, textureWidth, textureHeight, texelScale)
+      mapped.topLeft = BGE.Math.worldPointToTexturePixel(output.topLeft, mapOffset, textureWidth, textureHeight, texelScale)
+      mapped.bottomRight = BGE.Math.worldPointToTexturePixel(output.bottomRight, mapOffset, textureWidth, textureHeight, texelScale)
+      mapped.bottomLeft = BGE.Math.worldPointToTexturePixel(output.bottomLeft, mapOffset, textureWidth, textureHeight, texelScale)
 
       return {actual: output, mapped: mapped}
     end function
@@ -728,13 +739,97 @@ namespace BGE
       return BGE.Math.VectorOps.add(farCenter, BGE.Math.VectorOps.scale(right, halfWidth * side))
     end function
 
+    ' World units per texel: the smaller of the drawable's x/y scale. The rest of a
+    ' non-square scale is stretched into the source texture (see getTextureStretch()),
+    ' since the texture warp rotates then scales and can't represent a shear.
+    '
+    ' @return {float}
+    function getTexelScale() as float
+      scale = m.drawable.scale
+      return BGE.Math.Max(0.01, BGE.Math.Min(Abs(scale.x), Abs(scale.y)))
+    end function
+
+    ' How much the source texture is stretched along x and y on top of getTexelScale() -
+    ' 1 on the smaller axis, and 1 on both for a square scale.
+    '
+    ' @return {BGE.Math.Vector}
+    function getTextureStretch() as BGE.Math.Vector
+      texelScale = m.getTexelScale()
+      scale = m.drawable.scale
+      return BGE.Math.VectorOps.create(BGE.Math.Max(0.01, Abs(scale.x)) / texelScale, BGE.Math.Max(0.01, Abs(scale.y)) / texelScale, 1)
+    end function
+
+    ' The texture's size in texels: its region stretched by getTextureStretch().
+    '
+    ' @return {SizeWH}
+    function getTextureSize() as SizeWH
+      if invalid = m.drawable.region
+        return {width: 0, height: 0}
+      end if
+      stretch = m.getTextureStretch()
+      return {width: m.drawable.region.GetWidth() * stretch.x, height: m.drawable.region.GetHeight() * stretch.y}
+    end function
+
+    ' Where a world point on the plane lands in the texture, in texels.
+    '
+    ' @param {BGE.Math.Vector} worldPoint
+    ' @return {BGE.Math.Vector}
+    function worldPointToTexel(worldPoint as BGE.Math.Vector) as BGE.Math.Vector
+      textureSize = m.getTextureSize()
+      return BGE.Math.worldPointToTexturePixel(worldPoint, m.drawable.getWorldPosition(), textureSize.width, textureSize.height, m.getTexelScale())
+    end function
+
+    ' How far this plane draws, in world units. Its bitmaps are sized in texels, so a
+    ' coarser texture reaches farther (see Camera3d.getPlaneDrawDistanceForTexelScale()).
+    '
+    ' @param {Camera3d} camera
+    ' @return {float}
+    function getWorldDrawDistance(camera as Camera3d) as float
+      return camera.getPlaneDrawDistanceForTexelScale(m.getTexelScale())
+    end function
+
+    ' A staticImage's source: its region, or for a non-square scale a copy stretched by
+    ' getTextureStretch(), rebuilt when the region's size or the scale changes.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {roRegion} invalid if the copy couldn't be allocated
+    private function getStaticSourceRegion(rendererObj as BGE.Renderer) as roRegion
+      stretch = m.getTextureStretch()
+      if stretch.x = 1 and stretch.y = 1
+        m.stretchedSourceRegion = invalid
+        m.stretchedSourceKey = ""
+        return m.drawable.region
+      end if
+      textureSize = m.getTextureSize()
+      width = cint(textureSize.width)
+      height = cint(textureSize.height)
+      key = `${m.drawable.region.GetWidth()}x${m.drawable.region.GetHeight()}@${width}x${height}`
+      if invalid <> m.stretchedSourceRegion and key = m.stretchedSourceKey
+        return m.stretchedSourceRegion
+      end if
+      m.stretchedSourceRegion = invalid
+      bmp = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+      if invalid = bmp
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; width; "x"; height; " stretched decal - skipping this plane this frame"
+        return invalid
+      end if
+      bmp.Clear(&h00000000)
+      if not rendererObj.drawScaledObjectTo(bmp, 0, 0, width / m.drawable.region.GetWidth(), height / m.drawable.region.GetHeight(), m.drawable.region)
+        return invalid
+      end if
+      m.stretchedSourceRegion = CreateObject("roRegion", bmp, 0, 0, width, height)
+      m.stretchedSourceKey = key
+      return m.stretchedSourceRegion
+    end function
+
     ' Sizes the "rectified" (top-down) scratch bitmap that populatePerspectiveBmp()
     ' warps the ground texture into. Only its aspect ratio and pixel budget matter:
     ' computePerspectiveSlices() reads slice spans from the quad's own corners in this
     ' bitmap's pixels, whatever its size.
     private function getPrePerspectiveBmp(rendererObj as BGE.Renderer) as roBitmap
       camera = rendererObj.camera as Camera3d
-      size = BGE.getPlanePrePerspectiveBmpSize(camera.getPlaneDrawDistance(), camera.fieldOfViewDegrees, BGE.getPlanePrePerspectiveMaxPixels())
+      ' sized in texels, so a coarser plane reaching farther needs no bigger a bitmap
+      size = BGE.getPlanePrePerspectiveBmpSize(m.getWorldDrawDistance(camera) / m.getTexelScale(), camera.fieldOfViewDegrees, BGE.getPlanePrePerspectiveMaxPixels())
       return CreateObject("roBitmap", {width: size.width, height: size.height, AlphaEnable: true})
     end function
 
@@ -762,7 +857,9 @@ namespace BGE
     ' @return {boolean} false if a bitmap couldn't be allocated (retried next call)
     private function buildSuperTextureIfNeeded(rendererObj as BGE.Renderer) as boolean
       camera = rendererObj.camera as Camera3d
-      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = camera.getPlaneDrawDistance() and m.superTextureBuiltForTileWidth = m.drawable.region.GetWidth() and m.superTextureBuiltForTileHeight = m.drawable.region.GetHeight()
+      textureSize = m.getTextureSize()
+      worldDrawDistance = m.getWorldDrawDistance(camera)
+      if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = worldDrawDistance and m.superTextureBuiltForTileWidth = textureSize.width and m.superTextureBuiltForTileHeight = textureSize.height
         return true
       end if
       ' Release the old bitmaps before allocating replacements, and leave the cache
@@ -774,15 +871,16 @@ namespace BGE
 
       ' Floored at 1 - a degenerate 0-sized tile region would otherwise divide by zero
       ' below (and downstream, a 0-sized bmpWidth/bmpHeight feeding CreateObject("roBitmap", ...)).
-      m.tileWidth = BGE.Math.Max(1, m.drawable.region.GetWidth())
-      m.tileHeight = BGE.Math.Max(1, m.drawable.region.GetHeight())
+      ' Logical tiles are the region stretched for a non-square scale (see getTextureStretch())
+      m.tileWidth = BGE.Math.Max(1, textureSize.width)
+      m.tileHeight = BGE.Math.Max(1, textureSize.height)
       smallestTileDimension = BGE.Math.Min(m.tileWidth, m.tileHeight)
 
       ' m.tiledScratchBmp (the rotate destination) must stay at this unpadded,
       ' maxDrawDistance-bounded size - drawScaledObjectTo reads it whole into the
       ' final composite with no sub-crop, so it can't grow with the rotation padding
       ' computed below. Computed from real tile-quantized dimensions, not an estimate.
-      unpaddedTilesPerAxis = Fix(2 * camera.getPlaneDrawDistance() / smallestTileDimension) + 1
+      unpaddedTilesPerAxis = Fix(2 * (worldDrawDistance / m.getTexelScale()) / smallestTileDimension) + 1
       if (unpaddedTilesPerAxis mod 2) = 0
         unpaddedTilesPerAxis = unpaddedTilesPerAxis + 1
       end if
@@ -832,9 +930,11 @@ namespace BGE
       ' up (issue #252), which a small tile at a long draw distance reached.
       ' Tiles land on whole pixels, so at a fractional tile size a step can be a pixel
       ' longer than the tile: each is stretched a pixel to overlap the next (drawn over it).
-      tileScaleX = m.superTextureScale + 1.0 / m.tileWidth
-      tileScaleY = m.superTextureScale + 1.0 / m.tileHeight
-      stripHeight = Int(m.tileHeight * tileScaleY) + 2
+      regionWidth = BGE.Math.Max(1, m.drawable.region.GetWidth())
+      regionHeight = BGE.Math.Max(1, m.drawable.region.GetHeight())
+      tileScaleX = (m.tileWidth * m.superTextureScale + 1.0) / regionWidth
+      tileScaleY = (m.tileHeight * m.superTextureScale + 1.0) / regionHeight
+      stripHeight = Int(regionHeight * tileScaleY) + 2
       strip = CreateObject("roBitmap", {width: physicalWidth, height: stripHeight, AlphaEnable: true})
       if invalid = strip
         print "[BGE.SceneObjectPlane] warning: couldn't allocate the tiledImage tile strip - skipping this plane this frame"
@@ -871,9 +971,9 @@ namespace BGE
         return false
       end if
       m.tiledScratchBmp.SetAlphaEnable(true)
-      m.superTextureBuiltForMaxDrawDistance = camera.getPlaneDrawDistance()
-      m.superTextureBuiltForTileWidth = m.tileWidth
-      m.superTextureBuiltForTileHeight = m.tileHeight
+      m.superTextureBuiltForMaxDrawDistance = worldDrawDistance
+      m.superTextureBuiltForTileWidth = textureSize.width
+      m.superTextureBuiltForTileHeight = textureSize.height
       return true
     end function
 

@@ -57,14 +57,20 @@ What Mark asked for: "here's a 600x600 plane image, but scale it by 1.5 times in
 
 ### Texture mapping
 
-`SceneObjectPlane.getPerspectivePointsByCamera` maps world corners to texture pixels with
-`worldPointToTexturePixel(worldPoint, planeCenter, textureWidth, textureHeight)`. With a scale,
-the offset from the plane's centre is divided by the scale per axis before adding the
-half-texture offset. Everything after that (the warp into the top-down bitmap, the supertexture
-wrap, `boundsOverlapRect` for decals) already works in texture pixels and stays as is.
+`populatePerspectiveBmp` warps the texture by rotating it to the view's top edge, then scaling it
+along its own axes. That can't represent a shear, and a non-square scale applied in the mapping
+would produce one whenever the view is rotated. So the scale splits in two:
 
-`tiledImage`'s supertexture and `wrapAnchorIntoSuperTexture` work in texture pixels (the wrap
-period is the tile size), so they need no change beyond their inputs now being in texels.
+- **Texel scale** `s = min(|scale.x|, |scale.y|)`: world units per texel, applied uniformly in
+  the mapping. `worldPointToTexturePixel` divides the offset from the plane's centre by `s`.
+- **Stretch** `(|scale.x| / s, |scale.y| / s)`, one axis always 1: baked into the source
+  texture. A `tiledImage` stretches its tiles while it builds the supertexture (free: they're
+  already drawn one by one). A `staticImage` with a non-square scale gets one stretched copy of
+  its region, rebuilt only when the region or scale changes. A square scale needs no copy.
+
+Everything after the mapping (the warp into the top-down bitmap, the supertexture wrap,
+`boundsOverlapRect` for decals) works in texels of the stretched texture and is otherwise
+unchanged.
 
 ### Draw distance
 
