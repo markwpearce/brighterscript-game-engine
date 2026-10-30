@@ -64,8 +64,10 @@ namespace BGE
 
   class Sprite extends AnimatedImage
 
-    ' roBitmap to pick cells from
+    ' roBitmap to pick cells from (the first sheet, when there are several)
     spriteSheet as ifDraw2d
+    ' Every sheet, in order. Cells are numbered across them: sheet 0's first, then sheet 1's, ...
+    spriteSheets as ifDraw2d[] = []
     ' Width of each animation cell in the sprite image in pixels
     cellWidth as integer
     ' Height of each animation cell in the sprite image in pixels
@@ -77,9 +79,22 @@ namespace BGE
     ' The current animation being played
     activeAnimation as SpriteAnimation = invalid
 
-    function new(owner as GameEntity, spriteSheet as ifDraw2d, cellWidth as integer, cellHeight as integer, args = {} as roAssociativeArray)
+    ' Index of each sheet's first cell in m.regions
+    private sheetFirstFrames as integer[] = []
+
+    ' @param {GameEntity} owner
+    ' @param {ifDraw2d|ifDraw2d[]} spriteSheet One sheet, or several with the same cell size. Cells are numbered across sheets in order.
+    ' @param {integer} cellWidth Width of each cell in pixels
+    ' @param {integer} cellHeight Height of each cell in pixels
+    ' @param [args={}] Any extra properties to set
+    function new(owner as GameEntity, spriteSheet as ifDraw2d or ifDraw2d[], cellWidth as integer, cellHeight as integer, args = {} as roAssociativeArray)
       super(owner, invalid, args)
-      m.spriteSheet = spriteSheet
+      if rodash.isArray(spriteSheet)
+        m.spriteSheets = spriteSheet as ifDraw2d[]
+      else
+        m.spriteSheets = [spriteSheet as ifDraw2d]
+      end if
+      m.spriteSheet = m.spriteSheets[0]
       m.cellWidth = cellWidth
       m.cellHeight = cellHeight
       m.width = cellWidth
@@ -90,8 +105,56 @@ namespace BGE
     end function
 
     private sub setCellRegions()
-      m.regions = BGE.sliceGridRegions(m.spriteSheet, m.cellWidth, m.cellHeight)
+      m.regions = []
+      m.sheetFirstFrames = []
+      for each sheet in m.spriteSheets
+        m.sheetFirstFrames.push(m.regions.Count())
+        m.regions.Append(BGE.sliceGridRegions(sheet, m.cellWidth, m.cellHeight))
+      end for
     end sub
+
+    ' Which sheet a cell index comes from, or -1 if it's out of range
+    '
+    ' @param {integer} frameIndex
+    ' @return {integer}
+    function getSheetIndexForFrame(frameIndex as integer) as integer
+      if frameIndex < 0 or frameIndex >= m.regions.Count()
+        return -1
+      end if
+      for i = m.sheetFirstFrames.Count() - 1 to 0 step -1
+        if frameIndex >= m.sheetFirstFrames[i]
+          return i
+        end if
+      end for
+      return -1
+    end function
+
+    ' Size and cell layout of every sheet, for debug info
+    '
+    ' @return {roAssociativeArray[]}
+    function getSpriteSheetsDebugInfo() as roAssociativeArray[]
+      sheetsDump = []
+      for i = 0 to m.spriteSheets.Count() - 1
+        sheet = m.spriteSheets[i]
+        if invalid = sheet
+          continue for
+        end if
+        columns = 0
+        rows = 0
+        if m.cellWidth > 0 and m.cellHeight > 0
+          columns = cint(sheet.GetWidth() / m.cellWidth)
+          rows = cint(sheet.GetHeight() / m.cellHeight)
+        end if
+        sheetsDump.push({
+          width: sheet.GetWidth(),
+          height: sheet.GetHeight(),
+          columns: columns,
+          rows: rows,
+          firstFrame: m.sheetFirstFrames[i]
+        })
+      end for
+      return sheetsDump
+    end function
 
 
     ' Apply a pre-translation to set the pivot point for the sprite cell
@@ -177,25 +240,26 @@ namespace BGE
           frames: framesDump
         }
       end for
-      columns = 0
-      rows = 0
-      if invalid <> m.regions and m.cellWidth > 0 and m.cellHeight > 0
-        columns = cint(m.spriteSheet.GetWidth() / m.cellWidth)
-        rows = cint(m.spriteSheet.GetHeight() / m.cellHeight)
+      sheetsDump = m.getSpriteSheetsDebugInfo()
+      ' Top-level size/columns/rows describe the first sheet
+      firstSheet = {width: 0, height: 0, columns: 0, rows: 0}
+      if sheetsDump.Count() > 0
+        firstSheet = sheetsDump[0]
       end if
       return {
-        spriteSheetWidth: m.spriteSheet.GetWidth(),
-        spriteSheetHeight: m.spriteSheet.GetHeight(),
+        spriteSheetWidth: firstSheet.width,
+        spriteSheetHeight: firstSheet.height,
         cellWidth: m.cellWidth,
         cellHeight: m.cellHeight,
-        columns: columns,
-        rows: rows,
+        columns: firstSheet.columns,
+        rows: firstSheet.rows,
+        spriteSheets: sheetsDump,
         totalRegions: invalid <> m.regions ? m.regions.Count() : 0,
         animations: animationsDump
       }
     end function
 
-    ' One frame's spritesheet pixel rect (x/y/width/height), or an `error` note if
+    ' One frame's sheet index and pixel rect (x/y/width/height) within that sheet, or an `error` note if
     ' frameIndex is out of range for this sprite's own sliced regions. Factored out of
     ' getAnimationsDebugInfo() so it's independently callable too.
     '
@@ -212,6 +276,7 @@ namespace BGE
       region = m.regions[frameIndex]
       return {
         frameIndex: frameIndex,
+        sheetIndex: m.getSheetIndexForFrame(frameIndex),
         x: region.GetX(),
         y: region.GetY(),
         width: region.GetWidth(),
