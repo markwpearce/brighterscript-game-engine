@@ -389,7 +389,11 @@ namespace BGE
         totalScaleX = 1.0 * (drawnSize.width / regionObj.getWidth()) * ownerScale.x
         totalScaleY = 1.0 * (drawnSize.height / regionObj.getHeight()) * ownerScale.y
         retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -m.getNetRotationZ(), color)
-      else if drawMode = BGE.SceneObjectDrawMode.directScaled
+      else if isCameraFacingQuadDrawMode(drawMode)
+        if drawMode = BGE.SceneObjectDrawMode.axisAligned and m.getCanvasMidlineHeight() < 1
+          ' seen from nearly straight above or below: nothing to draw
+          return true
+        end if
         ' A Drawable's setAnchor(x, y) - e.g. (0.5, 1) for "feet on the ground" - controls
         ' where this quad is pinned as it scales with distance; see Drawable.getPretranslation()
         ' and updateCanvasPointsForCameraFacingQuad.
@@ -765,10 +769,10 @@ namespace BGE
       end if
       size = m.getDirectModeCanvasSize()
       ' a polygon or model has no width/height of its own
-      if drawMode <> BGE.SceneObjectDrawMode.directScaled or size.width = 0 or size.height = 0
+      if not isCameraFacingQuadDrawMode(drawMode) or size.width = 0 or size.height = 0
         return invalid
       end if
-      return m.getCameraFacingQuadWorldCorners(cameraObj)
+      return m.getCameraFacingQuadWorldCorners(cameraObj, drawMode)
     end function
 
     ' Computes this object's 4 world-space corners unconditionally, regardless of draw
@@ -856,12 +860,12 @@ namespace BGE
         if m.needsCanvasCornerPoints()
           m.updateCanvasPointsForDirectMode()
         end if
-      else if drawMode = BGE.SceneObjectDrawMode.directScaled
+      else if isCameraFacingQuadDrawMode(drawMode)
         m.canvasPosition = rendererObj.worldPointToCanvasPoint(m.worldPosition)
         if invalid = m.canvasPosition
           return false
         end if
-        return m.updateCanvasPointsForCameraFacingQuad(rendererObj)
+        return m.updateCanvasPointsForCameraFacingQuad(rendererObj, drawMode)
       else if isOrientedDrawMode(drawMode)
         index = 0
         for each corner in m.worldPoints.toArray()
@@ -969,12 +973,13 @@ namespace BGE
     '
     ' @param {Renderer} rendererObj
     ' @return {boolean} true if every corner projected onto the canvas
-    protected function updateCanvasPointsForCameraFacingQuad(rendererObj as Renderer) as boolean
-      corners = m.getCameraFacingQuadWorldCorners(rendererObj.camera)
+    protected function updateCanvasPointsForCameraFacingQuad(rendererObj as Renderer, drawMode = BGE.SceneObjectDrawMode.directScaled as SceneObjectDrawMode) as boolean
+      corners = m.getCameraFacingQuadWorldCorners(rendererObj.camera, drawMode)
       if rendererObj.camera.name = "Camera3d"
+        camera3d = rendererObj.camera as Camera3d
         ' the same canvas points as worldPointToCanvasPoint(), in one cheaper pass
         projected = m.cameraFacingProjected
-        if not (rendererObj.camera as Camera3d).projectPointsWithDepth(corners, projected)
+        if not camera3d.projectPointsWithDepth(corners, projected)
           return false
         end if
         canvasPoints = m.canvasPoints
@@ -982,6 +987,9 @@ namespace BGE
         m.setCanvasCorner(canvasPoints.topRight, projected, 3)
         m.setCanvasCorner(canvasPoints.bottomLeft, projected, 6)
         m.setCanvasCorner(canvasPoints.bottomRight, projected, 9)
+        if drawMode = BGE.SceneObjectDrawMode.axisAligned and not m.drawable.banksWithCameraRoll and camera3d.rollDegrees <> 0
+          m.unrollCanvasPoints(camera3d.rollDegrees)
+        end if
         return true
       end if
       index = 0
@@ -996,6 +1004,32 @@ namespace BGE
       return true
     end function
 
+    ' Distance between the canvas quad's top and bottom edge midpoints. Unlike its side
+    ' edges, this goes to 0 for an upright card seen from straight above.
+    '
+    ' @return {float}
+    private function getCanvasMidlineHeight() as float
+      quad = m.canvasPoints
+      dX = (quad.topLeft.x + quad.topRight.x - quad.bottomLeft.x - quad.bottomRight.x) / 2
+      dY = (quad.topLeft.y + quad.topRight.y - quad.bottomLeft.y - quad.bottomRight.y) / 2
+      return Sqr(dX * dX + dY * dY)
+    end function
+
+    ' An axisAligned quad is built from world up, so the camera's roll tilts it on screen.
+    ' Turning it back around its anchor keeps it upright, like the other billboards.
+    private sub unrollCanvasPoints(rollDegrees as float)
+      theta = BGE.Math.DegreesToRadians(rollDegrees)
+      cosTheta = cos(theta)
+      sinTheta = sin(theta)
+      pivot = m.canvasPosition
+      for each corner in [m.canvasPoints.topLeft, m.canvasPoints.topRight, m.canvasPoints.bottomLeft, m.canvasPoints.bottomRight]
+        dX = corner.x - pivot.x
+        dY = corner.y - pivot.y
+        corner.x = pivot.x + dX * cosTheta - dY * sinTheta
+        corner.y = pivot.y + dX * sinTheta + dY * cosTheta
+      end for
+    end sub
+
     private sub setCanvasCorner(corner as BGE.Math.Vector, projected as float[], offset as integer)
       corner.x = projected[offset]
       corner.y = projected[offset + 1]
@@ -1007,7 +1041,7 @@ namespace BGE
     '
     ' @param {Camera} cameraObj
     ' @return {BGE.Math.Vector[]} top left, top right, bottom left, bottom right
-    protected function getCameraFacingQuadWorldCorners(cameraObj as Camera) as BGE.Math.Vector[]
+    protected function getCameraFacingQuadWorldCorners(cameraObj as Camera, drawMode = BGE.SceneObjectDrawMode.directScaled as SceneObjectDrawMode) as BGE.Math.Vector[]
       ' getRightVector()/getUpVector() are roll-aware (rotated by the camera's own
       ' rollDegrees) - building the quad from them and then projecting through that
       ' same rolled camera necessarily cancels the roll back out, which is exactly what
@@ -1017,7 +1051,16 @@ namespace BGE
       ' actual (rolled) projection of each independently-computed corner introduces the
       ' correct on-screen rotation - the same effect a real object planted in the world
       ' (the ground plane, built from plain world coordinates) already gets for free.
-      if m.drawable.banksWithCameraRoll and cameraObj.name = "Camera3d"
+      ' axisAligned stands upright in the world: across the camera's yaw, up along world up.
+      ' Projecting it foreshortens it with pitch; heightScale makes it full height at the
+      ' drawable's axisAlignedFullHeightPitch.
+      heightScale = 1.0
+      if drawMode = BGE.SceneObjectDrawMode.axisAligned and cameraObj.name = "Camera3d"
+        right = (cameraObj as Camera3d).getLevelRightVector()
+        up = BGE.Math.VectorOps.create(0, 1, 0)
+        fullHeightPitch = BGE.Math.Clamp(Abs(m.drawable.axisAlignedFullHeightPitch), 0, 89)
+        heightScale = 1.0 / cos(BGE.Math.DegreesToRadians(fullHeightPitch))
+      else if m.drawable.banksWithCameraRoll and cameraObj.name = "Camera3d"
         camera3d = cameraObj as Camera3d
         right = camera3d.getLevelRightVector()
         up = camera3d.getLevelUpVector()
@@ -1029,7 +1072,7 @@ namespace BGE
       worldSize = m.getDirectModeCanvasSize()
 
       acrossWorld = BGE.Math.VectorOps.scale(right, worldSize.width)
-      downWorld = BGE.Math.VectorOps.scale(up, -worldSize.height)
+      downWorld = BGE.Math.VectorOps.scale(up, -worldSize.height * heightScale)
 
       ' Anchoring, expressed the way the oriented modes express it (see updateWorldPosition):
       ' the pretranslation shifts the top left corner, right by x and *down* by y. For an Image
@@ -1044,7 +1087,7 @@ namespace BGE
       totalScaleY = m.drawable.scale.y * ownerScale.y
       anchorOffset = BGE.Math.VectorOps.subtract(
       BGE.Math.VectorOps.scale(right, pretrans.x * totalScaleX),
-      BGE.Math.VectorOps.scale(up, pretrans.y * totalScaleY))
+      BGE.Math.VectorOps.scale(up, pretrans.y * totalScaleY * heightScale))
 
       topLeft = BGE.Math.VectorOps.add(m.worldPosition, anchorOffset)
       return [
