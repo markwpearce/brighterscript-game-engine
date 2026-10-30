@@ -9,7 +9,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Move (relative to the camera) | Left stick | D-pad |
 | Orbit the camera | Right stick | - |
 | Recenter the camera | Y | Rewind |
-| Attack (press again late in a swing to chain) | R1 or A | OK |
+| Attack (press again during a swing to chain) | R1 or A | OK |
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | L2 | Fast-forward |
 | Dodge (roll toward the stick, or step back) | B | Back or Replay |
@@ -20,7 +20,7 @@ Movement is relative to the camera, and the camera stays put until you move it.
 ## How it works
 
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
-- `ThirdPersonCamera.bs`: the chase camera. It sits 3.4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
+- `ThirdPersonCamera.bs`: the chase camera. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
 - `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks alternate between two identical animations because replaying the one already playing doesn't restart it.
 - `Scenes/FieldScene.bs`: the ground plane and the control hints.
 
