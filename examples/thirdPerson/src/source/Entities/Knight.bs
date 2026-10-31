@@ -1,5 +1,7 @@
 import "../World.bs"
 import "../ThirdPersonCamera.bs"
+import "../CombatDirector.bs"
+import "Fighter.bs"
 
 enum KnightState
   idle = "idle"
@@ -8,14 +10,16 @@ enum KnightState
   block = "block"
   parry = "parry"
   dodge = "dodge"
+  hurt = "hurt"
+  dead = "dead"
 end enum
 
 ' The player: Flare's male hero knight, re-rendered from its Blender sources by
 ' tools/render-knight.py (sprites/knight.png) and shown as a 16-direction oriented sprite. Moves relative to the
 ' camera and has light attacks (chained), a held block, a timed parry and a dodge.
-class Knight extends BGE.GameEntity
+class Knight extends Fighter
 
-  sprite as BGE.DrawableOrientedSprite
+  director as CombatDirector = invalid
   cameraRig as ThirdPersonCamera = invalid
   state as KnightState = KnightState.idle
   ' True during the middle of a dodge
@@ -33,9 +37,17 @@ class Knight extends BGE.GameEntity
   parrySeconds as float = 4 / 12.0
   dodgeSeconds as float = 0.4
   dodgeDistance as float = World.metres(4)
+  attackDamage as float = 25
+  attackReach as float = World.metres(1.6)
+  ' Either side of where he faces
+  attackHalfAngle as float = BGE.Math.PI * 0.4
+  ' Fraction of a hit the shield lets through
+  blockLeak as float = 0.2
+  hurtSeconds as float = 0.35
 
   private stateSeconds as float = 0
   private attackQueued as boolean = false
+  private attackLanded as boolean = false
   private dodgeDirection as BGE.Math.Vector = BGE.Math.VectorOps.create()
 
   ' Sheet layout: one row per direction in bucket order (front, then clockwise from above),
@@ -51,6 +63,8 @@ class Knight extends BGE.GameEntity
   override sub onCreate(args as roAssociativeArray)
     m.position = BGE.Math.VectorOps.create(args.x ?? 0, 0, args.z ?? 0)
     m.rotation = BGE.Math.VectorOps.create(0, args.heading ?? 0, 0)
+    m.director = args.director
+    m.director.setPlayer(m)
 
     m.sprite = m.addOrientedSprite("body", m.game.getBitmap("knight"), 92, 92, m.numDirections, 1, {
       drawMode: BGE.SceneObjectDrawMode.axisAligned
@@ -69,6 +83,9 @@ class Knight extends BGE.GameEntity
     m.sprite.addOrientedAnimation("parry", m.framesFor([19, 20, 20, 19]), m.frameRate, BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimation("roll", m.framesFor([4, 5, 6, 7, 8, 9, 10, 11]), m.frameRate)
     m.sprite.addOrientedAnimation("backstep", m.framesFor([11, 10, 9, 8, 7, 6, 5, 4]), m.frameRate)
+    ' There's no hit or death art, so these hold a frame and the colour does the rest
+    m.sprite.addOrientedAnimation("hurt", m.framesFor([19]), m.frameRate)
+    m.sprite.addOrientedAnimation("dead", m.framesFor([20]), m.frameRate)
     m.sprite.playOrientedAnimation("idle")
   end sub
 
@@ -90,7 +107,13 @@ class Knight extends BGE.GameEntity
     m.stateSeconds += dt
     move = m.cameraRelativeMove()
 
-    if m.state = KnightState.attack
+    if m.state = KnightState.dead
+      ' Waits for the scene to respawn him
+    else if m.state = KnightState.hurt
+      if m.stateSeconds >= m.hurtSeconds
+        m.setState(KnightState.idle)
+      end if
+    else if m.state = KnightState.attack
       m.updateAttack(dt, controls.isActionPressed("attack"))
     else if m.state = KnightState.parry
       if m.stateSeconds >= m.parrySeconds
@@ -118,6 +141,11 @@ class Knight extends BGE.GameEntity
       m.setState(KnightState.idle)
     end if
 
+    m.updateCombatEffects(dt)
+    if invalid <> m.director
+      m.director.separateBodies()
+    end if
+
     ' The camera follows after the knight has moved this frame
     if invalid <> m.cameraRig
       m.cameraRig.update(dt)
@@ -140,11 +168,6 @@ class Knight extends BGE.GameEntity
     return move
   end function
 
-  private sub moveBy(direction as BGE.Math.Vector, distance as float)
-    m.position.x += direction.x * distance
-    m.position.z += direction.z * distance
-  end sub
-
   ' `restart` re-enters the current state, e.g. to chain an attack.
   private sub setState(state as KnightState, restart = false as boolean)
     if m.state = state and not restart
@@ -164,6 +187,7 @@ class Knight extends BGE.GameEntity
       m.rotation.y = World.headingOf(move)
     end if
     m.attackQueued = false
+    m.attackLanded = false
     m.setState(KnightState.attack, true)
   end sub
 
@@ -175,6 +199,15 @@ class Knight extends BGE.GameEntity
     lungeSeconds = m.attackSeconds * 0.5
     if m.stateSeconds < lungeSeconds
       m.moveBy(World.headingForward(m.rotation.y), m.attackLunge * dt / lungeSeconds)
+    end if
+    ' The blade connects about halfway through the swing
+    if not m.attackLanded and m.stateSeconds >= m.attackSeconds * 0.45
+      m.attackLanded = true
+      if invalid <> m.director
+        for each target in m.director.enemiesInArc(m, m.attackReach, m.attackHalfAngle)
+          target.receiveHit(m.attackDamage, m)
+        end for
+      end if
     end if
     if m.stateSeconds >= m.attackSeconds
       if m.attackQueued
@@ -208,5 +241,43 @@ class Knight extends BGE.GameEntity
       m.setState(KnightState.idle)
     end if
   end sub
+
+  override function receiveHit(damage as float, attacker as Fighter) as HitResult
+    if not m.isAlive() or m.invulnerable
+      return HitResult.dodged
+    end if
+    if m.state = KnightState.parry and m.stateSeconds < m.parrySeconds and m.isFacing(attacker, BGE.Math.PI / 2)
+      attacker.parried()
+      return HitResult.parried
+    end if
+    if m.state = KnightState.block and m.isFacing(attacker, BGE.Math.PI * 0.45)
+      m.takeDamage(damage * m.blockLeak, attacker, World.metres(0.5))
+      result = HitResult.blocked
+    else
+      m.takeDamage(damage, attacker, World.metres(1))
+      result = HitResult.hit
+    end if
+    if not m.isAlive()
+      m.setState(KnightState.dead)
+    else if result = HitResult.hit
+      m.setState(KnightState.hurt, true)
+    end if
+    return result
+  end function
+
+  ' Back on his feet at full health.
+  sub respawn(x as float, z as float)
+    m.health = m.maxHealth
+    m.position = BGE.Math.VectorOps.create(x, 0, z)
+    m.knockback = BGE.Math.VectorOps.create()
+    m.setState(KnightState.idle)
+  end sub
+
+  protected override function restingColor() as integer
+    if m.state = KnightState.dead
+      return &h803030
+    end if
+    return &hFFFFFF
+  end function
 
 end class
