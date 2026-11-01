@@ -940,6 +940,30 @@ the live population; once reached, further spawns (continuous or `burst()`) are 
 dropped until a slot frees up via natural expiry - a safety net against a runaway or
 misconfigured emitter, not something you need to size exactly.
 
+The velocity spread only fans out in x/y. For a 3D spray, `burstCone()` fires particles in a
+cone around any direction, with optional upward lift:
+
+```brighterscript
+' 20 particles, up to 0.6 rad off the swing direction, 100 +/- 30 units/s, plus 80 +/- 20 up
+emitter.burstCone(20, swingDirection, 0.6, 100, 30, 80, 20)
+```
+
+For one-shot effects all over the world (hits, sparks, dust), add a `BGE.ParticleBurstPool`
+instead of an entity per effect. It reuses a few emitters, each moved to its burst, once the
+emitter's particles have faded:
+
+```brighterscript
+m.bursts = new BGE.ParticleBurstPool(m.game)
+m.game.addEntity(m.bursts)
+
+m.bursts.play(hitPoint, swingDirection, {
+  shape: BGE.ParticleShape.Rectangle, count: 18,
+  startColor: &h8A1010, endColor: &h8A1010, startSize: 10, endSize: 3,
+  lifetime: 0.5, spreadRadians: 0.6, speed: 100, speedSpread: 30, lift: 80,
+  acceleration: BGE.Math.VectorOps.create(0, -400, 0)
+})
+```
+
 ### Animated sprite-sheet particles (`shape = BGE.ParticleShape.Image`)
 
 A `BGE.ParticleShape.Image` emitter can optionally animate each particle through a sprite sheet
