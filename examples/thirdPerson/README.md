@@ -1,6 +1,6 @@
 # Third Person
 
-A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with lock-on. The map, stamina, ripostes and checkpoints come later.
+A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight. The map, stamina, ripostes and checkpoints come later.
 
 ## Playing
 
@@ -8,17 +8,16 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | --- | --- | --- |
 | Move (relative to the camera) | Left stick | D-pad |
 | Orbit the camera | Right stick | - |
-| Lock on, or recenter the camera if there's nothing to lock on to (press again to let go) | R3 or Y | Rewind |
-| Switch lock target | Right stick left/right | - |
+| Recenter the camera behind the knight | R3 or Y | Rewind |
 | Attack (press again during a swing to chain) | R1 or A | OK |
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | L2 | Fast-forward |
 | Dodge (roll toward the stick, or step back) | B | Back or Replay |
 | Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
 
-Movement is relative to the camera, and the camera stays put until you move it. While locked on, the camera keeps the target in front (just off to the side, so the knight doesn't hide it), the knight turns to face it whenever he isn't running, and his swings aim at it. If the target dies the lock moves to the next enemy in view.
+Movement is relative to the camera, and the camera stays put until you move it.
 
-Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. When the knight dies the field clears and he gets up again.
+Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. Hits spray blood (bone dust from the skeleton), and blocks and parries throw sparks. When the knight dies the field clears and he gets up again.
 
 ## How it works
 
@@ -26,9 +25,10 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 - `ThirdPersonCamera.bs`: the chase camera. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
 - `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
-- `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view) and picks lock-on targets.
+- `Entities/HitEffect.bs`: a one-off particle burst where a blow lands (blood, bone dust, block and parry sparks), using `DrawableParticles` with its particles made by hand so they fan out round the ground direction of the hit.
+- `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view).
 - `Entities/Enemy.bs`: a 16-direction monster, rendered like the knight, with a small AI. While it's waiting for an attack slot (or out of view) it circles the player; otherwise it closes in (straight, or flanking round to the player's side first) and attacks: wind-up, strike, recover, then either stays close or backs off. A hit knocks it back and, during the wind-up, interrupts it, after which it backs off; some enemies block hits from the front, and heavy ones shrug hits off.
-- `Entities/EnemyTypes.bs`: the three enemies, as data. Everything that makes one different (speed, health, weight, how it approaches, what it does after attacking, block chance, and the attack's range, reach, arc, timing, damage and lunge) is a field of `EnemyType`, so a new enemy is a new function here:
+- `Entities/EnemyTypes.bs`: the three enemies, as data. Everything that makes one different (size, blood colour, speed, health, weight, how it approaches, what it does after attacking, block chance, and the attack's range, reach, arc, timing, damage and lunge) is a field of `EnemyType`, so a new enemy is a new function here:
   - Skeleton: flanks, sometimes blocks, a quick sword swing.
   - Orc: quick, no armour; comes straight at you, chops, then backs off.
   - Heavy orc: slow and tough, blocks often, never flinches; a long wind-up and a heavy hit.
@@ -36,7 +36,7 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 
 ## Sprite sheets
 
-The knight and the monsters are re-rendered from Clint Bellanger's Flare Blender sources at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
+The knight and the monsters are re-rendered from Clint Bellanger's Flare Blender sources at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so `EnemyTypes.bs` draws them a little smaller (`scale`). Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
 
 | Sheet | Source | Frames per direction | Cell | Texture |
 | --- | --- | --- | --- | --- |
@@ -69,5 +69,4 @@ Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton
 - [ ] The four sheets take ~55 MB of texture memory, too much for HD devices (64 MB); trim them (fewer directions or frames, or split by animation once #386 lands).
 - [ ] Ground texture and the map.
 - [ ] Stamina, ripostes and backstabs, checkpoints.
-- [ ] A strafe walk for moving while locked on (he turns to run, for now).
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).
