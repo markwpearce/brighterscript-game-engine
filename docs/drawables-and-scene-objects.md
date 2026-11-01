@@ -218,8 +218,10 @@ builds one. Bucket 0 (of `numAngles`, default 8) is the entity's front facing th
 camera, and buckets increase clockwise as viewed from above; `numElevationBands`
 (default 1, meaning no vertical distinction) optionally adds a second axis for a sheet
 that also draws a distinct top-down or bottom-up view. Every bucket needs its own real
-art - there's no mirroring support (a negated-`scale.x` flip was tried and found not to
-render correctly through `directScaled`'s blit path; see the spec's Non-goals). See
+art, unless the character is roughly left/right symmetric: set `mirrorBuckets = true` before
+registering, give only buckets 0 (front) to `numAngles / 2` (back), and the other side draws
+the matching bucket flipped (via `scale.x`), nearly halving the sheet. Weapons and shields
+swap hands in the mirrored directions. See
 `examples/terrain`'s `Guard` entity for a runnable demo, and
 `specs/2026-09-22-oriented-sprite-billboards-design.md` for the full design.
 
