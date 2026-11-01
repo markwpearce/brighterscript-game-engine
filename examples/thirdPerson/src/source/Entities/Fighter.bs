@@ -1,0 +1,186 @@
+import "../World.bs"
+import "HitEffect.bs"
+
+enum HitResult
+  hit = "hit"
+  blocked = "blocked"
+  parried = "parried"
+  dodged = "dodged"
+end enum
+
+interface AttackArc
+  reach as float
+  ' Radians either side of where the attacker faces
+  halfAngle as float
+end interface
+
+' Anything that fights: the knight and the enemies. Each has health, a round body that others
+' can't walk through (see CombatDirector.separateBodies()), knockback and a hit flash.
+class Fighter extends BGE.GameEntity
+
+  sprite as BGE.DrawableOrientedSprite
+  maxHealth as float = 100
+  health as float = 100
+  bodyRadius as float = World.metres(0.4)
+  ' Where the health bar goes
+  height as float = World.metres(2)
+  ' When two bodies overlap the lighter one is pushed further
+  mass as float = 1
+  ' Set by CombatDirector.add()
+  combatId as integer = 0
+  ' What a hit sprays: blood, or bone dust
+  bloodColor as integer = &h8A1010
+
+  ' Sheet layout from tools/render-character.py: each direction's frames in order, front first
+  ' then clockwise from above
+  protected numDirections as integer = 16
+  protected framesPerDirection as integer = 1
+
+  ' Untyped: `as BGE.Math.Vector` here gives a bogus "Cannot find name 'Vector'" in bsc 1.0.0-alpha.57
+  protected knockback = BGE.Math.VectorOps.create()
+  protected flashSeconds as float = 0
+
+  ' Without its own constructor bsc 1.0.0-alpha.57 fails to transpile this class (GameEntity's inherited `args as roAssociativeArray`)
+  sub new(game as BGE.Game)
+    super(game)
+  end sub
+
+  function isAlive() as boolean
+    return m.health > 0
+  end function
+
+  ' Called by the attacker when a swing connects. Subclasses decide whether it's blocked,
+  ' parried or dodged.
+  function receiveHit(damage as float, attacker as Fighter) as HitResult
+    m.takeDamage(damage, attacker, World.metres(1))
+    return HitResult.hit
+  end function
+
+  ' Called when this fighter's strike is parried.
+  sub parried()
+  end sub
+
+  protected sub takeDamage(damage as float, attacker as Fighter, push as float)
+    m.health = BGE.Math.Max(0, m.health - damage)
+    m.flashSeconds = 0.15
+    m.pushAwayFrom(attacker, push)
+  end sub
+
+  ' A burst of particles on the side facing `attacker`, about chest high, sprayed away from it.
+  protected sub spray(style as HitEffectStyle, attacker as Fighter)
+    towardAttacker = m.directionTo(attacker)
+    position = BGE.Math.VectorOps.create(m.position.x + towardAttacker.x * m.bodyRadius, m.height * 0.55, m.position.z + towardAttacker.z * m.bodyRadius)
+    effect = new HitEffect(m.game)
+    m.game.addEntity(effect, {
+      position: position,
+      direction: BGE.Math.VectorOps.scale(towardAttacker, -1),
+      style: style
+    })
+  end sub
+
+  ' Shoves this fighter `distance` away from `other`, eased out over a moment. Heavier
+  ' fighters move less.
+  sub pushAwayFrom(other as Fighter, distance as float)
+    away = World.flatDirection(other.position, m.position)
+    m.knockback = BGE.Math.VectorOps.scale(away, distance * 6 / Sqr(m.mass))
+  end sub
+
+  ' Unit vector from this fighter toward `other`, on the ground.
+  function directionTo(other as Fighter) as BGE.Math.Vector
+    return World.flatDirection(m.position, other.position)
+  end function
+
+  function distanceTo(other as Fighter) as float
+    return World.flatDistance(m.position, other.position)
+  end function
+
+  ' True when `other` is within halfAngle radians either side of where this fighter faces.
+  function isFacing(other as Fighter, halfAngle as float) as boolean
+    heading = World.headingOf(m.directionTo(other))
+    return Abs(World.wrapAngle(heading - m.rotation.y)) <= halfAngle
+  end function
+
+  ' Knockback and the hit flash; call once per update.
+  protected sub updateCombatEffects(dt as float)
+    if BGE.Math.VectorOps.length(m.knockback) > 1
+      m.position.x += m.knockback.x * dt
+      m.position.z += m.knockback.z * dt
+      m.knockback = BGE.Math.VectorOps.scale(m.knockback, BGE.Math.Max(0, 1 - 10 * dt))
+    end if
+    if m.flashSeconds > 0
+      m.flashSeconds -= dt
+    end if
+    if invalid <> m.sprite
+      if m.flashSeconds > 0
+        m.sprite.color = &hFF5050
+      else
+        m.sprite.color = m.restingColor()
+      end if
+    end if
+  end sub
+
+  protected function restingColor() as integer
+    return &hFFFFFF
+  end function
+
+  ' The same frame columns for every direction bucket.
+  protected function framesFor(columns as integer[]) as integer[][]
+    buckets = []
+    for direction = 0 to m.numDirections - 1
+      frames = []
+      for each column in columns
+        frames.push(direction * m.framesPerDirection + column)
+      end for
+      buckets.push(frames)
+    end for
+    return buckets
+  end function
+
+  ' The swing in progress, or invalid. Drawn with the colliders.
+  protected function attackArc() as AttackArc
+    return invalid
+  end function
+
+  ' With collider drawing on (* toggles it), draws the body on the ground in green and any
+  ' swing in progress in red.
+  override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+    if not m.game.isDebugDrawingColliders()
+      return
+    end if
+    m.drawGroundArc(gameRenderer, m.bodyRadius, 0, 2 * BGE.Math.PI, &h40FF40FF, false)
+    arc = m.attackArc()
+    if invalid <> arc
+      m.drawGroundArc(gameRenderer, arc.reach, m.rotation.y - arc.halfAngle, m.rotation.y + arc.halfAngle, &hFF4040FF, true)
+    end if
+  end sub
+
+  ' An arc round this fighter's feet, from heading `fromAngle` to `toAngle`; a wedge if toCentre.
+  private sub drawGroundArc(gameRenderer as BGE.Renderer, radius as float, fromAngle as float, toAngle as float, color as integer, toCentre as boolean)
+    points = []
+    if toCentre
+      points.push(m.position)
+    end if
+    segments = 16
+    for i = 0 to segments
+      offset = BGE.Math.VectorOps.scale(World.headingForward(fromAngle + (toAngle - fromAngle) * i / segments), radius)
+      points.push(BGE.Math.VectorOps.create(m.position.x + offset.x, 0, m.position.z + offset.z))
+    end for
+    if toCentre
+      points.push(m.position)
+    end if
+    previous = invalid
+    for each point in points
+      canvasPoint = gameRenderer.worldPointToCanvasPoint(point)
+      if invalid <> previous and invalid <> canvasPoint
+        gameRenderer.drawLine(previous.x, previous.y, canvasPoint.x, canvasPoint.y, color)
+      end if
+      previous = canvasPoint
+    end for
+  end sub
+
+  protected sub moveBy(direction as BGE.Math.Vector, distance as float)
+    m.position.x += direction.x * distance
+    m.position.z += direction.z * distance
+  end sub
+
+end class

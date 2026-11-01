@@ -1,0 +1,182 @@
+import "World.bs"
+import "Entities/Fighter.bs"
+
+' Keeps track of who's fighting: the player, the enemies, and which enemies may attack right
+' now. Like a souls game, one enemy attacks at a time, with a breather between attacks, and
+' preferably from where the camera can see it; the rest wait their turn.
+class CombatDirector
+
+  player as Fighter = invalid
+  enemies as Fighter[] = []
+  maxAttackers as integer = 1
+  ' After an attack ends, nobody else may start one for this long
+  attackGapSeconds as float = 1.2
+  ' Where the camera looks (World heading), set each frame by the scene
+  viewHeading as float = 0
+  ' Enemies further than this either side of the view can't start an attack
+  viewHalfAngle as float = BGE.Math.PI * 0.45
+  ' After this long with nobody attacking, enemies out of view may attack too, so looking away
+  ' isn't a hiding place
+  offscreenAttackSeconds as float = 4
+
+  private nextCombatId as integer = 1
+  private gapSeconds as float = 0
+  private quietSeconds as float = 0
+  ' combatId -> true for each foe holding an attack slot
+  private attackers as roAssociativeArray = {}
+
+  sub add(combatant as Fighter)
+    combatant.combatId = m.nextCombatId
+    m.nextCombatId++
+  end sub
+
+  sub setPlayer(combatant as Fighter)
+    m.add(combatant)
+    m.player = combatant
+  end sub
+
+  sub addEnemy(combatant as Fighter)
+    m.add(combatant)
+    m.enemies.push(combatant)
+  end sub
+
+  ' Forgets an foe (e.g. once it has died); its body stops blocking.
+  sub removeEnemy(combatant as Fighter)
+    m.releaseAttack(combatant)
+    for i = m.enemies.Count() - 1 to 0 step -1
+      if m.enemies[i].combatId = combatant.combatId
+        m.enemies.Delete(i)
+      end if
+    end for
+  end sub
+
+  ' Removes every foe from the game.
+  sub clearEnemies()
+    for each foe in m.enemies
+      foe.invalidate()
+    end for
+    m.enemies = []
+    m.attackers = {}
+    m.gapSeconds = 0
+    m.quietSeconds = 0
+  end sub
+
+  sub update(dt as float)
+    if m.gapSeconds > 0
+      m.gapSeconds -= dt
+    end if
+    if m.attackers.Count() = 0
+      m.quietSeconds += dt
+    end if
+  end sub
+
+  ' True if `combatant` may start an attack now: a slot is free, and it's in view or the
+  ' player has gone unattacked for offscreenAttackSeconds.
+  function mayStartAttack(combatant as Fighter) as boolean
+    if not m.canAttack(combatant)
+      return false
+    end if
+    return m.isInView(combatant) or m.quietSeconds >= m.offscreenAttackSeconds
+  end function
+
+  ' True if `combatant` holds an attack slot, or one is free.
+  function canAttack(combatant as Fighter) as boolean
+    if m.attackers.DoesExist(combatant.combatId.toStr())
+      return true
+    end if
+    return m.attackers.Count() < m.maxAttackers and m.gapSeconds <= 0
+  end function
+
+  ' True when `combatant` is roughly where the camera looks, seen from the player.
+  function isInView(combatant as Fighter) as boolean
+    if invalid = m.player
+      return true
+    end if
+    return Abs(m.viewAngleOf(combatant)) <= m.viewHalfAngle
+  end function
+
+  ' Radians from the view heading to `combatant`, seen from the player; positive is to the right.
+  function viewAngleOf(combatant as Fighter) as float
+    return World.wrapAngle(World.headingOf(m.player.directionTo(combatant)) - m.viewHeading)
+  end function
+
+  ' Takes an attack slot if one is free. Release it with releaseAttack() when the attack is over.
+  function requestAttack(combatant as Fighter) as boolean
+    if not m.canAttack(combatant)
+      return false
+    end if
+    m.attackers[combatant.combatId.toStr()] = true
+    m.quietSeconds = 0
+    return true
+  end function
+
+  sub releaseAttack(combatant as Fighter)
+    if m.attackers.Delete(combatant.combatId.toStr())
+      m.gapSeconds = m.attackGapSeconds
+    end if
+  end sub
+
+  ' Living enemies within `reach` (plus their body radius) of `attacker` and within halfAngle
+  ' radians of where it faces.
+  function enemiesInArc(attacker as Fighter, reach as float, halfAngle as float) as Fighter[]
+    targets = []
+    for each foe in m.enemies
+      if foe.isAlive() and attacker.distanceTo(foe) <= reach + foe.bodyRadius and attacker.isFacing(foe, halfAngle)
+        targets.push(foe)
+      end if
+    end for
+    return targets
+  end function
+
+  ' Pushes overlapping bodies apart, so nobody walks through anybody else. The lighter body
+  ' moves further.
+  sub separateBodies()
+    bodies = []
+    if invalid <> m.player and m.player.isAlive()
+      bodies.push(m.player)
+    end if
+    for each foe in m.enemies
+      if foe.isAlive()
+        bodies.push(foe)
+      end if
+    end for
+    for i = 0 to bodies.Count() - 2
+      a = bodies[i]
+      for j = i + 1 to bodies.Count() - 1
+        b = bodies[j]
+        minDistance = a.bodyRadius + b.bodyRadius
+        dx = b.position.x - a.position.x
+        dz = b.position.z - a.position.z
+        if Abs(dx) < minDistance and Abs(dz) < minDistance
+          distance = Sqr(dx * dx + dz * dz)
+          if distance < minDistance
+            if distance < 0.001
+              dx = 1
+              dz = 0
+              distance = 1
+            end if
+            overlap = minDistance - distance
+            nx = dx / distance
+            nz = dz / distance
+            aShare = b.mass / (a.mass + b.mass)
+            a.position.x -= nx * overlap * aShare
+            a.position.z -= nz * overlap * aShare
+            b.position.x += nx * overlap * (1 - aShare)
+            b.position.z += nz * overlap * (1 - aShare)
+          end if
+        end if
+      end for
+    end for
+  end sub
+
+  function livingEnemyCount() as integer
+    count = 0
+    for each foe in m.enemies
+      if foe.isAlive()
+        count++
+      end if
+    end for
+    return count
+  end function
+
+end class

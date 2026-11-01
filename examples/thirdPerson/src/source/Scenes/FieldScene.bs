@@ -1,12 +1,26 @@
 import "../World.bs"
 import "../ThirdPersonCamera.bs"
 import "../Entities/Knight.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/EnemyTypes.bs"
+import "../CombatDirector.bs"
 
-' A flat night field to try out the knight's movement and actions.
+' A flat night field to try out the knight's movement and combat. Enemies keep spawning
+' 20-50 m away (a skeleton, an orc and a heavy orc in turn), up to maxEnemies at once.
 class FieldScene extends BGE.GameScene
 
   knight as Knight
   cameraRig as ThirdPersonCamera
+  director as CombatDirector = new CombatDirector()
+
+  maxEnemies as integer = 3
+  spawnIntervalSeconds as float = 8
+  respawnSeconds as float = 3
+
+  private enemyTypes as EnemyType[] = EnemyTypes.all()
+  private nextEnemyType as integer = 0
+  private spawnSeconds as float = 1
+  private deadSeconds as float = 0
 
   sub new(game as BGE.Game)
     super(game)
@@ -20,6 +34,11 @@ class FieldScene extends BGE.GameScene
     if m.game.Bitmaps["grass"] = invalid
       loader.loadBitmap("grass", "pkg:/sprites/grass.png")
     end if
+    for each enemyType in m.enemyTypes
+      if m.game.Bitmaps[enemyType.bitmap] = invalid
+        loader.loadBitmap(enemyType.bitmap, `pkg:/sprites/${enemyType.bitmap}.png`)
+      end if
+    end for
   end sub
 
   override sub onCreate(args as roAssociativeArray)
@@ -32,7 +51,7 @@ class FieldScene extends BGE.GameScene
     m.addDrawable("Ground", ground)
 
     player = new Knight(m.game)
-    m.game.addEntity(player, {x: 0, z: 0, heading: 0})
+    m.game.addEntity(player, {x: 0, z: 0, heading: 0, director: m.director})
     m.knight = player
 
     camera = m.game.canvas.renderer.camera as BGE.Camera3d
@@ -47,6 +66,7 @@ class FieldScene extends BGE.GameScene
       showingDebug = not m.game.isDebugUiEnabled()
       m.game.debugShowUi(showingDebug)
       m.game.debugDrawEntityDetails(showingDebug)
+      m.game.debugDrawColliders(showingDebug)
     end if
   end sub
 
@@ -54,16 +74,53 @@ class FieldScene extends BGE.GameScene
     if m.game.controls.isActionPressed("recenter")
       m.cameraRig.recenter()
     end if
+    m.director.viewHeading = m.cameraRig.heading
+    m.director.update(dt)
+    if m.knight.isAlive()
+      m.updateSpawner(dt)
+    else
+      ' Start over: full health, an empty field
+      m.deadSeconds += dt
+      if m.deadSeconds >= m.respawnSeconds
+        m.deadSeconds = 0
+        m.director.clearEnemies()
+        m.knight.respawn(0, 0)
+        m.spawnSeconds = 1
+      end if
+    end if
+  end sub
+
+  private sub updateSpawner(dt as float)
+    m.spawnSeconds -= dt
+    if m.spawnSeconds > 0
+      return
+    end if
+    m.spawnSeconds = m.spawnIntervalSeconds
+    if m.director.livingEnemyCount() >= m.maxEnemies
+      return
+    end if
+    heading = Rnd(0) * 2 * BGE.Math.PI
+    distance = World.metres(20 + Rnd(0) * 30)
+    offset = BGE.Math.VectorOps.scale(World.headingForward(heading), distance)
+    enemyType = m.enemyTypes[m.nextEnemyType]
+    m.nextEnemyType = (m.nextEnemyType + 1) mod m.enemyTypes.Count()
+    spawned = new Enemy(m.game)
+    m.game.addEntity(spawned, {
+      type: enemyType,
+      director: m.director,
+      x: m.knight.position.x + offset.x,
+      z: m.knight.position.z + offset.z
+    })
   end sub
 
   override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
     font = m.game.getFont("default")
     lines = [
       "Move: L stick / D-pad    Camera: R stick"
-      "Recenter: Y / Rewind    Debug: *"
+      "Recenter: R3 / Y / Rewind    Debug: *"
       "Attack: R1 / A / OK    Block (hold): L1 / Play"
       "Parry: L2 / Fast-fwd    Dodge: B / Back / Replay"
-      "State: " + m.knight.state
+      `State: ${m.knight.state}    Enemies: ${m.director.livingEnemyCount()}`
     ]
     ' The UI canvas is screen-sized; keep the hints inside the title-safe top edge
     center = uiRenderObj.getCanvasCenter()
@@ -73,6 +130,16 @@ class FieldScene extends BGE.GameScene
       uiRenderObj.DrawText(textLine, center.x, y, BGE.Colors.White, font, "center")
       y += lineHeight
     end for
+
+    ' Health bar, bottom left inside the action-safe area
+    barWidth = center.x * 0.6
+    barX = center.x * 2 * 0.07
+    barY = center.y * 2 * 0.9
+    uiRenderObj.drawRectangle(barX - 2, barY - 2, barWidth + 4, 18, &h000000C0)
+    uiRenderObj.drawRectangle(barX, barY, barWidth * m.knight.health / m.knight.maxHealth, 14, &hC02828FF)
+    if not m.knight.isAlive()
+      uiRenderObj.DrawText("YOU DIED", center.x, center.y, &hC02828FF, font, "center")
+    end if
   end sub
 
 end class
