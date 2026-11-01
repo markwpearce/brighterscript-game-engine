@@ -5,12 +5,17 @@
 #   Blender -b <converted>/steel_armor.blend --python tools/render-character.py -- \
 #     --character knight --parts <converted> --out src/sprites/knight.png [--directions 16] [--height 64] [--test]
 #
+# --packed trims every frame to its own pixels and packs them into sheets of at most
+# --sheet-size px (knight.png, knight_1.png, ...), with knight.json listing each frame's rect and
+# offset for BGE.SpriteFrames / Game.getSpriteFrames(). Much less texture than the grid.
+#
 # Cells are row-major, front first then clockwise viewed from above (DrawableOrientedSprite's
 # bucket order). Each direction's frames follow on from the last, wrapping at --columns
 # (default: one row per direction). Prints the cell size and feet anchor. Rendered frames are
 # kept next to the sheet (per character and height, but not colour: clear them after a
 # colour change), so a re-run only renders frames it doesn't have.
 import argparse
+import json
 import math
 import os
 import sys
@@ -96,6 +101,8 @@ def parse_args():
     p.add_argument("--elevation", type=float, default=12, help="camera degrees above horizontal")
     p.add_argument("--samples", type=int, default=24)
     p.add_argument("--test", action="store_true", help="render the first frame of every direction only")
+    p.add_argument("--packed", action="store_true", help="trim and pack frames, writing a .json frame list")
+    p.add_argument("--sheet-size", type=int, default=2048, help="largest packed sheet width/height")
     return p.parse_args(argv)
 
 
@@ -212,34 +219,92 @@ def load_rgba(path):
     return np.flipud(px.reshape(h, w, 4))
 
 
-def pack(paths, feet, out, columns, animations):
+def save_png(pixels, path):
+    h, w = pixels.shape[:2]
+    img = bpy.data.images.new("sheet", w, h, alpha=True)
+    img.pixels.foreach_set(np.flipud(pixels).ravel())
+    img.filepath_raw = path
+    img.file_format = "PNG"
+    img.save()
+    bpy.data.images.remove(img)
+
+
+def opaque_box(alpha):
+    ys, xs = np.nonzero(alpha > 0.03)
+    if len(ys) == 0:
+        return 0, 1, 0, 1
+    return ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+
+
+def pack(paths, feet, out, columns, animations, packed, sheet_size):
     cells = [load_rgba(p) for row in paths for p in row]
     # Drop the faint edge of the ground shadow, which otherwise pads every cell to the full render
     for cell in cells:
         cell[cell[:, :, 3] < 0.1] = 0
     per_direction = len(paths[0])
     alpha = np.max(np.stack([c[:, :, 3] for c in cells]), axis=0)
-    ys, xs = np.nonzero(alpha > 0.03)
-    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    y0, y1, x0, x1 = opaque_box(alpha)
     cw, ch = x1 - x0, y1 - y0
-    cols = columns or per_direction
-    rows = (len(cells) + cols - 1) // cols
-    sheet = np.zeros((rows * ch, cols * cw, 4), dtype=np.float32)
-    for i, cell in enumerate(cells):
-        r, c = divmod(i, cols)
-        sheet[r * ch:(r + 1) * ch, c * cw:(c + 1) * cw] = cell[y0:y1, x0:x1]
-    img = bpy.data.images.new("sheet", cols * cw, rows * ch, alpha=True)
-    img.pixels.foreach_set(np.flipud(sheet).ravel())
-    img.filepath_raw = out
-    img.file_format = "PNG"
-    img.save()
+    cells = [cell[y0:y1, x0:x1] for cell in cells]
     fx, fy = feet[0] - x0, feet[1] - y0
-    print("SHEET %s %dx%d cell %dx%d, %d directions x %d frames, %d columns, anchor (%.3f, %.3f), %.1f MB texture" % (
-        out, cols * cw, rows * ch, cw, ch, len(paths), per_direction, cols, fx / cw, fy / ch, cols * cw * rows * ch * 4 / 1048576))
+    if packed:
+        texture = pack_trimmed(cells, cw, ch, out, sheet_size)
+        print("PACKED %s cell %dx%d, %d directions x %d frames, anchor (%.3f, %.3f), %.1f MB texture" % (
+            out, cw, ch, len(paths), per_direction, fx / cw, fy / ch, texture / 1048576))
+    else:
+        cols = columns or per_direction
+        rows = (len(cells) + cols - 1) // cols
+        sheet = np.zeros((rows * ch, cols * cw, 4), dtype=np.float32)
+        for i, cell in enumerate(cells):
+            r, c = divmod(i, cols)
+            sheet[r * ch:(r + 1) * ch, c * cw:(c + 1) * cw] = cell
+        save_png(sheet, out)
+        print("SHEET %s %dx%d cell %dx%d, %d directions x %d frames, %d columns, anchor (%.3f, %.3f), %.1f MB texture" % (
+            out, cols * cw, rows * ch, cw, ch, len(paths), per_direction, cols, fx / cw, fy / ch, cols * cw * rows * ch * 4 / 1048576))
     offset = 0
     for name, fs in animations:
         print("ANIM %s frames %d-%d" % (name, offset, offset + len(fs) - 1))
         offset += len(fs)
+
+
+# Trims each cell to its opaque pixels and shelf-packs them, tallest first, into as many
+# sheet_size sheets as it takes. Writes the sheets and a .json frame list next to `out`, in
+# frame order. Returns the total texture bytes.
+def pack_trimmed(cells, cw, ch, out, sheet_size):
+    trimmed = []
+    for cell in cells:
+        ty0, ty1, tx0, tx1 = opaque_box(cell[:, :, 3])
+        trimmed.append((cell[ty0:ty1, tx0:tx1], int(tx0), int(ty0)))
+    placed = [None] * len(trimmed)
+    sheet, x, y, shelf = 0, 0, 0, 0
+    sizes = [[0, 0]]
+    for i in sorted(range(len(trimmed)), key=lambda k: -trimmed[k][0].shape[0]):
+        h, w = trimmed[i][0].shape[:2]
+        if x + w > sheet_size:
+            x, y, shelf = 0, y + shelf, 0
+        if y + h > sheet_size:
+            sheet, x, y, shelf = sheet + 1, 0, 0, 0
+            sizes.append([0, 0])
+        placed[i] = (sheet, x, y)
+        sizes[sheet] = [max(sizes[sheet][0], x + w), max(sizes[sheet][1], y + h)]
+        x, shelf = x + w, max(shelf, h)
+    base, _ = os.path.splitext(out)
+    sheets = [np.zeros((h, w, 4), dtype=np.float32) for w, h in sizes]
+    frames = []
+    for i, (pixels, ox, oy) in enumerate(trimmed):
+        s, px, py = placed[i]
+        h, w = pixels.shape[:2]
+        sheets[s][py:py + h, px:px + w] = pixels
+        frames.append({"sheet": s, "x": px, "y": py, "width": w, "height": h,
+                       "offsetX": ox, "offsetY": oy, "sourceWidth": int(cw), "sourceHeight": int(ch)})
+    names = []
+    for s, pixels in enumerate(sheets):
+        path = out if s == 0 else "%s_%d.png" % (base, s)
+        save_png(pixels, path)
+        names.append(os.path.basename(path))
+    with open(base + ".json", "w") as f:
+        json.dump({"sheets": names, "frames": frames}, f, separators=(",", ":"))
+    return sum(w * h * 4 for w, h in sizes)
 
 
 def main():
@@ -254,7 +319,7 @@ def main():
     frame_dir = os.path.join(os.path.dirname(out), "%s_%d_frames" % (args.character, args.height))
     os.makedirs(frame_dir, exist_ok=True)
     paths, feet = render_frames(sc, cam, args, character, frame_dir)
-    pack(paths, feet, out, args.columns, character["animations"])
+    pack(paths, feet, out, args.columns, character["animations"], args.packed, args.sheet_size)
 
 
 main()

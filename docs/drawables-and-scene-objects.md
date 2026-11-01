@@ -234,6 +234,26 @@ sheets = [m.game.getBitmap("walk"), m.game.getBitmap("attack")]
 sprite = m.addOrientedSprite("body", sheets, 128, 128)
 ```
 
+When many entities use the same sheet, ask the game for its frames instead of passing the bitmap.
+Every sprite made from them shares one set of regions, so spawning another enemy doesn't slice
+the sheet again:
+
+```brighterscript
+frames = m.game.getSpriteFrames("orc", 128, 128) ' cached until "orc" is unloaded
+sprite = m.addOrientedSprite("body", frames, 0, 0, 16)
+```
+
+A grid makes every cell as big as the biggest frame in any direction. A packed sheet stores each
+frame trimmed to its own pixels, with its rect and its offset inside the untrimmed cell, so it
+still lines up with the others. `setAnchor()` is measured on the untrimmed cell. The frames can
+come from a JSON atlas (`examples/thirdPerson/tools/render-character.py --packed` writes one):
+
+```brighterscript
+atlas = ParseJson(ReadAsciiFile("pkg:/sprites/orc.json"))
+frames = m.game.getSpriteFrames(["orc", "orc_1"], 0, 0, atlas.frames)
+' each frame: {sheet, x, y, width, height, offsetX, offsetY, sourceWidth, sourceHeight}
+```
+
 Playing the animation that's already playing keeps its place, so you can call it every frame, and
 so does turning to another direction of it.
 To replay a one-shot from its first frame, such as a second attack in a combo, pass `restart`:
