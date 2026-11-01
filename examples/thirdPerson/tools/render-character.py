@@ -8,7 +8,8 @@
 # Cells are row-major, front first then clockwise viewed from above (DrawableOrientedSprite's
 # bucket order). Each direction's frames follow on from the last, wrapping at --columns
 # (default: one row per direction). Prints the cell size and feet anchor. Rendered frames are
-# kept next to the sheet, so a re-run only renders frames it doesn't have.
+# kept next to the sheet (per character and height, but not colour: clear them after a
+# colour change), so a re-run only renders frames it doesn't have.
 import argparse
 import math
 import os
@@ -23,7 +24,11 @@ from mathutils import Vector
 # parts: objects from other files (object name -> file)
 # layers: which of the file's layers (now "Collection N") to render, if not all of them
 # hide: objects not to render
+# colours: material -> colour (linear RGB), replacing the base and texture colours convert-flare.py made
 # size: the camera's view in Blender units, enough for the widest swing
+# A darker, sickly green than the source's orange, with dark hair
+ORC_COLOURS = {"Material.skin": (0.2, 0.25, 0.12), "Material.hair": (0.06, 0.04, 0.025)}
+
 CHARACTERS = {
     "knight": {
         "animations": [
@@ -40,7 +45,7 @@ CHARACTERS = {
         "animations": [
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 14, 15, 16]),
+            ("attack", [13, 13.6, 14.2, 14.8, 15.4, 16]),
             ("block", [17]),
             ("hit", [19]),
             ("die", [21, 23, 25, 27]),
@@ -53,11 +58,12 @@ CHARACTERS = {
         "animations": [
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 14, 15, 16]),
+            ("attack", [13, 13.6, 14.2, 14.8, 15.4, 16]),
             ("hit", [17]),
             ("die", [19, 21, 23, 24]),
         ],
         "layers": ["1", "2"],
+        "colours": ORC_COLOURS,
         "size": 3.6,
     },
     # orc_flare_0.blend, layer 5: armour, shield and a bigger axe
@@ -66,12 +72,13 @@ CHARACTERS = {
         "animations": [
             ("idle", [1, 3]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 14, 15, 16]),
+            ("attack", [13, 13.6, 14.2, 14.8, 15.4, 16]),
             ("block", [30]),
             ("hit", [17]),
             ("die", [20, 24]),
         ],
         "layers": ["1", "5"],
+        "colours": ORC_COLOURS,
         "size": 3.6,
     },
 }
@@ -117,6 +124,18 @@ def choose_objects(character):
                 collection.hide_render = collection.name.split()[-1] not in layers
     for name in character.get("hide", []):
         bpy.data.objects[name].hide_render = True
+
+
+def recolour(character):
+    for name, colour in character.get("colours", {}).items():
+        for node in bpy.data.materials[name].node_tree.nodes:
+            if node.type == "RGB":
+                node.outputs["Color"].default_value = tuple(colour) + (1,)
+            elif node.type in ("MIX", "MIX_RGB"):
+                # Each texture's colour, mixed in over the base
+                for socket in node.inputs:
+                    if socket.type == "RGBA" and socket.name in ("B", "Color2") and not socket.is_linked:
+                        socket.default_value = tuple(colour) + (1,)
 
 
 def setup_scene(args, character):
@@ -229,9 +248,10 @@ def main():
     if character.get("parts"):
         add_parts(character["parts"], args.parts, bpy.data.objects["RenderPlatform"])
     choose_objects(character)
+    recolour(character)
     sc, cam = setup_scene(args, character)
     out = os.path.abspath(args.out)
-    frame_dir = os.path.join(os.path.dirname(out), "%s_frames" % args.character)
+    frame_dir = os.path.join(os.path.dirname(out), "%s_%d_frames" % (args.character, args.height))
     os.makedirs(frame_dir, exist_ok=True)
     paths, feet = render_frames(sc, cam, args, character, frame_dir)
     pack(paths, feet, out, args.columns, character["animations"])

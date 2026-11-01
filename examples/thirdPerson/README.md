@@ -36,14 +36,14 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 
 ## Sprite sheets
 
-The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so `EnemyTypes.bs` draws them a little smaller (`scale`). Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
+The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so they're rendered a little smaller (`--height 56`, or 58 for the heavy orc, against the knight's 64). The orcs' skin is recoloured a paler, sickly green with dark hair (`ORC_COLOURS` in the script), and the monsters' melee gets two in-between frames (6 in place of Flare's 4). Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
 
 | Sheet | Source | Frames per direction | Cell | Texture |
 | --- | --- | --- | --- | --- |
 | `knight.png` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield` | 21 | 92×92 | 10.8 MB |
-| `skeleton.png` | `skeleton_0.blend` | 22 | 128×86 | 14.8 MB |
-| `orc.png` | `orc_flare_0.blend`, layer 2 (hand axe) | 21 | 108×95 | 13.4 MB |
-| `orc_heavy.png` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 18 | 128×111 | 15.6 MB |
+| `skeleton.png` | `skeleton_0.blend` | 24 | 112×75 | 12.3 MB |
+| `orc.png` | `orc_flare_0.blend`, layer 2 (hand axe) | 23 | 100×83 | 11.7 MB |
+| `orc_heavy.png` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 20 | 116×101 | 14.3 MB |
 
 1. The sources are Blender 2.49 files, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
 
@@ -55,18 +55,18 @@ blender -b skeleton_0.blend --python tools/convert-flare.py -- <converted>/skele
 
 ```
 Blender -b <converted>/steel_armor.blend --python tools/render-character.py -- --character knight --parts <converted> --out <somewhere>/knight.png
-Blender -b <converted>/skeleton_0.blend --python tools/render-character.py -- --character skeleton --columns 16 --out <somewhere>/skeleton.png
-Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc --columns 18 --out <somewhere>/orc.png
-Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc-heavy --columns 16 --out <somewhere>/orc_heavy.png
+Blender -b <converted>/skeleton_0.blend --python tools/render-character.py -- --character skeleton --height 56 --columns 16 --out <somewhere>/skeleton.png
+Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc --height 56 --columns 16 --out <somewhere>/orc.png
+Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc-heavy --height 58 --columns 16 --out <somewhere>/orc_heavy.png
 ```
 
-The frames it renders are kept in a `<character>_frames` folder next to the sheet, so render outside `src/` and copy the sheet in.
+The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/` and copy the sheet in. They aren't keyed by colour, so clear them after changing `colours`.
 
 Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32.
 
 ## Still needed
 
-- [ ] The four sheets take ~55 MB of texture memory, too much for HD devices (64 MB); trim them (fewer directions or frames, or split by animation once #386 lands).
+- [ ] The four sheets take ~49 MB of texture memory, too much for HD devices (64 MB). Most of each cell is empty, so per-frame cell sizes ([#397](https://github.com/markwpearce/brighterscript-game-engine/issues/397)) would help most; or fewer directions or frames, or split by animation once #386 lands.
 - [ ] Ground texture and the map.
 - [ ] Stamina, ripostes and backstabs, checkpoints.
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).
