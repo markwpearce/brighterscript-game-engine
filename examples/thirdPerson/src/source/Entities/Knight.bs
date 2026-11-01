@@ -15,8 +15,9 @@ enum KnightState
 end enum
 
 ' The player: Flare's male hero knight, re-rendered from its Blender sources by
-' tools/render-knight.py (sprites/knight.png) and shown as a 16-direction oriented sprite. Moves relative to the
-' camera and has light attacks (chained), a held block, a timed parry and a dodge.
+' tools/render-character.py (sprites/knight.png) and shown as a 16-direction oriented sprite. Moves
+' relative to the camera and has light attacks (chained), a held block, a timed parry, a dodge
+' and lock-on.
 class Knight extends Fighter
 
   director as CombatDirector = invalid
@@ -25,11 +26,12 @@ class Knight extends Fighter
   ' True during the middle of a dodge
   invulnerable as boolean = false
 
-  runSpeed as float = World.metres(5)
+  runSpeed as float = World.metres(3.5)
   blockWalkSpeed as float = World.metres(1.5)
   turnSpeed as float = 12 ' radians/sec
   ' Animation rates; attack and parry last as long as their frames
   frameRate as integer = 12
+  runFrameRate as float = World.runFrameRate(World.metres(3.5))
   idleFrameRate as integer = 5
   attackFrameRate as integer = 24
   attackSeconds as float = 7 / 24.0
@@ -44,11 +46,15 @@ class Knight extends Fighter
   ' Fraction of a hit the shield lets through
   blockLeak as float = 0.2
   hurtSeconds as float = 0.35
+  ' Lock-on breaks when the target gets this much further away than lock range
+  lockBreakDistance as float = World.metres(20)
 
   private stateSeconds as float = 0
   private attackQueued as boolean = false
   private attackLanded as boolean = false
   private dodgeDirection as BGE.Math.Vector = BGE.Math.VectorOps.create()
+  ' The look stick has to return to centre between target switches
+  private switchArmed as boolean = true
 
   ' Sheet layout: one row per direction in bucket order (front, then clockwise from above),
   ' 21 frames per row: idle 0-3, run 4-11, attack 12-18, block 19-20.
@@ -70,14 +76,14 @@ class Knight extends Fighter
       drawMode: BGE.SceneObjectDrawMode.axisAligned
     })
     ' Stands upright and foreshortens as the camera looks down; full height at the 12
-    ' degrees render-knight.py renders from
+    ' degrees render-character.py renders from
     m.sprite.axisAlignedFullHeightPitch = 12
-    ' Anchor at the feet, as printed by render-knight.py. He's rendered 64 px tall, which
+    ' Anchor at the feet, as printed by render-character.py. He's rendered 64 px tall, which
     ' is already 2 m at 32 units per metre.
     m.sprite.setAnchor(0.5, 0.857)
 
     m.sprite.addOrientedAnimation("idle", m.framesFor([0, 1, 2, 3]), m.idleFrameRate, BGE.SpritePlayMode.PingPong)
-    m.sprite.addOrientedAnimation("run", m.framesFor([4, 5, 6, 7, 8, 9, 10, 11]), m.frameRate)
+    m.sprite.addOrientedAnimation("run", m.framesFor([4, 5, 6, 7, 8, 9, 10, 11]), m.runFrameRate)
     m.sprite.addOrientedAnimation("attack", m.framesFor([12, 13, 14, 15, 16, 17, 18]), m.attackFrameRate, BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimation("block", m.framesFor([20]), m.frameRate)
     m.sprite.addOrientedAnimation("parry", m.framesFor([19, 20, 20, 19]), m.frameRate, BGE.SpritePlayMode.Forward)
@@ -105,6 +111,7 @@ class Knight extends Fighter
   override sub onUpdate(dt as float)
     controls = m.game.controls
     m.stateSeconds += dt
+    m.updateLockOn(controls)
     move = m.cameraRelativeMove()
 
     if m.state = KnightState.dead
@@ -129,7 +136,8 @@ class Knight extends Fighter
       m.setState(KnightState.parry)
     else if controls.isActionHeld("block")
       m.setState(KnightState.block)
-      ' Walk slowly behind the shield without turning
+      ' Walk slowly behind the shield without turning (except to keep facing a lock target)
+      m.faceLockTarget(dt)
       m.moveBy(move, m.blockWalkSpeed * dt)
     else if BGE.Math.VectorOps.length(move) > 0.25
       ' Always full speed: there's only a run animation, so slower would slide the feet
@@ -139,6 +147,7 @@ class Knight extends Fighter
       m.moveBy(direction, m.runSpeed * dt)
     else
       m.setState(KnightState.idle)
+      m.faceLockTarget(dt)
     end if
 
     m.updateCombatEffects(dt)
@@ -182,8 +191,10 @@ class Knight extends Fighter
   end sub
 
   private sub startAttack(move as BGE.Math.Vector)
-    ' A stick direction aims the swing
-    if BGE.Math.VectorOps.length(move) > 0.3
+    ' Swings at the lock target, or where the stick points
+    if invalid <> m.lockTarget
+      m.rotation.y = World.headingOf(m.directionTo(m.lockTarget))
+    else if BGE.Math.VectorOps.length(move) > 0.3
       m.rotation.y = World.headingOf(move)
     end if
     m.attackQueued = false
@@ -242,6 +253,56 @@ class Knight extends Fighter
     end if
   end sub
 
+  ' Lock-on (R3 / Rewind): locks on to the enemy nearest the middle of the view, or recentres
+  ' the camera if there isn't one; pressed again it lets go. Flicking the look stick left or
+  ' right switches target. If the target dies the lock moves to the next one in view.
+  private sub updateLockOn(controls as BGE.Controller.ControlMap)
+    if invalid <> m.lockTarget
+      if not m.lockTarget.isAlive() or m.distanceTo(m.lockTarget) > m.lockBreakDistance
+        m.lockTarget = invalid
+        if invalid <> m.director
+          m.lockTarget = m.director.bestLockTarget()
+        end if
+      end if
+    end if
+    if controls.isActionPressed("lockOn")
+      if invalid <> m.lockTarget
+        m.lockTarget = invalid
+      else if invalid <> m.director
+        m.lockTarget = m.director.bestLockTarget()
+      end if
+      if invalid = m.lockTarget and invalid <> m.cameraRig
+        m.cameraRig.recenter()
+      end if
+    end if
+    if invalid <> m.lockTarget
+      look = controls.getRawAxis("look")
+      if Abs(look.x) < 0.3
+        m.switchArmed = true
+      else if m.switchArmed and Abs(look.x) > 0.7
+        m.switchArmed = false
+        side = 1
+        if look.x < 0
+          side = -1
+        end if
+        nextTarget = m.director.nextLockTarget(m.lockTarget, side)
+        if invalid <> nextTarget
+          m.lockTarget = nextTarget
+        end if
+      end if
+    end if
+    if invalid <> m.cameraRig
+      m.cameraRig.lockTarget = m.lockTarget
+    end if
+  end sub
+
+  ' Turns toward the lock target, if there is one.
+  private sub faceLockTarget(dt as float)
+    if invalid <> m.lockTarget
+      m.rotation.y = World.turnToward(m.rotation.y, World.headingOf(m.directionTo(m.lockTarget)), m.turnSpeed * dt)
+    end if
+  end sub
+
   override function receiveHit(damage as float, attacker as Fighter) as HitResult
     if not m.isAlive() or m.invulnerable
       return HitResult.dodged
@@ -265,9 +326,17 @@ class Knight extends Fighter
     return result
   end function
 
+  protected override function attackArc() as roAssociativeArray
+    if m.state = KnightState.attack
+      return {reach: m.attackReach, halfAngle: m.attackHalfAngle}
+    end if
+    return invalid
+  end function
+
   ' Back on his feet at full health.
   sub respawn(x as float, z as float)
     m.health = m.maxHealth
+    m.lockTarget = invalid
     m.position = BGE.Math.VectorOps.create(x, 0, z)
     m.knockback = BGE.Math.VectorOps.create()
     m.setState(KnightState.idle)

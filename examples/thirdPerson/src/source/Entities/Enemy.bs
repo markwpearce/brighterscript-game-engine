@@ -18,6 +18,17 @@ enum EnemyAfterAttack
   retreat = "retreat"
 end enum
 
+' Sheet columns for each animation (the same in every direction's row)
+interface EnemyFrames
+  idle as integer[]
+  run as integer[]
+  windup as integer[]
+  strike as integer[]
+  guard as integer[]
+  hit as integer[]
+  die as integer[]
+end interface
+
 interface EnemyAttack
   ' Starts the wind-up when the player is this close
   range as float
@@ -38,13 +49,16 @@ end interface
 ' Everything that makes one kind of enemy different from another; see EnemyTypes.
 interface EnemyType
   name as string
-  ' Bitmap name, and its cell size and feet anchor as printed by tools/prepare-sheet.js
+  ' Bitmap name, and its cell size, feet anchor and frames per direction as printed by
+  ' tools/render-character.py
   bitmap as string
   cellWidth as integer
   cellHeight as integer
   anchorX as float
   anchorY as float
-  ' Where the health bar goes
+  framesPerDirection as integer
+  frames as EnemyFrames
+  ' Where the health bar and lock-on marker go
   height as float
   maxHealth as float
   bodyRadius as float
@@ -58,8 +72,11 @@ interface EnemyType
   waitDistance as float
   ' Chance of blocking a hit taken from the front while not attacking
   blockChance as float
-  ' A hit during the wind-up (or while moving) interrupts it for this long; the strike can't be interrupted
+  ' A hit during the wind-up (or while moving) interrupts it for this long; the strike can't be
+  ' interrupted. 0 shrugs hits off.
   flinchSeconds as float
+  ' After flinching, backs away from the player for this long
+  backOffSeconds as float
   ' How long a parry leaves it open
   staggerSeconds as float
   attack as EnemyAttack
@@ -78,8 +95,8 @@ enum EnemyState
   dead = "dead"
 end enum
 
-' A monster from one of Flare's 8-direction sheets (prepared by tools/prepare-sheet.js), with
-' a simple AI set up by its EnemyType.
+' A monster rendered from Flare's Blender sources by tools/render-character.py (16 directions,
+' like the knight), with a simple AI set up by its EnemyType.
 class Enemy extends Fighter
 
   type as EnemyType
@@ -93,11 +110,10 @@ class Enemy extends Fighter
   private circleSeconds as float = 0
   private strikeLanded as boolean = false
   private staggerDuration as float = 0
+  private retreatDuration as float = 0
   private animation as string = ""
 
-  ' Prepared Flare sheets keep columns 0-23: stance 0-3, run 4-11, melee 12-15, block 16-17,
-  ' hit and die 18-23. Rows face l, ul, u, ur, r, dr, d, dl.
-  private framesPerDirection as integer = 24
+  private numDirections as integer = 16
 
   sub new(game as BGE.Game)
     super(game)
@@ -113,42 +129,51 @@ class Enemy extends Fighter
     m.health = m.type.maxHealth
     m.bodyRadius = m.type.bodyRadius
     m.mass = m.type.mass
+    m.height = m.type.height
     m.circleDirection = m.randomSign()
     m.position = BGE.Math.VectorOps.create(args.x ?? 0, 0, args.z ?? 0)
     m.rotation = BGE.Math.VectorOps.create(0, 0, 0)
     m.director.addEnemy(m)
 
-    m.sprite = m.addOrientedSprite("body", m.game.getBitmap(m.type.bitmap), m.type.cellWidth, m.type.cellHeight, 8, 1, {
+    m.sprite = m.addOrientedSprite("body", m.game.getBitmap(m.type.bitmap), m.type.cellWidth, m.type.cellHeight, m.numDirections, 1, {
       drawMode: BGE.SceneObjectDrawMode.axisAligned
     })
-    ' Flare's sheets are rendered from an isometric camera
-    m.sprite.axisAlignedFullHeightPitch = 30
+    ' Rendered from the same 12 degrees as the knight, at the same scale
+    m.sprite.axisAlignedFullHeightPitch = 12
     m.sprite.setAnchor(m.type.anchorX, m.type.anchorY)
 
     attack = m.type.attack
-    m.sprite.addOrientedAnimation("idle", m.framesFor([0, 1, 2, 3]), 5, BGE.SpritePlayMode.PingPong)
-    m.sprite.addOrientedAnimation("run", m.framesFor([4, 5, 6, 7, 8, 9, 10, 11]), 12)
-    m.sprite.addOrientedAnimation("windup", m.framesFor([12, 13]), 2 / attack.windupSeconds, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("strike", m.framesFor([14, 15]), 2 / attack.strikeSeconds, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("guard", m.framesFor([16, 17]), 8, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("hit", m.framesFor([18, 19]), 8, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("die", m.framesFor([18, 19, 20, 21, 22, 23]), 10, BGE.SpritePlayMode.Forward)
+    frames = m.type.frames
+    m.sprite.addOrientedAnimation("idle", m.framesFor(frames.idle), 5, BGE.SpritePlayMode.PingPong)
+    m.sprite.addOrientedAnimation("run", m.framesFor(frames.run), World.runFrameRate(m.type.speed))
+    m.sprite.addOrientedAnimation("backpedal", m.framesFor(m.reversed(frames.run)), World.runFrameRate(m.type.speed * 0.6))
+    m.sprite.addOrientedAnimation("windup", m.framesFor(frames.windup), frames.windup.Count() / attack.windupSeconds, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("strike", m.framesFor(frames.strike), frames.strike.Count() / attack.strikeSeconds, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("guard", m.framesFor(frames.guard), 8, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("hit", m.framesFor(frames.hit), 8, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("die", m.framesFor(frames.die), 8, BGE.SpritePlayMode.Forward)
     m.play("idle")
   end sub
 
-  ' The same frame columns for every direction bucket. Bucket 0 is the front (Flare's "d"
-  ' row), then clockwise from above: dr, r, ur, u, ul, l, dl.
+  ' The same frame columns for every direction bucket; the sheet has one row per bucket.
   private function framesFor(columns as integer[]) as integer[][]
     buckets = []
-    for bucket = 0 to 7
-      row = (14 - bucket) mod 8
+    for row = 0 to m.numDirections - 1
       frames = []
       for each column in columns
-        frames.push(row * m.framesPerDirection + column)
+        frames.push(row * m.type.framesPerDirection + column)
       end for
       buckets.push(frames)
     end for
     return buckets
+  end function
+
+  private function reversed(columns as integer[]) as integer[]
+    result = []
+    for i = columns.Count() - 1 to 0 step -1
+      result.push(columns[i])
+    end for
+    return result
   end function
 
   override sub onUpdate(dt as float)
@@ -169,7 +194,7 @@ class Enemy extends Fighter
       if m.stateSeconds >= attack.recoverSeconds
         m.director.releaseAttack(m)
         if m.type.afterAttack = EnemyAfterAttack.retreat
-          m.setState(EnemyState.retreat, "run")
+          m.backOff(m.type.retreatSeconds)
         else
           m.setState(EnemyState.approach, "idle")
         end if
@@ -180,7 +205,11 @@ class Enemy extends Fighter
       end if
     else if m.state = EnemyState.stagger
       if m.stateSeconds >= m.staggerDuration
-        m.setState(EnemyState.approach, "idle")
+        if m.type.backOffSeconds > 0
+          m.backOff(m.type.backOffSeconds)
+        else
+          m.setState(EnemyState.approach, "idle")
+        end if
       end if
     else
       m.think(dt)
@@ -200,14 +229,14 @@ class Enemy extends Fighter
     m.turnToward(player, dt)
 
     if m.state = EnemyState.retreat
-      if m.stateSeconds < m.type.retreatSeconds
-        m.moveBy(toPlayer, -m.type.speed * dt)
+      if m.stateSeconds < m.retreatDuration
+        m.moveBy(toPlayer, -m.type.speed * 0.6 * dt)
         return
       end if
       m.setState(EnemyState.approach, "run")
     end if
 
-    if not m.director.canAttack(m)
+    if not m.director.canAttack(m) or not m.director.isInView(m)
       ' Someone else's turn: circle at a distance
       m.setState(EnemyState.circle, "run")
       m.circle(dt, player, m.type.waitDistance, m.nextCircleDirection(dt))
@@ -215,8 +244,8 @@ class Enemy extends Fighter
     end if
 
     reach = m.type.attack.range + player.bodyRadius
-    if m.type.approach = EnemyApproach.flank and m.flankSeconds < 3 and distance < World.metres(6) and player.isFacing(m, BGE.Math.PI * 0.4)
-      ' Work round toward the player's back before closing in
+    if m.type.approach = EnemyApproach.flank and m.flankSeconds < 2 and distance < World.metres(6) and player.isFacing(m, BGE.Math.PI * 0.25)
+      ' Work round toward the player's side before closing in
       m.flankSeconds += dt
       m.setState(EnemyState.flank, "run")
       m.circle(dt, player, reach, m.flankDirection(player))
@@ -224,6 +253,7 @@ class Enemy extends Fighter
     end if
 
     if distance <= reach
+      m.setState(EnemyState.approach, "idle")
       if m.director.requestAttack(m)
         m.flankSeconds = 0
         m.setState(EnemyState.windup, "windup")
@@ -254,7 +284,7 @@ class Enemy extends Fighter
     return m.circleDirection
   end function
 
-  ' Whichever way round the player gets toward their back.
+  ' Whichever way round the player is shorter to their side.
   private function flankDirection(player as Fighter) as float
     relative = World.wrapAngle(World.headingOf(player.directionTo(m)) - player.rotation.y)
     ' Moving with direction 1 goes counter-clockwise round the player in heading terms
@@ -289,10 +319,10 @@ class Enemy extends Fighter
       m.pushAwayFrom(attacker, World.metres(0.3))
       return HitResult.blocked
     end if
-    m.takeDamage(damage, attacker, World.metres(0.6))
+    m.takeDamage(damage, attacker, World.metres(1.2))
     if not m.isAlive()
       m.die()
-    else if m.state <> EnemyState.strike and m.state <> EnemyState.stagger
+    else if m.state <> EnemyState.strike and m.state <> EnemyState.stagger and m.type.flinchSeconds > 0
       ' The strike itself can't be interrupted
       m.stagger(m.type.flinchSeconds)
     end if
@@ -307,6 +337,13 @@ class Enemy extends Fighter
     m.director.releaseAttack(m)
     m.staggerDuration = seconds
     m.setState(EnemyState.stagger, "hit")
+  end sub
+
+  ' Backpedals away from the player for a moment, giving up its turn to attack.
+  private sub backOff(seconds as float)
+    m.director.releaseAttack(m)
+    m.retreatDuration = seconds
+    m.setState(EnemyState.retreat, "backpedal")
   end sub
 
   private sub die()
@@ -350,9 +387,22 @@ class Enemy extends Fighter
     return 1
   end function
 
-  ' A health bar over its head once it's been hurt.
+  protected override function attackArc() as roAssociativeArray
+    if m.state = EnemyState.windup or m.state = EnemyState.strike
+      return {reach: m.type.attack.reach, halfAngle: m.type.attack.arcDegrees * BGE.Math.PI / 180}
+    end if
+    return invalid
+  end function
+
+  private function isLockTarget() as boolean
+    player = m.director.player
+    return invalid <> player and invalid <> player.lockTarget and player.lockTarget.combatId = m.combatId
+  end function
+
+  ' A health bar over its head once it's been hurt, or while it's locked on to.
   override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
-    if not m.isAlive() or m.health >= m.maxHealth
+    super.onDrawEnd(gameRenderer, uiRenderer)
+    if not m.isAlive() or (m.health >= m.maxHealth and not m.isLockTarget())
       return
     end if
     top = gameRenderer.worldPointToCanvasPoint(BGE.Math.VectorOps.create(m.position.x, m.type.height, m.position.z))

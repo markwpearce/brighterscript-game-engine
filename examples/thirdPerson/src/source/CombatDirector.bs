@@ -2,14 +2,24 @@ import "World.bs"
 import "Entities/Fighter.bs"
 
 ' Keeps track of who's fighting: the player, the enemies, and which enemies may attack right
-' now. Like a souls game, only a couple of enemies attack at once; the rest wait their turn.
+' now. Like a souls game, one enemy attacks at a time, with a breather between attacks, and
+' only from where the camera can see it; the rest wait their turn.
 class CombatDirector
 
   player as Fighter = invalid
   enemies as Fighter[] = []
-  maxAttackers as integer = 2
+  maxAttackers as integer = 1
+  ' After an attack ends, nobody else may start one for this long
+  attackGapSeconds as float = 1.2
+  ' Where the camera looks (World heading), set each frame by the scene
+  viewHeading as float = 0
+  ' Enemies further than this either side of the view can't start an attack
+  viewHalfAngle as float = BGE.Math.PI * 0.45
+  ' Lock-on reaches this far, and breaks a bit further out
+  lockDistance as float = World.metres(15)
 
   private nextCombatId as integer = 1
+  private gapSeconds as float = 0
   ' combatId -> true for each foe holding an attack slot
   private attackers as roAssociativeArray = {}
 
@@ -45,11 +55,34 @@ class CombatDirector
     end for
     m.enemies = []
     m.attackers = {}
+    m.gapSeconds = 0
+  end sub
+
+  sub update(dt as float)
+    if m.gapSeconds > 0
+      m.gapSeconds -= dt
+    end if
   end sub
 
   ' True if `combatant` holds an attack slot, or one is free.
   function canAttack(combatant as Fighter) as boolean
-    return m.attackers.DoesExist(combatant.combatId.toStr()) or m.attackers.Count() < m.maxAttackers
+    if m.attackers.DoesExist(combatant.combatId.toStr())
+      return true
+    end if
+    return m.attackers.Count() < m.maxAttackers and m.gapSeconds <= 0
+  end function
+
+  ' True when `combatant` is roughly where the camera looks, seen from the player.
+  function isInView(combatant as Fighter) as boolean
+    if invalid = m.player
+      return true
+    end if
+    return Abs(m.viewAngleOf(combatant)) <= m.viewHalfAngle
+  end function
+
+  ' Radians from the view heading to `combatant`, seen from the player; positive is to the right.
+  function viewAngleOf(combatant as Fighter) as float
+    return World.wrapAngle(World.headingOf(m.player.directionTo(combatant)) - m.viewHeading)
   end function
 
   ' Takes an attack slot if one is free. Release it with releaseAttack() when the attack is over.
@@ -62,8 +95,47 @@ class CombatDirector
   end function
 
   sub releaseAttack(combatant as Fighter)
-    m.attackers.Delete(combatant.combatId.toStr())
+    if m.attackers.Delete(combatant.combatId.toStr())
+      m.gapSeconds = m.attackGapSeconds
+    end if
   end sub
+
+  ' The living enemy within lock range nearest the middle of the view, or invalid.
+  function bestLockTarget() as Fighter
+    best = invalid
+    bestScore = 0
+    for each foe in m.enemies
+      distance = m.player.distanceTo(foe)
+      angle = Abs(m.viewAngleOf(foe))
+      if foe.isAlive() and distance <= m.lockDistance and angle <= m.viewHalfAngle
+        ' Mostly by angle; distance breaks ties between enemies in a line
+        score = angle + distance / m.lockDistance * 0.3
+        if invalid = best or score < bestScore
+          best = foe
+          bestScore = score
+        end if
+      end if
+    end for
+    return best
+  end function
+
+  ' The next enemy in lock range to the right (side 1) or left (side -1) of `current`, as the
+  ' camera sees them, or invalid.
+  function nextLockTarget(current as Fighter, side as float) as Fighter
+    currentAngle = m.viewAngleOf(current)
+    best = invalid
+    bestOffset = 0
+    for each foe in m.enemies
+      if foe.isAlive() and foe.combatId <> current.combatId and m.player.distanceTo(foe) <= m.lockDistance
+        offset = World.wrapAngle(m.viewAngleOf(foe) - currentAngle) * side
+        if offset > 0 and (invalid = best or offset < bestOffset)
+          best = foe
+          bestOffset = offset
+        end if
+      end if
+    end for
+    return best
+  end function
 
   ' Living enemies within `reach` (plus their body radius) of `attacker` and within halfAngle
   ' radians of where it faces.
