@@ -1,4 +1,4 @@
-# Renders a character from Clint Bellanger's Flare Blender sources into an oriented sprite
+# Renders a character from the Flare Blender sources (see CREDITS.md) into an oriented sprite
 # sheet for the third-person camera. Run with Blender 5.x, after re-saving the 2.49 sources in
 # Blender 2.79 (newer Blender drops their animation):
 #

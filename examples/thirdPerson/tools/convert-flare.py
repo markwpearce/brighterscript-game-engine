@@ -1,4 +1,4 @@
-# Re-saves one of Clint Bellanger's Flare Blender 2.49 sources so Blender 5 can render it
+# Re-saves one of the Flare Blender 2.49 sources (see CREDITS.md) so Blender 5 can render it
 # with tools/render-character.py. Run with Blender 2.79 (newer Blender drops 2.49 animation):
 #
 #   blender -b skeleton_0.blend --python tools/convert-flare.py -- <converted>/skeleton_0.blend

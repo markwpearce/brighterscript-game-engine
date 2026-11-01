@@ -36,7 +36,7 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 
 ## Sprite sheets
 
-The knight and the monsters are re-rendered from Clint Bellanger's Flare Blender sources at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so `EnemyTypes.bs` draws them a little smaller (`scale`). Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
+The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so `EnemyTypes.bs` draws them a little smaller (`scale`). Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
 
 | Sheet | Source | Frames per direction | Cell | Texture |
 | --- | --- | --- | --- | --- |
