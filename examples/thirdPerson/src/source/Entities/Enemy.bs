@@ -29,6 +29,18 @@ interface EnemyFrames
   die as integer[]
 end interface
 
+' EnemyFrames expanded to every direction, ready for addOrientedAnimation()
+interface EnemyFrameTables
+  idle as integer[][]
+  run as integer[][]
+  backpedal as integer[][]
+  windup as integer[][]
+  strike as integer[][]
+  guard as integer[][]
+  hit as integer[][]
+  die as integer[][]
+end interface
+
 interface EnemyAttack
   ' Starts the wind-up when the player is this close
   range as float
@@ -58,6 +70,8 @@ interface EnemyType
   anchorY as float
   framesPerDirection as integer
   frames as EnemyFrames
+  ' Filled in by the first Enemy of this type
+  optional frameTables as EnemyFrameTables
   ' Where the health bar goes
   height as float
   ' What a hit sprays
@@ -115,8 +129,6 @@ class Enemy extends Fighter
   private retreatDuration as float = 0
   private animation as string = ""
 
-  private numDirections as integer = 16
-
   sub new(game as BGE.Game)
     super(game)
     m.name = "Enemy"
@@ -133,6 +145,7 @@ class Enemy extends Fighter
     m.mass = m.type.mass
     m.height = m.type.height
     m.bloodColor = m.type.bloodColor
+    m.framesPerDirection = m.type.framesPerDirection
     m.circleDirection = m.randomSign()
     m.position = BGE.Math.VectorOps.create(args.x ?? 0, 0, args.z ?? 0)
     m.rotation = BGE.Math.VectorOps.create(0, 0, 0)
@@ -147,28 +160,35 @@ class Enemy extends Fighter
 
     attack = m.type.attack
     frames = m.type.frames
-    m.sprite.addOrientedAnimation("idle", m.framesFor(frames.idle), 5, BGE.SpritePlayMode.PingPong)
-    m.sprite.addOrientedAnimation("run", m.framesFor(frames.run), World.runFrameRate(m.type.speed))
-    m.sprite.addOrientedAnimation("backpedal", m.framesFor(m.reversed(frames.run)), World.runFrameRate(m.type.speed * 0.6))
-    m.sprite.addOrientedAnimation("windup", m.framesFor(frames.windup), frames.windup.Count() / attack.windupSeconds, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("strike", m.framesFor(frames.strike), frames.strike.Count() / attack.strikeSeconds, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("guard", m.framesFor(frames.guard), 8, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("hit", m.framesFor(frames.hit), 8, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("die", m.framesFor(frames.die), 8, BGE.SpritePlayMode.Forward)
+    tables = m.frameTables()
+    m.sprite.addOrientedAnimation("idle", tables.idle, 5, BGE.SpritePlayMode.PingPong)
+    m.sprite.addOrientedAnimation("run", tables.run, World.runFrameRate(m.type.speed))
+    m.sprite.addOrientedAnimation("backpedal", tables.backpedal, World.runFrameRate(m.type.speed * 0.6))
+    ' Finishes just inside the windup and strike, so the swing lines up with its timing
+    m.sprite.addOrientedAnimation("windup", tables.windup, World.frameRateWithin(frames.windup.Count(), attack.windupSeconds), BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("strike", tables.strike, World.frameRateWithin(frames.strike.Count(), attack.strikeSeconds), BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("guard", tables.guard, 8, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("hit", tables.hit, 8, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("die", tables.die, 8, BGE.SpritePlayMode.Forward)
     m.play("idle")
   end sub
 
-  ' The same frame columns for every direction bucket; the sheet has one row per bucket.
-  private function framesFor(columns as integer[]) as integer[][]
-    buckets = []
-    for row = 0 to m.numDirections - 1
-      frames = []
-      for each column in columns
-        frames.push(row * m.type.framesPerDirection + column)
-      end for
-      buckets.push(frames)
-    end for
-    return buckets
+  ' Every animation's per-direction frames, built once per EnemyType and shared by its enemies.
+  private function frameTables() as EnemyFrameTables
+    if invalid = m.type.frameTables
+      frames = m.type.frames
+      m.type.frameTables = {
+        idle: m.framesFor(frames.idle),
+        run: m.framesFor(frames.run),
+        backpedal: m.framesFor(m.reversed(frames.run)),
+        windup: m.framesFor(frames.windup),
+        strike: m.framesFor(frames.strike),
+        guard: m.framesFor(frames.guard),
+        hit: m.framesFor(frames.hit),
+        die: m.framesFor(frames.die)
+      }
+    end if
+    return m.type.frameTables
   end function
 
   private function reversed(columns as integer[]) as integer[]
@@ -239,8 +259,9 @@ class Enemy extends Fighter
       m.setState(EnemyState.approach, "run")
     end if
 
-    if not m.director.canAttack(m) or not m.director.isInView(m)
-      ' Someone else's turn: circle at a distance
+    if not m.director.mayStartAttack(m)
+      ' Someone else's turn: circle at a distance, and flank afresh next turn
+      m.flankSeconds = 0
       m.setState(EnemyState.circle, "run")
       m.circle(dt, player, m.type.waitDistance, m.nextCircleDirection(dt))
       return
@@ -340,6 +361,7 @@ class Enemy extends Fighter
 
   private sub stagger(seconds as float)
     m.director.releaseAttack(m)
+    m.flankSeconds = 0
     m.staggerDuration = seconds
     m.setState(EnemyState.stagger, "hit")
   end sub
@@ -347,6 +369,7 @@ class Enemy extends Fighter
   ' Backpedals away from the player for a moment, giving up its turn to attack.
   private sub backOff(seconds as float)
     m.director.releaseAttack(m)
+    m.flankSeconds = 0
     m.retreatDuration = seconds
     m.setState(EnemyState.retreat, "backpedal")
   end sub
@@ -392,7 +415,7 @@ class Enemy extends Fighter
     return 1
   end function
 
-  protected override function attackArc() as roAssociativeArray
+  protected override function attackArc() as AttackArc
     if m.state = EnemyState.windup or m.state = EnemyState.strike
       return {reach: m.type.attack.reach, halfAngle: m.type.attack.arcDegrees * BGE.Math.PI / 180}
     end if
