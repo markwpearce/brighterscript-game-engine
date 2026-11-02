@@ -1,0 +1,178 @@
+import "pkg:/source/engine/loading/AssetLoader.bs"
+import "pkg:/source/engine/loading/AssetLoaderDownloads.spec.bs"
+import "pkg:/source/engine/loading/SpriteAtlas.bs"
+import "pkg:/source/engine/loading/TextureLoader.spec.bs"
+
+namespace tests
+
+  @suite("BGE.AssetLoader sprite atlases")
+  class AssetLoaderSpriteAtlasTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as tests.ServedAssetLoader
+    textureLoader as tests.FakeTextureLoader
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.textureLoader = new tests.FakeTextureLoader()
+      m.game.textureLoader = m.textureLoader
+      m.loader = new tests.ServedAssetLoader(m.game)
+      CreateObject("roFileSystem").CreateDirectory("tmp:/bge_atlas")
+      tests.writeAtlasSheet("tmp:/bge_atlas/hero.png", 8, 4)
+      tests.writeAtlasSheet("tmp:/bge_atlas/hero_1.png", 6, 2)
+      WriteAsciiFile("tmp:/bge_atlas/hero.json", tests.atlasJson())
+    end function
+
+    @describe("loadSpriteAtlas")
+
+    @it("loads the json and every sheet, relative to the json")
+    function _()
+      m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(2, m.textureLoader.requests.count())
+      m.assertEqual("tmp:/bge_atlas/hero.png", m.textureLoader.requests[0].path)
+      m.assertEqual("tmp:/bge_atlas/hero_1.png", m.textureLoader.requests[1].path)
+      m.assertEqual(8, m.game.getBitmap("hero#0").GetWidth())
+      m.assertEqual(6, m.game.getBitmap("hero#1").GetWidth())
+    end function
+
+    @it("gives frames for every sheet, shared between calls")
+    function _()
+      m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json")
+      tests.runLoader(m.loader)
+      frames = m.game.getSpriteAtlasFrames("hero")
+      m.assertNotInvalid(frames)
+      m.assertEqual(2, frames.sheets.count())
+      m.assertEqual(3, frames.frames.count())
+      m.assertEqual(1, frames.frames[2].sheet)
+      ' marks this instance, to tell whether the next call returns it
+      frames.cellWidth = 42
+      again = m.game.getSpriteAtlasFrames("hero")
+      m.assertEqual(42, again.cellWidth)
+    end function
+
+    @it("doesn't load sheets again for the same atlas")
+    function _()
+      m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json")
+      tests.runLoader(m.loader)
+      m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(2, m.textureLoader.requests.count())
+      m.assertNotInvalid(m.game.getSpriteAtlasFrames("hero"))
+    end function
+
+    @it("fails when the json is missing")
+    function _()
+      task = m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/missing.json")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertTrue(task.error.Instr("sprite atlas not found: tmp:/bge_atlas/missing.json") >= 0)
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+    end function
+
+    @it("fails when the json isn't an atlas")
+    function _()
+      WriteAsciiFile("tmp:/bge_atlas/bad.json", "{""sheets"": [""hero.png""]}")
+      task = m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/bad.json")
+      tests.runLoader(m.loader)
+      m.assertTrue(task.error.Instr("has no ""frames"" list") >= 0)
+      m.assertEqual(0, m.textureLoader.requests.count())
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+    end function
+
+    @it("fails, naming the sheet, when a sheet is missing")
+    function _()
+      CreateObject("roFileSystem").Delete("tmp:/bge_atlas/hero_1.png")
+      task = m.loader.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertTrue(task.error.Instr("sprite atlas hero") >= 0)
+      m.assertTrue(task.error.Instr("hero_1.png") >= 0)
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+      m.assertInvalid(m.game.getSpriteAtlasFrames("hero"))
+    end function
+
+    @it("downloads a URL's json and its sheets, relative to the URL")
+    function _()
+      m.loader.files["https://example.com/art/hero.json"] = "tmp:/bge_atlas/hero.json"
+      m.loader.files["https://example.com/art/hero.png"] = "tmp:/bge_atlas/hero.png"
+      m.loader.files["https://example.com/art/hero_1.png"] = "tmp:/bge_atlas/hero_1.png"
+      m.loader.loadSpriteAtlas("hero", "https://example.com/art/hero.json")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(3, m.loader.requested.count())
+      m.assertEqual("https://example.com/art/hero_1.png", m.loader.requested[2])
+      atlas = m.game.getSpriteAtlas("hero")
+      m.assertEqual("https://example.com/art/hero.png", atlas.sheetPaths[0])
+      m.assertNotInvalid(m.game.getSpriteAtlasFrames("hero"))
+    end function
+
+    @it("fails when a URL's sheet download fails")
+    function _()
+      m.loader.files["https://example.com/art/hero.json"] = "tmp:/bge_atlas/hero.json"
+      m.loader.files["https://example.com/art/hero.png"] = "tmp:/bge_atlas/hero.png"
+      task = m.loader.loadSpriteAtlas("hero", "https://example.com/art/hero.json")
+      tests.runLoader(m.loader)
+      m.assertTrue(task.error.Instr("404") >= 0)
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+    end function
+
+    @describe("Game")
+
+    @it("loads an atlas synchronously")
+    function _()
+      m.assertTrue(m.game.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json"))
+      m.assertEqual(8, m.game.getBitmap("hero#0").GetWidth())
+      m.assertEqual(3, m.game.getSpriteAtlasFrames("hero").frames.count())
+    end function
+
+    @it("doesn't load a URL synchronously")
+    function _()
+      m.assertFalse(m.game.loadSpriteAtlas("hero", "https://example.com/art/hero.json"))
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+    end function
+
+    @it("fails synchronously when a sheet is missing")
+    function _()
+      CreateObject("roFileSystem").Delete("tmp:/bge_atlas/hero_1.png")
+      m.assertFalse(m.game.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json"))
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+    end function
+
+    @it("gives no frames for an atlas that isn't loaded")
+    function _()
+      m.assertInvalid(m.game.getSpriteAtlasFrames("nobody"))
+    end function
+
+    @it("unloads an atlas and its sheets")
+    function _()
+      m.game.loadSpriteAtlas("hero", "tmp:/bge_atlas/hero.json")
+      m.game.unloadSpriteAtlas("hero")
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+      m.assertInvalid(m.game.Bitmaps["hero#0"])
+      m.assertInvalid(m.game.Bitmaps["hero#1"])
+    end function
+
+  end class
+
+  ' Writes a blank PNG of the given size.
+  sub writeAtlasSheet(path as string, width as integer, height as integer)
+    bitmap = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+    bitmap.GetPng(0, 0, width, height).WriteFile(path)
+  end sub
+
+  ' An atlas of two sheets: two frames on the first, one on the second.
+  function atlasJson() as string
+    return FormatJson({
+      sheets: ["hero.png", "hero_1.png"],
+      frames: [
+        {sheet: 0, x: 0, y: 0, width: 4, height: 4, offsetX: 1, offsetY: 0, sourceWidth: 6, sourceHeight: 4},
+        {sheet: 0, x: 4, y: 0, width: 4, height: 4},
+        {sheet: 1, x: 0, y: 0, width: 6, height: 2}
+      ]
+    })
+  end function
+
+end namespace

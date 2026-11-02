@@ -1,13 +1,28 @@
-# Renders a character from the Flare Blender sources (see CREDITS.md) into an oriented sprite
-# sheet for the third-person camera. Run with Blender 5.x, after re-saving the 2.49 sources in
-# Blender 2.79 (newer Blender drops their animation):
+# Renders an animated Blender character into an oriented sprite sheet (BGE.DrawableOrientedSprite)
+# for a third-person camera: every frame from every direction on a turntable, from a fixed camera
+# angle. Run with Blender 5.x:
 #
-#   Blender -b <converted>/steel_armor.blend --python tools/render-character.py -- \
-#     --character knight --parts <converted> --out src/sprites/knight.png [--directions 16] [--height 64] [--test]
+#   Blender -b <character>.blend --python tools/render-character.py -- \
+#     --config <game>/tools/characters.py --character knight --out <somewhere>/knight.png \
+#     [--parts <folder>] [--directions 16] [--height 64] [--packed] [--mirror] [--test]
+#
+# --config is a Python file defining CHARACTERS, a dict of character name -> settings. It can
+# call inbetweens(start, end, count), which this script provides.
+#   animations: [(animation, source action frames)]; fractional frames are in-betweens
+#   size: the camera's view in Blender units, enough for the widest swing
+#   parts (optional): objects from other files (object name -> file in --parts)
+#   layers (optional): which of the file's layers ("Collection N") to render, if not all of them
+#   hide (optional): objects not to render
+#   colours (optional): material -> colour (linear RGB), replacing its RGB node and texture colours
+#   platform (optional): the turntable object the character stands on (default "RenderPlatform")
+#   lamp (optional): the key light (default "Lamp"; a sun is added if the file has none)
+# An object with a material named "ShadowCatcher" catches the ground shadow.
+# See examples/thirdPerson/tools/characters.py.
 #
 # --packed trims every frame to its own pixels and packs them into sheets of at most
 # --sheet-size px (knight.png, knight_1.png, ...), with knight.json listing each frame's rect and
-# offset for BGE.SpriteFrames / Game.getSpriteFrames(). Much less texture than the grid.
+# offset, for AssetLoader.loadSpriteAtlas() and Game.getSpriteAtlasFrames(). Much less texture
+# than the grid.
 # --mirror renders only the front-to-back half (9 of 16 directions) for
 # DrawableOrientedSprite.mirrorBuckets, which draws the other side flipped.
 #
@@ -20,6 +35,7 @@ import argparse
 import json
 import math
 import os
+import runpy
 import sys
 
 import bpy
@@ -27,88 +43,35 @@ import numpy as np
 from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Vector
 
-# animations: (animation, source action frames); fractional frames are in-betweens of the 2.49 keys
-# parts: objects from other files (object name -> file)
-# layers: which of the file's layers (now "Collection N") to render, if not all of them
-# hide: objects not to render
-# colours: material -> colour (linear RGB), replacing the base and texture colours convert-flare.py made
-# size: the camera's view in Blender units, enough for the widest swing
-# Grey-green skin (renders at about #9AAE93; the lighting brightens it) in place of the source's orange, with dark hair
-ORC_COLOURS = {"Material.skin": (0.18, 0.22, 0.146), "Material.hair": (0.06, 0.04, 0.025)}
-
 
 def inbetweens(start, end, count):
     """count frames evenly spaced from start to end, both included"""
     return [round(start + (end - start) * i / (count - 1), 3) for i in range(count)]
 
 
-# The melee's four keys (13-16) with four in-betweens
-MONSTER_ATTACK = inbetweens(13, 16, 8)
-
-CHARACTERS = {
-    "knight": {
-        "animations": [
-            ("idle", [1, 2, 3, 4]),
-            ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", inbetweens(13, 16, 9)),
-            ("block", [17, 18]),
-        ],
-        "parts": {"MaleHead1": "male_head1.blend", "Longsword": "longsword.blend", "HeavyShield": "shield.blend"},
-        "size": 2.6,
-    },
-    # skeleton_0.blend
-    "skeleton": {
-        "animations": [
-            ("idle", [1, 2, 3, 4]),
-            ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", MONSTER_ATTACK),
-            ("block", [17]),
-            ("hit", [19]),
-            ("die", [21, 23, 25, 27]),
-        ],
-        "hide": ["KingdomCrossbow"],
-        "size": 3.6,
-    },
-    # orc_flare_0.blend, layer 2: hand axe, no armour
-    "orc": {
-        "animations": [
-            ("idle", [1, 2, 3, 4]),
-            ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", MONSTER_ATTACK),
-            ("hit", [17]),
-            ("die", [19, 21, 23, 24]),
-        ],
-        "layers": ["1", "2"],
-        "colours": ORC_COLOURS,
-        "size": 3.6,
-    },
-    # orc_flare_0.blend, layer 5: armour, shield and a bigger axe
-    # Its overhead swing makes its frames big, so it keeps fewer idle and die frames to save texture memory
-    "orc-heavy": {
-        "animations": [
-            ("idle", [1, 3]),
-            ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", MONSTER_ATTACK),
-            ("block", [30]),
-            ("hit", [17]),
-            ("die", [20, 24]),
-        ],
-        "layers": ["1", "5"],
-        "colours": ORC_COLOURS,
-        "size": 3.6,
-    },
-}
+def load_characters(path):
+    """The CHARACTERS dict from a --config file"""
+    characters = runpy.run_path(path, init_globals={"inbetweens": inbetweens}).get("CHARACTERS")
+    if not isinstance(characters, dict) or not characters:
+        sys.exit("%s doesn't define a CHARACTERS dict" % path)
+    for name, character in characters.items():
+        missing = [key for key in ("animations", "size") if key not in character]
+        if missing:
+            sys.exit("%s: character %s has no %s" % (path, name, ", ".join(missing)))
+    return characters
 
 
 def parse_args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     p = argparse.ArgumentParser()
-    p.add_argument("--character", required=True, choices=sorted(CHARACTERS))
-    p.add_argument("--parts", help="folder with the converted parts files, for characters that have them")
+    p.add_argument("--config", required=True, help="Python file defining CHARACTERS")
+    p.add_argument("--character", required=True)
+    p.add_argument("--parts", help="folder with the parts files, for characters that have them")
     p.add_argument("--out", required=True)
     p.add_argument("--directions", type=int, default=16)
     p.add_argument("--columns", type=int, default=0, help="cells per sheet row (default: a row per direction)")
-    p.add_argument("--height", type=int, default=64, help="pixels per 1.8 Blender units (the knight's height)")
+    p.add_argument("--height", type=int, default=64, help="pixels per --reference-height Blender units")
+    p.add_argument("--reference-height", type=float, default=1.8, help="Blender units that --height pixels cover (e.g. the hero's height)")
     p.add_argument("--elevation", type=float, default=12, help="camera degrees above horizontal")
     p.add_argument("--samples", type=int, default=24)
     p.add_argument("--test", action="store_true", help="render the first frame of every direction only")
@@ -157,6 +120,14 @@ def recolour(character):
                         socket.default_value = tuple(colour) + (1,)
 
 
+def find_platform(character):
+    name = character.get("platform", "RenderPlatform")
+    platform = bpy.data.objects.get(name)
+    if platform is None:
+        sys.exit("No turntable object named %s to stand the character on (set 'platform' in the config)" % name)
+    return platform
+
+
 def setup_scene(args, character):
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"
@@ -177,7 +148,10 @@ def setup_scene(args, character):
     bg.inputs["Color"].default_value = (0.55, 0.6, 0.7, 1)
     bg.inputs["Strength"].default_value = 1.2
 
-    lamp = bpy.data.objects["Lamp"]
+    lamp = bpy.data.objects.get(character.get("lamp", "Lamp"))
+    if lamp is None:
+        lamp = bpy.data.objects.new("RenderLamp", bpy.data.lights.new("RenderLamp", "SUN"))
+        sc.collection.objects.link(lamp)
     lamp.data.energy = 4.5
 
     cam = sc.camera
@@ -191,13 +165,12 @@ def setup_scene(args, character):
     cam.rotation_euler = (math.pi / 2 - el, 0, 0)
     # Light from the camera's upper left, so every direction is lit the same way
     lamp.rotation_euler = (math.radians(50), 0, math.radians(-35))
-    pixels = int(round(args.height * cam.data.ortho_scale / 1.8))
+    pixels = int(round(args.height * cam.data.ortho_scale / args.reference_height))
     sc.render.resolution_x = sc.render.resolution_y = pixels
     return sc, cam
 
 
-def render_frames(sc, cam, args, character, frame_dir):
-    platform = bpy.data.objects["RenderPlatform"]
+def render_frames(sc, cam, args, character, frame_dir, platform):
     frames = [f for _, fs in character["animations"] for f in fs]
     if args.test:
         frames = frames[:1]
@@ -322,17 +295,24 @@ def pack_trimmed(cells, cw, ch, out, sheet_size):
 
 def main():
     args = parse_args()
-    character = CHARACTERS[args.character]
+    characters = load_characters(args.config)
+    if args.character not in characters:
+        sys.exit("No character %s in %s (it has %s)" % (args.character, args.config, ", ".join(sorted(characters))))
+    character = characters[args.character]
+    platform = find_platform(character)
     if character.get("parts"):
-        add_parts(character["parts"], args.parts, bpy.data.objects["RenderPlatform"])
+        if not args.parts:
+            sys.exit("Character %s needs --parts, the folder with its parts files" % args.character)
+        add_parts(character["parts"], args.parts, platform)
     choose_objects(character)
     recolour(character)
     sc, cam = setup_scene(args, character)
     out = os.path.abspath(args.out)
     frame_dir = os.path.join(os.path.dirname(out), "%s_%d_frames" % (args.character, args.height))
     os.makedirs(frame_dir, exist_ok=True)
-    paths, feet = render_frames(sc, cam, args, character, frame_dir)
+    paths, feet = render_frames(sc, cam, args, character, frame_dir, platform)
     pack(paths, feet, out, args.columns, character["animations"], args.packed, args.sheet_size)
 
 
-main()
+if __name__ == "__main__":
+    main()
