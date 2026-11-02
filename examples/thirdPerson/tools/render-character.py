@@ -35,15 +35,22 @@ from mathutils import Vector
 # size: the camera's view in Blender units, enough for the widest swing
 # Grey-green skin (renders at about #9AAE93; the lighting brightens it) in place of the source's orange, with dark hair
 ORC_COLOURS = {"Material.skin": (0.18, 0.22, 0.146), "Material.hair": (0.06, 0.04, 0.025)}
+
+
+def inbetweens(start, end, count):
+    """count frames evenly spaced from start to end, both included"""
+    return [round(start + (end - start) * i / (count - 1), 3) for i in range(count)]
+
+
 # The melee's four keys (13-16) with four in-betweens
-MONSTER_ATTACK = [13, 13.43, 13.86, 14.29, 14.71, 15.14, 15.57, 16]
+MONSTER_ATTACK = inbetweens(13, 16, 8)
 
 CHARACTERS = {
     "knight": {
         "animations": [
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 13.375, 13.75, 14.125, 14.5, 14.875, 15.25, 15.625, 16]),
+            ("attack", inbetweens(13, 16, 9)),
             ("block", [17, 18]),
         ],
         "parts": {"MaleHead1": "male_head1.blend", "Longsword": "longsword.blend", "HeavyShield": "shield.blend"},
@@ -76,7 +83,7 @@ CHARACTERS = {
         "size": 3.6,
     },
     # orc_flare_0.blend, layer 5: armour, shield and a bigger axe
-    # Its overhead swing makes the frames big, so it has fewer of them
+    # Its overhead swing makes its frames big, so it keeps fewer idle and die frames to save texture memory
     "orc-heavy": {
         "animations": [
             ("idle", [1, 3]),
