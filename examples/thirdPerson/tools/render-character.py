@@ -8,6 +8,8 @@
 # --packed trims every frame to its own pixels and packs them into sheets of at most
 # --sheet-size px (knight.png, knight_1.png, ...), with knight.json listing each frame's rect and
 # offset for BGE.SpriteFrames / Game.getSpriteFrames(). Much less texture than the grid.
+# --mirror renders only the front-to-back half (9 of 16 directions) for
+# DrawableOrientedSprite.mirrorBuckets, which draws the other side flipped.
 #
 # Cells are row-major, front first then clockwise viewed from above (DrawableOrientedSprite's
 # bucket order). Each direction's frames follow on from the last, wrapping at --columns
@@ -102,6 +104,7 @@ def parse_args():
     p.add_argument("--samples", type=int, default=24)
     p.add_argument("--test", action="store_true", help="render the first frame of every direction only")
     p.add_argument("--packed", action="store_true", help="trim and pack frames, writing a .json frame list")
+    p.add_argument("--mirror", action="store_true", help="render front to back only (directions / 2 + 1), for DrawableOrientedSprite.mirrorBuckets")
     p.add_argument("--sheet-size", type=int, default=2048, help="largest packed sheet width/height")
     return p.parse_args(argv)
 
@@ -190,7 +193,8 @@ def render_frames(sc, cam, args, character, frame_dir):
     if args.test:
         frames = frames[:1]
     paths = []
-    for d in range(args.directions):
+    rendered = args.directions // 2 + 1 if args.mirror else args.directions
+    for d in range(rendered):
         # The character faces the camera at 0; turning it counter-clockwise puts the camera
         # clockwise round from its front, which is bucket d
         platform.rotation_euler = (0, 0, math.radians(d * 360.0 / args.directions))

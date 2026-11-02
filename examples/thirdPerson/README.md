@@ -60,7 +60,7 @@ Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- -
 Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc-heavy --height 58 --columns 16 --out <somewhere>/orc_heavy.png
 ```
 
-Add `--packed` to trim each frame and pack them into sheets of at most `--sheet-size` (2048) px, with a `.json` frame list for `Game.getSpriteFrames()`. The sheets in `src/sprites` are still grids.
+Add `--packed` to trim each frame and pack them into sheets of at most `--sheet-size` (2048) px, with a `.json` frame list for `Game.getSpriteFrames()`. Add `--mirror` to render only the front-to-back half of the directions, for `DrawableOrientedSprite.mirrorBuckets`. The sheets in `src/sprites` are still full grids.
 
 The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/` and copy the sheet in. They aren't keyed by colour, so clear them after changing `colours`.
 
