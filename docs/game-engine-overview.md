@@ -318,6 +318,57 @@ camera.follow(playerEntity)
 never a frame behind. `setBounds()` stops the view showing past the level's edges (and centres a
 level that's smaller than the screen); it also applies to plain `setTarget()` calls.
 
+## Melee combat helpers
+
+A few small pieces cover what most melee games redo by hand. `examples/thirdPerson` uses all
+three.
+
+**Did the swing land?** `BGE.Math.isWithinArc()` tests a ground-plane wedge (heights ignored,
+heading 0 faces -z), the same shape `Renderer.drawWorldArc()` draws for debugging. The optional
+last argument is the target's body radius, added to the reach:
+
+```
+if BGE.Math.isWithinArc(m.position, m.rotation.y, foe.position, swingReach, swingHalfAngle, foe.bodyRadius)
+  foe.takeHit(damage)
+end if
+
+' Debug view of the same swing
+renderer.drawWorldArc(m.position, swingReach, m.rotation.y - swingHalfAngle, m.rotation.y + swingHalfAngle, BGE.Colors.Red, true)
+```
+
+**Who may attack?** `BGE.TokenPool` is the "attack token" pattern: at most `maxHolders` ids hold a
+token, and after a release nobody can take one for `cooldownSeconds`, so enemies take turns rather
+than piling in. Ids are strings or integers (`GameEntity.id` works), never the objects themselves:
+
+```
+m.attackTokens = new BGE.TokenPool(1, 1.2) ' one attacker, 1.2s between attacks
+m.attackTokens.update(dt)                  ' once per frame
+
+' In an enemy:
+if inRange and m.attackTokens.request(m.id)
+  m.startAttack()
+end if
+m.attackTokens.release(m.id)               ' when the attack ends, or it dies
+```
+
+`idleSeconds()` is how long nobody has held a token, e.g. to let an enemy out of view attack
+once the player has had a long enough break.
+
+**Health bars.** `Renderer.drawWorldBar()` draws a screen-aligned bar with its bottom-centre on a
+world point, in RGBA colours like the other `Renderer.draw*` calls. The fraction is clamped to
+0..1, the fill is inset by a border (1px by default) of the background colour, and nothing is
+drawn when the point is behind the camera:
+
+```
+override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+  head = BGE.Math.VectorOps.create(m.position.x, m.height, m.position.z)
+  gameRenderer.drawWorldBar(head, 42, 6, m.health / m.maxHealth, &hD03030FF, &h000000C0)
+end sub
+```
+
+The size is in canvas pixels, so the bar stays the same size at any distance.
+`examples/rendererTest`'s `combat-helpers` demo shows the bars and the arc test together.
+
 ## The game loop
 
 `Game.Play()` runs one main loop. Every frame goes through six steps, always in this order:

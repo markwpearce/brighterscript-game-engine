@@ -9,9 +9,8 @@ class CombatDirector
   bursts as BGE.ParticleBurstPool = invalid
   player as Fighter = invalid
   enemies as Fighter[] = []
-  maxAttackers as integer = 1
-  ' After an attack ends, nobody else may start one for this long
-  attackGapSeconds as float = 1.2
+  ' Attack slots: one at a time, and after an attack ends nobody else may start one for a while
+  attackTokens as BGE.TokenPool = new BGE.TokenPool(1, 1.2)
   ' Where the camera looks (World heading), set each frame by the scene
   viewHeading as float = 0
   ' Enemies further than this either side of the view can't start an attack
@@ -21,10 +20,6 @@ class CombatDirector
   offscreenAttackSeconds as float = 4
 
   private nextCombatId as integer = 1
-  private gapSeconds as float = 0
-  private quietSeconds as float = 0
-  ' combatId -> true for each foe holding an attack slot
-  private attackers as roAssociativeArray = {}
 
   sub add(combatant as Fighter)
     combatant.combatId = m.nextCombatId
@@ -57,18 +52,11 @@ class CombatDirector
       foe.invalidate()
     end for
     m.enemies = []
-    m.attackers = {}
-    m.gapSeconds = 0
-    m.quietSeconds = 0
+    m.attackTokens.clear()
   end sub
 
   sub update(dt as float)
-    if m.gapSeconds > 0
-      m.gapSeconds -= dt
-    end if
-    if m.attackers.Count() = 0
-      m.quietSeconds += dt
-    end if
+    m.attackTokens.update(dt)
   end sub
 
   ' True if `combatant` may start an attack now: a slot is free, and it's in view or the
@@ -77,15 +65,12 @@ class CombatDirector
     if not m.canAttack(combatant)
       return false
     end if
-    return m.isInView(combatant) or m.quietSeconds >= m.offscreenAttackSeconds
+    return m.isInView(combatant) or m.attackTokens.idleSeconds() >= m.offscreenAttackSeconds
   end function
 
   ' True if `combatant` holds an attack slot, or one is free.
   function canAttack(combatant as Fighter) as boolean
-    if m.attackers.DoesExist(combatant.combatId.toStr())
-      return true
-    end if
-    return m.attackers.Count() < m.maxAttackers and m.gapSeconds <= 0
+    return m.attackTokens.canRequest(combatant.combatId)
   end function
 
   ' True when `combatant` is roughly where the camera looks, seen from the player.
@@ -103,18 +88,11 @@ class CombatDirector
 
   ' Takes an attack slot if one is free. Release it with releaseAttack() when the attack is over.
   function requestAttack(combatant as Fighter) as boolean
-    if not m.canAttack(combatant)
-      return false
-    end if
-    m.attackers[combatant.combatId.toStr()] = true
-    m.quietSeconds = 0
-    return true
+    return m.attackTokens.request(combatant.combatId)
   end function
 
   sub releaseAttack(combatant as Fighter)
-    if m.attackers.Delete(combatant.combatId.toStr())
-      m.gapSeconds = m.attackGapSeconds
-    end if
+    m.attackTokens.release(combatant.combatId)
   end sub
 
   ' Living enemies within `reach` (plus their body radius) of `attacker` and within halfAngle
@@ -122,7 +100,7 @@ class CombatDirector
   function enemiesInArc(attacker as Fighter, reach as float, halfAngle as float) as Fighter[]
     targets = []
     for each foe in m.enemies
-      if foe.isAlive() and attacker.distanceTo(foe) <= reach + foe.bodyRadius and attacker.isFacing(foe, halfAngle)
+      if foe.isAlive() and attacker.isInArc(foe, reach, halfAngle)
         targets.push(foe)
       end if
     end for

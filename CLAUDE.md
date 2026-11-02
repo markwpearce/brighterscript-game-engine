@@ -110,6 +110,7 @@ Retained-mode widget tree on its own canvas: `Game.gameUi` and `Game.debugUi` (`
 ### Other
 
 - `math/`: `BGE.Math.VectorOps`, `Matrix44`, `CornerPoints`, etc. are used everywhere instead of raw AAs. Ground-plane headings (`headingForward`, `wrapAngle`, `turnToward`, `flatDistance`, … in `heading.bs`) follow the camera/oriented-sprite convention: heading 0 faces -z. `Renderer.drawWorldPolyline/Circle/Arc` draw world-space debug shapes.
+- Melee helpers: `BGE.Math.isWithinArc()` (the wedge `drawWorldArc` draws), `BGE.TokenPool` (attack tokens keyed by id, with a cooldown), `Renderer.drawWorldBar()` (RGBA health bar at a world point).
 - `utils/`: OBJ/STL parsers (`Game.load3dModel`, textured `.obj` with materials), tweens, `MotionChecker`, `TagList`, registry helpers, auto-tiling (`utils/tilemap/AutoTile.bs`), `CountdownTimer` (dt-driven; distinct from wall-clock `GameTimer`).
 - `story/`: `BGE.Story` — UI-free dialogue/flags/inventory runner (`docs/story.md`). `goto`/`call`/`end` are reserved words (use brackets / quoted keys); ids can't contain `#` or `/`. If bsc misreads a `StoryData` literal against `Items()`, add `items: {}`.
 - Music: `Game.musicPlay(path, loop, restart = true)` — pass `restart = false` to keep a shared track playing across scenes; `roAudioPlayer` can't fade. `Game.changeSceneWithFade()` for transitions.
