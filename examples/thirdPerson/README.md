@@ -32,7 +32,7 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
   - Skeleton: flanks, sometimes blocks, a quick sword swing.
   - Orc: quick, no armour; comes straight at you, chops, then backs off.
   - Heavy orc: slow and tough, blocks often, never flinches; a long wind-up and a heavy hit.
-- `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane, the enemy spawner, respawning, the control hints and the health bar.
+- `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane (grass at 2 world units per texel, so the device's plane cap lets it reach twice as far), the enemy spawner, respawning, the control hints and the health bar.
 
 ## Sprite sheets
 
