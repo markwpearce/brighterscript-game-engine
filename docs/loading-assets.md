@@ -55,6 +55,31 @@ Give both `width` and `height`. `game.unloadBitmap(name)` frees the texture mana
 
 > Before Roku OS 16, you can't draw into a bitmap from the texture manager. If you'll draw into a loaded image, pass `drawable: true`. That image is decoded the slower way, in a single frame. Drawing *from* a loaded bitmap (regions, sprites, `DrawObject`) works either way.
 
+## Sprite atlases
+
+A packed sprite atlas is a `.json` frame list plus the sheets it names. `loader.loadSpriteAtlas()` loads both, and `game.getSpriteAtlasFrames()` gives the frames every sprite made from it shares:
+
+```brightscript
+override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+  ' reads orc.json, then loads orc.png, orc_1.png, ... from the same folder
+  loader.loadSpriteAtlas("orc", "pkg:/sprites/orc.json")
+end sub
+
+' later, e.g. in an entity's onCreate()
+frames = m.game.getSpriteAtlasFrames("orc")
+sprite = m.addOrientedSprite("body", frames, 0, 0, 16)
+```
+
+The `.json` is what `tools/render-character.py --packed` writes:
+
+```json
+{"sheets": ["orc.png", "orc_1.png"], "frames": [{"sheet": 0, "x": 85, "y": 573, "width": 78, "height": 62, "offsetX": 14, "offsetY": 21, "sourceWidth": 92, "sourceHeight": 88}]}
+```
+
+Each frame is a `BGE.SpriteFrameRect` (see [Drawables and Scene Objects](/drawables-and-scene-objects)). Sheet files are relative to the `.json`, and they decode side by side through the texture manager, like `loadBitmap()`. Their bitmaps are named `orc#0`, `orc#1` and so on (`game.getSpriteAtlas("orc").sheets`). Loading the same atlas again, say when a scene restarts, reads the `.json` but not the sheets that are still loaded. `game.unloadSpriteAtlas("orc")` frees them.
+
+A missing or malformed `.json`, or a sheet that won't load, fails the task with a message naming the file, and the atlas isn't registered, so `getSpriteAtlasFrames()` logs a warning and returns `invalid`. Given a URL, the `.json` and its sheets are all downloaded (see [Loading from URLs](#loading-from-urls)). `game.loadSpriteAtlas(name, path)` does the same in one frame, for local files.
+
 ## Your own work
 
 `loader.addStep()` calls a function once per step until it says it's done. Return `true` when finished, or a number from 0 to 1 for progress (done at 1). This builds a level one row at a time:
