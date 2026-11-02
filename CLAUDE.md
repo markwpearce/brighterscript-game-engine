@@ -53,7 +53,7 @@ Never by hand. Run the **Initialize Release** GitHub workflow (patch/minor/major
 
 1. Collect input/ECP/audio/URL events.
 2. **UI input first** (`processUiInput`): `gameUi` gets input before entities, so a widget can `input.consume()` and stop it reaching `GameEntity.onInput()`.
-3. Update entities (current scene first, then `sortedEntities` in reverse): input callbacks, `onUpdate`, velocity integration; then `tweenManager` ticks (a tween beats velocity on the same field).
+3. Update entities (current scene first, then `sortedEntities` in reverse): input callbacks, `onUpdate`, velocity integration; then `tweenManager` ticks (a tween beats velocity on the same field). Then the current scene's `onPostUpdate` (order-independent "after everyone moved" work, e.g. `BGE.separateCircles()` or a follow camera).
 4. Collisions via `roCompositor`, calling `onCollision`.
 5. Draw game canvas (`onDrawBegin`/`render()`/`onDrawEnd`), then UI canvas, then `debugUi` (update+draw).
 6. Swap buffers, periodic GC, then apply any pending scene change (deferred to end of frame).
@@ -104,7 +104,7 @@ Retained-mode widget tree on its own canvas: `Game.gameUi` and `Game.debugUi` (`
 - `CircleCollider`/`RectangleCollider` use `roCompositor.CheckMultipleCollisions()`. `onCollisionEnter`/`onCollisionExit` are diffed per frame.
 - Edge-to-edge contact is not an overlap: snapping flush stops `onCollision` next frame, so "reset grounded every frame" flickers.
 - `SphereCollider3d`/`BoxCollider3d` do true 3D overlap (two compositor planes plus exact maths). `Game.raycast()`/`raycastAll()` return `BGE.RaycastHit`.
-- `resolveAabbTileCollision()` (tile platformers) and `BGE.SolidWorld.moveAndSlide()` (top-down) resolve against static geometry.
+- `resolveAabbTileCollision()` (tile platformers) and `BGE.SolidWorld.moveAndSlide()` (top-down) resolve against static geometry. `BGE.separateCircles()` pushes moving bodies (characters) apart by mass.
 
 ### Other
 
