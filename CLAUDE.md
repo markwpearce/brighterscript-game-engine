@@ -37,6 +37,7 @@ Never by hand. Run the **Initialize Release** GitHub workflow (patch/minor/major
 - Don't name a suite field `scene` (clashes with `rooibos.BaseTestSuite.scene`).
 - Don't `assertEqual` whole objects that may hold circular references or native components; compare an id or marker field.
 - Needs an `@describe` before the first `@it` (RBS2201).
+- To sample exact times, `freeze()` the `GameTimer` before `addTime()` (`Sprite.advanceAnimationClockForTests()` does); otherwise real time adds drift on slow CI runners.
 - Tests cover engine code only. Example apps' runtime code is **not** exercised by `check`/`validate-examples` — an actual on-device/simulator run is required to verify example changes.
 
 ### Docs site
