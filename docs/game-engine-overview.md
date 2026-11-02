@@ -303,6 +303,48 @@ fourth argument for moves that shouldn't be eased around corners, like a knockba
 `addSolid` returns an id. Pass it to `removeSolid(id)` to take that rectangle back out, for
 example when a door opens.
 
+### Hit flash and knockback
+
+A hit usually tints the sprite for a moment and shoves the entity away from the attacker.
+`Drawable.flash()` does the tint, and a `BGE.Impulse` does the shove:
+
+```
+import "pkg:/source/utils/Impulse.bs"
+
+class Enemy extends BGE.GameEntity
+  sprite as BGE.Sprite
+  knockback as BGE.Impulse = new BGE.Impulse()
+
+  sub hurt(attacker as BGE.GameEntity)
+    m.sprite.flash(&hFF5050, 0.15)
+    away = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.subtract(m.position, attacker.position))
+    ' 400 units/s away, losing 10x its speed per second
+    m.knockback.start(BGE.Math.VectorOps.scale(away, 400), 10)
+  end sub
+
+  override sub onUpdate(dt as float)
+    push = m.knockback.step(dt)
+    m.position.x += push.x
+    m.position.y += push.y
+  end sub
+end class
+```
+
+The flash color is RGB, like `Drawable.color`. The flash never changes `color` itself, so your
+code can keep setting `color` (a tint that follows the enemy's state, say) and the drawable goes
+back to whatever it is when the flash ends. Flashing again restarts it, `stopFlash()` ends it,
+and a third argument makes it blink: `flash(&hFF4040, 0.6, 0.08)` alternates every 0.08 seconds.
+The game ticks flashes for you, just before the entity's `onUpdate()`, and holds them while
+paused.
+
+`step(dt)` returns how far to move this frame rather than moving anything, so you can send it
+through your own collision instead, e.g. `m.solidWorld.moveAndSlide(feetBox, push.x, push.y,
+{cornerNudge: 0})`. `startTimed(displacement, seconds)` moves at a constant speed for a fixed
+time instead of easing out, and `isActive()` says whether a push is still running, for skipping
+the entity's own movement meanwhile. A fixed-tick game can call `step(1)` each tick and give
+speeds and the decay rate per tick. `examples/rpg`'s `Enemy` and `examples/thirdPerson`'s
+`Fighter` use both.
+
 ## Following the player with the camera
 
 The default camera is a `BGE.Camera2d` centred on `camera.setTarget(point)`. For a world bigger

@@ -68,6 +68,7 @@ Callbacks can delete entities or change scene mid-frame, so engine code re-check
 - `Drawable`s attach to an entity and register a `SceneObject` with the `Renderer`, which does the actual drawing (see `docs/drawables-and-scene-objects.md`). `Drawable.owner` may be `invalid` — use the owner-safe accessors (`getGame()`, `getOwnerPosition()`, …), not `m.owner.*`.
 - A drawable that changes shape in place must call `invalidateGeometry()` (movement checking can't see a resize).
 - `Sprite` frames come from a `BGE.SpriteFrames` (grid or packed/trimmed atlas) whose regions are shared per anchor and have the anchor's pretranslation baked in — never mutate them per sprite. `Game.getSpriteFrames()` caches by bitmap name; packed `.json` atlases (`tools/render-character.py --packed`) load with `AssetLoader.loadSpriteAtlas()` and come back via `Game.getSpriteAtlasFrames()`.
+- Hit reactions: `Drawable.flash(rgb, seconds, blinkSeconds)` overrides the drawn color without writing `color`, ticked by `Game` before `onUpdate` (only while `GameEntity.hasActiveFlash`); `BGE.Impulse.step(dt)` returns a knockback's displacement for the caller to apply.
 - `GameEntity.isOnScreen()` is a signal only; the engine never skips off-screen entities' updates.
 - **Two color formats**: `Drawable.color`/`outlineRGBA` take RGB (`0xRRGGBB`, `BGE.ColorsRGB`); `Renderer.draw*` takes RGBA (`0xRRGGBBAA`, `BGE.Colors`). Mixing them gives a wrong color, not an error.
 - `GameInput` `x`/`y` are world space: +y is up. Only the final canvas projection flips y.
