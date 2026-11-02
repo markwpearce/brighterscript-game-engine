@@ -24,6 +24,7 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
 - `ThirdPersonCamera.bs`: the chase camera. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
 - `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
+- `CharacterSprites.bs`: loads a character's packed sprite sheets and their `.json` frame list (see [Sprite sheets](#sprite-sheets)) into one shared `BGE.SpriteFrames`.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
 - `Entities/HitEffect.bs`: a one-off particle burst where a blow lands (blood, bone dust, block and parry sparks), using `DrawableParticles` with its particles made by hand so they fan out round the ground direction of the hit.
 - `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view).
@@ -36,39 +37,39 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 
 ## Sprite sheets
 
-The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so they're rendered a little smaller (`--height 56`, or 58 for the heavy orc, against the knight's 64). The orcs' skin is recoloured a paler, sickly green with dark hair (`ORC_COLOURS` in the script), and the monsters' melee gets two in-between frames (6 in place of Flare's 4). Each direction's frames follow on from the last, wrapping to stay within the device's 2048 px bitmap limit.
+The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so they're rendered a little smaller (`--height 56`, or 58 for the heavy orc, against the knight's 64). The orcs' skin is recoloured a grey-green (about `#9AAE93` once lit) with dark hair (`ORC_COLOURS` in the script), and every attack gets in-between frames: 9 for the knight and 8 for the monsters, in place of Flare's 4. Each sheet is packed: every frame is trimmed to its own pixels, and a `.json` alongside lists each frame's rect and its offset in the untrimmed cell (loaded by `CharacterSprites.bs` into `Game.getSpriteFrames()`).
 
-| Sheet | Source | Frames per direction | Cell | Texture |
+| Sheet | Source | Frames per direction | Untrimmed cell | Texture |
 | --- | --- | --- | --- | --- |
-| `knight.png` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield` | 21 | 92×92 | 10.8 MB |
-| `skeleton.png` | `skeleton_0.blend` | 24 | 112×75 | 12.3 MB |
-| `orc.png` | `orc_flare_0.blend`, layer 2 (hand axe) | 23 | 100×83 | 11.7 MB |
-| `orc_heavy.png` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 20 | 116×101 | 14.3 MB |
+| `knight.png` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield` | 23 | 92×88 | 6.8 MB |
+| `skeleton.png` | `skeleton_0.blend` | 26 | 112×75 | 6.8 MB |
+| `orc.png` | `orc_flare_0.blend`, layer 2 (hand axe) | 25 | 105×83 | 5.6 MB |
+| `orc_heavy.png` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 22 | 116×101 | 7.4 MB |
 
-1. The sources are Blender 2.49 files, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
-
-```
-blender -b skeleton_0.blend --python tools/convert-flare.py -- <converted>/skeleton_0.blend
-```
-
-2. Render with Blender 5 (Cycles, with a shadow catcher for the ground shadow). `--character` picks the frames, layers and parts (see `CHARACTERS` at the top of the script). It prints the cell size, the feet anchor, the frame columns of each animation and the texture size, which go in `Knight.bs` or `EnemyTypes.bs`:
+1. The sources are in `art/`, unchanged from their downloads. They're Blender 2.49 files, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
 
 ```
-Blender -b <converted>/steel_armor.blend --python tools/render-character.py -- --character knight --parts <converted> --out <somewhere>/knight.png
-Blender -b <converted>/skeleton_0.blend --python tools/render-character.py -- --character skeleton --height 56 --columns 16 --out <somewhere>/skeleton.png
-Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc --height 56 --columns 16 --out <somewhere>/orc.png
-Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc-heavy --height 58 --columns 16 --out <somewhere>/orc_heavy.png
+blender -b art/skeleton_0.blend --python tools/convert-flare.py -- <converted>/skeleton_0.blend
 ```
 
-Add `--packed` to trim each frame and pack them into sheets of at most `--sheet-size` (2048) px, with a `.json` frame list for `Game.getSpriteFrames()`. Add `--mirror` to render only the front-to-back half of the directions, for `DrawableOrientedSprite.mirrorBuckets`. The sheets in `src/sprites` are still full grids.
+2. Render with Blender 5 (Cycles, with a shadow catcher for the ground shadow). `--character` picks the frames, layers and parts (see `CHARACTERS` at the top of the script), and `--packed` trims and packs the frames into sheets of at most `--sheet-size` (2048) px, with the `.json` frame list. It prints the cell size, the feet anchor, the frame columns of each animation and the texture size; the anchor and columns go in `Knight.bs` or `EnemyTypes.bs`:
 
-The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/` and copy the sheet in. They aren't keyed by colour, so clear them after changing `colours`.
+```
+Blender -b <converted>/steel_armor.blend --python tools/render-character.py -- --character knight --parts <converted> --packed --out <somewhere>/knight.png
+Blender -b <converted>/skeleton_0.blend --python tools/render-character.py -- --character skeleton --height 56 --packed --out <somewhere>/skeleton.png
+Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc --height 56 --packed --out <somewhere>/orc.png
+Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc-heavy --height 58 --packed --out <somewhere>/orc_heavy.png
+```
+
+Copy the `.png` sheets and the `.json` into `src/sprites`. Without `--packed` it writes a full grid instead, wrapping at `--columns`. Add `--mirror` to render only the front-to-back half of the directions, for `DrawableOrientedSprite.mirrorBuckets`.
+
+The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/`. They aren't keyed by colour, so clear them after changing `colours`.
 
 Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32.
 
 ## Still needed
 
-- [ ] The four sheets take ~49 MB of texture memory, too much for HD devices (64 MB). Most of each cell is empty, so per-frame cell sizes ([#397](https://github.com/markwpearce/brighterscript-game-engine/issues/397)) would help most; or fewer directions or frames, or split by animation once #386 lands.
+- [ ] The four packed sheets take ~27 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) would roughly halve it, or split by animation once #386 lands.
 - [ ] Ground texture and the map.
 - [ ] Stamina, ripostes and backstabs, checkpoints.
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).
