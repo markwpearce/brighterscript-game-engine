@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 An object-oriented game engine for Roku in [BrighterScript](https://github.com/rokucommunity/brighterscript), distributed via ROPM. All engine source is under `src/source/` in the `BGE` namespace. `examples/` holds sample Roku channels that consume the engine via ROPM and are the main end-to-end check of engine changes; `examples/rendererTest` is a menu of `BGE.Renderer` demos built without `Game`/`GameScene` (see below). Unit tests are colocated Rooibos `*.spec.bs` files.
 
-Deeper material: hand-written guides in `docs/` (e.g. `engine-internals.md`, `drawables-and-scene-objects.md`, `loading-assets.md`, `render-quality.md`, `story.md`, `tile-maps.md`) and design specs in `specs/`. Read the relevant one before changing a subsystem.
+Deeper material: hand-written guides in `docs/` (e.g. `engine-internals.md`, `drawables-and-scene-objects.md`, `loading-assets.md`, `render-quality.md`, `story.md`, `third-person-cameras.md`, `tile-maps.md`) and design specs in `specs/`. Read the relevant one before changing a subsystem.
 
 ## Commands
 
@@ -16,7 +16,7 @@ Run from the repo root.
 - `npm run check:all` — `check`, then validate every example.
 - `npm run validate` — type-check with and without tests (`bsconfig.build.json`, `bsconfig.test.json`).
 - `npm run lint` / `npm run build` / `npm run clean` / `npm run docs` / `npm run docs-server` (serves under the `/brighterscript-game-engine` basePath, as deployed).
-- `npm run test:ci` — build and run tests headlessly via `brs-cli` (what CI runs). `npm run test:device` runs them on a device/brs-desktop (`ROKU_HOST`/`ROKU_PASSWORD`).
+- `npm run test:ci` — build and run tests headlessly via `brs-cli` (what CI runs), in shards (`scripts/run-tests-sharded.js`): one run of the whole suite exhausts a CI runner's memory. Add a shard when one grows past ~1000 tests. `npm run test:device` runs them on a device/brs-desktop (`ROKU_HOST`/`ROKU_PASSWORD`).
 - Examples: `prepare-examples`, `build-examples` (zips to `examples/<name>/out/`), `validate-examples`, `clean-all` — all fan out via `scripts/examples.js`. `npm run run-example -- <name> [key=value ...]` builds the engine, packages one example, sideloads it and launches it with deep-link params (`scripts/run-example.js`). Otherwise, for one example, `cd examples/<name>` and use its own npm scripts (some, e.g. `rpg`, `visualnovel`, have their own `npm test`, not part of CI).
 - Scaffolding: `npm run create-example -- <name> ["Title"]`, `create-entity -- <example> <Entity>`, `create-scene -- <example> <Scene>` (then wire up `defineScene`/`changeScene` by hand).
 - `npm run audio -- <sfx|music|silences|info> ...` — `ffmpeg`-based audio tools (`roAudioResource` plays WAV only; `roAudioPlayer` can't play OGG).
@@ -111,10 +111,12 @@ Retained-mode widget tree on its own canvas: `Game.gameUi` and `Game.debugUi` (`
 ### Other
 
 - `math/`: `BGE.Math.VectorOps`, `Matrix44`, `CornerPoints`, etc. are used everywhere instead of raw AAs. Ground-plane headings (`headingForward`, `wrapAngle`, `turnToward`, `flatDistance`, … in `heading.bs`) follow the camera/oriented-sprite convention: heading 0 faces -z. `Renderer.drawWorldPolyline/Circle/Arc` draw world-space debug shapes.
+- Melee helpers: `BGE.Math.isWithinArc()` (the wedge `drawWorldArc` draws), `BGE.TokenPool` (attack tokens keyed by id, with a cooldown), `Renderer.drawWorldBar()` (RGBA health bar at a world point).
 - `utils/`: OBJ/STL parsers (`Game.load3dModel`, textured `.obj` with materials), tweens, `MotionChecker`, `TagList`, registry helpers, auto-tiling (`utils/tilemap/AutoTile.bs`), `CountdownTimer` (dt-driven; distinct from wall-clock `GameTimer`).
 - `story/`: `BGE.Story` — UI-free dialogue/flags/inventory runner (`docs/story.md`). `goto`/`call`/`end` are reserved words (use brackets / quoted keys); ids can't contain `#` or `/`. If bsc misreads a `StoryData` literal against `Items()`, add `items: {}`.
 - Music: `Game.musicPlay(path, loop, restart = true)` — pass `restart = false` to keep a shared track playing across scenes; `roAudioPlayer` can't fade. `Game.changeSceneWithFade()` for transitions.
 - `Camera2d.follow()`/`setBounds()` apply in `checkMovement()` after updates — set camera targets in `onUpdate`, not `onDrawBegin`.
+- `BGE.OrbitCamera` is a third-person orbit camera (look vector passed to `update()`, call it in `onPostUpdate`); `BGE.Math.cameraRelativeMove()` pairs with it (`docs/third-person-cameras.md`).
 - `BGE.CameraBoom` keeps a chase camera in front of 3D colliders (pull in at once, ease out); give blockers their own `memberFlags` bit so characters' colliders don't count.
 
 ## Conventions

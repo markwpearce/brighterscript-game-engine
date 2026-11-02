@@ -22,7 +22,7 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
 ## How it works
 
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
-- `ThirdPersonCamera.bs`: the chase camera. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
+- The chase camera is a `BGE.OrbitCamera` with a `BGE.CameraBoom`, set up in `Scenes/FieldScene.bs`. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
 - `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
 - `CharacterSprites.bs`: loads a character's packed sprite sheets and their `.json` frame list (see [Sprite sheets](#sprite-sheets)) into one shared `BGE.SpriteFrames`.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.

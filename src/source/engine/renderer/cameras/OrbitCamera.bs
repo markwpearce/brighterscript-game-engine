@@ -1,0 +1,144 @@
+import "../../../math/math.bs"
+import "../../../math/vector.bs"
+import "../../../math/heading.bs"
+import "../../GameEntity.bs"
+import "Camera3d.bs"
+import "CameraBoom.bs"
+
+namespace BGE
+
+  ' Settings for BGE.OrbitCamera; any left out keep the class defaults.
+  interface OrbitCameraOptions extends roAssociativeArray
+    optional distance as float
+    optional height as float
+    optional lookHeight as float
+    optional minHeight as float
+    optional orbitSpeed as float
+    optional recenterSpeed as float
+    optional tiltSpeed as float
+    optional minTilt as float
+    optional maxTilt as float
+    optional heading as float
+    optional boom as BGE.CameraBoom
+  end interface
+
+  ' A third-person chase camera: it sits behind and above a target entity, looking at a point
+  ' above the target's feet, and swings round that point on a sphere. A look vector (e.g. a
+  ' right stick) orbits it (x) and tilts it (y); recenter() swings it back behind the target.
+  ' It never drifts behind a moving target on its own, so camera-relative movement (see
+  ' BGE.Math.cameraRelativeMove()) runs straight instead of curving.
+  '
+  ' Give it a BGE.CameraBoom to pull it in front of walls between it and the target.
+  ' Call update() after everything has moved, e.g. in the scene's onPostUpdate():
+  '
+  '   m.orbit = new BGE.OrbitCamera(camera, player, {
+  '     boom: new BGE.CameraBoom(m.game, {collidableFlags: CAMERA_BLOCKER})
+  '   })
+  '   m.orbit.update(dt, m.game.controls.getRawAxis("look"))
+  class OrbitCamera
+
+    camera as BGE.Camera3d
+    target as BGE.GameEntity
+    ' Ground heading the camera looks along (heading 0 faces -z)
+    heading as float = 0
+
+    ' Horizontal distance behind the target at rest, in world units
+    distance as float = 128.0
+    ' Height of the camera above the target's position at rest
+    height as float = 56.0
+    ' Height above the target's position of the point the camera looks at
+    lookHeight as float = 40.0
+    ' The camera never goes lower than this above the target's position
+    minHeight as float = 10.0
+    ' Radians/sec at full look
+    orbitSpeed as float = 2.6
+    ' Radians/sec while recentering (tilt eases back at a quarter of this)
+    recenterSpeed as float = 8.0
+    ' Tilt added to the resting angle, in radians; positive looks further down on the target
+    tilt as float = 0
+    ' Radians/sec at full look
+    tiltSpeed as float = 1.6
+    minTilt as float = -0.4
+    maxTilt as float = 0.4
+    ' Optional: pulls the camera in front of blockers
+    boom as BGE.CameraBoom = invalid
+
+    protected recentering as boolean = false
+
+    ' Places the camera straight away, behind the target unless options.heading says otherwise.
+    '
+    ' @param {BGE.Camera3d} camera - the camera to move
+    ' @param {BGE.GameEntity} target - the entity to follow; its rotation.y is "behind"
+    ' @param {BGE.OrbitCameraOptions} [options={}] - overrides for the public fields
+    sub new(camera as BGE.Camera3d, target as BGE.GameEntity, options = {} as BGE.OrbitCameraOptions)
+      m.camera = camera
+      m.target = target
+      m.heading = target.rotation.y
+      ' bs:disable-next-line: 1140
+      m.append(options)
+      m.apply(0)
+    end sub
+
+    ' Starts swinging the camera back behind the target, with the tilt back to rest. Any look
+    ' input cancels it.
+    sub recenter()
+      m.recentering = true
+    end sub
+
+    ' Whether a recenter() is still under way.
+    '
+    ' @return {boolean}
+    function isRecentering() as boolean
+      return m.recentering
+    end function
+
+    ' Orbits/tilts by the look vector, then moves the camera.
+    '
+    ' @param {float} dt - seconds since last frame
+    ' @param {BGE.Math.Vector} look - x orbits (positive turns the camera clockwise seen from above), y tilts (positive looks up); each -1..1
+    sub update(dt as float, look as BGE.Math.Vector)
+      behind = m.target.rotation.y
+      if look.y <> 0
+        ' Looking up drops the camera
+        m.tilt = BGE.Math.Clamp(m.tilt - look.y * m.tiltSpeed * dt, m.minTilt, m.maxTilt)
+      end if
+      if look.x <> 0 or look.y <> 0
+        m.recentering = false
+        m.heading = BGE.Math.wrapAngle(m.heading + look.x * m.orbitSpeed * dt)
+      else if m.recentering
+        m.heading = BGE.Math.turnToward(m.heading, behind, m.recenterSpeed * dt)
+        m.tilt = BGE.Math.turnToward(m.tilt, 0, m.recenterSpeed * dt * 0.25)
+        m.recentering = Abs(BGE.Math.wrapAngle(behind - m.heading)) > 0.0001 or m.tilt <> 0
+      end if
+      m.apply(dt)
+    end sub
+
+    ' The point the camera looks at: lookHeight above the target.
+    '
+    ' @return {BGE.Math.Vector}
+    function getLookAt() as BGE.Math.Vector
+      focus = m.target.position
+      return BGE.Math.VectorOps.create(focus.x, focus.y + m.lookHeight, focus.z)
+    end function
+
+    ' Swings round the look-at point on a sphere, so tilting keeps the target framed.
+    protected sub apply(dt as float)
+      rise = m.height - m.lookHeight
+      radius = Sqr(m.distance * m.distance + rise * rise)
+      elevation = BGE.Math.Atan2(rise, m.distance) + m.tilt
+      forward = BGE.Math.headingForward(m.heading)
+      horizontal = radius * Cos(elevation)
+      lookAt = m.getLookAt()
+      cameraY = BGE.Math.Max(m.target.position.y + m.minHeight, lookAt.y + radius * Sin(elevation))
+      wanted = BGE.Math.VectorOps.create(lookAt.x - forward.x * horizontal, cameraY, lookAt.z - forward.z * horizontal)
+      if invalid <> m.boom
+        m.camera.position = m.boom.update(lookAt, wanted, dt)
+      else
+        m.camera.position = wanted
+      end if
+      m.camera.setTarget(lookAt)
+    end sub
+
+  end class
+
+end namespace
