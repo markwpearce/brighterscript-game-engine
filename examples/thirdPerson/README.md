@@ -1,6 +1,6 @@
 # Third Person
 
-A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight. The map, stamina, ripostes and checkpoints come later.
+A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina and a souls-style HUD. The map, ripostes and checkpoints come later.
 
 ## Playing
 
@@ -19,11 +19,15 @@ Movement is relative to the camera, and the camera stays put until you move it.
 
 Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. Hits spray blood (bone dust from the skeleton), and blocks and parries throw sparks. When the knight dies the field clears and he gets up again.
 
+Attacking, dodging and parrying cost stamina, and so does every hit you block (more for heavier hits). It refills after a short pause, more slowly while the shield is up. With none left you can't attack, dodge or parry (the stamina bar flashes), and a blocked hit that empties it breaks your guard and stuns you for a moment.
+
 ## How it works
 
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
 - The chase camera is a `BGE.OrbitCamera` with a `BGE.CameraBoom`, set up in `Scenes/FieldScene.bs`. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
 - `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
+- `Stamina.bs`: the knight's stamina pool. `spend()` starts an action if there's any stamina left (it can take it to zero); `drain()` takes a blocked hit's cost and says whether the guard held.
+- `Hud.bs`: health and stamina bars, top left in the title-safe area. Lost health stays as a pale chunk that drains after a moment.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
 - `Entities/HitEffect.bs`: a one-off particle burst where a blow lands (blood, bone dust, block and parry sparks), using `DrawableParticles` with its particles made by hand so they fan out round the ground direction of the hit.
 - `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view).
@@ -32,7 +36,7 @@ Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which i
   - Skeleton: flanks, sometimes blocks, a quick sword swing.
   - Orc: quick, no armour; comes straight at you, chops, then backs off.
   - Heavy orc: slow and tough, blocks often, never flinches; a long wind-up and a heavy hit.
-- `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane, the enemy spawner, respawning, the control hints and the health bar.
+- `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane, the enemy spawner, respawning, the control hints (top right) and the HUD.
 
 ## Sprite sheets
 
@@ -68,7 +72,7 @@ Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton
 
 ## Still needed
 
-- [ ] The four packed sheets take ~27 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) would roughly halve it, or split by animation once #386 lands.
+- [ ] The four packed sheets take ~27 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
 - [ ] Ground texture and the map.
-- [ ] Stamina, ripostes and backstabs, checkpoints.
+- [ ] Ripostes and backstabs, checkpoints.
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).
