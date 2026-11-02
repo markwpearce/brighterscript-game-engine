@@ -6,7 +6,7 @@ Guidance for Claude Code when working in this repository.
 
 An object-oriented game engine for Roku in [BrighterScript](https://github.com/rokucommunity/brighterscript), distributed via ROPM. All engine source is under `src/source/` in the `BGE` namespace. `examples/` holds sample Roku channels that consume the engine via ROPM and are the main end-to-end check of engine changes; `examples/rendererTest` is a menu of `BGE.Renderer` demos built without `Game`/`GameScene` (see below). Unit tests are colocated Rooibos `*.spec.bs` files.
 
-Deeper material: hand-written guides in `docs/` (e.g. `engine-internals.md`, `drawables-and-scene-objects.md`, `loading-assets.md`, `render-quality.md`, `story.md`, `tile-maps.md`) and design specs in `specs/`. Read the relevant one before changing a subsystem.
+Deeper material: hand-written guides in `docs/` (e.g. `engine-internals.md`, `drawables-and-scene-objects.md`, `loading-assets.md`, `render-quality.md`, `story.md`, `third-person-cameras.md`, `tile-maps.md`) and design specs in `specs/`. Read the relevant one before changing a subsystem.
 
 ## Commands
 
@@ -114,6 +114,7 @@ Retained-mode widget tree on its own canvas: `Game.gameUi` and `Game.debugUi` (`
 - `story/`: `BGE.Story` — UI-free dialogue/flags/inventory runner (`docs/story.md`). `goto`/`call`/`end` are reserved words (use brackets / quoted keys); ids can't contain `#` or `/`. If bsc misreads a `StoryData` literal against `Items()`, add `items: {}`.
 - Music: `Game.musicPlay(path, loop, restart = true)` — pass `restart = false` to keep a shared track playing across scenes; `roAudioPlayer` can't fade. `Game.changeSceneWithFade()` for transitions.
 - `Camera2d.follow()`/`setBounds()` apply in `checkMovement()` after updates — set camera targets in `onUpdate`, not `onDrawBegin`.
+- `BGE.OrbitCamera` is a third-person orbit camera (look vector passed to `update()`, call it in `onPostUpdate`); `BGE.Math.cameraRelativeMove()` pairs with it (`docs/third-person-cameras.md`).
 - `BGE.CameraBoom` keeps a chase camera in front of 3D colliders (pull in at once, ease out); give blockers their own `memberFlags` bit so characters' colliders don't count.
 
 ## Conventions
