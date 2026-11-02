@@ -60,6 +60,8 @@ Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- -
 Blender -b <converted>/orc_flare_0.blend --python tools/render-character.py -- --character orc-heavy --height 58 --columns 16 --out <somewhere>/orc_heavy.png
 ```
 
+Add `--packed` to trim each frame and pack them into sheets of at most `--sheet-size` (2048) px, with a `.json` frame list for `Game.getSpriteFrames()`. The sheets in `src/sprites` are still grids.
+
 The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/` and copy the sheet in. They aren't keyed by colour, so clear them after changing `colours`.
 
 Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32.

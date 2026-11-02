@@ -1,0 +1,156 @@
+import "../../utils/utils.bs"
+
+namespace BGE
+
+  ' One frame of a packed sprite sheet (see BGE.SpriteFrames). The rect is where the frame's
+  ' pixels are on the sheet; the optional offset and source size say where that rect sat in
+  ' the untrimmed cell, so trimmed frames still line up with each other.
+  interface SpriteFrameRect extends roAssociativeArray
+    ' Which sheet the frame is on (default 0)
+    optional sheet as integer
+    x as integer
+    y as integer
+    width as integer
+    height as integer
+    ' Position of the rect inside the untrimmed cell (default 0, 0)
+    optional offsetX as integer
+    optional offsetY as integer
+    ' Size of the untrimmed cell (default: the rect's own size)
+    optional sourceWidth as integer
+    optional sourceHeight as integer
+  end interface
+
+  ' The frames of a Sprite: which sheet bitmap and which rect each frame index draws from.
+  ' Either a uniform grid (every cell cellWidth x cellHeight, numbered row by row, sheet after
+  ' sheet), or packed frames of any size, each with its own rect, like a texture atlas.
+  '
+  ' Sprites made from the same SpriteFrames share its roRegions instead of each slicing the
+  ' sheets again, which matters when many entities use one sheet. Game.getSpriteFrames()
+  ' caches them by bitmap name.
+  class SpriteFrames
+
+    ' Every sheet, in order
+    sheets as ifDraw2d[] = []
+    ' Each frame's rect, with every optional field filled in
+    frames as BGE.SpriteFrameRect[] = []
+    ' Grid cell size, or 0 for packed frames
+    cellWidth as integer = 0
+    cellHeight as integer = 0
+
+    ' Region sets already built, by anchor key (see regionsForAnchor())
+    private regionSets as roAssociativeArray = {}
+
+    ' @param {ifDraw2d|ifDraw2d[]} sheets - one sheet, or several
+    ' @param {integer} cellWidth - grid cell width; ignored when frameRects is given
+    ' @param {integer} cellHeight - grid cell height; ignored when frameRects is given
+    ' @param {BGE.SpriteFrameRect[]} [frameRects=invalid] - packed frames, e.g. parsed from a JSON atlas
+    sub new(sheets as ifDraw2d or ifDraw2d[], cellWidth as integer, cellHeight as integer, frameRects = invalid as dynamic)
+      if rodash.isArray(sheets)
+        m.sheets = sheets as ifDraw2d[]
+      else
+        m.sheets = [sheets as ifDraw2d]
+      end if
+      if invalid <> frameRects
+        for each rect in frameRects
+          m.frames.push(m.completeRect(rect))
+        end for
+        return
+      end if
+      m.cellWidth = cellWidth
+      m.cellHeight = cellHeight
+      if cellWidth <= 0 or cellHeight <= 0
+        return
+      end if
+      for sheetIndex = 0 to m.sheets.Count() - 1
+        sheet = m.sheets[sheetIndex]
+        if invalid = sheet
+          continue for
+        end if
+        cols = cint(sheet.GetWidth() / cellWidth)
+        rows = cint(sheet.GetHeight() / cellHeight)
+        for row = 0 to rows - 1
+          for col = 0 to cols - 1
+            m.frames.push({sheet: sheetIndex, x: col * cellWidth, y: row * cellHeight, width: cellWidth, height: cellHeight, offsetX: 0, offsetY: 0, sourceWidth: cellWidth, sourceHeight: cellHeight})
+          end for
+        end for
+      end for
+    end sub
+
+    ' Whether the frames are a uniform grid (rather than packed).
+    '
+    ' @return {boolean}
+    function isGrid() as boolean
+      return m.cellWidth > 0 and m.cellHeight > 0
+    end function
+
+    ' @return {integer}
+    function frameCount() as integer
+      return m.frames.Count()
+    end function
+
+    ' Which sheet a frame is on, or -1 if it's out of range.
+    '
+    ' @param {integer} frameIndex
+    ' @return {integer}
+    function sheetIndexForFrame(frameIndex as integer) as integer
+      if frameIndex < 0 or frameIndex >= m.frames.Count()
+        return -1
+      end if
+      return m.frames[frameIndex].sheet
+    end function
+
+    ' The largest untrimmed cell size of any frame, e.g. to size a drawable before it animates.
+    '
+    ' @return {BGE.Math.Vector} x = width, y = height
+    function getMaxSourceSize() as BGE.Math.Vector
+      size = BGE.Math.VectorOps.create(m.cellWidth, m.cellHeight)
+      for each frame in m.frames
+        size.x = BGE.Math.Max(size.x, frame.sourceWidth)
+        size.y = BGE.Math.Max(size.y, frame.sourceHeight)
+      end for
+      return size
+    end function
+
+    ' One region per frame, with the pretranslation for this anchor already set, so a frame
+    ' trimmed out of its cell still draws where the untrimmed cell would. Built once per anchor
+    ' and shared by every sprite asking for it: treat the regions as read-only.
+    '
+    ' @param {float} anchorX - 0 (left) to 1 (right) of the untrimmed cell; 0 with no anchor
+    ' @param {float} anchorY - 0 (top) to 1 (bottom) of the untrimmed cell; 0 with no anchor
+    ' @return {roRegion[]}
+    function regionsForAnchor(anchorX as float, anchorY as float) as roRegion[]
+      key = anchorX.toStr() + "," + anchorY.toStr()
+      regions = m.regionSets[key]
+      if invalid <> regions
+        return regions
+      end if
+      regions = []
+      for each frame in m.frames
+        sheet = m.sheets[frame.sheet]
+        region = CreateObject("roRegion", sheet, frame.x, frame.y, frame.width, frame.height)
+        if invalid <> region
+          region.SetPretranslation(frame.offsetX - frame.sourceWidth * anchorX, frame.offsetY - frame.sourceHeight * anchorY)
+        end if
+        regions.push(region)
+      end for
+      m.regionSets[key] = regions
+      return regions
+    end function
+
+    private function completeRect(rect as BGE.SpriteFrameRect) as BGE.SpriteFrameRect
+      return {
+        sheet: rect.sheet ?? 0,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
+        offsetX: rect.offsetX ?? 0,
+        offsetY: rect.offsetY ?? 0,
+        sourceWidth: rect.sourceWidth ?? rect.width,
+        sourceHeight: rect.sourceHeight ?? rect.height
+      }
+    end function
+
+  end class
+
+end namespace

@@ -3,6 +3,7 @@ import "../../utils/utils.bs"
 import "../debug/LogLevel.bs"
 import "../GameEntity.bs"
 import "AnimatedImage.bs"
+import "SpriteFrames.bs"
 
 namespace BGE
 
@@ -68,10 +69,12 @@ namespace BGE
     spriteSheet as ifDraw2d
     ' Every sheet, in order. Cells are numbered across them: sheet 0's first, then sheet 1's, ...
     spriteSheets as ifDraw2d[] = []
-    ' Width of each animation cell in the sprite image in pixels
+    ' Width of each animation cell in the sprite image in pixels (0 for packed frames)
     cellWidth as integer
-    ' Height of each animation cell in the sprite image in pixels
+    ' Height of each animation cell in the sprite image in pixels (0 for packed frames)
     cellHeight as integer
+    ' Which rect of which sheet each frame index draws; may be shared with other sprites
+    spriteFrames as BGE.SpriteFrames
 
     ' Lookup map of animation name -> SpriteAnimation object
     animations as roAssociativeArray = {}
@@ -79,38 +82,54 @@ namespace BGE
     ' The current animation being played
     activeAnimation as SpriteAnimation = invalid
 
-    ' Index of each sheet's first cell in m.regions
-    private sheetFirstFrames as integer[] = []
-
     ' @param {GameEntity} owner
-    ' @param {ifDraw2d|ifDraw2d[]} spriteSheet One sheet, or several with the same cell size. Cells are numbered across sheets in order.
-    ' @param {integer} cellWidth Width of each cell in pixels
-    ' @param {integer} cellHeight Height of each cell in pixels
+    ' @param {ifDraw2d|ifDraw2d[]|BGE.SpriteFrames} spriteSheet One sheet, several with the same cell size (cells are numbered across sheets in order), or a BGE.SpriteFrames for packed frames or to share regions with other sprites
+    ' @param {integer} cellWidth Width of each cell in pixels (ignored for a BGE.SpriteFrames)
+    ' @param {integer} cellHeight Height of each cell in pixels (ignored for a BGE.SpriteFrames)
     ' @param [args={}] Any extra properties to set
-    function new(owner as GameEntity, spriteSheet as ifDraw2d or ifDraw2d[], cellWidth as integer, cellHeight as integer, args = {} as roAssociativeArray)
+    function new(owner as GameEntity, spriteSheet as ifDraw2d or ifDraw2d[] or BGE.SpriteFrames, cellWidth as integer, cellHeight as integer, args = {} as roAssociativeArray)
       super(owner, invalid, args)
-      if rodash.isArray(spriteSheet)
-        m.spriteSheets = spriteSheet as ifDraw2d[]
+      if "roAssociativeArray" = type(spriteSheet)
+        m.spriteFrames = spriteSheet as BGE.SpriteFrames
       else
-        m.spriteSheets = [spriteSheet as ifDraw2d]
+        m.spriteFrames = new BGE.SpriteFrames(spriteSheet as dynamic, cellWidth, cellHeight)
       end if
+      m.spriteSheets = m.spriteFrames.sheets
       m.spriteSheet = m.spriteSheets[0]
-      m.cellWidth = cellWidth
-      m.cellHeight = cellHeight
-      m.width = cellWidth
-      m.height = cellHeight
+      m.cellWidth = m.spriteFrames.cellWidth
+      m.cellHeight = m.spriteFrames.cellHeight
+      size = m.spriteFrames.getMaxSourceSize()
+      m.width = size.x
+      m.height = size.y
       m.setCellRegions()
       ' bs:disable-next-line: 1140
       m.append(args)
     end function
 
     private sub setCellRegions()
-      m.regions = []
-      m.sheetFirstFrames = []
-      for each sheet in m.spriteSheets
-        m.sheetFirstFrames.push(m.regions.Count())
-        m.regions.Append(BGE.sliceGridRegions(sheet, m.cellWidth, m.cellHeight))
-      end for
+      if m.anchorIsSet
+        m.regions = m.spriteFrames.regionsForAnchor(m.anchor.x, m.anchor.y)
+      else
+        m.regions = m.spriteFrames.regionsForAnchor(0, 0)
+      end if
+      if m.index >= 0 and m.index < m.regions.Count()
+        m.region = m.regions[m.index]
+      end if
+    end sub
+
+    ' Anchors are measured on the untrimmed cell, so packed frames trimmed out of their cells
+    ' still line up. Switches to the shared regions already set up for this anchor.
+    '
+    ' @param {float} x
+    ' @param {float} y
+    override sub setAnchor(x as float, y as float)
+      super.setAnchor(x, y)
+      m.setCellRegions()
+    end sub
+
+    ' The regions come from spriteFrames with the anchor's pretranslation already set, and may
+    ' be shared, so nothing is pushed onto them here.
+    protected override sub applyAnchorToRegion()
     end sub
 
     ' Which sheet a cell index comes from, or -1 if it's out of range
@@ -118,15 +137,7 @@ namespace BGE
     ' @param {integer} frameIndex
     ' @return {integer}
     function getSheetIndexForFrame(frameIndex as integer) as integer
-      if frameIndex < 0 or frameIndex >= m.regions.Count()
-        return -1
-      end if
-      for i = m.sheetFirstFrames.Count() - 1 to 0 step -1
-        if frameIndex >= m.sheetFirstFrames[i]
-          return i
-        end if
-      end for
-      return -1
+      return m.spriteFrames.sheetIndexForFrame(frameIndex)
     end function
 
     ' Size and cell layout of every sheet, for debug info
@@ -145,19 +156,27 @@ namespace BGE
           columns = cint(sheet.GetWidth() / m.cellWidth)
           rows = cint(sheet.GetHeight() / m.cellHeight)
         end if
+        firstFrame = -1
+        for f = 0 to m.spriteFrames.frameCount() - 1
+          if m.spriteFrames.sheetIndexForFrame(f) = i
+            firstFrame = f
+            exit for
+          end if
+        end for
         sheetsDump.push({
           width: sheet.GetWidth(),
           height: sheet.GetHeight(),
           columns: columns,
           rows: rows,
-          firstFrame: m.sheetFirstFrames[i]
+          firstFrame: firstFrame
         })
       end for
       return sheetsDump
     end function
 
 
-    ' Apply a pre-translation to set the pivot point for the sprite cell
+    ' Apply a pre-translation to set the pivot point for the sprite cell. Prefer setAnchor():
+    ' this changes the regions every sprite sharing spriteFrames draws with.
     '
     ' @param {float} x
     ' @param {float} y
@@ -293,7 +312,7 @@ namespace BGE
         return {frameIndex: frameIndex, error: `frame index out of range (sprite sheet has 0-${maxIndex.toStr()})`}
       end if
       region = m.regions[frameIndex]
-      return {
+      info = {
         frameIndex: frameIndex,
         sheetIndex: m.getSheetIndexForFrame(frameIndex),
         x: region.GetX(),
@@ -301,6 +320,14 @@ namespace BGE
         width: region.GetWidth(),
         height: region.GetHeight()
       }
+      if not m.spriteFrames.isGrid()
+        frame = m.spriteFrames.frames[frameIndex]
+        info.offsetX = frame.offsetX
+        info.offsetY = frame.offsetY
+        info.sourceWidth = frame.sourceWidth
+        info.sourceHeight = frame.sourceHeight
+      end if
+      return info
     end function
 
     ' Prints getAnimationsDebugInfo() as JSON via this sprite's owner Game.log() - call

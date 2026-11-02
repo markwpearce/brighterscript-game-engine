@@ -23,6 +23,7 @@ import "debug/LogDisplay.bs"
 import "debug/LogLevel.bs"
 import "debug/MemoryDisplay.bs"
 import "drawables/Model3d.bs"
+import "drawables/SpriteFrames.bs"
 import "GameEntity.bs"
 import "GameInput.bs"
 import "interfaces.bs"
@@ -164,6 +165,8 @@ namespace BGE
     ' bitmap name -> file, for bitmaps decoded by the texture loader
     private textureLoaderPaths = {}
 
+    ' Shared SpriteFrames by bitmap names and layout - see getSpriteFrames()
+    private spriteFramesCache as roAssociativeArray = {}
     ' ****END - For Internal Use, Do Not Manually Alter****
 
 
@@ -2585,12 +2588,14 @@ namespace BGE
     function loadBitmap(bitmapName as string, source as BGE.LoadBitmapSource) as boolean
       if type(source) = "roBitmap"
         m.releaseTexture(bitmapName)
+        m.forgetSpriteFrames(bitmapName)
         m.Bitmaps[bitmapName] = source
         return true
       else if type(source) = "roAssociativeArray"
         options = source as BGE.EmptyBitmapOptions
         if options.width <> invalid and options.height <> invalid and options.alphaEnable <> invalid
           m.releaseTexture(bitmapName)
+          m.forgetSpriteFrames(bitmapName)
           m.Bitmaps[bitmapName] = CreateObject("roBitmap", options)
           return true
         else
@@ -2635,6 +2640,7 @@ namespace BGE
         return "could not be decoded"
       end if
       m.releaseTexture(bitmapName)
+      m.forgetSpriteFrames(bitmapName)
       m.Bitmaps[bitmapName] = bitmap
       return ""
     end function
@@ -2653,6 +2659,58 @@ namespace BGE
     end function
 
 
+    ' Frames for sprites drawn from bitmaps loaded with loadBitmap() and friends, shared by every
+    ' sprite that asks for the same bitmaps and layout, so spawning another entity with the
+    ' same sheet doesn't slice it into new regions. Pass the result to addSprite()/
+    ' addOrientedSprite() in place of the bitmap. Forgotten when any of the bitmaps is unloaded
+    ' or replaced.
+    '
+    ' @param {string|string[]} bitmapNames - one bitmap, or several sheets numbered across in order
+    ' @param {integer} cellWidth - grid cell width (ignored with frameRects)
+    ' @param {integer} cellHeight - grid cell height (ignored with frameRects)
+    ' @param {BGE.SpriteFrameRect[]} [frameRects=invalid] - packed frames instead of a grid; the same bitmaps always need the same frameRects
+    ' @return {BGE.SpriteFrames} or invalid if a bitmap isn't loaded
+    function getSpriteFrames(bitmapNames as string or string[], cellWidth as integer, cellHeight as integer, frameRects = invalid as dynamic) as BGE.SpriteFrames
+      names = [] as string[]
+      if "roArray" = type(bitmapNames)
+        names = bitmapNames as string[]
+      else
+        names = [bitmapNames as string]
+      end if
+      key = names.Join("|")
+      if invalid = frameRects
+        key += `@${cellWidth}x${cellHeight}`
+      else
+        key += "@packed"
+      end if
+      cached = m.spriteFramesCache[key]
+      if invalid <> cached
+        return cached.frames
+      end if
+      sheets = []
+      for each name in names
+        bitmap = m.getBitmap(name)
+        if invalid = bitmap
+          return invalid
+        end if
+        sheets.push(bitmap)
+      end for
+      frames = new BGE.SpriteFrames(sheets, cellWidth, cellHeight, frameRects)
+      m.spriteFramesCache[key] = {names: names, frames: frames}
+      return frames
+    end function
+
+    private sub forgetSpriteFrames(bitmapName as string)
+      for each key in m.spriteFramesCache.Keys()
+        for each name in m.spriteFramesCache[key].names
+          if name = bitmapName
+            m.spriteFramesCache.Delete(key)
+            exit for
+          end if
+        end for
+      end for
+    end sub
+
     ' Forgets a bitmap, so its memory is freed once nothing else holds it. For a bitmap loaded
     ' with an AssetLoader, this also drops the texture manager's copy.
     '
@@ -2660,6 +2718,7 @@ namespace BGE
     ' @return {void}
     sub unloadBitmap(bitmapName as string)
       m.releaseTexture(bitmapName)
+      m.forgetSpriteFrames(bitmapName)
       m.Bitmaps[bitmapName] = invalid
     end sub
 
@@ -2681,6 +2740,7 @@ namespace BGE
     ' @param {string} path - the file it was decoded from
     sub addTextureBitmap(bitmapName as string, bitmap as roBitmap, path as string)
       m.releaseTexture(bitmapName)
+      m.forgetSpriteFrames(bitmapName)
       m.Bitmaps[bitmapName] = bitmap
       m.textureLoaderPaths[bitmapName] = path
     end sub
