@@ -223,6 +223,17 @@ render correctly through `directScaled`'s blit path; see the spec's Non-goals). 
 `examples/terrain`'s `Guard` entity for a runnable demo, and
 `specs/2026-09-22-oriented-sprite-billboards-design.md` for the full design.
 
+For a sheet laid out one direction after another, `addOrientedAnimationColumns()` builds every
+bucket from the frame columns of one direction, and frame rates can be fractional.
+`BGE.frameRateFor(frameCount, seconds)` gives the rate that fits a set time:
+
+```brighterscript
+' 16 directions, 24 frames each; the run is columns 4-11 of every direction
+sprite.addOrientedAnimationColumns("run", [4, 5, 6, 7, 8, 9, 10, 11], 24, 9.5)
+' a 3-frame windup that has to last exactly as long as the attack's 1.1s telegraph
+sprite.addOrientedAnimationColumns("windup", [12, 13, 14], 24, BGE.frameRateFor(3, 1.1), BGE.SpritePlayMode.Forward)
+```
+
 Both `Sprite` and `DrawableOrientedSprite` accept an array of sheet bitmaps instead of one, so a
 large character can be split across sheets that each fit the device's bitmap size limit (or by
 animation, loading only what a scene needs). Every sheet uses the same cell size, and frame
