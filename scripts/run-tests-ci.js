@@ -22,13 +22,10 @@ const ROOT_DIR = path.join(__dirname, '..');
 const BUILD_DIR = path.resolve(ROOT_DIR, process.argv[2] || 'test-build');
 const OUT_DIR = path.join(ROOT_DIR, 'out');
 const ZIP_NAME = 'bge-tests.zip';
-// The test suite has grown enough (860+ specs as of the controller-protocol and
-// QR-code work) that a slower/shared CI runner can take noticeably longer than a
-// local dev machine to finish - confirmed by two consecutive CI failures that
-// each hung at a *different* point in the run (varying by normal runner-speed
-// jitter, not a real deterministic hang), both comfortably under this budget
-// locally (~26s). Sized with real margin above that, not just enough to clear it.
-const RESULT_TIMEOUT_MS = 180000;
+// CI runners are far slower than a dev machine: 2200+ specs take ~165-180s there
+// (~30s locally), and a run that's just slow looks like a hang (#427). Keep real
+// margin above the CI time, and raise it as the suite grows.
+const RESULT_TIMEOUT_MS = 600000;
 
 function runTests(zipPath) {
     return new Promise((resolve) => {
