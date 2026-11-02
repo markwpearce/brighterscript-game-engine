@@ -1,5 +1,6 @@
 import "../World.bs"
 import "../CombatDirector.bs"
+import "../Stamina.bs"
 import "Fighter.bs"
 
 enum KnightState
@@ -15,7 +16,8 @@ end enum
 
 ' The player: Flare's male hero knight, re-rendered from its Blender sources by
 ' tools/render-character.py (sprites/knight.json) and shown as a 16-direction oriented sprite. Moves
-' relative to the camera and has light attacks (chained), a held block, a timed parry and a dodge.
+' relative to the camera and has light attacks (chained), a held block, a timed parry and a dodge,
+' all paid for with stamina.
 class Knight extends Fighter
 
   cameraRig as BGE.OrbitCamera = invalid
@@ -43,10 +45,20 @@ class Knight extends Fighter
   blockLeak as float = 0.2
   hurtSeconds as float = 0.35
 
+  stamina as Stamina = new Stamina()
+  attackStamina as float = 22
+  dodgeStamina as float = 28
+  parryStamina as float = 15
+  ' Stamina a blocked hit costs, per point of the hit's damage
+  blockStaminaPerDamage as float = 1.5
+  ' Stunned this long when a block runs out of stamina
+  guardBreakSeconds as float = 0.9
+
   private stateSeconds as float = 0
   private attackQueued as boolean = false
   private attackLanded as boolean = false
   private dodgeDirection as BGE.Math.Vector = BGE.Math.VectorOps.create()
+  private hurtForSeconds as float = 0
 
   sub new(game as BGE.Game)
     super(game)
@@ -92,7 +104,7 @@ class Knight extends Fighter
     if m.state = KnightState.dead
       ' Waits for the scene to respawn him
     else if m.state = KnightState.hurt
-      if m.stateSeconds >= m.hurtSeconds
+      if m.stateSeconds >= m.hurtForSeconds
         m.setState(KnightState.idle)
       end if
     else if m.state = KnightState.attack
@@ -103,11 +115,11 @@ class Knight extends Fighter
       end if
     else if m.state = KnightState.dodge
       m.updateDodge(dt)
-    else if controls.isActionPressed("dodge")
+    else if controls.isActionPressed("dodge") and m.stamina.spend(m.dodgeStamina)
       m.startDodge(move)
-    else if controls.isActionPressed("attack")
+    else if controls.isActionPressed("attack") and m.stamina.spend(m.attackStamina)
       m.startAttack(move)
-    else if controls.isActionPressed("parry")
+    else if controls.isActionPressed("parry") and m.stamina.spend(m.parryStamina)
       m.setState(KnightState.parry)
     else if controls.isActionHeld("block")
       m.setState(KnightState.block)
@@ -123,6 +135,8 @@ class Knight extends Fighter
       m.setState(KnightState.idle)
     end if
 
+    ' Holding the shield up slows recovery
+    m.stamina.update(dt, m.state = KnightState.block)
     m.updateCombatEffects(dt)
   end sub
 
@@ -178,7 +192,7 @@ class Knight extends Fighter
       end if
     end if
     if m.stateSeconds >= m.attackSeconds
-      if m.attackQueued
+      if m.attackQueued and m.stamina.spend(m.attackStamina)
         m.startAttack(m.cameraRelativeMove())
       else
         m.setState(KnightState.idle)
@@ -219,8 +233,14 @@ class Knight extends Fighter
       m.spray(HitEffects.parrySparks(), attacker)
       return HitResult.parried
     end if
+    guardBroken = false
     if m.state = KnightState.block and m.isFacing(attacker, BGE.Math.PI * 0.45)
-      m.takeDamage(damage * m.blockLeak, attacker, World.metres(0.5))
+      guardBroken = not m.stamina.drain(damage * m.blockStaminaPerDamage)
+      push = World.metres(0.5)
+      if guardBroken
+        push = World.metres(1.2)
+      end if
+      m.takeDamage(damage * m.blockLeak, attacker, push)
       m.spray(HitEffects.blockSparks(), attacker)
       result = HitResult.blocked
     else
@@ -230,7 +250,11 @@ class Knight extends Fighter
     end if
     if not m.isAlive()
       m.setState(KnightState.dead)
+    else if guardBroken
+      m.hurtForSeconds = m.guardBreakSeconds
+      m.setState(KnightState.hurt, true)
     else if result = HitResult.hit
+      m.hurtForSeconds = m.hurtSeconds
       m.setState(KnightState.hurt, true)
     end if
     return result
@@ -246,6 +270,7 @@ class Knight extends Fighter
   ' Back on his feet at full health.
   sub respawn(x as float, z as float)
     m.health = m.maxHealth
+    m.stamina.refill()
     m.position = BGE.Math.VectorOps.create(x, 0, z)
     m.knockback.stop()
     m.setState(KnightState.idle)
