@@ -32,6 +32,7 @@ import "renderer/lighting/Light.bs"
 import "GameScene.bs"
 import "loading/AssetLoader.bs"
 import "loading/LoadingScreen.bs"
+import "loading/SpriteAtlas.bs"
 import "loading/TextureLoader.bs"
 import "quality/DeviceQualitySeed.bs"
 import "quality/QualityController.bs"
@@ -167,6 +168,8 @@ namespace BGE
 
     ' Shared SpriteFrames by bitmap names and layout - see getSpriteFrames()
     private spriteFramesCache as roAssociativeArray = {}
+    ' BGE.SpriteAtlas by name
+    private spriteAtlases as roAssociativeArray = {}
     ' ****END - For Internal Use, Do Not Manually Alter****
 
 
@@ -2766,6 +2769,91 @@ namespace BGE
       end if
       m.textureLoaderPaths.Delete(bitmapName)
       m.releaseTexturePath(path)
+    end sub
+
+    ' Loads a packed sprite atlas's `.json` and every sheet it lists, in this frame. Prefer
+    ' `AssetLoader.loadSpriteAtlas()` in `GameScene.onLoad()`, which spreads the work over frames
+    ' and takes URLs. Local files only.
+    '
+    ' @param {string} atlasName - the name to get it by later (`getSpriteAtlasFrames()`)
+    ' @param {string} jsonPath - the atlas `.json`; its sheets are relative to it
+    ' @return {boolean} true if the atlas and every sheet loaded
+    function loadSpriteAtlas(atlasName as string, jsonPath as string) as boolean
+      if BGE.Urls.isUrl(jsonPath)
+        m.logSyncUrlError("loadSpriteAtlas", jsonPath)
+        return false
+      end if
+      if not m.filesystem.Exists(jsonPath)
+        m.log("Game.loadSpriteAtlas() - sprite atlas not found: " + jsonPath, BGE.Debug.LogLevel.error)
+        return false
+      end if
+      parsed = ParseJson(ReadAsciiFile(jsonPath))
+      problem = BGE.SpriteAtlases.findProblem(parsed)
+      if problem <> ""
+        m.log("Game.loadSpriteAtlas() - sprite atlas " + jsonPath + " " + problem, BGE.Debug.LogLevel.error)
+        return false
+      end if
+      atlas = BGE.SpriteAtlases.create(atlasName, jsonPath, parsed)
+      for i = 0 to atlas.sheets.count() - 1
+        reason = m.loadBitmapFile(atlas.sheets[i], atlas.sheetPaths[i])
+        if reason <> ""
+          m.log("Game.loadSpriteAtlas() - sprite atlas " + atlasName + " (" + jsonPath + "): sheet " + atlas.sheetPaths[i] + ": " + reason, BGE.Debug.LogLevel.error)
+          return false
+        end if
+      end for
+      m.addSpriteAtlas(atlas)
+      return true
+    end function
+
+    ' Registers a loaded sprite atlas whose sheets are already loaded. Used by BGE.AssetLoader.
+    '
+    ' @param {BGE.SpriteAtlas} atlas
+    sub addSpriteAtlas(atlas as BGE.SpriteAtlas)
+      previous = m.getSpriteAtlas(atlas.name)
+      ' another file's frames may differ, so frames cached for the same sheet names are stale
+      if previous <> invalid and previous.source <> atlas.source
+        for each sheet in previous.sheets
+          m.forgetSpriteFrames(sheet)
+        end for
+      end if
+      m.spriteAtlases[atlas.name] = atlas
+    end sub
+
+    ' A loaded sprite atlas, or invalid if none is loaded under that name.
+    '
+    ' @param {string} atlasName
+    ' @return {BGE.SpriteAtlas}
+    function getSpriteAtlas(atlasName as string) as BGE.SpriteAtlas
+      return m.spriteAtlases[atlasName]
+    end function
+
+    ' The frames of a sprite atlas loaded with `loadSpriteAtlas()`, shared by every sprite made
+    ' from them (see `getSpriteFrames()`). Pass them to addSprite()/addOrientedSprite() in place
+    ' of a bitmap.
+    '
+    ' @param {string} atlasName
+    ' @return {BGE.SpriteFrames} or invalid (logged) if the atlas or one of its sheets isn't loaded
+    function getSpriteAtlasFrames(atlasName as string) as BGE.SpriteFrames
+      atlas = m.getSpriteAtlas(atlasName)
+      if atlas = invalid
+        m.log("Game.getSpriteAtlasFrames() - No sprite atlas has been loaded under the name: " + atlasName, BGE.Debug.LogLevel.warning)
+        return invalid
+      end if
+      return m.getSpriteFrames(atlas.sheets, 0, 0, atlas.frames)
+    end function
+
+    ' Forgets a sprite atlas and unloads its sheets.
+    '
+    ' @param {string} atlasName
+    sub unloadSpriteAtlas(atlasName as string)
+      atlas = m.getSpriteAtlas(atlasName)
+      if atlas = invalid
+        return
+      end if
+      for each sheet in atlas.sheets
+        m.unloadBitmap(sheet)
+      end for
+      m.spriteAtlases.Delete(atlasName)
     end sub
 
     ' --------------------------------Begin Model Functions----------------------------------------

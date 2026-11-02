@@ -258,14 +258,23 @@ sprite = m.addOrientedSprite("body", frames, 0, 0, 16)
 
 A grid makes every cell as big as the biggest frame in any direction. A packed sheet stores each
 frame trimmed to its own pixels, with its rect and its offset inside the untrimmed cell, so it
-still lines up with the others. `setAnchor()` is measured on the untrimmed cell. The frames can
-come from a JSON atlas (`examples/thirdPerson/tools/render-character.py --packed` writes one):
+still lines up with the others. `setAnchor()` is measured on the untrimmed cell. Load a JSON
+atlas (`tools/render-character.py --packed` writes one) and its sheets with
+`loader.loadSpriteAtlas()`, then ask the game for its shared frames (see
+[Sprite atlases](/loading-assets#sprite-atlases)):
 
 ```brighterscript
-atlas = ParseJson(ReadAsciiFile("pkg:/sprites/orc.json"))
-frames = m.game.getSpriteFrames(["orc", "orc_1"], 0, 0, atlas.frames)
-' each frame: {sheet, x, y, width, height, offsetX, offsetY, sourceWidth, sourceHeight}
+' in GameScene.onLoad(): orc.json and the orc.png, orc_1.png, ... sheets it lists
+loader.loadSpriteAtlas("orc", "pkg:/sprites/orc.json")
+
+' then, once loaded
+frames = m.game.getSpriteAtlasFrames("orc")
+sprite = m.addOrientedSprite("body", frames, 0, 0, 16)
 ```
+
+The frames can also be given directly, as `BGE.SpriteFrameRect`s (`{sheet, x, y, width, height,
+offsetX, offsetY, sourceWidth, sourceHeight}`):
+`m.game.getSpriteFrames(["orcSheet", "orcSheet2"], 0, 0, frameRects)`.
 
 Playing the animation that's already playing keeps its place, so you can call it every frame, and
 so does turning to another direction of it.

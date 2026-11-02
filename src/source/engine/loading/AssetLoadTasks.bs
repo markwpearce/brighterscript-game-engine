@@ -10,6 +10,7 @@ import "../../utils/urls.bs"
 import "AssetLoader.bs"
 import "DownloadTask.bs"
 import "LoadTask.bs"
+import "SpriteAtlas.bs"
 import "TextureLoader.bs"
 
 namespace BGE
@@ -642,6 +643,144 @@ namespace BGE
     private sub warnUntextured(reason as string)
       m.game.log("BGE.AssetLoader - " + reason + ", model " + m.modelName + " will render untextured", BGE.Debug.LogLevel.warning)
     end sub
+
+  end class
+
+  ' Loads a packed sprite atlas: its `.json` (downloaded first if it's a URL), then every sheet
+  ' it lists, decoded side by side like `BitmapLoadTask`s. Registers the atlas with the game
+  ' once every sheet has loaded.
+  class SpriteAtlasLoadTask extends FileLoadTask
+
+    ' Makes the sheets' downloads. Set by AssetLoader.
+    loader as BGE.AssetLoader = invalid
+    ' Options for the sheets' downloads. Set by AssetLoader.
+    downloadOptions as BGE.DownloadOptions
+
+    private game as BGE.Game
+    private atlasName as string
+    private atlas as BGE.SpriteAtlas = invalid
+    private sheetTasks as BGE.BitmapLoadTask[]
+    private sheetCount as integer = 0
+    private sheetErrors as string[]
+    ' the .json itself was bad, so a downloaded copy shouldn't be kept
+    private jsonBad as boolean = false
+
+    sub new(game as BGE.Game, atlasName as string, path as string)
+      super(path)
+      m.name = "sprite atlas " + path
+      m.game = game
+      m.atlasName = atlasName
+      m.downloadOptions = {}
+      m.sheetTasks = []
+      m.sheetErrors = []
+      ' the .json is small next to its sheets
+      m.downloadShare = 0.1
+    end sub
+
+    override function loadFile(budgetMs as integer) as boolean
+      if m.atlas = invalid
+        if not m.readAtlas()
+          return true
+        end if
+      end if
+      if not m.stepSheets(budgetMs)
+        m.waitingForNextFrame = true
+        return false
+      end if
+      if m.sheetErrors.count() > 0
+        m.error = "sprite atlas " + m.atlasName + " (" + m.source + "): " + m.sheetErrors.Join("; ")
+        return true
+      end if
+      m.game.addSpriteAtlas(m.atlas)
+      return true
+    end function
+
+    override function getFileProgress() as float
+      if m.atlas = invalid or m.sheetCount = 0
+        return 0.0
+      end if
+      return 0.1 + 0.9 * (m.sheetCount - m.sheetTasks.count()) / m.sheetCount
+    end function
+
+    ' Bad only if the .json wasn't an atlas - a sheet failing doesn't make it bad.
+    override function isDownloadedFileBad() as boolean
+      return m.jsonBad
+    end function
+
+    ' Also releases the sheets' downloads and texture requests.
+    override sub abort()
+      super.abort()
+      for each sheetTask in m.sheetTasks
+        sheetTask.abort()
+      end for
+      m.sheetTasks = []
+    end sub
+
+    ' Parses the .json and creates the sheet tasks. Returns false with `error` set if it isn't an atlas.
+    private function readAtlas() as boolean
+      if not CreateObject("roFileSystem").Exists(m.path)
+        m.error = "sprite atlas not found: " + m.source
+        return false
+      end if
+      parsed = ParseJson(ReadAsciiFile(m.path))
+      problem = BGE.SpriteAtlases.findProblem(parsed)
+      if problem <> ""
+        m.error = "sprite atlas " + m.source + " " + problem
+        m.jsonBad = true
+        return false
+      end if
+      m.atlas = BGE.SpriteAtlases.create(m.atlasName, m.source, parsed)
+      previous = m.game.getSpriteAtlas(m.atlasName)
+      for i = 0 to m.atlas.sheets.count() - 1
+        bitmapName = m.atlas.sheets[i]
+        sheetPath = m.atlas.sheetPaths[i]
+        ' a sheet already loaded from the same file isn't loaded again
+        loaded = previous <> invalid and i < previous.sheetPaths.count() and m.game.Bitmaps[bitmapName] <> invalid
+        if loaded
+          loaded = previous.sheetPaths[i] = sheetPath
+        end if
+        if not loaded
+          sheetTask = new BGE.BitmapLoadTask(m.game, bitmapName, sheetPath)
+          if BGE.Urls.isUrl(sheetPath)
+            sheetTask.download = m.newDownload(sheetPath)
+          end if
+          m.sheetTasks.push(sheetTask)
+        end if
+      end for
+      m.sheetCount = m.sheetTasks.count()
+      return true
+    end function
+
+    ' Steps every unfinished sheet, sharing the budget (the first always gets a step). Returns
+    ' true when none are left.
+    private function stepSheets(budgetMs as integer) as boolean
+      timer = CreateObject("roTimespan")
+      remainingTasks = [] as BGE.BitmapLoadTask[]
+      steppedAny = false
+      for each sheetTask in m.sheetTasks
+        remainingMs = budgetMs - timer.TotalMilliseconds()
+        if steppedAny and remainingMs <= 0
+          remainingTasks.push(sheetTask)
+        else
+          steppedAny = true
+          if not sheetTask.step(remainingMs)
+            remainingTasks.push(sheetTask)
+          else if sheetTask.error <> invalid
+            m.sheetErrors.push(sheetTask.error)
+          end if
+        end if
+      end for
+      m.sheetTasks = remainingTasks
+      return m.sheetTasks.count() = 0
+    end function
+
+    private function newDownload(url as string) as BGE.DownloadTask
+      if m.loader <> invalid
+        return m.loader.getDownloadTask(url, m.downloadOptions)
+      end if
+      task = new BGE.DownloadTask(url, m.downloadOptions)
+      return task
+    end function
 
   end class
 
