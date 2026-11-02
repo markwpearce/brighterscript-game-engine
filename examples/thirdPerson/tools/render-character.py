@@ -33,15 +33,24 @@ from mathutils import Vector
 # hide: objects not to render
 # colours: material -> colour (linear RGB), replacing the base and texture colours convert-flare.py made
 # size: the camera's view in Blender units, enough for the widest swing
-# A darker, sickly green than the source's orange, with dark hair
-ORC_COLOURS = {"Material.skin": (0.2, 0.25, 0.12), "Material.hair": (0.06, 0.04, 0.025)}
+# Grey-green skin (renders at about #9AAE93; the lighting brightens it) in place of the source's orange, with dark hair
+ORC_COLOURS = {"Material.skin": (0.18, 0.22, 0.146), "Material.hair": (0.06, 0.04, 0.025)}
+
+
+def inbetweens(start, end, count):
+    """count frames evenly spaced from start to end, both included"""
+    return [round(start + (end - start) * i / (count - 1), 3) for i in range(count)]
+
+
+# The melee's four keys (13-16) with four in-betweens
+MONSTER_ATTACK = inbetweens(13, 16, 8)
 
 CHARACTERS = {
     "knight": {
         "animations": [
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 13.5, 14, 14.5, 15, 15.5, 16]),
+            ("attack", inbetweens(13, 16, 9)),
             ("block", [17, 18]),
         ],
         "parts": {"MaleHead1": "male_head1.blend", "Longsword": "longsword.blend", "HeavyShield": "shield.blend"},
@@ -52,7 +61,7 @@ CHARACTERS = {
         "animations": [
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 13.6, 14.2, 14.8, 15.4, 16]),
+            ("attack", MONSTER_ATTACK),
             ("block", [17]),
             ("hit", [19]),
             ("die", [21, 23, 25, 27]),
@@ -65,7 +74,7 @@ CHARACTERS = {
         "animations": [
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 13.6, 14.2, 14.8, 15.4, 16]),
+            ("attack", MONSTER_ATTACK),
             ("hit", [17]),
             ("die", [19, 21, 23, 24]),
         ],
@@ -74,12 +83,12 @@ CHARACTERS = {
         "size": 3.6,
     },
     # orc_flare_0.blend, layer 5: armour, shield and a bigger axe
-    # Its overhead swing makes the cells tall, so fewer frames keep the sheet within 2048 px
+    # Its overhead swing makes its frames big, so it keeps fewer idle and die frames to save texture memory
     "orc-heavy": {
         "animations": [
             ("idle", [1, 3]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
-            ("attack", [13, 13.6, 14.2, 14.8, 15.4, 16]),
+            ("attack", MONSTER_ATTACK),
             ("block", [30]),
             ("hit", [17]),
             ("die", [20, 24]),
@@ -200,7 +209,7 @@ def render_frames(sc, cam, args, character, frame_dir):
         platform.rotation_euler = (0, 0, math.radians(d * 360.0 / args.directions))
         row = []
         for f in frames:
-            path = os.path.join(frame_dir, "d%02d_f%05.1f.png" % (d, f))
+            path = os.path.join(frame_dir, "d%02d_f%07.3f.png" % (d, f))
             if not os.path.exists(path):
                 sc.frame_set(int(f), subframe=f - int(f))
                 sc.render.filepath = path
