@@ -1,0 +1,120 @@
+import "../../../math/math.bs"
+import "../../../math/vector.bs"
+import "../../Game.bs"
+
+namespace BGE
+
+  ' Keeps a chase camera out of walls: given the point the camera looks at and where it would
+  ' like to be, update() returns the closest position on that line that no collider blocks.
+  ' It pulls in at once when something comes between them, and eases back out when it clears.
+  '
+  ' Obstacles need 3D colliders (BoxCollider3d/SphereCollider3d): a static building is an
+  ' isStatic entity with a BoxCollider3d. Give them their own memberFlags bit and set
+  ' collidableFlags to it, so the player's and enemies' own colliders don't pull the camera in.
+  '
+  '   m.boom = new BGE.CameraBoom(m.game, {collidableFlags: CAMERA_BLOCKER})
+  '   camera.position = m.boom.update(lookAt, wantedPosition, dt)
+  class CameraBoom
+
+    ' Thickness of the camera: rays are cast round a circle this wide, and the camera stops
+    ' this far short of what it hits, so it doesn't clip through edges a single ray would miss.
+    probeRadius as float = 8.0
+    ' Never closer to the look-at point than this, even if blocked closer still
+    minDistance as float = 16.0
+    ' Colliders whose memberFlags overlap this block the camera
+    collidableFlags as integer = &hFFFFFFFF
+    ' How quickly the camera eases back out, 1/seconds (higher is faster)
+    easeOutRate as float = 4.0
+    ' isClose() is true within this distance, e.g. to fade out the player
+    closeDistance as float = 0.0
+
+    protected game as BGE.Game
+    protected distance as float = -1.0
+    protected blocked as boolean = false
+
+    sub new(game as BGE.Game, args = {} as roAssociativeArray)
+      m.game = game
+      ' bs:disable-next-line: 1140
+      m.append(args)
+    end sub
+
+    ' Works out this frame's camera position.
+    '
+    ' @param {BGE.Math.Vector} lookAt - the point the camera looks at, e.g. the player's head
+    ' @param {BGE.Math.Vector} desiredPosition - where the camera would be with nothing in the way
+    ' @param {float} dt - seconds since last frame
+    ' @return {BGE.Math.Vector} the camera position to use
+    function update(lookAt as BGE.Math.Vector, desiredPosition as BGE.Math.Vector, dt as float) as BGE.Math.Vector
+      offset = BGE.Math.VectorOps.subtract(desiredPosition, lookAt)
+      wanted = BGE.Math.VectorOps.length(offset)
+      if wanted < 0.001
+        m.distance = wanted
+        m.blocked = false
+        return BGE.Math.VectorOps.copy(desiredPosition)
+      end if
+      direction = BGE.Math.VectorOps.scale(offset, 1 / wanted)
+      allowed = m.unblockedDistance(lookAt, direction, wanted)
+      m.blocked = allowed < wanted
+      if m.distance < 0 or allowed <= m.distance
+        m.distance = allowed
+      else
+        m.distance += (allowed - m.distance) * (1 - Exp(-m.easeOutRate * dt))
+        if allowed - m.distance < 0.5
+          m.distance = allowed
+        end if
+      end if
+      return BGE.Math.VectorOps.add(lookAt, BGE.Math.VectorOps.scale(direction, m.distance))
+    end function
+
+    ' Distance from the look-at point to the camera after the last update().
+    '
+    ' @return {float}
+    function getDistance() as float
+      return m.distance
+    end function
+
+    ' Whether something was in the way at the last update().
+    '
+    ' @return {boolean}
+    function isBlocked() as boolean
+      return m.blocked
+    end function
+
+    ' Whether the camera is within closeDistance of the look-at point.
+    '
+    ' @return {boolean}
+    function isClose() as boolean
+      return m.distance >= 0 and m.distance <= m.closeDistance
+    end function
+
+    ' Forgets the eased distance, so the next update() snaps straight to the result, e.g. after
+    ' a cut or a respawn.
+    sub reset()
+      m.distance = -1.0
+      m.blocked = false
+    end sub
+
+    ' The farthest the camera can be along `direction` without hitting anything: a ray down
+    ' the middle and four round the probe circle, each stopped probeRadius short of its hit.
+    protected function unblockedDistance(lookAt as BGE.Math.Vector, direction as BGE.Math.Vector, wanted as float) as float
+      helper = BGE.Math.VectorOps.create(0, 1, 0)
+      if Abs(direction.y) > 0.9
+        helper = BGE.Math.VectorOps.create(1, 0, 0)
+      end if
+      across = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.crossProduct(direction, helper))
+      up = BGE.Math.VectorOps.crossProduct(direction, across)
+      r = m.probeRadius
+      offsets = [BGE.Math.VectorOps.create(), BGE.Math.VectorOps.scale(across, r), BGE.Math.VectorOps.scale(across, -r), BGE.Math.VectorOps.scale(up, r), BGE.Math.VectorOps.scale(up, -r)]
+      allowed = wanted
+      for each offset in offsets
+        hit = m.game.raycast(BGE.Math.VectorOps.add(lookAt, offset), direction, wanted + r, m.collidableFlags)
+        if invalid <> hit
+          allowed = BGE.Math.Min(allowed, hit.distance - r)
+        end if
+      end for
+      return BGE.Math.Clamp(allowed, BGE.Math.Min(m.minDistance, wanted), wanted)
+    end function
+
+  end class
+
+end namespace
