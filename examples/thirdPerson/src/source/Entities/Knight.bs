@@ -17,13 +17,20 @@ end enum
 ' The player: Flare's male hero knight, re-rendered from its Blender sources by
 ' tools/render-character.py (sprites/knight.json) and shown as a 16-direction oriented sprite. Moves
 ' relative to the camera and has light attacks (chained), a held block, a timed parry and a dodge,
-' all paid for with stamina.
+' all paid for with stamina. Locked onto an enemy, he faces it while he moves and swings at it.
 class Knight extends Fighter
 
   cameraRig as BGE.OrbitCamera = invalid
   state as KnightState = KnightState.idle
   ' True during the middle of a dodge
   invulnerable as boolean = false
+  ' The enemy he's locked onto, or invalid
+  lockTarget as Fighter = invalid
+  ' Locks onto enemies this close, roughly where the camera looks
+  lockRange as float = World.metres(15)
+  lockHalfAngle as float = BGE.Math.PI * 0.4
+  ' Drops the lock past this
+  lockBreakRange as float = World.metres(20)
 
   runSpeed as float = World.metres(3.5)
   blockWalkSpeed as float = World.metres(1.5)
@@ -59,6 +66,8 @@ class Knight extends Fighter
   private attackLanded as boolean = false
   private dodgeDirection as BGE.Math.Vector = BGE.Math.VectorOps.create()
   private hurtForSeconds as float = 0
+  ' The look stick has been centred since the last target switch
+  private switchReady as boolean = true
 
   sub new(game as BGE.Game)
     super(game)
@@ -100,6 +109,7 @@ class Knight extends Fighter
     controls = m.game.controls
     m.stateSeconds += dt
     move = m.cameraRelativeMove()
+    m.updateLockOn()
 
     if m.state = KnightState.dead
       ' Waits for the scene to respawn him
@@ -123,22 +133,87 @@ class Knight extends Fighter
       m.setState(KnightState.parry)
     else if controls.isActionHeld("block")
       m.setState(KnightState.block)
-      ' Walk slowly behind the shield without turning
+      ' Walk slowly behind the shield without turning, unless locked on
+      m.faceLockTarget(dt)
       m.moveBy(move, m.blockWalkSpeed * dt)
     else if BGE.Math.VectorOps.length(move) > 0.25
       ' Always full speed: there's only a run animation, so slower would slide the feet
       direction = BGE.Math.VectorOps.scale(move, 1 / BGE.Math.VectorOps.length(move))
       m.setState(KnightState.run)
-      m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(direction), m.turnSpeed * dt)
+      ' Locked on, he strafes round the target
+      if not m.faceLockTarget(dt)
+        m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(direction), m.turnSpeed * dt)
+      end if
       m.moveBy(direction, m.runSpeed * dt)
     else
       m.setState(KnightState.idle)
+      m.faceLockTarget(dt)
     end if
 
     ' Holding the shield up slows recovery
     m.stamina.update(dt, m.state = KnightState.block)
     m.updateCombatEffects(dt)
   end sub
+
+  ' Lock-on presses, target switching with the look stick, and dropping a target that died or
+  ' got away.
+  private sub updateLockOn()
+    controls = m.game.controls
+    if invalid <> m.lockTarget and (not m.isAlive() or not m.lockTarget.isAlive() or m.distanceTo(m.lockTarget) > m.lockBreakRange)
+      m.setLockTarget(invalid)
+    end if
+    if not m.isAlive() or invalid = m.director
+      return
+    end if
+    if controls.isActionPressed("lockOn")
+      if invalid <> m.lockTarget
+        m.setLockTarget(invalid)
+      else
+        m.setLockTarget(m.director.lockOnCandidate(m, m.lockRange, m.lockHalfAngle))
+        if invalid = m.lockTarget and invalid <> m.cameraRig
+          ' Nothing to lock onto: a souls game recenters instead
+          m.cameraRig.recenter()
+        end if
+      end if
+    end if
+    ' A flick of the look stick switches to the next enemy that way
+    lookX = controls.getRawAxis("look").x
+    if Abs(lookX) < 0.3
+      m.switchReady = true
+    else if Abs(lookX) > 0.7 and m.switchReady and invalid <> m.lockTarget
+      m.switchReady = false
+      side = 1
+      if lookX < 0
+        side = -1
+      end if
+      nextTarget = m.director.nextLockTarget(m, m.lockTarget, side, m.lockRange)
+      if invalid <> nextTarget
+        m.setLockTarget(nextTarget)
+      end if
+    end if
+  end sub
+
+  ' Locks the knight and the camera onto `target`, or releases both with invalid.
+  sub setLockTarget(target as Fighter)
+    m.lockTarget = target
+    if invalid = m.cameraRig
+      return
+    end if
+    if invalid = target
+      m.cameraRig.releaseLock()
+    else
+      m.cameraRig.lockOn(target)
+    end if
+  end sub
+
+  ' Turns toward the lock target, if there is one; returns whether there was.
+  private function faceLockTarget(dt as float) as boolean
+    if invalid = m.lockTarget
+      return false
+    end if
+    m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(m.directionTo(m.lockTarget)), m.turnSpeed * dt)
+    return true
+  end function
 
   ' Move stick turned into a world direction relative to the camera (length 0..1).
   private function cameraRelativeMove() as BGE.Math.Vector
@@ -164,8 +239,10 @@ class Knight extends Fighter
   end sub
 
   private sub startAttack(move as BGE.Math.Vector)
-    ' Swings where the stick points
-    if BGE.Math.VectorOps.length(move) > 0.3
+    ' Swings at the lock target, or where the stick points
+    if invalid <> m.lockTarget
+      m.rotation.y = BGE.Math.headingOf(m.directionTo(m.lockTarget))
+    else if BGE.Math.VectorOps.length(move) > 0.3
       m.rotation.y = BGE.Math.headingOf(move)
     end if
     m.attackQueued = false
@@ -269,11 +346,22 @@ class Knight extends Fighter
 
   ' Back on his feet at full health.
   sub respawn(x as float, z as float)
+    m.setLockTarget(invalid)
     m.health = m.maxHealth
     m.stamina.refill()
     m.position = BGE.Math.VectorOps.create(x, 0, z)
     m.knockback.stop()
     m.setState(KnightState.idle)
+  end sub
+
+  ' A white dot on the locked-on enemy's chest.
+  override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+    super.onDrawEnd(gameRenderer, uiRenderer)
+    if invalid <> m.lockTarget
+      target = m.lockTarget
+      chest = BGE.Math.VectorOps.create(target.position.x, target.height * 0.6, target.position.z)
+      gameRenderer.drawWorldBar(chest, 6, 6, 1, &hFFFFFFFF, &h000000C0)
+    end if
   end sub
 
   protected override function restingColor() as integer

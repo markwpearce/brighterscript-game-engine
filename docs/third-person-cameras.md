@@ -59,6 +59,28 @@ The camera does not drift back behind a moving target on its own. With camera-re
 movement, a drifting camera would turn every run into a curve. `recenter()` swings it back
 behind the target and levels the tilt instead. Any look input cancels a recenter.
 
+### Locking on
+
+`lockOn(entity)` turns the camera to look past the target at another entity, e.g. the enemy
+the player has locked onto, and keeps it there as either moves. Look input is ignored while
+locked, so the look stick is free for switching targets, and the tilt eases to `lockTilt`;
+a positive one looks down on the ground between them, which makes the distance easier to judge. `releaseLock()` lets go, leaving the
+camera where it is; it also lets go by itself when the entity is invalidated.
+
+```brighterscript
+if m.game.controls.isActionPressed("lockOn")
+  if m.orbit.isLocked()
+    m.orbit.releaseLock()
+  else if invalid <> m.nearestEnemy
+    m.orbit.lockOn(m.nearestEnemy)
+  else
+    m.orbit.recenter()
+  end if
+end if
+```
+
+Choosing the target and dropping it when it dies or gets away is up to the game.
+
 Every option is also a public field, so you can change them while the game runs, e.g. pull the
 camera in for a cutscene. The defaults (all in world units) suit a world of about 32 units per
 metre: 4 m back, 1.75 m up, looking at 1.25 m.
@@ -71,6 +93,8 @@ metre: 4 m back, 1.75 m up, looking at 1.25 m.
 | `minHeight` | 10 | The camera never goes lower than this above the target |
 | `orbitSpeed` / `tiltSpeed` | 2.6 / 1.6 | Radians per second at full look |
 | `recenterSpeed` | 8 | Radians per second while recentering |
+| `lockTurnSpeed` | 6 | Radians per second while turning toward a `lockOn()` entity |
+| `lockTilt` | 0 | Tilt while locked on, radians (within `minTilt`/`maxTilt`) |
 | `minTilt` / `maxTilt` | -0.4 / 0.4 | Tilt limits, radians |
 | `heading` | target's `rotation.y` | The heading the camera looks along |
 | `boom` | `invalid` | A `BGE.CameraBoom` (see below) |

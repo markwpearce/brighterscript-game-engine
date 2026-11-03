@@ -117,7 +117,7 @@ Retained-mode widget tree on its own canvas: `Game.gameUi` and `Game.debugUi` (`
 - `story/`: `BGE.Story` — UI-free dialogue/flags/inventory runner (`docs/story.md`). `goto`/`call`/`end` are reserved words (use brackets / quoted keys); ids can't contain `#` or `/`. If bsc misreads a `StoryData` literal against `Items()`, add `items: {}`.
 - Music: `Game.musicPlay(path, loop, restart = true)` — pass `restart = false` to keep a shared track playing across scenes; `roAudioPlayer` can't fade. `Game.changeSceneWithFade()` for transitions.
 - `Camera2d.follow()`/`setBounds()` apply in `checkMovement()` after updates — set camera targets in `onUpdate`, not `onDrawBegin`.
-- `BGE.OrbitCamera` is a third-person orbit camera (look vector passed to `update()`, call it in `onPostUpdate`); `BGE.Math.cameraRelativeMove()` pairs with it (`docs/third-person-cameras.md`).
+- `BGE.OrbitCamera` is a third-person orbit camera (look vector passed to `update()`, call it in `onPostUpdate`; `lockOn(entity)` keeps a second entity in view); `BGE.Math.cameraRelativeMove()` pairs with it (`docs/third-person-cameras.md`).
 - `BGE.CameraBoom` keeps a chase camera in front of 3D colliders (pull in at once, ease out); give blockers their own `memberFlags` bit so characters' colliders don't count.
 
 ## Conventions
