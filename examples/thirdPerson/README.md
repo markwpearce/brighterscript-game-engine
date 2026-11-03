@@ -18,7 +18,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 
 Movement is relative to the camera, and the camera stays put until you move it.
 
-Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight faces it as he moves (strafing round it) and swings at it. The lock drops when the enemy dies or gets more than 20 m away. There's no strafe or roll art yet, so both reuse the run cycle.
+Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight faces it while he stands, blocks or runs toward it, and swings at it; running away or sideways turns him to run that way. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away. There's no strafe or roll art yet, so the roll reuses the run cycle.
 
 Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. Hits spray blood (bone dust from the skeleton), and blocks and parries throw sparks. When the knight dies the field clears and he gets up again.
 
