@@ -1,6 +1,6 @@
 # Third Person
 
-A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina and a souls-style HUD. The map, ripostes and checkpoints come later.
+A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD. The map, ripostes and checkpoints come later.
 
 ## Playing
 
@@ -8,14 +8,17 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | --- | --- | --- |
 | Move (relative to the camera) | Left stick | D-pad |
 | Orbit the camera | Right stick | - |
-| Recenter the camera behind the knight | R3 or Y | Rewind |
-| Attack (press again during a swing to chain) | R1 or A | OK |
+| Lock onto the enemy in front, or release it; with none in front, recenter the camera behind the knight | L2 | Rewind |
+| Switch lock-on target | Flick the right stick left or right | - |
+| Attack (press again during a swing to chain) | X | OK |
 | Block (hold; walk slowly) | L1 | Play |
-| Parry | L2 | Fast-forward |
-| Dodge (roll toward the stick, or step back) | B | Back or Replay |
+| Parry | B | Fast-forward |
+| Dodge (roll toward the stick, or step back) | A | Back or Replay |
 | Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
 
 Movement is relative to the camera, and the camera stays put until you move it.
+
+Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight faces it while he stands, blocks or runs toward it, and swings at it; running away or sideways turns him to run that way. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away. There's no strafe or roll art yet, so the roll reuses the run cycle.
 
 Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. Hits spray blood (bone dust from the skeleton), and blocks and parries throw sparks. When the knight dies the field clears and he gets up again.
 
