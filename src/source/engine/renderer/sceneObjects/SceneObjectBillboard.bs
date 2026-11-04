@@ -51,6 +51,17 @@ namespace BGE
     private occluderProjectionScratch as float[] = []
     ' A temp bitmap kept through a failed draw, so the next one needn't allocate (~10ms on device)
     private spareTempBitmap as roBitmap = invalid
+    ' Whether this draw's temp bitmap bounds were clipped to the canvas, and whether the
+    ' cached temp bitmap was
+    private boundsClippedThisDraw = false
+    private tempBitmapClipped = false
+    ' Where a clipped temp bitmap's (0,0) sits from its unclipped bounds' top left
+    private tempBitmapClipOffset as BGE.Math.Vector = invalid
+    ' Whether the right and bottom sides were clipped, this draw and for the cached bitmap
+    private clippedFarThisDraw = [false, false]
+    private tempBitmapClippedFar = [false, false]
+    ' The direction from the camera to the quad when the temp bitmap was drawn
+    private tempBitmapViewDirection as BGE.Math.Vector = invalid
 
     protected worldPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
     protected canvasPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
@@ -107,10 +118,13 @@ namespace BGE
         ' only the temp bitmap paths below need the bounds, and they're the only paths
         ' reachable when this draw mode uses a temp bitmap at all - so in the direct draw
         ' modes (every sprite in a 2D game) this whole computation is skipped every frame
-        canvasBounds = m.getCanvasBounds()
+        canvasBounds = m.getTempBitmapBounds(rendererObj)
       end if
       if m.doNotDrawBecauseBackface(drawMode)
-        ' this is backface, and should not be drawn
+        ' this is backface, and should not be drawn; keep the allocation for when it turns back
+        if invalid <> m.tempBitmap
+          m.spareTempBitmap = m.tempBitmap as roBitmap
+        end if
         m.tempBitmap = invalid
         m.tempBitmapRegion = invalid
         return false
@@ -364,6 +378,16 @@ namespace BGE
       ' alongside the real content.
       m.tempBitmapRegion = CreateObject("roRegion", tempBitmap, 0, 0, neededWidth, neededHeight)
       m.limitPointMap = m.getCanvasLimitPointMap()
+      m.tempBitmapClipped = m.boundsClippedThisDraw
+      m.tempBitmapClippedFar = m.clippedFarThisDraw
+      m.tempBitmapClipOffset = invalid
+      if m.tempBitmapClipped
+        m.tempBitmapClipOffset = BGE.Math.VectorOps.subtract(canvasBounds[0], m.limitPointMap.origin)
+      end if
+      m.tempBitmapViewDirection = invalid
+      if m.usesBillboardReuseLimits()
+        m.tempBitmapViewDirection = m.getViewDirection(rendererObj)
+      end if
       m.hasAccurateTempBitmap = not tempBitmapResult.didFastDraw
       rendererObj.forceDraw(tempBitmap)
       return tempBitmap
@@ -576,6 +600,39 @@ namespace BGE
     ' @return {BGE.Math.Vector[]} the bounds of the canvas points
     protected function getCanvasBounds() as BGE.Math.Vector[]
       return BGE.Math.getBounds(m.getAllCanvasPoints())
+    end function
+
+    ' The temp bitmap's bounds: getCanvasBounds() clipped to the canvas plus a margin,
+    ' so a quad beside the camera doesn't ask for a bitmap many times the screen's size.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {BGE.Math.Vector[]} [TL, BR]
+    protected function getTempBitmapBounds(rendererObj as Renderer) as BGE.Math.Vector[]
+      m.boundsClippedThisDraw = false
+      m.clippedFarThisDraw = [false, false]
+      bounds = m.getCanvasBounds()
+      frame = rendererObj.camera.frameSize
+      if invalid = bounds or bounds.count() < 2 or frame.x <= 0 or frame.y <= 0
+        return bounds
+      end if
+      ' at least the reuse threshold, so a small drift doesn't uncover a clipped edge at once
+      least = m.getTempBitmapThreshold(SceneObjectDrawMode.oriented)
+      marginX = BGE.Math.Max(least, frame.x * BGE.RendererHelpers.CANVAS_CLIP_MARGIN_FRACTION)
+      marginY = BGE.Math.Max(least, frame.y * BGE.RendererHelpers.CANVAS_CLIP_MARGIN_FRACTION)
+      x0 = BGE.Math.Max(bounds[0].x, -marginX)
+      y0 = BGE.Math.Max(bounds[0].y, -marginY)
+      x1 = BGE.Math.Min(bounds[1].x, frame.x + marginX)
+      y1 = BGE.Math.Min(bounds[1].y, frame.y + marginY)
+      if x0 = bounds[0].x and y0 = bounds[0].y and x1 = bounds[1].x and y1 = bounds[1].y
+        return bounds
+      end if
+      m.boundsClippedThisDraw = true
+      m.clippedFarThisDraw = [x1 < bounds[1].x, y1 < bounds[1].y]
+      if x1 < x0 or y1 < y0
+        x1 = x0
+        y1 = y0
+      end if
+      return [BGE.Math.VectorOps.create(x0, y0), BGE.Math.VectorOps.create(x1, y1)]
     end function
 
 
@@ -1155,6 +1212,14 @@ namespace BGE
         return invalid
       end if
 
+      ' a corner pin was tried for what this can't fit, but measured slower than a redraw (#439)
+      if m.usesBillboardReuseLimits() and invalid <> renderObj.qualitySettings
+        maxAngle = renderObj.qualitySettings.billboardReuseMaxAngleDegrees
+        if maxAngle < 180 and m.getViewTurnCosine(renderObj) < Cos(BGE.Math.DegreesToRadians(maxAngle))
+          return invalid
+        end if
+      end if
+
       rotationDelta = m.limitPointMap.getAngleBaseLineDifference(currentLimits)
 
       ' rotate the current points to be axis aligned, so we can get the mappedOrigin - this allows us to read x & y sclaes
@@ -1198,20 +1263,72 @@ namespace BGE
 
       ' totalDifference = topDelta + leftDelta + rightDelta + bottomDelta
       maxDifference = BGE.Math.arrayMax([topDelta, leftDelta, rightDelta, bottomDelta])
-      if maxDifference < m.getTempBitmapThreshold(drawMode)
+      if maxDifference < m.getTempBitmapReuseAllowance(renderObj, drawMode)
         ' if the difference is small enough, we can use the temp bitmap
-        return {
+        details = {
           origin: mappedOrigin,
           rotation: rotationDelta,
           scaleX: newHorizScale,
           scaleY: newVertScale
-        }
+        } as TransformTempBitmapDetails
+        if m.tempBitmapClipped
+          return m.placeClippedTempBitmap(renderObj, details)
+        end if
+        return details
       end if
 
       return invalid
     end function
 
+    ' Whether billboard reuse limits (view angle, size-relative error) apply; a model has its own.
+    protected function usesBillboardReuseLimits() as boolean
+      return true
+    end function
 
+    ' @return {BGE.Math.Vector} unit direction from the camera to the quad's centre
+    private function getViewDirection(rendererObj as Renderer) as BGE.Math.Vector
+      direction = BGE.Math.VectorOps.subtract(m.worldPoints.getCenter(), rendererObj.camera.position)
+      BGE.Math.VectorOps.normalize(direction)
+      return direction
+    end function
+
+    ' @return {float} cosine of the angle the view direction turned since the temp bitmap was drawn
+    private function getViewTurnCosine(rendererObj as Renderer) as float
+      if invalid = m.tempBitmapViewDirection
+        return 1.0
+      end if
+      return BGE.Math.VectorOps.dotProduct(m.getViewDirection(rendererObj), m.tempBitmapViewDirection)
+    end function
+
+
+
+    ' Moves a reuse transform's origin to a clipped temp bitmap's (0,0), if every clipped
+    ' edge still lands off the canvas - otherwise part of what's now on screen was never drawn.
+    ' Only for a scale: DrawTransformedObject's rotation direction isn't verified for this.
+    '
+    ' @param {Renderer} renderObj
+    ' @param {TransformTempBitmapDetails} details placed for the unclipped bounds
+    ' @return {TransformTempBitmapDetails} invalid if the clipped bitmap can't be reused
+    private function placeClippedTempBitmap(renderObj as Renderer, details as TransformTempBitmapDetails) as TransformTempBitmapDetails
+      if abs(details.rotation) > 0.001
+        return invalid
+      end if
+      offset = m.tempBitmapClipOffset
+      ' bitmap pixel (u, v) lands at origin + (scaleX * u, scaleY * v)
+      originX = details.origin.x + details.scaleX * offset.x
+      originY = details.origin.y + details.scaleY * offset.y
+      right = originX + m.tempBitmapRegion.GetWidth() * details.scaleX
+      bottom = originY + m.tempBitmapRegion.GetHeight() * details.scaleY
+      frame = renderObj.camera.frameSize
+      if (offset.x > 0 and originX > 0) or (offset.y > 0 and originY > 0)
+        return invalid
+      end if
+      if (m.tempBitmapClippedFar[0] and right < frame.x) or (m.tempBitmapClippedFar[1] and bottom < frame.y)
+        return invalid
+      end if
+      details.origin = BGE.Math.VectorOps.create(originX, originY)
+      return details
+    end function
 
     ' Is this a back and then we should not draw it?
     '
@@ -1389,6 +1506,22 @@ namespace BGE
 
     protected function getTempBitmapThreshold(drawMode as SceneObjectDrawMode) as integer
       return 16
+    end function
+
+    ' How far, in canvas pixels, attemptTransformTempBitmap() may place a limit point from
+    ' where it should be: getTempBitmapThreshold(), or billboardReuseError of the cached
+    ' bitmap's size if larger. Occluders keep the threshold, which their claim is inset by.
+    '
+    ' @param {Renderer} renderObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {float}
+    protected function getTempBitmapReuseAllowance(renderObj as Renderer, drawMode as SceneObjectDrawMode) as float
+      threshold = m.getTempBitmapThreshold(drawMode)
+      if m.isOccluder or invalid = renderObj.qualitySettings
+        return threshold
+      end if
+      diagonal = Sqr(m.limitPointMap.width * m.limitPointMap.width + m.limitPointMap.height * m.limitPointMap.height)
+      return BGE.Math.Max(threshold, renderObj.qualitySettings.billboardReuseError * diagonal)
     end function
 
   end class
