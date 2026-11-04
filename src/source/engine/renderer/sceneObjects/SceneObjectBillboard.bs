@@ -51,6 +51,10 @@ namespace BGE
     private occluderProjectionScratch as float[] = []
     ' A temp bitmap kept through a failed draw, so the next one needn't allocate (~10ms on device)
     private spareTempBitmap as roBitmap = invalid
+    ' Whether this draw's temp bitmap bounds were clipped to the canvas, and whether the
+    ' cached temp bitmap was (attemptTransformTempBitmap() can't place a clipped one)
+    private boundsClippedThisDraw = false
+    private tempBitmapClipped = false
 
     protected worldPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
     protected canvasPoints as BGE.Math.CornerPoints = new BGE.Math.CornerPoints()
@@ -107,7 +111,7 @@ namespace BGE
         ' only the temp bitmap paths below need the bounds, and they're the only paths
         ' reachable when this draw mode uses a temp bitmap at all - so in the direct draw
         ' modes (every sprite in a 2D game) this whole computation is skipped every frame
-        canvasBounds = m.getCanvasBounds()
+        canvasBounds = m.getTempBitmapBounds(rendererObj)
       end if
       if m.doNotDrawBecauseBackface(drawMode)
         ' this is backface, and should not be drawn; keep the allocation for when it turns back
@@ -367,6 +371,7 @@ namespace BGE
       ' alongside the real content.
       m.tempBitmapRegion = CreateObject("roRegion", tempBitmap, 0, 0, neededWidth, neededHeight)
       m.limitPointMap = m.getCanvasLimitPointMap()
+      m.tempBitmapClipped = m.boundsClippedThisDraw
       m.hasAccurateTempBitmap = not tempBitmapResult.didFastDraw
       rendererObj.forceDraw(tempBitmap)
       return tempBitmap
@@ -579,6 +584,35 @@ namespace BGE
     ' @return {BGE.Math.Vector[]} the bounds of the canvas points
     protected function getCanvasBounds() as BGE.Math.Vector[]
       return BGE.Math.getBounds(m.getAllCanvasPoints())
+    end function
+
+    ' The temp bitmap's bounds: getCanvasBounds() clipped to the canvas plus a 10% margin,
+    ' so a quad beside the camera doesn't ask for a bitmap many times the screen's size.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {BGE.Math.Vector[]} [TL, BR]
+    protected function getTempBitmapBounds(rendererObj as Renderer) as BGE.Math.Vector[]
+      m.boundsClippedThisDraw = false
+      bounds = m.getCanvasBounds()
+      frame = rendererObj.camera.frameSize
+      if invalid = bounds or bounds.count() < 2 or frame.x <= 0 or frame.y <= 0
+        return bounds
+      end if
+      marginX = frame.x * 0.1
+      marginY = frame.y * 0.1
+      x0 = BGE.Math.Max(bounds[0].x, -marginX)
+      y0 = BGE.Math.Max(bounds[0].y, -marginY)
+      x1 = BGE.Math.Min(bounds[1].x, frame.x + marginX)
+      y1 = BGE.Math.Min(bounds[1].y, frame.y + marginY)
+      if x0 = bounds[0].x and y0 = bounds[0].y and x1 = bounds[1].x and y1 = bounds[1].y
+        return bounds
+      end if
+      m.boundsClippedThisDraw = true
+      if x1 < x0 or y1 < y0
+        x1 = x0
+        y1 = y0
+      end if
+      return [BGE.Math.VectorOps.create(x0, y0), BGE.Math.VectorOps.create(x1, y1)]
     end function
 
 
@@ -1144,7 +1178,7 @@ namespace BGE
       if m.drawsOccluderExactly()
         return invalid
       end if
-      if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.tempBitmapRegion) or rodash.isInvalid(m.limitPointMap) or not m.usesTempBitmap(drawMode)
+      if rodash.isInvalid(m.tempBitmap) or rodash.isInvalid(m.tempBitmapRegion) or rodash.isInvalid(m.limitPointMap) or m.tempBitmapClipped or not m.usesTempBitmap(drawMode)
         return invalid
       end if
 
@@ -1318,7 +1352,7 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function mayReuseTransformedTempBitmap(drawMode as SceneObjectDrawMode) as boolean
-      return m.useTempBitmapMap[drawMode] and invalid <> m.tempBitmap and invalid <> m.tempBitmapRegion and invalid <> m.limitPointMap
+      return m.useTempBitmapMap[drawMode] and invalid <> m.tempBitmap and invalid <> m.tempBitmapRegion and invalid <> m.limitPointMap and not m.tempBitmapClipped
     end function
 
     ' Projects a convex world-space outline to an occluder polygon.
