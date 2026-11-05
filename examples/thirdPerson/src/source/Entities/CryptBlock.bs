@@ -1,0 +1,112 @@
+import "../World.bs"
+import "../Crypt/CryptMap.bs"
+
+' One solid cell of the crypt: stone wall faces on the sides that border floor, each cut into
+' 2 m segments so torchlight falls off along it. Static, so the faces occlude what's behind
+' them, and a BoxCollider3d on CAMERA_BLOCKER keeps the chase camera out.
+class CryptBlock extends BGE.GameEntity
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "CryptBlock"
+    m.isStatic = true
+  end sub
+
+  ' args: x, z (cell centre), openSides (string[] of "n"/"e"/"s"/"w"), style ("image", the
+  ' default, or "model")
+  override sub onCreate(args as roAssociativeArray)
+    m.position = BGE.Math.VectorOps.create(args.x, 0, args.z)
+    cell = World.metres(CryptMap.CELL_METRES)
+    height = World.metres(CryptMap.WALL_METRES)
+    wallBmp = m.game.getBitmap("cryptWall")
+    if args.style = "model"
+      m.addModelWalls(args.openSides, wallBmp)
+    else
+      m.addImageWalls(args.openSides, wallBmp)
+    end if
+    body = m.addBoxCollider3d("body", cell, height, cell, 0, height / 2, 0)
+    body.memberFlags = World.CAMERA_BLOCKER
+  end sub
+
+  ' Centres of the segments along a side (y 0), and the side's outward normal
+  private function segmentCenters(side as string) as BGE.Math.Vector[]
+    normal = m.sideNormal(side)
+    tangent = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.create(0, 1, 0), normal)
+    halfCell = World.metres(CryptMap.CELL_METRES) / 2
+    segment = World.metres(CryptMap.SEGMENT_METRES)
+    count = CryptMap.CELL_METRES / CryptMap.SEGMENT_METRES
+    centers = [] as BGE.Math.Vector[]
+    for i = 0 to count - 1
+      along = (i - (count - 1) / 2) * segment
+      centers.push(BGE.Math.VectorOps.add(BGE.Math.VectorOps.scale(normal, halfCell), BGE.Math.VectorOps.scale(tangent, along)))
+    end for
+    return centers
+  end function
+
+  private function sideNormal(side as string) as BGE.Math.Vector
+    turn = CryptMap.sideTurn(side)
+    return BGE.Math.VectorOps.create(Sin(turn), 0, Cos(turn))
+  end function
+
+  ' One oriented image per segment: each re-warps when the camera moves
+  private sub addImageWalls(openSides as string[], wallBmp as roBitmap)
+    height = World.metres(CryptMap.WALL_METRES)
+    for each side in openSides
+      turn = CryptMap.sideTurn(side)
+      centers = m.segmentCenters(side)
+      for i = 0 to centers.Count() - 1
+        center = centers[i]
+        region = CreateObject("roRegion", wallBmp, 0, 0, wallBmp.GetWidth(), wallBmp.GetHeight())
+        face = m.addImage(`${side}${i}`, region, {
+          offset: BGE.Math.VectorOps.create(center.x, height / 2, center.z),
+          rotation: BGE.Math.VectorOps.create(0, turn, 0),
+          drawMode: BGE.SceneObjectDrawMode.oriented,
+          isShaded: true,
+          isOccluder: true
+        })
+        face.setAnchor(0.5, 0.5)
+      end for
+    end for
+  end sub
+
+  ' One textured model for the whole block: its impostor is reused while the camera moves
+  private sub addModelWalls(openSides as string[], wallBmp as roBitmap)
+    height = World.metres(CryptMap.WALL_METRES)
+    halfSegment = World.metres(CryptMap.SEGMENT_METRES) / 2
+    texWidth = wallBmp.GetWidth()
+    texHeight = wallBmp.GetHeight()
+    texture = {region: CreateObject("roRegion", wallBmp, 0, 0, texWidth, texHeight), id: "cryptWall"} as BGE.RendererHelpers.RegionWithId
+    up = BGE.Math.VectorOps.create(0, height, 0)
+    faces = [] as BGE.Model3dFace[]
+    for each side in openSides
+      normal = m.sideNormal(side)
+      right = BGE.Math.VectorOps.scale(BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.create(0, 1, 0), normal), halfSegment)
+      for each center in m.segmentCenters(side)
+        bottomLeft = BGE.Math.VectorOps.subtract(center, right)
+        bottomRight = BGE.Math.VectorOps.add(center, right)
+        topRight = BGE.Math.VectorOps.add(bottomRight, up)
+        topLeft = BGE.Math.VectorOps.add(bottomLeft, up)
+        ' Counter-clockwise seen from the floor side; texture points are pixels in the region
+        pixelBottomLeft = BGE.Math.VectorOps.create(0, texHeight, 0)
+        pixelBottomRight = BGE.Math.VectorOps.create(texWidth, texHeight, 0)
+        pixelTopRight = BGE.Math.VectorOps.create(texWidth, 0, 0)
+        pixelTopLeft = BGE.Math.VectorOps.create(0, 0, 0)
+        faces.push(m.texturedFace([bottomLeft, bottomRight, topRight], [pixelBottomLeft, pixelBottomRight, pixelTopRight], normal, texture))
+        faces.push(m.texturedFace([bottomLeft, topRight, topLeft], [pixelBottomLeft, pixelTopRight, pixelTopLeft], normal, texture))
+      end for
+    end for
+    model = new BGE.Model3d(faces)
+    model.name = "cryptBlock"
+    walls = new BGE.DrawableModel(m, model)
+    walls.isShaded = true
+    walls.isOccluder = true
+    m.addDrawable("walls", walls)
+  end sub
+
+  private function texturedFace(corners as BGE.Math.Vector[], pixels as BGE.Math.Vector[], normal as BGE.Math.Vector, texture as BGE.RendererHelpers.RegionWithId) as BGE.Model3dFace
+    face = BGE.Model3dFaceOps.create(corners, normal)
+    face.Texture = new BGE.Model3dTexture(texture, pixels)
+    return face
+  end function
+
+end class
