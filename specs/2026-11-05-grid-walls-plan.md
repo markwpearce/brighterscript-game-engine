@@ -25,7 +25,7 @@ it doesn't depend on pitch.
 - A quality/speed constant belongs in `BGE.RenderQualitySettings` with a value at all five
   levels in `RenderQualityPresets.bs`, plus `RenderQualitySettingsOverrides`, and
   `RenderQualityPresets.spec.bs` extended (completeness and monotonicity).
-- Strip width at Medium is 4 px.
+- Strip width at Medium is 4 px. (Later decision, after Task 8b's measured optimisation: 8 px at Medium, presets [16, 8, 8, 4, 4], light interval [8, 4, 4, 2, 2].)
 - Drawable colours are RGB; renderer draws take RGBA.
 - Never pass a negative scale together with a nonzero rotation to a native draw call.
 - Keep draws per frame well under ~13,000.

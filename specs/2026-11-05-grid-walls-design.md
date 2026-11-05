@@ -168,7 +168,7 @@ is nearer over part of it, it draws, then the wall strips nearer than it within 
 drawn again over it. Objects in front of every wall in their span are untouched.
 
 **Quality.** A new `RenderQualitySettings` value for strip width in pixels at each of the
-five levels (Medium 4, the measured sweet spot; wider at lower levels, narrower is allowed at
+five levels (Medium 4, the measured sweet spot - later changed to 8 by user decision after the strip-geometry optimisation: presets [16, 8, 8, 4, 4]; wider at lower levels, narrower is allowed at
 the top only if measured affordable), plus the lighting interval if it's a setting.
 
 **Proof.**

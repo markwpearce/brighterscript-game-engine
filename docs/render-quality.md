@@ -77,6 +77,23 @@ game.renderQuality.overridePreset(BGE.RenderQualityLevel.medium, {planeSliceCoun
 Fields you don't name keep the engine's values. See `BGE.RenderQualitySettings`
 for every field.
 
+## Grid walls
+
+A [`DrawableGridWalls`](/drawables-and-scene-objects) maze draws one strip per
+`gridWallStripWidth` pixels and samples lights every `gridWallLightInterval` strips,
+so these two settings set its cost. Wider strips and a longer interval are cheaper and
+a little coarser (a fine stair-step along wall feet and tops).
+
+| Level  | `gridWallStripWidth` | `gridWallLightInterval` |
+| ------ | -------------------- | ----------------------- |
+| Basic  | 16                   | 8                       |
+| Low    | 8                    | 4                       |
+| Medium | 8                    | 4                       |
+| High   | 4                    | 2                       |
+| Ultra  | 4                    | 2                       |
+
+Override them like any other field, e.g. `{gridWallStripWidth: 6}` at Medium.
+
 ## Scale your own content
 
 Every entity and scene gets `onQualityChanged(level)` when the level changes:
