@@ -5,18 +5,11 @@ import "../Entities/EnemyTypes.bs"
 import "../Entities/Pillar.bs"
 import "../Entities/Torch.bs"
 import "../Night.bs"
-import "../CombatDirector.bs"
-import "../Hud.bs"
-import "../PerfLog.bs"
+import "ThirdPersonScene.bs"
 
 ' A flat night field to try out the knight's movement and combat. Enemies keep spawning
 ' 20-50 m away (a skeleton, an orc and a heavy orc in turn), up to maxEnemies at once.
-class FieldScene extends BGE.GameScene
-
-  knight as Knight
-  cameraRig as BGE.OrbitCamera
-  director as CombatDirector = new CombatDirector()
-  hud as Hud = new Hud()
+class FieldScene extends ThirdPersonScene
 
   maxEnemies as integer = 3
   spawnIntervalSeconds as float = 8
@@ -26,11 +19,8 @@ class FieldScene extends BGE.GameScene
   groundTexelScale as float = 2
   ' Pillars for the camera to pull in front of; `pillars=0` measures the frame rate without them
   showPillars as boolean = true
-  ' Camera spin speed with no input (deep link `orbit`), for repeatable measurements
-  autoOrbit as float = 0
   ' "model", "cull" or "rect" (deep link `pillarStyle`) - see Pillar
   pillarStyle as string = "model"
-  perfLog as PerfLog
   ' Moon, sky light and torches (deep link `night=0` for the old unlit field)
   showNight as boolean = true
 
@@ -77,12 +67,7 @@ class FieldScene extends BGE.GameScene
     if args.pillarStyle <> invalid
       m.pillarStyle = args.pillarStyle
     end if
-    if args.orbit <> invalid
-      m.autoOrbit = args.orbit.toFloat()
-    end if
-    if args.perf = "1"
-      m.perfLog = new PerfLog(m.game.canvas.renderer)
-    end if
+    m.readCommonArgs(args)
 
     groundPlaneDef = {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}
     grassBmp = m.game.getBitmap("grass")
@@ -117,38 +102,13 @@ class FieldScene extends BGE.GameScene
       end for
     end if
 
-    bursts = new BGE.ParticleBurstPool(m.game)
-    m.game.addEntity(bursts)
-    m.director.bursts = bursts
-
-    player = new Knight(m.game)
-    m.game.addEntity(player, {x: 0, z: 0, heading: 0, director: m.director})
-    m.knight = player
-
-    camera = m.game.canvas.renderer.camera as BGE.Camera3d
-    camera.maxDrawDistance = World.metres(40)
+    m.addKnight(0, 0, 0)
+    fadeFraction = 0
     if m.showNight
       ' Fade the far half into the dark, not just the last stretch
-      camera.drawDistanceFadeFraction = 0.5
+      fadeFraction = 0.5
     end if
-    camera.fieldOfViewDegrees = 90
-    ' 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen.
-    ' The boom pulls it in front of anything on the CAMERA_BLOCKER flag.
-    cameraRig = new BGE.OrbitCamera(camera, player, {
-      distance: World.metres(4),
-      height: World.metres(1.8),
-      lookHeight: World.metres(1.2),
-      minHeight: World.metres(0.3),
-      ' Locked on, look down at the ground between him and the enemy to judge the distance
-      lockTilt: 0.35,
-      boom: new BGE.CameraBoom(m.game, {
-        probeRadius: World.metres(0.3),
-        minDistance: World.metres(0.8),
-        collidableFlags: World.CAMERA_BLOCKER
-      })
-    })
-    m.cameraRig = cameraRig
-    player.cameraRig = cameraRig
+    m.setUpCamera(World.metres(40), fadeFraction, 0)
   end sub
 
   override sub onDestroy()
@@ -156,15 +116,6 @@ class FieldScene extends BGE.GameScene
       m.game.removeLight(light)
     end for
     m.nightLights = []
-  end sub
-
-  override sub onInput(input as BGE.GameInput)
-    if input.press and input.isButton("options")
-      showingDebug = not m.game.isDebugUiEnabled()
-      m.game.debugShowUi(showingDebug)
-      m.game.debugDrawEntityDetails(showingDebug)
-      m.game.debugDrawColliders(showingDebug)
-    end if
   end sub
 
   override sub onUpdate(dt as float)
@@ -182,19 +133,6 @@ class FieldScene extends BGE.GameScene
         m.knight.respawn(0, 0)
         m.spawnSeconds = 1
       end if
-    end if
-  end sub
-
-  ' Everyone has moved: push bodies apart, then the camera follows the knight's final position
-  override sub onPostUpdate(dt as float)
-    m.director.separateBodies()
-    look = m.game.controls.getRawAxis("look")
-    if m.autoOrbit <> 0 and look.x = 0 and look.y = 0
-      look = BGE.Math.VectorOps.create(m.autoOrbit, 0, 0)
-    end if
-    m.cameraRig.update(dt, look)
-    if m.perfLog <> invalid
-      m.perfLog.update(dt)
     end if
   end sub
 
@@ -221,30 +159,10 @@ class FieldScene extends BGE.GameScene
     })
   end sub
 
-  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
-    font = m.game.getFont("default")
-    lines = [
-      "Move: L stick / D-pad    Camera: R stick"
-      "Lock on / recenter: L2 / Rewind    Debug: *"
-      "Attack: X / OK    Block (hold): L1 / Play"
-      "Parry: B / Fast-fwd    Dodge: A / Back / Replay"
-      `State: ${m.knight.state}    Enemies: ${m.director.livingEnemyCount()}`
-    ]
-    ' The UI canvas is screen-sized; the hints sit top right (the HUD bars are top left), inside
-    ' the title-safe area
-    center = uiRenderObj.getCanvasCenter()
-    lineHeight = font.GetOneLineHeight()
-    hintsRight = center.x * 2 * 0.9
-    y = center.y * 2 * 0.1
-    for each textLine in lines
-      uiRenderObj.DrawText(textLine, hintsRight, y, BGE.Colors.White, font, "right")
-      y += lineHeight
-    end for
-
-    m.hud.draw(uiRenderObj, m.knight)
-    if not m.knight.isAlive()
-      uiRenderObj.DrawText("YOU DIED", center.x, center.y, &hC02828FF, font, "center")
-    end if
-  end sub
+  protected override function hintLines() as string[]
+    lines = super.hintLines()
+    lines.push(`State: ${m.knight.state}    Enemies: ${m.director.livingEnemyCount()}`)
+    return lines
+  end function
 
 end class
