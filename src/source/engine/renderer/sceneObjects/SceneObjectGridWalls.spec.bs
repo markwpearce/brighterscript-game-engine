@@ -48,6 +48,24 @@ namespace tests
 
   end class
 
+  ' Records where each transformed object is drawn, in order.
+  class RecordingRenderer extends BGE.Renderer
+
+    public drawnX = [] as float[]
+    public drawnY = [] as float[]
+
+    sub new(draw2d as ifDraw2d, mainGame as BGE.Game, cam as BGE.Camera)
+      super(draw2d, mainGame, cam)
+    end sub
+
+    override function drawTransformedObject(x as float, y as float, scaleX as float, scaleY as float, theta as float, region as ifDraw2d, rgba = -1 as integer) as boolean
+      m.drawnX.push(x)
+      m.drawnY.push(y)
+      return super.drawTransformedObject(x, y, scaleX, scaleY, theta, region, rgba)
+    end function
+
+  end class
+
   ' A 3x3-cell room (cells 4 units, walls 4 high) whose open floor spans x and z -6..6. The
   ' camera stands at (0, 2, 4) looking down -z at the north wall (z = -6), 10 units away.
   @suite("BGE.SceneObjectGridWalls")
@@ -118,6 +136,10 @@ namespace tests
       m.assertNear(top.x, topX, 1, "top x")
       m.assertNear(top.y, topY, 1, "top y")
     end sub
+
+    private function isOnCanvas(point as dynamic) as boolean
+      return invalid <> point and point.x >= 0 and point.x <= 1280 and point.y >= 0 and point.y <= 720
+    end function
 
     ' Swaps m.walls for one that counts its casts.
     private function useCountingWalls() as tests.CountingSceneObjectGridWalls
@@ -239,6 +261,100 @@ namespace tests
       m.assertTrue(m.walls.computeStrip(mid, strip))
       alpha = strip.rgba and &hFF
       m.assertTrue(alpha < 255 and alpha > 0, `alpha ${alpha}`)
+    end function
+
+    @it("matches the projection on rays across the view, level and pitched 15 up and 35 down")
+    function _()
+      strip = m.newStrip()
+      for each pitch in [0, -15, 35]
+        m.pitchDown(pitch)
+        m.assertTrue(m.updateView())
+        rayCount = m.walls.view.rayCount
+        checked = 0
+        for i = 0 to rayCount - 1 step int(rayCount / 7)
+          if m.walls.computeStrip(i, strip)
+            hit = m.walls.view.getHit(i)
+            foot = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(hit.x, 0, hit.z))
+            top = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(hit.x, 4, hit.z))
+            if invalid <> foot and invalid <> top
+              m.assertStripMatchesProjection(i, strip)
+              checked++
+            end if
+          end if
+        end for
+        m.assertTrue(checked >= 4, `pitch ${pitch}: checked ${checked}`)
+      end for
+    end function
+
+    @it("fades a strip in the fade band as Camera3d.getDistanceFadeAlpha does")
+    function _()
+      m.camera.maxDrawDistance = 12
+      m.camera.drawDistanceFadeFraction = 0.5
+      m.camera.snapDrawDistance()
+      m.pitchDown(10)
+      m.assertTrue(m.updateView())
+      strip = m.newStrip()
+      checked = 0
+      for i = 0 to m.walls.view.rayCount - 1
+        if m.walls.computeStrip(i, strip)
+          hit = m.walls.view.getHit(i)
+          fade = m.camera.getDistanceFadeAlpha(BGE.Math.VectorOps.create(hit.x, 2, hit.z))
+          if fade < 0.99
+            expected = int(255 * fade + 0.5)
+            alpha = strip.rgba and &hFF
+            m.assertTrue(abs(expected - alpha) <= 1, `ray ${i}: alpha ${alpha} expected ${expected}`)
+            checked++
+          end if
+        end if
+      end for
+      m.assertTrue(checked > 0)
+    end function
+
+    @it("skips rays whose walls are wholly off the canvas pitched 35 down, and draws every wall on it")
+    function _()
+      m.pitchDown(35)
+      m.renderFrame()
+      rayCount = m.walls.raysLastFrame
+      m.assertTrue(m.walls.stripsDrawnLastFrame < rayCount, `strips ${m.walls.stripsDrawnLastFrame} rays ${rayCount}`)
+      m.assertTrue(m.walls.raysCulledEarlyLastFrame > 0, `culled early ${m.walls.raysCulledEarlyLastFrame}`)
+      for i = 0 to rayCount - 1
+        if m.walls.view.hasHit(i)
+          hit = m.walls.view.getHit(i)
+          foot = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(hit.x, 0, hit.z))
+          top = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(hit.x, 4, hit.z))
+          if m.isOnCanvas(foot) or m.isOnCanvas(top)
+            m.assertNotInvalid(m.walls.getDrawnStrip(i), `ray ${i}`)
+          end if
+        end if
+      end for
+    end function
+
+    @it("draws the strips far to near")
+    function _()
+      m.drawable.removeFromRenderer(m.renderer)
+      bitmap = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      recorder = new tests.RecordingRenderer(bitmap, m.game, m.camera)
+      m.walls = m.drawable.addToRenderer(recorder) as BGE.SceneObjectGridWalls
+      ' looking into a corner, so the strips' depths vary
+      m.camera.orientation = BGE.Math.VectorOps.create(-0.6, -0.3, -0.75)
+      recorder.setupCameraForFrame()
+      recorder.render()
+      depthAt = {}
+      for i = 0 to m.walls.raysLastFrame - 1
+        strip = m.walls.getDrawnStrip(i)
+        if invalid <> strip
+          depthAt[`${strip.x},${strip.y}`] = strip.distance
+        end if
+      end for
+      m.assertTrue(recorder.drawnX.count() > 10, `drawn ${recorder.drawnX.count()}`)
+      m.assertEqual(m.walls.stripsDrawnLastFrame, recorder.drawnX.count())
+      previous = 1.0e30
+      for n = 0 to recorder.drawnX.count() - 1
+        depth = depthAt[`${recorder.drawnX[n]},${recorder.drawnY[n]}`]
+        m.assertNotInvalid(depth, `draw ${n}`)
+        m.assertTrue(depth <= previous, `draw ${n}: depth ${depth} after ${previous}`)
+        previous = depth
+      end for
     end function
 
     @describe("lighting")
