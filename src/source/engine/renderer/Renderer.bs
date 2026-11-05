@@ -184,6 +184,10 @@ namespace BGE
     ' see getStageMsLastFrame(). Costs a timer read per scene object drawn, so leave it off
     ' outside profiling.
     public profileStages as boolean = false
+
+    ' The grid walls object this renderer draws (one at most), and the one drawn this frame.
+    private gridWallsObject as dynamic = invalid
+    private activeGridWalls as dynamic = invalid
     private stageMs as roAssociativeArray = {}
     private stageCounts as roAssociativeArray = {}
     ' Scratch for projected occlusion test points: x, y, depth per point.
@@ -604,7 +608,23 @@ namespace BGE
       end if
 
       m.syncOccluderFlag(sceneObj)
+
+      if sceneObj.type = SceneObjectType.GridWalls
+        if invalid = m.gridWallsObject
+          m.gridWallsObject = sceneObj
+        else
+          sceneObj.drawable.log("Drawable '" + sceneObj.drawable.name + "' is a second grid walls object on this renderer - only one is supported, so it will not draw", BGE.Debug.LogLevel.warning)
+        end if
+      end if
     end sub
+
+    ' The grid walls scene object drawn this frame (a BGE.SceneObjectGridWalls), or invalid
+    ' if none drew - e.g. none is registered, it's disabled, or the camera is a Camera2d.
+    '
+    ' @return {dynamic}
+    function getGridWalls() as dynamic
+      return m.activeGridWalls
+    end function
 
     ' Registers or unregisters an owned scene object as an occluder when its Drawable's
     ' isOccluder changes (checked every frame). Ownerless scene objects opt in by calling
@@ -775,6 +795,9 @@ namespace BGE
           m.needsStaticTreeRebuild = true
         end if
         m.unmarkOccluder(sceneObjToRemove)
+        if invalid <> m.gridWallsObject and m.gridWallsObject.id = sceneObjToRemove.id
+          m.gridWallsObject = invalid
+        end if
       end if
       sceneObjToRemove.id = ""
     end sub
@@ -1058,7 +1081,7 @@ namespace BGE
 
       dynamicItems = []
       for each sceneObj in m.sceneObjects
-        isDynamicItem = sceneObj.isEnabled() and sceneObj.type <> SceneObjectType.Plane and sceneObj.type <> SceneObjectType.Skybox and (not sceneObj.isStatic or not sceneObj.isReadyForStaticBspBuild(m.camera))
+        isDynamicItem = sceneObj.isEnabled() and not sceneObj.drawsInFixedStage() and (not sceneObj.isStatic or not sceneObj.isReadyForStaticBspBuild(m.camera))
         if isDynamicItem and sceneObj.negDistanceFromCamera >= 0
           sceneObj.markSkippedBehindCamera(m.camera)
         else if isDynamicItem
@@ -1122,7 +1145,7 @@ namespace BGE
 
     ' Milliseconds each stage of the last render() took, by name, while profileStages is
     ' on: "update", "occlusion" (of which "occlusionBuild" rebuilt the span map), "sort"
-    ' (overlap clusters and the depth sort), "skybox", "planes", "objects" (everything else,
+    ' (overlap clusters and the depth sort), "skybox", "planes", "gridWalls", "objects" (everything else,
     ' including the static geometry walk), "clusters" and "finish", plus "draw<type>" for
     ' each SceneObjectType drawn (e.g. "drawModel", "drawBillboard") - those are part of
     ' "objects". Readings are whole milliseconds, so average them over many frames.
@@ -1216,6 +1239,7 @@ namespace BGE
       end if
       ' a free-running timer, so both readings round down alike and averages stay unbiased
       lap = m.occlusionTimer.TotalMilliseconds()
+      m.activeGridWalls = invalid
       m.updateLighting()
       m.applyOccluderDrawPolicy()
       m.updateSceneObjects()
@@ -1306,6 +1330,15 @@ namespace BGE
       end for
       lap = m.lapStage("planes", lap)
 
+      walls = m.gridWallsObject
+      if invalid <> walls and walls.isEnabled()
+        walls.draw(m)
+        if walls.didDrawLastFrame()
+          m.activeGridWalls = walls
+        end if
+      end if
+      lap = m.lapStage("gridWalls", lap)
+
       ' draw sceneObjects in sorted order - the static-geometry BSP walk (see
       ' drawStaticAndDynamicSceneObjects) once anything has ever been marked static on
       ' this renderer, otherwise exactly the plain per-object painter's sort from before
@@ -1317,7 +1350,7 @@ namespace BGE
       else
         ' ignore any that are too far away (TBD) or behind camera
         for each sceneObj in m.sceneObjects
-          if sceneObj.isEnabled() and sceneObj.type <> SceneObjectType.Plane and sceneObj.type <> SceneObjectType.Skybox
+          if sceneObj.isEnabled() and not sceneObj.drawsInFixedStage()
             if sceneObj.negDistanceFromCamera >= 0
               sceneObj.markSkippedBehindCamera(m.camera)
             else if sceneObj.occludedThisFrame
