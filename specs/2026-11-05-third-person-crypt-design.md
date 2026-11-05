@@ -69,8 +69,10 @@ It should feel like a maze: a few dead ends and loops, the exit not visible from
 **Floor.** A flagstone texture we draw, on a `DrawablePlane` with `fillMode: tiledImage`
 across the whole maze, shaded (`isShaded`) so torches pool on it.
 
-**Walls.** Oriented images of a stone texture we draw (about 4 m tall), drawn from both
-sides (`orientedDrawBackFace`), `isStatic` (so they go in the renderer's static BSP) and
+**Walls.** Oriented images of a stone texture we draw (about 4 m tall). Builder's call
+(planning): solid grid cells, each showing only the faces that border a floor cell, drawn
+one-sided (`oriented`, facing the floor), since the back of a solid cell is never seen.
+They are `isStatic` (so they go in the renderer's static BSP) and
 `isOccluder` (so walls hide what's behind them). The texture is pre-tiled into a wide
 bitmap so a run of wall needs few quads. Each wall has a
 `BoxCollider3d` on `World.CAMERA_BLOCKER`, so the existing `CameraBoom` pulls the camera in
