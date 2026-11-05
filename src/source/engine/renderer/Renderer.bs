@@ -21,10 +21,12 @@ import "cameras/Camera.bs"
 import "cameras/Camera2d.bs"
 import "cameras/Camera3d.bs"
 import "DepthSortHelpers.bs"
+import "gridWalls/GridWallsView.bs"
 import "lighting/Light.bs"
 import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
 import "sceneObjects/SceneObject.bs"
+import "sceneObjects/SceneObjectGridWalls.bs"
 import "ScratchBitmap.bs"
 import "TriangleCache.bs"
 
@@ -188,6 +190,8 @@ namespace BGE
     ' The grid walls object this renderer draws (one at most), and the one drawn this frame.
     private gridWallsObject as dynamic = invalid
     private activeGridWalls as dynamic = invalid
+    ' Wall spans to redraw over partly hidden cluster members once the cluster pass has drawn.
+    private pendingWallRedraws = [] as BGE.GridWallsSpan[]
     private stageMs as roAssociativeArray = {}
     private stageCounts as roAssociativeArray = {}
     ' Scratch for projected occlusion test points: x, y, depth per point.
@@ -719,7 +723,7 @@ namespace BGE
       return m.occlusionMapBuildCount
     end function
 
-    ' How many scene objects occlusion culling hid in the last rendered frame.
+    ' How many scene objects occlusion culling or grid walls hid in the last rendered frame.
     '
     ' @return {integer}
     function getOccludedCountLastFrame() as integer
@@ -833,6 +837,7 @@ namespace BGE
           m.needsStaticTreeRebuild = true
         end if
         m.syncOccluderFlag(sceneObj)
+        sceneObj.hiddenByWallsThisFrame = false
         if sceneObj.isEnabled()
           if m.profileStages
             start = m.occlusionTimer.TotalMilliseconds()
@@ -1111,15 +1116,83 @@ namespace BGE
         ' so this check (matching the legacy sorted path's own isEnabled() gate) is
         ' what keeps a disabled object from drawing out of a stale tree in the meantime.
         if sceneObj.isEnabled()
-          if sceneObj.occludedThisFrame
-            sceneObj.markSkippedOccluded(m.camera)
-          else if m.profileStages
-            m.drawAndTime(sceneObj)
-          else
-            sceneObj.draw(m)
-          end if
+          m.drawSortedObject(sceneObj)
         end if
       end for
+    end sub
+
+    ' Draws one object of the sorted pass, unless the span map or the grid walls hide it. An
+    ' object partly behind the walls draws, then the nearer wall strips are drawn over it.
+    private sub drawSortedObject(sceneObj as SceneObject)
+      if sceneObj.occludedThisFrame
+        sceneObj.markSkippedOccluded(m.camera)
+        return
+      end if
+      partialSpan = invalid
+      if invalid <> m.activeGridWalls and sceneObj.distanceFadeAlpha > 0 and not sceneObj.isCulled()
+        walls = m.activeGridWalls as BGE.SceneObjectGridWalls
+        ' only a type whose points bound what it draws may be skipped whole
+        canSkip = sceneObj.canBeOccluded()
+        if canSkip
+          points = sceneObj.getOcclusionTestPoints(m.camera)
+        else
+          points = sceneObj.getBoundingPoints(m.camera)
+        end if
+        if invalid <> points
+          view = walls.view
+          span = view.findSpan(points)
+          if span.valid
+            limit = span.nearestDistance - 0.001
+            anyHidden = false
+            allHidden = true
+            for i = span.firstRay to span.lastRay
+              if view.getDepth(i) < limit
+                anyHidden = true
+              else
+                allHidden = false
+              end if
+              if anyHidden and not allHidden
+                exit for
+              end if
+            end for
+            if allHidden and canSkip
+              sceneObj.hiddenByWallsThisFrame = true
+              sceneObj.markSkippedOccluded(m.camera)
+              m.occludedCountLastFrame++
+              return
+            end if
+            if anyHidden
+              partialSpan = span
+            end if
+          end if
+        end if
+      end if
+      if m.profileStages
+        m.drawAndTime(sceneObj)
+      else
+        sceneObj.draw(m)
+      end if
+      if invalid <> partialSpan and sceneObj.didDrawLastFrame()
+        if sceneObj.clusterMemberCount > 1
+          m.pendingWallRedraws.push(partialSpan)
+        else
+          m.redrawWallsOver(partialSpan)
+        end if
+      end if
+    end sub
+
+    ' Redraws the wall strips nearer than the span's nearest point, one ray wider each side.
+    private sub redrawWallsOver(span as BGE.GridWallsSpan)
+      walls = m.activeGridWalls as BGE.SceneObjectGridWalls
+      firstRay = span.firstRay - 1
+      if firstRay < 0
+        firstRay = 0
+      end if
+      lastRay = span.lastRay + 1
+      if lastRay > walls.view.rayCount - 1
+        lastRay = walls.view.rayCount - 1
+      end if
+      walls.redrawStrips(m, firstRay, lastRay, span.nearestDistance)
     end sub
 
     ' Draws one scene object, adding its time to its type's "draw<type>" stage.
@@ -1353,12 +1426,8 @@ namespace BGE
           if sceneObj.isEnabled() and not sceneObj.drawsInFixedStage()
             if sceneObj.negDistanceFromCamera >= 0
               sceneObj.markSkippedBehindCamera(m.camera)
-            else if sceneObj.occludedThisFrame
-              sceneObj.markSkippedOccluded(m.camera)
-            else if profile
-              m.drawAndTime(sceneObj)
             else
-              sceneObj.draw(m)
+              m.drawSortedObject(sceneObj)
             end if
           end if
         end for
@@ -1366,6 +1435,12 @@ namespace BGE
       lap = m.lapStage("objects", lap)
 
       m.drawPendingClusterPrimitives()
+      if m.pendingWallRedraws.count() > 0
+        for each span in m.pendingWallRedraws
+          m.redrawWallsOver(span)
+        end for
+        m.pendingWallRedraws.clear()
+      end if
       lap = m.lapStage("clusters", lap)
 
       if m.showOcclusionDebug
@@ -1420,8 +1495,33 @@ namespace BGE
           m.drawLine(bounds.maxX, bounds.minY, bounds.maxX, bounds.maxY, BGE.Colors.Red)
           m.drawLine(bounds.maxX, bounds.maxY, bounds.minX, bounds.maxY, BGE.Colors.Red)
           m.drawLine(bounds.minX, bounds.maxY, bounds.minX, bounds.minY, BGE.Colors.Red)
+        else if sceneObj.hiddenByWallsThisFrame
+          m.drawWallHiddenDebugBox(sceneObj)
         end if
       end for
+    end sub
+
+    ' Outlines the canvas box of a wall-hidden object's test points, as drawOcclusionDebug()
+    ' does for the span map's.
+    private sub drawWallHiddenDebugBox(sceneObj as SceneObject)
+      projected = m.occlusionProjected
+      if not (m.camera as Camera3d).projectPointsWithDepth(sceneObj.getOcclusionTestPoints(m.camera), projected)
+        return
+      end if
+      minX = projected[0]
+      maxX = minX
+      minY = projected[1]
+      maxY = minY
+      for i = 3 to projected.count() - 1 step 3
+        minX = BGE.Math.Min(minX, projected[i])
+        maxX = BGE.Math.Max(maxX, projected[i])
+        minY = BGE.Math.Min(minY, projected[i + 1])
+        maxY = BGE.Math.Max(maxY, projected[i + 1])
+      end for
+      m.drawLine(minX, minY, maxX, minY, BGE.Colors.Red)
+      m.drawLine(maxX, minY, maxX, maxY, BGE.Colors.Red)
+      m.drawLine(maxX, maxY, minX, maxY, BGE.Colors.Red)
+      m.drawLine(minX, maxY, minX, minY, BGE.Colors.Red)
     end sub
 
 
