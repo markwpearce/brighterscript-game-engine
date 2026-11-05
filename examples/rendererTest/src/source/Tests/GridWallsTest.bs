@@ -1,0 +1,319 @@
+' Grid walls (BGE.DrawableGridWalls) in thirdPerson's crypt maze, at its scale: 32 units per
+' metre, 6 m cells, 4 m walls, the eye 1.8 m up in a junction. A tiled floor, an alcove hung
+' on a wall, and a billboard pacing in and out behind a corner with a health bar over it.
+' The camera turns and sweeps its pitch from 15 degrees up to 35 degrees down over 8 s.
+'
+' up/down: quality level, OK: pause the pitch sweep, left/right: pitch -/+ 5 degrees,
+' options (*): pause turning. Launch params (for measuring): level=0..4, pitch=<degrees>
+' (holds it), heading=<degrees>, turn=0, walker=<column> (holds the walker), shade=0 (unlit
+' walls), probe=1 (also times a second cast and strip pass). Prints a timing line every 2 s.
+class GridWallsTest extends RendererTest
+
+  private metre = 32.0
+  private cellMetres = 6.0
+  private rows as string[] = [
+    "#########"
+    "#A.T#b..#"
+    "###.#.#.#"
+    "#k..T.#.#"
+    "#.###.#.#"
+    "#...#...#"
+    "#.#.###T#"
+    "#T#...S.#"
+    "#E#######"
+  ]
+  private pitchUp = 15.0
+  private pitchDown = -35.0
+  private sweepSeconds = 8.0
+  private turnRate = 0.25
+
+  private rendererRef as BGE.Renderer
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private previousQuality as BGE.RenderQualitySettings
+  private walls as BGE.SceneObjectGridWalls
+  private walker as BGE.Image
+  private font as roFont
+
+  private level as BGE.RenderQualityLevel = BGE.RenderQualityLevel.medium
+  private heading = 0.0
+  private pitch = 0.0
+  private sweepTime = 0.0
+  private walkTime = 0.0
+  private sweepPaused = false
+  private turnPaused = false
+  private eye as BGE.Math.Vector
+  ' walker=<column> holds the walker there (cells, along row 3), -1 to pace
+  private walkerColumn = -1.0
+  ' probe=1 casts and computes every strip once more per frame, timed, to split the cost
+  private probeCast = false
+  private probeTimer as roTimespan
+  private windowCastMs = 0
+  private windowStripMs = 0
+  private probeStrip as BGE.GridWallStrip
+
+  ' Timing window, printed every reportSeconds.
+  private reportSeconds = 2.0
+  private windowSeconds = 0.0
+  private windowFrames = 0
+  private windowWallMs = 0
+  private windowRays = 0
+  private windowStrips = 0
+  private reportLine = "measuring..."
+
+  sub new()
+    super("Grid Walls")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    cell = m.cellMetres * m.metre
+
+    m.camera = new BGE.Camera3d()
+    m.camera.maxDrawDistance = 24 * m.metre
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+    m.previousQuality = renderer.qualitySettings
+    renderer.profileStages = true
+
+    ' Floor: crypt flagstones, 2 world units per texel as in the crypt
+    floorBmp = CreateObject("roBitmap", "pkg:/sprites/crypt_floor.png")
+    floorRegion = CreateObject("roRegion", floorBmp, 0, 0, floorBmp.GetWidth(), floorBmp.GetHeight())
+    floor = new BGE.DrawablePlane(invalid, floorRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.tiledImage,
+      scale: BGE.Math.VectorOps.create(2, 2, 1),
+      isShaded: true
+    })
+    floor.addToRenderer(renderer)
+
+    ' The 2 x 4 m wall tile, three across a 6 m cell, so texels stay square
+    tile = CreateObject("roBitmap", "pkg:/sprites/crypt_wall.png")
+    tilesPerCell = 3
+    wallBmp = CreateObject("roBitmap", {width: tile.GetWidth() * tilesPerCell, height: tile.GetHeight(), alphaEnable: false})
+    for i = 0 to tilesPerCell - 1
+      wallBmp.DrawObject(i * tile.GetWidth(), 0, tile)
+    end for
+    wallBmp.Finish()
+    wallRegion = CreateObject("roRegion", wallBmp, 0, 0, wallBmp.GetWidth(), wallBmp.GetHeight())
+    map = new BGE.GridWallsMap(m.rows, {
+      cellSize: cell,
+      wallHeight: 4 * m.metre,
+      origin: BGE.Math.VectorOps.create(0, 0, 0),
+      solid: {"#": "stone"}
+    })
+    wallsDrawable = new BGE.DrawableGridWalls(invalid, map, {stone: wallRegion}, {isShaded: m.launchParams.shade <> "0"})
+    m.walls = wallsDrawable.addToRenderer(renderer) as BGE.SceneObjectGridWalls
+
+    ' The alcove on the east wall closing the corridor along row 5, facing -x into it,
+    ' 0.01 m off the face (+y rotation turns +z toward -x)
+    alcoveBmp = CreateObject("roBitmap", "pkg:/sprites/crypt_alcove.png")
+    alcoveRegion = CreateObject("roRegion", alcoveBmp, 0, 0, alcoveBmp.GetWidth(), alcoveBmp.GetHeight())
+    alcove = new BGE.Image(invalid, alcoveRegion, {
+      offset: BGE.Math.VectorOps.create(8 * cell - 0.01 * m.metre, 0, 5.5 * cell),
+      rotation: BGE.Math.VectorOps.create(0, BGE.Math.PI / 2, 0),
+      scale: BGE.Math.VectorOps.create(1.5, 1.5, 1),
+      drawMode: BGE.SceneObjectDrawMode.oriented,
+      isShaded: true
+    })
+    alcove.setAnchor(0.5, 1)
+    alcoveObj = alcove.addToRenderer(renderer)
+    renderer.markStatic(alcoveObj)
+
+    ' A red figure pacing along row 3, in and out of view behind the wall at (4, 4)
+    walkerBmp = CreateObject("roBitmap", {width: 40, height: 56, alphaEnable: true})
+    walkerBmp.Clear(&h00000000)
+    walkerBmp.DrawRect(0, 0, 40, 56, &h400000FF)
+    walkerBmp.DrawRect(3, 3, 34, 50, &hE03030FF)
+    walkerBmp.DrawRect(12, 8, 16, 12, &hFFE0C0FF)
+    walkerBmp.Finish()
+    walkerRegion = CreateObject("roRegion", walkerBmp, 0, 0, 40, 56)
+    m.walker = new BGE.Image(invalid, walkerRegion, {
+      offset: BGE.Math.VectorOps.create(5.5 * cell, 0, 3.5 * cell),
+      drawMode: BGE.SceneObjectDrawMode.axisAligned
+    })
+    m.walker.setAnchor(0.5, 1)
+    m.walker.addToRenderer(renderer)
+
+    renderer.addLight(new BGE.AmbientLight(&h8090B0, 0.3))
+    renderer.addLight(new BGE.PointLight(BGE.Math.VectorOps.create(6.5 * cell, 2.4 * m.metre, 5.5 * cell), 12 * m.metre, &hFFB060, 1.2))
+
+    ' In the junction at column 5, row 5
+    m.eye = BGE.Math.VectorOps.create(5.5 * cell, 1.8 * m.metre, 5.5 * cell)
+    m.applyLaunchParams()
+    m.applyQuality()
+    m.updateCamera()
+  end sub
+
+  private sub applyLaunchParams()
+    params = m.launchParams
+    if invalid <> params.level
+      m.level = BGE.clampRenderQualityLevel(val(params.level))
+    end if
+    if invalid <> params.pitch
+      m.pitch = val(params.pitch)
+      m.sweepPaused = true
+    end if
+    if invalid <> params.heading
+      m.heading = val(params.heading) * BGE.Math.PI / 180
+    end if
+    if params.turn = "0"
+      m.turnPaused = true
+    end if
+    if invalid <> params.walker
+      m.walkerColumn = val(params.walker)
+    end if
+    m.probeCast = params.probe = "1"
+    m.probeTimer = CreateObject("roTimespan")
+  end sub
+
+  private sub applyQuality()
+    m.rendererRef.setQualitySettings(BGE.getRenderQualityPreset(m.level))
+    m.resetWindow()
+  end sub
+
+  private sub resetWindow()
+    m.windowSeconds = 0
+    m.windowFrames = 0
+    m.windowWallMs = 0
+    m.windowRays = 0
+    m.windowStrips = 0
+    m.windowCastMs = 0
+    m.windowStripMs = 0
+  end sub
+
+  ' Heading 0 faces -z; pitch is in degrees, up positive.
+  private sub updateCamera()
+    p = m.pitch * BGE.Math.PI / 180
+    direction = BGE.Math.VectorOps.create(-sin(m.heading) * cos(p), sin(p), -cos(m.heading) * cos(p))
+    m.camera.position = BGE.Math.VectorOps.create(m.eye.x, m.eye.y, m.eye.z)
+    m.camera.setTarget(BGE.Math.VectorOps.add(m.eye, direction))
+  end sub
+
+  override sub update(dt as float)
+    if not m.turnPaused
+      m.heading += dt * m.turnRate
+    end if
+    if not m.sweepPaused
+      ' Up to down over sweepSeconds, then back
+      m.sweepTime += dt
+      period = 2 * m.sweepSeconds
+      phase = (m.sweepTime - int(m.sweepTime / period) * period) / m.sweepSeconds
+      if phase > 1
+        phase = 2 - phase
+      end if
+      m.pitch = m.pitchUp + (m.pitchDown - m.pitchUp) * phase
+    end if
+    m.updateCamera()
+
+    cell = m.cellMetres * m.metre
+    m.walkTime += dt
+    column = 4 + 1.5 * sin(m.walkTime * 0.8)
+    if m.walkerColumn >= 0
+      column = m.walkerColumn
+    end if
+    m.walker.offset = BGE.Math.VectorOps.create(column * cell, 0, 3.5 * cell)
+
+    m.windowSeconds += dt
+    if m.windowSeconds >= m.reportSeconds and m.windowFrames > 0
+      m.reportTiming()
+    end if
+  end sub
+
+  private sub reportTiming()
+    frames = m.windowFrames
+    fps = frames / m.windowSeconds
+    frameMs = m.windowSeconds * 1000 / frames
+    m.reportLine = `${BGE.getRenderQualityLevelName(m.level)} pitch ${m.format(m.pitch)}: ${m.format(fps)} fps, frame ${m.format(frameMs)} ms, gridWalls ${m.format(m.windowWallMs / frames)} ms, rays ${cint(m.windowRays / frames)}, strips ${cint(m.windowStrips / frames)}`
+    probe = ""
+    if m.probeCast
+      probe = ` probeCastMs=${m.format(m.windowCastMs / frames)} probeStripMs=${m.format(m.windowStripMs / frames)}`
+    end if
+    print `[grid-walls] level=${BGE.getRenderQualityLevelName(m.level)} pitch=${m.format(m.pitch)} turning=${not m.turnPaused} fps=${m.format(fps)} frameMs=${m.format(frameMs)} gridWallsMs=${m.format(m.windowWallMs / frames)} rays=${cint(m.windowRays / frames)} strips=${cint(m.windowStrips / frames)}${probe}`
+    m.resetWindow()
+  end sub
+
+  private function format(value as float) as string
+    return Str(cint(value * 10) / 10.0).trim()
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    renderer.render()
+
+    ' Over the walker's head; hidden with it behind walls
+    head = m.walker.offset
+    renderer.drawWorldBar(BGE.Math.VectorOps.create(head.x, 2.2 * m.metre, head.z), 60, 8, 0.5 + 0.5 * sin(m.walkTime * 2), &h40E040FF, &h000000C0)
+
+    if m.probeCast
+      m.probeTimer.Mark()
+      m.walls.view.update(m.camera, renderer.qualitySettings.gridWallStripWidth)
+      m.windowCastMs += m.probeTimer.TotalMilliseconds()
+      ' every strip's geometry (and, when shaded, its full lighting) again
+      if invalid = m.probeStrip
+        m.probeStrip = {x: 0.0, y: 0.0, angle: 0.0, scaleX: 1.0, scaleY: 1.0, column: invalid, rgba: -1, distance: 0.0}
+      end if
+      rayCount = m.walls.view.rayCount
+      m.probeTimer.Mark()
+      for i = 0 to rayCount - 1
+        m.walls.computeStrip(i, m.probeStrip)
+      end for
+      m.windowStripMs += m.probeTimer.TotalMilliseconds()
+    end if
+
+    stages = renderer.getStageMsLastFrame()
+    if invalid <> stages.gridWalls
+      m.windowWallMs += stages.gridWalls
+    end if
+    m.windowRays += m.walls.raysLastFrame
+    m.windowStrips += m.walls.stripsDrawnLastFrame
+    m.windowFrames++
+
+    x = 140
+    y = 80
+    state = ""
+    if m.sweepPaused
+      state += "  [pitch held]"
+    end if
+    if m.turnPaused
+      state += "  [turn held]"
+    end if
+    renderer.drawRectangle(x - 10, y - 4, 1010, 84, &h000000A0)
+    renderer.drawText(`${BGE.getRenderQualityLevelName(m.level)}  pitch ${m.format(m.pitch)}  rays/strips ${m.walls.raysLastFrame}/${m.walls.stripsDrawnLastFrame}${state}`, x, y, BGE.Colors.White, m.font)
+    renderer.drawText(m.reportLine, x, y + 26, BGE.Colors.Yellow, m.font)
+    renderer.drawText("up/down: quality   OK: hold pitch   left/right: pitch   *: hold turn", x, y + 52, BGE.Colors.Gray, m.font)
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "up" and m.level < BGE.RenderQualityLevel.ultra
+      m.level = (m.level + 1) as BGE.RenderQualityLevel
+      m.applyQuality()
+    else if buttonName = "down" and m.level > BGE.RenderQualityLevel.basic
+      m.level = (m.level - 1) as BGE.RenderQualityLevel
+      m.applyQuality()
+    else if buttonName = "OK"
+      m.sweepPaused = not m.sweepPaused
+    else if buttonName = "options"
+      m.turnPaused = not m.turnPaused
+    else if buttonName = "left" or buttonName = "right"
+      m.sweepPaused = true
+      if buttonName = "left"
+        m.pitch = BGE.Math.Clamp(m.pitch - 5, m.pitchDown, m.pitchUp)
+      else
+        m.pitch = BGE.Math.Clamp(m.pitch + 5, m.pitchDown, m.pitchUp)
+      end if
+      m.resetWindow()
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.clearLights()
+    renderer.profileStages = false
+    renderer.setQualitySettings(m.previousQuality)
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class
