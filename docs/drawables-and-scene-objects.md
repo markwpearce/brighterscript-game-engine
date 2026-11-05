@@ -969,7 +969,12 @@ The UI canvas is a separate renderer, so walls never hide UI.
 ### What it expects
 
 - The camera is a `Camera3d` standing inside the maze, below the wall tops. Pitch is supported from
-  about 15 degrees up to 35 degrees down; ray count grows fast beyond that. Camera roll is ignored.
+  about 15 degrees up to 35 degrees down; beyond that the ray count is capped (4 rays per strip
+  width of screen), so strips get coarser. Camera roll is ignored. A camera outside the grid sees
+  no walls, so nothing is hidden.
+- Depth is tested in plan view, but a point whose line of sight clears the wall top is not hidden:
+  a tall object (or `drawWorldBar`) behind a wall shows over it, with the strips redrawn over its
+  lower part. There is no ceiling.
 - There is no collision. The walls are drawn, not solid; use the same grid (`map.isSolid(col, row)`,
   `map.cellAt(x, z)`) for your movement.
 - One grid-walls drawable per renderer: a second one is ignored.
