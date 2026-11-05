@@ -49,6 +49,7 @@ namespace BGE
 
     private rendererObj as Renderer
     private warnedCamera2d as boolean = false
+    private castRequested as boolean = true
     ' Bumped on each successful view update; the strip and shade caches key off it.
     private viewStamp as integer = 0
     private viewStripWidth as integer = -1
@@ -120,8 +121,17 @@ namespace BGE
       return true
     end function
 
+    ' Only requests a cast, so performDraw() casts at most once per draw - and not at all when
+    ' only the lights changed.
     protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
-      return m.updateView(rendererObj)
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      camera = rendererObj.camera
+      if m.lastFrameWasCulled or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.objMovedInRelationToCamera(camera) or m.geometryChanged() or m.projectionChanged(camera) or m.drawModeChanged(drawMode)
+        m.castRequested = true
+      end if
+      return true
     end function
 
     ' Casts the view's rays for rendererObj's camera now. The renderer does this each frame
@@ -210,7 +220,8 @@ namespace BGE
       end if
       m.rendererObj = rendererObj
       camera = rendererObj.camera as Camera3d
-      if m.viewStripWidth <> m.getStripWidth(rendererObj) or camera.farDistanceChangedThisFrame() or m.viewGeometryVersion <> m.drawable.geometryVersion
+      if m.castRequested or m.viewStamp = 0 or m.viewStripWidth <> m.getStripWidth(rendererObj) or camera.farDistanceChangedThisFrame() or m.viewGeometryVersion <> m.drawable.geometryVersion
+        m.castRequested = false
         if not m.updateView(rendererObj)
           return false
         end if
@@ -349,10 +360,21 @@ namespace BGE
       sinA = -dx / length
       cosA = -dy / length
 
-      ' width: across to the next ray's foot, plus a pixel of overlap
+      ' width: across to the next ray's foot or top, whichever is further (pitched down,
+      ' verticals converge below the screen so tops spread wider), plus a pixel of overlap
       width = m.viewStripWidth * 1.0
-      if m.projectNeighbourFoot(i, hit, floorY)
-        width = (m.projX - footX) * cosA - (m.projY - footY) * sinA + 1
+      reach = -1.0e30
+      if m.projectNeighbour(i, hit, floorY)
+        reach = (m.projX - footX) * cosA - (m.projY - footY) * sinA
+      end if
+      if m.projectNeighbour(i, hit, wallTop)
+        topReach = (m.projX - m.topX) * cosA - (m.projY - m.topY) * sinA
+        if topReach > reach
+          reach = topReach
+        end if
+      end if
+      if reach > -1.0e30
+        width = reach + 1
         if width < 1
           width = 1.0
         end if
@@ -386,15 +408,15 @@ namespace BGE
       return true
     end function
 
-    ' Projects the foot of ray i + 1 into projX/projY: its own hit if it's on the same wall,
-    ' otherwise the point at this hit's distance along it.
-    private function projectNeighbourFoot(i as integer, hit as BGE.GridWallsHit, floorY as float) as boolean
+    ' Projects ray i + 1's wall point at height y into projX/projY: on its own hit if it's on
+    ' the same wall, otherwise at this hit's distance along it.
+    private function projectNeighbour(i as integer, hit as BGE.GridWallsHit, y as float) as boolean
       view = m.view
       j = i + 1
       if j < view.rayCount and view.hasHit(j)
         nextHit = view.getHit(j)
         if m.isSameFace(hit, nextHit)
-          return m.projectPoint(nextHit.x, floorY, nextHit.z)
+          return m.projectPoint(nextHit.x, y, nextHit.z)
         end if
       end if
       t = view.firstTan + j * view.tanStep
@@ -403,7 +425,7 @@ namespace BGE
       lr = view.levelRight
       dirX = (lf.x + lr.x * t) * invLength
       dirZ = (lf.z + lr.z * t) * invLength
-      return m.projectPoint(view.originX + dirX * hit.distance, floorY, view.originZ + dirZ * hit.distance)
+      return m.projectPoint(view.originX + dirX * hit.distance, y, view.originZ + dirZ * hit.distance)
     end function
 
     private function isSameFace(a as BGE.GridWallsHit, b as BGE.GridWallsHit) as boolean

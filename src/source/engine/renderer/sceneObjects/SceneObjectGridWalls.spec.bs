@@ -32,6 +32,22 @@ namespace tests
 
   end class
 
+  ' Counts casts, to check when the view is re-cast.
+  class CountingSceneObjectGridWalls extends BGE.SceneObjectGridWalls
+
+    public casts = 0
+
+    sub new(name as string, drawableObj as BGE.DrawableGridWalls)
+      super(name, drawableObj)
+    end sub
+
+    override function updateView(rendererObj as BGE.Renderer) as boolean
+      m.casts++
+      return super.updateView(rendererObj)
+    end function
+
+  end class
+
   ' A 3x3-cell room (cells 4 units, walls 4 high) whose open floor spans x and z -6..6. The
   ' camera stands at (0, 2, 4) looking down -z at the north wall (z = -6), 10 units away.
   @suite("BGE.SceneObjectGridWalls")
@@ -103,6 +119,25 @@ namespace tests
       m.assertNear(top.y, topY, 1, "top y")
     end sub
 
+    ' Swaps m.walls for one that counts its casts.
+    private function useCountingWalls() as tests.CountingSceneObjectGridWalls
+      m.drawable.removeFromRenderer(m.renderer)
+      counter = new tests.CountingSceneObjectGridWalls("counted", m.drawable)
+      m.renderer.addSceneObject(counter)
+      m.walls = counter
+      return counter
+    end function
+
+    ' The leftmost ray drawn on the north wall (face normal +z).
+    private function firstNorthWallRay() as integer
+      for i = 0 to m.walls.raysLastFrame - 1
+        if invalid <> m.walls.getDrawnStrip(i) and m.walls.view.getHit(i).normalZ = 1
+          return i
+        end if
+      end for
+      return -1
+    end function
+
     private function renderFrame() as integer
       m.renderer.resetDrawCallCounter()
       m.renderer.setupCameraForFrame()
@@ -155,6 +190,34 @@ namespace tests
         m.assertTrue(m.walls.computeStrip(i + 1, b))
         rightEdge = a.x + a.scaleX * cos(a.angle)
         m.assertTrue(rightEdge >= b.x, `ray ${i}: right edge ${rightEdge} < next ${b.x}`)
+      end for
+    end function
+
+    @it("leaves no gap at the foot or the top pitched 35 degrees down, at the widest strips")
+    function _()
+      settings = m.renderer.qualitySettings
+      settings.gridWallStripWidth = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic).gridWallStripWidth
+      m.renderer.setQualitySettings(settings)
+      m.pitchDown(35)
+      m.assertTrue(m.updateView())
+      mid = int(m.walls.view.rayCount / 2)
+      a = m.newStrip()
+      b = m.newStrip()
+      for i = mid - 3 to mid + 3
+        m.assertTrue(m.walls.computeStrip(i, a))
+        m.assertTrue(m.walls.computeStrip(i + 1, b))
+        cosA = cos(a.angle)
+        sinA = sin(a.angle)
+        footReach = (b.x - a.x) * cosA - (b.y - a.y) * sinA
+        lengthA = a.scaleY * 32
+        lengthB = b.scaleY * 32
+        topAX = a.x - lengthA * sin(a.angle)
+        topAY = a.y - lengthA * cos(a.angle)
+        topBX = b.x - lengthB * sin(b.angle)
+        topBY = b.y - lengthB * cos(b.angle)
+        topReach = (topBX - topAX) * cosA - (topBY - topAY) * sinA
+        m.assertTrue(a.scaleX >= footReach, `ray ${i}: width ${a.scaleX} < foot reach ${footReach}`)
+        m.assertTrue(a.scaleX >= topReach, `ray ${i}: width ${a.scaleX} < top reach ${topReach}`)
       end for
     end function
 
@@ -344,6 +407,36 @@ namespace tests
       dots = int((m.walls.raysLastFrame + 7) / 8)
       m.assertTrue(withDebug > plain, `plain ${plain} debug ${withDebug}`)
       m.assertTrue(withDebug <= plain + dots + 1, `plain ${plain} debug ${withDebug} dots ${dots}`)
+    end function
+
+    @describe("casting")
+
+    @it("relights without re-casting when only a light changed")
+    function _()
+      counter = m.useCountingWalls()
+      m.drawable.isShaded = true
+      lamp = new BGE.PointLight(BGE.Math.VectorOps.create(-5.5, 2, -5), 3)
+      m.renderer.addLight(lamp)
+      m.renderFrame()
+      m.renderFrame()
+      casts = counter.casts
+      first = m.firstNorthWallRay()
+      before = counter.getDrawnStrip(first).rgba
+      lamp.intensity = 0.5
+      m.renderFrame()
+      m.assertEqual(casts, counter.casts)
+      m.assertNotEqual(before, counter.getDrawnStrip(first).rgba)
+    end function
+
+    @it("casts once per draw, even when the camera moves and the draw distance changes together")
+    function _()
+      counter = m.useCountingWalls()
+      m.renderFrame()
+      m.assertEqual(1, counter.casts)
+      m.camera.position = BGE.Math.VectorOps.create(0, 2, 3.5)
+      m.camera.maxDrawDistance = 600
+      m.renderFrame()
+      m.assertEqual(2, counter.casts)
     end function
 
     @describe("redrawStrips")
