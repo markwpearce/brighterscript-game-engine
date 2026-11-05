@@ -49,8 +49,8 @@ lights, sprites and models, and the chase camera.
 - Different wall heights per cell, sloped floors, ceilings, floors other than a
   `DrawablePlane`, doors that open, transparent or cut-out walls (windows, bars, fences).
 - Camera roll (`Camera3d.rollDegrees`). Walls are drawn as if roll were 0; document it.
-- Making the existing occlusion culling (`isOccluder`) use the wall depth buffer. Possible
-  later; not needed for the frame rate.
+- Adding grid walls to the occlusion span map as `isOccluder` polygons. The wall depth buffer
+  hides objects itself (see "Fits the existing architecture"), so the span map isn't needed.
 - Collision. Games keep using `SolidWorld` / their own grid for movement and camera booms.
 
 ## Anti-goals
@@ -90,6 +90,47 @@ lights, sprites and models, and the chase camera.
   its own stage, after planes and before the sorted objects (stage name `gridWalls` in
   `profileStages`). At most one per renderer is supported; a second logs a warning and is
   ignored.
+
+**Fits the existing architecture (Mark: "I also want this rendering style to fit well with
+current architecture/drawables/sceneobjects/renderer etc").** Grid walls are an ordinary
+`Drawable` / `SceneObject` pair. They follow the patterns `DrawablePlane` and
+`SceneObjectSkybox` already use, with no special path through `Game` or `GameScene`:
+- `DrawableGridWalls extends BGE.Drawable`. Its `addToRenderer()` registers a
+  `SceneObjectGridWalls` through `addSceneObjectToRenderer()`, as `DrawablePlane` does. An
+  entity attaches it like any other drawable. It honours the base fields:
+  - `enabled` / visibility, `isShaded`, `color` / `alpha` as a tint, `lightWrap` and
+    `flash()`;
+  - owner-safe accessors, since `owner` may be `invalid`;
+  - `invalidateGeometry()` when its map or textures change.
+- `SceneObjectGridWalls extends BGE.SceneObject` and draws through the usual
+  `performDraw()` / `findCanvasPosition()` / `isPotentiallyOnScreen()` overrides, reusing
+  the existing helpers for distance fade (`participatesInDistanceFade`), shading and
+  `qualityVersion` / `lightingVersion` redraws. It doesn't join overlap clusters
+  (`participatesInOverlapDetection` false) or the static BSP.
+- **Draw stages.** Skybox, plane and grid-walls objects draw in fixed stages ahead of the
+  sorted objects. The renderer already tests `type <> Plane and type <> Skybox` in several
+  places (dynamic-item lists, the sorted pass). Add a single `SceneObject` query for "draws in
+  a fixed stage" that those checks use, rather than a third type test in each place.
+- **Hiding uses the existing verdicts.** An object wholly behind walls gets the same
+  per-frame verdict the occlusion span map gives:
+  - `occludedThisFrame` and `markSkippedOccluded()`;
+  - counted in `occludedCount()`;
+  - shown by the occlusion debug overlay (`Game.debugDrawOcclusion`).
+
+  Debug tools, `isCulled()` latching and the stats then treat both sources alike. The
+  partial-hide redraw is new and lives in the renderer next to the sorted pass. Either source
+  can hide an object, and neither depends on the other.
+- **Camera.** It needs `Camera3d`, like occlusion culling (`supportsOcclusionCulling()`).
+  With a `Camera2d`, it logs one warning and draws nothing.
+- **Quality and profiling.**
+  - Strip width (and the lighting interval) are `RenderQualitySettings` fields, read through
+    `rendererObj.qualitySettings`.
+  - The stage is timed with `lapStage("gridWalls", ...)` and listed with the other stages in
+    `profileStages`' doc comment.
+  - Entity-details debug output shows the per-frame ray and strip counts.
+- **Docs.** A section in `docs/drawables-and-scene-objects.md`: a row in "Every Drawable /
+  SceneObject pair" and a deep dive like the plane's. Also entries in `docs/render-quality.md`
+  and the CLAUDE.md renderer notes. A separate guide only if that section grows too long.
 
 **Drawing.** Each frame, cast rays from the camera through the grid (DDA) in horizontal
 directions spread across the camera's view, one per strip. For each hit, project the wall's
@@ -139,7 +180,9 @@ the top only if measured affordable), plus the lighting interval if it's a setti
   pitching across the whole range (15 degrees up to 35 degrees down), timed like the other demos, run on the Ultra at each quality level.
   Done when it holds 20 fps at Medium with walls meeting the floor and the wall image without
   visible gaps or drift, and nothing behind a wall showing.
-- A guide in `docs/` (frontmatter, how-to first, gotchas as asides) and a `CLAUDE.md` note.
+- The docs above (how-to first, gotchas as asides) and a `CLAUDE.md` note.
+- `npm run check` and `check:all` pass, and the existing rendererTest demos that use planes,
+  skyboxes and occlusion look and time the same as before.
 
 ## Left to the builder
 
