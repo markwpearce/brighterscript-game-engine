@@ -1,0 +1,217 @@
+import "GridWallsMap.bs"
+import "GridWallsRayCaster.bs"
+import "../cameras/Camera3d.bs"
+import "../../../math/vector.bs"
+
+namespace BGE
+
+  ' A run of rays covering some world points, from GridWallsView.findSpan().
+  interface GridWallsSpan
+    valid as boolean
+    firstRay as integer
+    lastRay as integer
+    ' The smallest forward depth (along levelForward) of the points.
+    nearestDistance as float
+  end interface
+
+  ' A fan of horizontal rays across the camera's view, cast through a GridWallsMap each frame
+  ' and kept as a depth buffer in ground-plane terms (bearing + horizontal distance), so camera
+  ' pitch doesn't affect it. Ray i has bearing tangent firstTan + i * tanStep relative to
+  ' levelForward, i.e. direction normalise(levelForward + levelRight * tan).
+  class GridWallsView
+
+    rayCount as integer = 0
+    firstTan as float = 0
+    tanStep as float = 1
+    ' Camera forward flattened onto the ground plane (unit), and its right (unit).
+    levelForward as BGE.Math.Vector = BGE.Math.VectorOps.create(0, 0, -1)
+    levelRight as BGE.Math.Vector = BGE.Math.VectorOps.create(1, 0, 0)
+    ' Horizontal length of the camera's orientation.
+    cosPitch as float = 1
+    ' Camera position on the ground plane, as of the last update().
+    originX as float = 0
+    originZ as float = 0
+    ' Per-ray unit direction (x, z), filled by update(); read these in hot loops instead of
+    ' rayDirection(), which allocates.
+    rayDirX = [] as float[]
+    rayDirZ = [] as float[]
+
+    private map as BGE.GridWallsMap
+    private caster as BGE.GridWallsRayCaster
+    ' Preallocated, grown with rayCount and never shrunk.
+    private hits = [] as BGE.GridWallsHit[]
+    private hitFlags = [] as boolean[]
+
+    sub new(map as BGE.GridWallsMap)
+      m.map = map
+      m.caster = new BGE.GridWallsRayCaster(map)
+    end sub
+
+    ' Casts every ray for this frame. stripWidth is the screen width in pixels one ray covers.
+    ' Returns false (rayCount 0) if the camera looks too close to straight up or down for a
+    ' ground-plane bearing to exist.
+    function update(camera as BGE.Camera3d, stripWidth as integer) as boolean
+      orient = camera.orientation
+      cosPitch = sqr(orient.x * orient.x + orient.z * orient.z)
+      m.cosPitch = cosPitch
+      if cosPitch < 0.02
+        m.rayCount = 0
+        return false
+      end if
+
+      camPos = camera.position
+      m.originX = camPos.x
+      m.originZ = camPos.z
+
+      lfx = orient.x / cosPitch
+      lfz = orient.z / cosPitch
+      m.levelForward = BGE.Math.VectorOps.create(lfx, 0, lfz)
+      right = camera.getLevelRightVector()
+      m.levelRight = BGE.Math.VectorOps.create(right.x, 0, right.z)
+      rx = right.x
+      rz = right.z
+      up = camera.getLevelUpVector()
+
+      focal = camera.getFocalLength()
+      halfW = camera.frameSize.x * 0.5
+      halfH = camera.frameSize.y * 0.5
+      minTan = 1.0e30
+      maxTan = -1.0e30
+      for each sx in [-1, 1]
+        for each sy in [-1, 1]
+          cx = orient.x * focal + right.x * halfW * sx + up.x * halfH * sy
+          cz = orient.z * focal + right.z * halfW * sx + up.z * halfH * sy
+          fwd = cx * lfx + cz * lfz
+          if fwd < focal * 0.01
+            fwd = focal * 0.01
+          end if
+          t = (cx * rx + cz * rz) / fwd
+          if t < minTan
+            minTan = t
+          end if
+          if t > maxTan
+            maxTan = t
+          end if
+        end for
+      end for
+
+      tanStep = stripWidth * cosPitch / focal
+      m.tanStep = tanStep
+      firstTan = minTan - tanStep
+      m.firstTan = firstTan
+      rayCount = int((maxTan + tanStep - firstTan) / tanStep) + 1
+      m.rayCount = rayCount
+
+      hits = m.hits
+      hitFlags = m.hitFlags
+      rayDirX = m.rayDirX
+      rayDirZ = m.rayDirZ
+      for i = hits.count() to rayCount - 1
+        hits.push({distance: 0.0, x: 0.0, z: 0.0, u: 0.0, texture: "", normalX: 0.0, normalZ: 0.0, col: 0, row: 0})
+        hitFlags.push(false)
+        rayDirX.push(0.0)
+        rayDirZ.push(0.0)
+      end for
+
+      maxDistance = camera.getCurrentDrawDistance() / cosPitch + m.map.wallHeight
+      caster = m.caster
+      ox = camPos.x
+      oz = camPos.z
+      for i = 0 to rayCount - 1
+        t = firstTan + i * tanStep
+        invLen = 1.0 / sqr(1.0 + t * t)
+        dx = (lfx + rx * t) * invLen
+        dz = (lfz + rz * t) * invLen
+        rayDirX[i] = dx
+        rayDirZ[i] = dz
+        hitFlags[i] = caster.cast(ox, oz, dx, dz, maxDistance, hits[i])
+      end for
+      return true
+    end function
+
+    function hasHit(i as integer) as boolean
+      return m.hitFlags[i]
+    end function
+
+    ' The hit of ray i; only meaningful when hasHit(i).
+    function getHit(i as integer) as BGE.GridWallsHit
+      return m.hits[i]
+    end function
+
+    ' The unit ground-plane direction of ray i (allocates; see rayDirX/rayDirZ).
+    function rayDirection(i as integer) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(m.rayDirX[i], 0, m.rayDirZ[i])
+    end function
+
+    ' The rays covering a set of world points. Invalid if empty or any point is level with or
+    ' behind the camera horizontally.
+    function findSpan(points as BGE.Math.Vector[]) as BGE.GridWallsSpan
+      span = {valid: false, firstRay: 0, lastRay: 0, nearestDistance: 0.0} as BGE.GridWallsSpan
+      if points.count() = 0 or m.rayCount = 0
+        return span
+      end if
+      first = m.rayCount
+      last = -1
+      nearest = 1.0e30
+      for each point in points
+        fwd = m.forwardDepth(point)
+        if fwd <= 0
+          return span
+        end if
+        i = m.rayIndexFor(point, fwd)
+        if i < first
+          first = i
+        end if
+        if i > last
+          last = i
+        end if
+        if fwd < nearest
+          nearest = fwd
+        end if
+      end for
+      span.valid = true
+      span.firstRay = first
+      span.lastRay = last
+      span.nearestDistance = nearest
+      return span
+    end function
+
+    ' True when the point's ray has a wall nearer than the point (horizontally).
+    function isPointHidden(point as BGE.Math.Vector) as boolean
+      if m.rayCount = 0
+        return false
+      end if
+      fwd = m.forwardDepth(point)
+      if fwd <= 0
+        return false
+      end if
+      i = m.rayIndexFor(point, fwd)
+      if not m.hitFlags[i]
+        return false
+      end if
+      dx = point.x - m.originX
+      dz = (point.z ?? 0) - m.originZ
+      return m.hits[i].distance < sqr(dx * dx + dz * dz) - 0.001
+    end function
+
+    private function forwardDepth(point as BGE.Math.Vector) as float
+      lf = m.levelForward
+      return (point.x - m.originX) * lf.x + ((point.z ?? 0) - m.originZ) * lf.z
+    end function
+
+    private function rayIndexFor(point as BGE.Math.Vector, fwd as float) as integer
+      lr = m.levelRight
+      t = ((point.x - m.originX) * lr.x + ((point.z ?? 0) - m.originZ) * lr.z) / fwd
+      i = int((t - m.firstTan) / m.tanStep + 0.5)
+      if i < 0
+        return 0
+      end if
+      if i >= m.rayCount
+        return m.rayCount - 1
+      end if
+      return i
+    end function
+
+  end class
+
+end namespace
