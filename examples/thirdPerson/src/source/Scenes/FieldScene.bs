@@ -3,6 +3,8 @@ import "../Entities/Knight.bs"
 import "../Entities/Enemy.bs"
 import "../Entities/EnemyTypes.bs"
 import "../Entities/Pillar.bs"
+import "../Entities/Torch.bs"
+import "../Night.bs"
 import "../CombatDirector.bs"
 import "../Hud.bs"
 import "../PerfLog.bs"
@@ -29,10 +31,13 @@ class FieldScene extends BGE.GameScene
   ' "model", "cull" or "rect" (deep link `pillarStyle`) - see Pillar
   pillarStyle as string = "model"
   perfLog as PerfLog
+  ' Moon, sky light and torches (deep link `night=0` for the old unlit field)
+  showNight as boolean = true
 
   private enemyTypes as EnemyType[] = EnemyTypes.all()
   private nextEnemyType as integer = 0
   private spawnSeconds as float = 1
+  private nightLights as BGE.Light[] = []
   private deadSeconds as float = 0
 
   sub new(game as BGE.Game)
@@ -45,13 +50,24 @@ class FieldScene extends BGE.GameScene
     if m.game.Bitmaps["grass"] = invalid
       loader.loadBitmap("grass", "pkg:/sprites/grass.png")
     end if
+    if m.game.Bitmaps["nightSky"] = invalid
+      loader.loadBitmap("nightSky", "pkg:/sprites/night_sky.png")
+    end if
     for each enemyType in m.enemyTypes
       loader.loadSpriteAtlas(enemyType.atlas, `pkg:/sprites/${enemyType.atlas}.json`)
     end for
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.game.setBackgroundColor(&h0B1324FF)
+    if args.night <> invalid
+      m.showNight = args.night <> "0"
+    end if
+    if m.showNight
+      ' The sky texture's zenith, for anything past its top
+      m.game.setBackgroundColor(&h080E28FF)
+    else
+      m.game.setBackgroundColor(&h0B1324FF)
+    end if
     if args.pillars <> invalid
       m.showPillars = args.pillars = "1"
     end if
@@ -77,10 +93,27 @@ class FieldScene extends BGE.GameScene
     })
     m.addDrawable("Ground", ground)
 
+    if m.showNight
+      ground.isShaded = true
+      skyBmp = m.game.getBitmap("nightSky")
+      sky = new BGE.DrawableSkybox(m, CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight()))
+      m.addDrawable("Sky", sky)
+      m.nightLights = Night.addLights(m.game)
+    end if
+
     if m.showPillars
-      for each spot in [[6, -2], [-7, 4], [0.5, 3.2], [-4, -10], [12, 6]]
+      ' x, z (metres) and the flame on its side facing the start, if any
+      for each spot in [[6, -2, FlameKind.fire], [-7, 4, FlameKind.fire], [0.5, 3.2, ""], [-4, -10, FlameKind.spirit], [12, 6, ""]]
+        x = World.metres(spot[0])
+        z = World.metres(spot[1])
+        width = World.metres(1.4)
         column = new Pillar(m.game)
-        m.game.addEntity(column, {x: World.metres(spot[0]), z: World.metres(spot[1]), width: World.metres(1.4), height: World.metres(5), style: m.pillarStyle})
+        m.game.addEntity(column, {x: x, z: z, width: width, height: World.metres(5), style: m.pillarStyle})
+        if m.showNight and spot[2] <> ""
+          out = BGE.Math.flatDirection(BGE.Math.VectorOps.create(x, 0, z), BGE.Math.VectorOps.create())
+          flame = new Torch(m.game)
+          m.game.addEntity(flame, {x: x + out.x * (width / 2 + World.metres(0.2)), y: World.metres(2.4), z: z + out.z * (width / 2 + World.metres(0.2)), kind: spot[2]})
+        end if
       end for
     end if
 
@@ -94,6 +127,10 @@ class FieldScene extends BGE.GameScene
 
     camera = m.game.canvas.renderer.camera as BGE.Camera3d
     camera.maxDrawDistance = World.metres(40)
+    if m.showNight
+      ' Fade the far half into the dark, not just the last stretch
+      camera.drawDistanceFadeFraction = 0.5
+    end if
     camera.fieldOfViewDegrees = 90
     ' 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen.
     ' The boom pulls it in front of anything on the CAMERA_BLOCKER flag.
@@ -112,6 +149,13 @@ class FieldScene extends BGE.GameScene
     })
     m.cameraRig = cameraRig
     player.cameraRig = cameraRig
+  end sub
+
+  override sub onDestroy()
+    for each light in m.nightLights
+      m.game.removeLight(light)
+    end for
+    m.nightLights = []
   end sub
 
   override sub onInput(input as BGE.GameInput)

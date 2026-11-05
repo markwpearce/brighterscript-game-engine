@@ -9,3 +9,4 @@
 | `art/skeleton_0.blend` (as downloaded) | Clint Bellanger | CC-BY-SA 3.0 | [Flare](https://github.com/flareteam/flare-game) monster sources |
 | `art/orc_flare_0.blend` (as downloaded) | johndh | CC-BY-SA 3.0 | [Orc Flare 3D](https://opengameart.org/content/orc-flare-3d) |
 | `src/sprites/grass.png` (placeholder ground, shared with `examples/terrain`) | - | CC0 | [Seamless grass textures](https://opengameart.org/content/seamless-grass-textures-20-pack) |
+| `src/sprites/night_sky.png` (drawn by `tools/night-sky.py`) | - | CC0 | this repo |

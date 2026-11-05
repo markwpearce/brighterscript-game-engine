@@ -1,6 +1,6 @@
 # Third Person
 
-A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD. The map, ripostes and checkpoints come later.
+A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD, at night under a full moon with torches on the pillars. The map, ripostes and checkpoints come later.
 
 ## Playing
 
@@ -32,6 +32,9 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - `Stamina.bs`: the knight's stamina pool. `spend()` starts an action if there's any stamina left (it can take it to zero); `drain()` takes a blocked hit's cost and says whether the guard held.
 - `Hud.bs`: health and stamina bars, top left in the title-safe area. Lost health stays as a pale chunk that drains after a moment.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
+- `Night.bs`: the moonlight (a cool `DirectionalLight` from where the moon is in the sky) and a blue `AmbientLight`. They shade the ground, the pillars and the fighters' sprites (`isShaded`, lit as cut-outs facing the camera, with `lightWrap` 0.5 so a back-lit figure stays dim rather than black).
+- `Entities/Torch.bs`: a flame (rising `DrawableParticles`, sized in pixels) and a `PointLight` that pools on the ground and lights the pillars and anyone near it: warm firelight, or cold blue spirit fire. The lights never flicker, because a changing light relights everything it reaches every frame.
+- The sky is a `DrawableSkybox` panorama drawn by `tools/night-sky.py` (`python3 tools/night-sky.py src/sprites/night_sky.png`, needs ImageMagick): deep blue with clouds, stars, a distant tree line and the moon, placed where `Night.bs`'s moonlight comes from. The far half of the 40 m draw distance fades out (`drawDistanceFadeFraction` 0.5) into the sky's dark below the horizon.
 - `Entities/HitEffect.bs`: a one-off particle burst where a blow lands (blood, bone dust, block and parry sparks), using `DrawableParticles` with its particles made by hand so they fan out round the ground direction of the hit.
 - `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view).
 - `Entities/Enemy.bs`: a 16-direction monster, rendered like the knight, with a small AI. While it's waiting for an attack slot (or out of view) it circles the player; otherwise it closes in (straight, or flanking round to the player's side first) and attacks: wind-up, strike, recover, then either stays close or backs off. A hit knocks it back and, during the wind-up, interrupts it, after which it backs off; some enemies block hits from the front, and heavy ones shrug hits off.
@@ -39,7 +42,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
   - Skeleton: flanks, sometimes blocks, a quick sword swing.
   - Orc: quick, no armour; comes straight at you, chops, then backs off.
   - Heavy orc: slow and tough, blocks often, never flinches; a long wind-up and a heavy hit.
-- `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane (grass at 2 world units per texel, so the device's plane cap lets it reach twice as far), the enemy spawner, respawning, the control hints (top right) and the HUD.
+- `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane (grass at 2 world units per texel, so the device's plane cap lets it reach twice as far), the sky, lights and torches (deep link `night=0` turns them off, for measuring), the enemy spawner, respawning, the control hints (top right) and the HUD.
 
 ## Sprite sheets
 
