@@ -389,6 +389,23 @@ re-tinting it - see the cost note below. A `staticImage` or `color` plane, and a
 no `range`, fall back to measuring the light on the plane right under the camera, so the ground
 brightens as you walk toward a lamp instead. Unlike other drawables, a plane with no lights isn't shaded at all.
 
+Billboard characters take lights the same way. A sprite in a camera-facing draw mode
+(`axisAligned`, `directScaled`, `directToCamera`) has no surface of its own, so with `isShaded`
+it's lit as a cut-out turned toward the camera, from the centre of what it draws. Without lights
+it's left as it is. Set `lightWrap` to let light reach round past the lit side, so a figure with
+the light behind it is dim rather than black:
+
+```brighterscript
+m.sprite = m.addOrientedSprite("body", frames, 0, 0, 16, 1, {
+  drawMode: BGE.SceneObjectDrawMode.axisAligned,
+  isShaded: true,
+  ' 0.5: lit halfway when edge-on to a light, unlit only from straight behind
+  lightWrap: 0.5,
+  ' let the AmbientLight decide how dark the shadows are
+  ambientBrightness: 0
+})
+```
+
 > **Cost.** Lights are free while they stay still: objects keep their cached drawings until
 > something moves. A light that moves or changes every frame relights everything it reaches
 > every frame - about what it costs for those objects to rotate - so keep animated lights to
