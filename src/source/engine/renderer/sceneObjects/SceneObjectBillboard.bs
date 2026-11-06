@@ -11,6 +11,7 @@ import "../lighting/Lighting.bs"
 import "../occlusion/ConvexInset.bs"
 import "../occlusion/OcclusionTypes.bs"
 import "../cameras/Camera3d.bs"
+import "../quadColumns/QuadColumnTexture.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
@@ -105,9 +106,18 @@ namespace BGE
     private fastDrawParallelogramTolerance as float = 0.03
     private fastDrawPerpendicularityTolerance as float = 0.05
 
+    ' Whether the renderer drawing this may draw it as texture columns, and whether this frame does
+    protected columnsAllowed = false
+    protected drawsColumnsThisFrame = false
+    ' Whether this moved relative to the camera this draw: only then are columns drawn
+    ' straight to the canvas (a still object blits its cached columns instead)
+    private movedThisDraw = false
+
     private sub captureFastDrawTolerances(rendererObj as BGE.Renderer)
       m.fastDrawParallelogramTolerance = rendererObj.qualitySettings.fastDrawParallelogramTolerance
       m.fastDrawPerpendicularityTolerance = rendererObj.qualitySettings.fastDrawPerpendicularityTolerance
+      m.columnsAllowed = rendererObj.drawFlatQuadsAsColumns and rendererObj.camera.isPerspective()
+      m.movedThisDraw = m.objMovedInRelationToCamera(rendererObj.camera)
     end sub
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -293,6 +303,9 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function drawFastPath(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.drawsColumnsThisFrame
+        return m.drawColumnsToCanvas(rendererObj)
+      end if
       regionToDraw = m.getRegionWithIdToDraw(rendererObj)
       if invalid = regionToDraw or invalid = regionToDraw.region
         return false
@@ -315,12 +328,80 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
-      if m.isEligibleForFastDrawCheck(drawMode)
-        m.usedTransformedFastDrawLastFrame = m.canUseTransformedFastDraw()
-        return not m.usedTransformedFastDrawLastFrame
-      end if
       m.usedTransformedFastDrawLastFrame = false
-      return m.useTempBitmapMap[drawMode]
+      m.drawsColumnsThisFrame = false
+      fastDrawEligible = m.isEligibleForFastDrawCheck(drawMode)
+      if fastDrawEligible
+        m.usedTransformedFastDrawLastFrame = m.canUseTransformedFastDraw()
+        if m.usedTransformedFastDrawLastFrame
+          return false
+        end if
+      end if
+      if m.columnsAllowed and m.movedThisDraw and m.canDrawAsColumns(drawMode)
+        m.drawsColumnsThisFrame = true
+        return false
+      end if
+      return fastDrawEligible or m.useTempBitmapMap[drawMode]
+    end function
+
+    ' Opt-in hook: whether this object's fill can be drawn as texture columns from
+    ' getColumnTexture() over its worldPoints quad, in place of a temp bitmap, in this draw mode.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function canDrawAsColumns(drawMode as SceneObjectDrawMode) as boolean
+      return false
+    end function
+
+    ' The flat quad modes columns can draw: oriented and solid, not screen-aligned or wireframe.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function isFlatQuadColumnMode(drawMode as SceneObjectDrawMode) as boolean
+      return not isScreenAlignedDrawMode(drawMode) and not isWireFrameDrawMode(drawMode)
+    end function
+
+    ' The column texture to draw this object's fill with.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {BGE.QuadColumnTexture} or invalid if there's nothing to draw
+    protected function getColumnTexture(rendererObj as BGE.Renderer) as BGE.QuadColumnTexture
+      regionToDraw = m.getRegionWithIdToDraw(rendererObj)
+      if invalid = regionToDraw or invalid = regionToDraw.region
+        return invalid
+      end if
+      return rendererObj.getQuadColumnTexture(regionToDraw)
+    end function
+
+    ' Draws the fill as columns into a temp bitmap whose (0,0) is at `origin` on the canvas,
+    ' without the distance fade (that's applied to the blit).
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {ifDraw2d} bitmap
+    ' @param {BGE.Math.Vector} origin
+    ' @return {boolean} whether any column was drawn
+    protected function drawColumnsToBitmap(rendererObj as BGE.Renderer, bitmap as ifDraw2d, origin as BGE.Math.Vector) as boolean
+      texture = m.getColumnTexture(rendererObj)
+      if invalid = texture
+        return false
+      end if
+      points = m.worldPoints
+      corners = [points.topLeft, points.topRight, points.bottomLeft, points.bottomRight]
+      return rendererObj.drawColumnTextureTo(bitmap, corners, texture, [m.getDrawColorRGBA(rendererObj)], origin) > 0
+    end function
+
+    ' Draws the fill straight to the canvas as projected texture columns, perspective correct.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {boolean} whether any column was drawn
+    protected function drawColumnsToCanvas(rendererObj as BGE.Renderer) as boolean
+      texture = m.getColumnTexture(rendererObj)
+      if invalid = texture
+        return false
+      end if
+      points = m.worldPoints
+      corners = [points.topLeft, points.topRight, points.bottomLeft, points.bottomRight]
+      return rendererObj.drawColumnTexture(corners, texture, [m.getCanvasDrawColorRGBA(rendererObj)]) > 0
     end function
 
     ' For tests/telemetry only - the backing temp bitmap's actual allocated size, which
@@ -403,6 +484,9 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.drawsColumnsThisFrame
+        return m.drawColumnsToCanvas(rendererObj)
+      end if
       regionToDraw = m.getRegionWithIdToDraw(rendererObj)
       regionObj = regionToDraw.region
       retVal = false
@@ -683,6 +767,9 @@ namespace BGE
       regionToDraw = m.getRegionWithIdToDraw(rendererObj)
       if invalid = regionToDraw or invalid = regionToDraw.region
         return {worked: false, didFastDraw: false}
+      end if
+      if m.columnsAllowed and m.canDrawAsColumns(drawMode)
+        return {worked: m.drawColumnsToBitmap(rendererObj, tempBitmap, canvasPointsTopLeftBound), didFastDraw: false}
       end if
       regionObj = regionToDraw.region
       preTransX = regionObj.getPretranslationX()

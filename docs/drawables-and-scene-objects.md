@@ -133,6 +133,31 @@ In the `wireFrame` draw modes the outline *is* the entire drawing, so it's strok
 `drawToCanvas` and skipped by the hook. Those modes fall back to the fill color when no `outlineRGBA`
 is set, which is why they look the same as they always did.
 
+### Texture columns for flat quads
+
+On a `Camera3d`, images, sprites, text, circles and filled rectangles in the oriented and solid draw
+modes draw as **projected texture columns**: one `DrawTransformedObject` per 1-texel column of the
+texture, placed and sized in camera space, so the result is perspective correct with no scratch or temp
+bitmaps. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
+`quadMinPixelsPerColumn`), and a per-frame budget keeps the draw count under Roku's queue limit.
+
+Columns go straight to the canvas only while the object moves relative to the camera. Once it's
+still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far
+cheaper than redrawing every column each frame. A still object never goes through the corner-pin warp.
+
+A quad that comes out as a plain rotated rectangle on screen (facing the camera, rotated only about the
+view axis) still takes the one-call fast path, because a single draw beats any number of columns.
+
+The column cuts (`BGE.QuadColumnTexture`) are made once and shared:
+
+- A sprite's frames are cut through its `BGE.SpriteFrames` (`getColumnTexture(frameIndex)`), so every
+  sprite sharing those frames shares the cuts. The regions in `SpriteFrames` are never touched.
+- Other textures are cached by the renderer under their region id (`Renderer.getQuadColumnTexture()`).
+- Filled rectangles use one shared white texture, tinted (`Renderer.getWhiteColumnTexture()`).
+
+Set `Renderer.drawFlatQuadsAsColumns = false` to go back to the temp bitmap and corner-pin path, for
+example to compare the two on a device.
+
 ### How a rectangle is drawn, and why it's a billboard
 
 `SceneObjectRectangle` extends `SceneObjectBillboard`, so a rectangle orients and foreshortens in 3D
@@ -142,8 +167,12 @@ the inherited **pinned-corners** path: filling the projected quad produces ident
 less work, and `DrawableRectangle` never has to hold a bitmap of its own. That's how
 `SceneObjectPolygon` draws, for the same reason.
 
-It does still cache that fill into a **temp bitmap** in the oriented draw modes, exactly like a
-polygon does. Filling a rotated quad means rasterizing two triangles through scratch bitmaps, which
+On a perspective camera (`Camera3d`), a filled rectangle in the oriented and solid draw modes is
+drawn as **texture columns** instead: tinted columns of a shared white texture, projected straight onto
+the canvas while it moves (see [Texture columns](#texture-columns-for-flat-quads) below). Once still, it
+fills its temp bitmap with triangles as before. With
+`Renderer.drawFlatQuadsAsColumns` off, or on a `Camera2d`, it caches that fill into a **temp bitmap**
+in the oriented draw modes, exactly like a polygon does. Filling a rotated quad means rasterizing two triangles through scratch bitmaps, which
 is far too expensive to repeat every frame for something that hasn't moved - skipping the cache here
 cost `examples/3d`'s RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was
 put back. Whether a `SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which
