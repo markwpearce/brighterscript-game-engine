@@ -686,9 +686,16 @@ See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `exa
 
 ## Textured 3D models (`Model3d` / `OBJParser`)
 
-An `.obj` model can carry diffuse textures, sampled via UV coordinates and affine-mapped onto each
-triangular face (not perspective-correct - see the "Bitmap Triangle Warp" demo in `rendererTest` for
-the underlying primitive, `Renderer.drawBitmapTriangle(To)`). Two ways to get textures onto a model:
+An `.obj` model can carry diffuse textures, sampled via UV coordinates. On a `Camera3d`, each
+textured face draws as texture columns, like a flat quad (see
+[Texture columns](#texture-columns-for-flat-quads)), but cut to the triangle: each strip is a power
+of two texels wide and runs only as far as the face's UV triangle reaches. The cuts are made once per
+face and strip width (`BGE.TriangleColumnCuts`, via `Model3dTexture.getColumnCuts()`) and shared by
+every instance of the model, so drawing a face only projects its strips. A moving model draws its
+faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
+`Renderer.drawModelFacesAsColumns = false` (or a `Camera2d`) uses the older affine triangle warp,
+`Renderer.drawBitmapTriangle(To)`, with per-face rasters reused while moving. Two ways to get
+textures onto a model:
 
 - **Materials**: the `.obj` references a `mtllib <file>.mtl`, and each `usemtl <name>` line sets the
   material of the faces after it. Each material's `map_Kd <image>` is its texture, resolved relative

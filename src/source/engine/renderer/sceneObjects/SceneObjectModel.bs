@@ -46,6 +46,8 @@ namespace BGE
     ' stable across frames even though modelCanvasFaces itself is re-filtered/re-sorted
     ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
     private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
+    ' Whether any face has a texture, as of the last updateWorldPosition()
+    private hasTexturedFaces as boolean = false
 
     ' Each face's shaded color as of its last projection, by faceIndex - lets a light
     ' change that didn't alter any face's color skip the redraw.
@@ -144,6 +146,12 @@ namespace BGE
       shadedColor = BGE.RendererHelpers.applyAlphaFade(face.shadedColor, m.distanceFadeAlpha)
       if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
         if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
+          if m.areColumnsAllowed(rendererObj)
+            strips = rendererObj.drawTriangleColumns(m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), shadedColor)
+            if strips >= 0
+              return strips > 0
+            end if
+          end if
           return rendererObj.drawBitmapTriangle(face.Texture.srcRegionWithId, face.Texture.points, face.vertices, shadedColor)
         end if
         return rendererObj.drawTriangle(face.vertices, 0, 0, shadedColor)
@@ -283,6 +291,31 @@ namespace BGE
       return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
     end function
 
+    ' Whether part of `face` lies past this frame's face clip rect, which the temp bitmap ends at.
+    private function isFaceOutsideClipRect(face as BGE.Model3dFace) as boolean
+      clip = m.faceClipRect
+      if invalid = clip
+        return false
+      end if
+      for each vertex in face.vertices
+        if vertex.x < clip.x0 or vertex.x > clip.x1 or vertex.y < clip.y0 or vertex.y > clip.y1
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' Textured faces draw as columns with the renderer's drawModelFacesAsColumns.
+    protected override function areColumnsAllowed(rendererObj as BGE.Renderer) as boolean
+      return rendererObj.drawModelFacesAsColumns and rendererObj.camera.isPerspective()
+    end function
+
+    ' While moving, a model with textured faces draws them straight to the canvas as columns,
+    ' unless it keeps an impostor, which needs every frame's drawing in its temp bitmap.
+    protected override function canDrawAsColumns(drawMode as SceneObjectDrawMode) as boolean
+      return m.hasTexturedFaces and not m.drawable.useImpostor and m.isFlatQuadColumnMode(drawMode)
+    end function
+
     ' How far past each canvas edge a face image holds: 10% of the canvas, and at least the
     ' whole-model stretch's reuse threshold, so zooming out while reusing doesn't show a gap.
     private function getFaceClipMargin(rendererObj as BGE.Renderer) as BGE.Math.Vector
@@ -382,7 +415,17 @@ namespace BGE
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
+          strips = -1
+          if m.columnsAllowed and face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
+            ' exact and cheap, so there's no face raster to keep
+            strips = rendererObj.drawTriangleColumnsTo(tempBitmap, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), face.shadedColor, canvasPointsTopLeftBound)
+            m.facesClippedThisDraw = m.facesClippedThisDraw or (strips >= 0 and m.isFaceOutsideClipRect(face))
+          end if
+          if strips >= 0
+            thisWorked = strips > 0
+          else
+            thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
+          end if
         else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
           ' Outlines are cheap already (no texture warp) - not worth caching, and a
           ' debug wireframe shouldn't lag a frame behind the model's real position.
@@ -623,6 +666,7 @@ namespace BGE
       m.modelWorldFaces = []
       m.worldPosition = m.drawable.getWorldPosition()
       m.modelWorldBounds = []
+      m.hasTexturedFaces = false
       i = 0
 
       for each face in m.drawable.model.faces as BGE.Model3dFace[]
@@ -647,6 +691,9 @@ namespace BGE
         end for
         worldFace = BGE.Model3dFaceOps.create(worldVerts)
         worldFace.Texture = face.Texture
+        if invalid <> face.Texture
+          m.hasTexturedFaces = true
+        end if
         worldFace.color = face.color
         m.modelWorldFaces.Push(worldFace)
         i++

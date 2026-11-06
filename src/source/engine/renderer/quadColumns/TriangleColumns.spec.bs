@@ -1,0 +1,172 @@
+import "../../../math/vector.bs"
+import "../../quality/RenderQualityLevel.bs"
+import "../../quality/RenderQualityPresets.bs"
+import "QuadColumnDrawer.bs"
+import "TriangleColumnCuts.bs"
+
+namespace tests
+
+  @suite("BGE.TriangleColumnCuts")
+  class TriangleColumnsTests extends rooibos.BaseTestSuite
+
+    private drawer as BGE.QuadColumnDrawer
+    private textureRegion as roRegion
+    private target as roBitmap
+
+    protected override sub beforeEach()
+      m.drawer = new BGE.QuadColumnDrawer()
+      m.drawer.setProjection(640, 1280, 720)
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.textureRegion = m.quadrantTexture()
+      m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      m.target.Clear(&h000000FF)
+    end sub
+
+    ' 128x128: top-left red, top-right blue, bottom-left green, bottom-right white
+    private function quadrantTexture() as roRegion
+      bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: true})
+      bmp.DrawRect(0, 0, 64, 64, &hFF0000FF)
+      bmp.DrawRect(64, 0, 64, 64, &h0000FFFF)
+      bmp.DrawRect(0, 64, 64, 64, &h00FF00FF)
+      bmp.DrawRect(64, 64, 64, 64, &hFFFFFFFF)
+      bmp.Finish()
+      return CreateObject("roRegion", bmp, 0, 0, 128, 128)
+    end function
+
+    ' the texture's top-left half: its top-left, top-right and bottom-left corners
+    private function upperLeftCuts() as BGE.TriangleColumnCuts
+      return new BGE.TriangleColumnCuts(m.textureRegion, [BGE.Math.VectorOps.create(0, 0), BGE.Math.VectorOps.create(128, 0), BGE.Math.VectorOps.create(0, 128)])
+    end function
+
+    ' the upper-left half of a 200 unit square facing the camera at depth 500: 256 px across
+    ' on screen, from (512, 232)
+    private function facingTriangle() as float[]
+      return [-100.0, 100.0, -500.0, 100.0, 100.0, -500.0, -100.0, -100.0, -500.0]
+    end function
+
+    private function pixel(x as integer, y as integer) as integer[]
+      m.target.Finish()
+      bytes = m.target.GetByteArray(x, y, 1, 1)
+      return [bytes[0], bytes[1], bytes[2]]
+    end function
+
+    @describe("cutting")
+
+    @it("cuts each column to the triangle's span")
+    function _()
+      cuts = m.upperLeftCuts()
+      m.assertTrue(cuts.isValid)
+      m.assertEqual(128, cuts.stripCount(false, 1))
+      strips = cuts.getStrips(false, 0)
+      m.assertEqual(128, strips.starts.count())
+      ' u 0..1 runs the full height; u 127..128 only its top texel
+      m.assertEqual(0, strips.lows[0])
+      m.assertEqual(128, strips.highs[0])
+      m.assertEqual(0, strips.lows[127])
+      m.assertEqual(1, strips.highs[127])
+      region = strips.regions[127]
+      m.assertEqual(127, region.GetX())
+      m.assertEqual(0, region.GetY())
+      m.assertEqual(1, region.GetWidth())
+      m.assertEqual(1, region.GetHeight())
+    end function
+
+    @it("cuts wider strips to their whole slab, and rows across v")
+    function _()
+      cuts = m.upperLeftCuts()
+      strips = cuts.getStrips(false, 2)
+      m.assertEqual(32, strips.starts.count())
+      ' u 4..8 reaches v 124 at u 4
+      m.assertEqual(4, strips.starts[1])
+      m.assertEqual(8, strips.ends[1])
+      m.assertEqual(124, strips.highs[1])
+      ' sampled from its middle texel
+      m.assertEqual(5, strips.regions[1].GetX())
+      rows = cuts.getStrips(true, 0)
+      m.assertEqual(128, rows.starts.count())
+      m.assertEqual(127, rows.highs[1])
+      m.assertEqual(1, rows.regions[1].GetY())
+      m.assertEqual(127, rows.regions[1].GetWidth())
+    end function
+
+    @it("keeps each strip width it cuts")
+    function _()
+      cuts = m.upperLeftCuts()
+      first = cuts.getStrips(false, 1)
+      first.starts.push(-1)
+      m.assertEqual(-1, cuts.getStrips(false, 1).starts.peek())
+    end function
+
+    @it("is invalid for a triangle with no texture area")
+    function _()
+      cuts = new BGE.TriangleColumnCuts(m.textureRegion, [BGE.Math.VectorOps.create(10, 10), BGE.Math.VectorOps.create(20, 20), BGE.Math.VectorOps.create(30, 30)])
+      m.assertFalse(cuts.isValid)
+      m.assertEqual(-1, m.drawer.drawTriangleTo(m.target, m.facingTriangle(), cuts, -1))
+    end function
+
+    @describe("drawing")
+
+    @it("draws the triangle's texture and nothing past its edge")
+    function _()
+      drawn = m.drawer.drawTriangleTo(m.target, m.facingTriangle(), m.upperLeftCuts(), -1)
+      m.assertTrue(drawn > 0)
+      m.assertFalse(m.drawer.lastUsedRows)
+      m.assertEqual([255, 0, 0], m.pixel(560, 280))
+      m.assertEqual([0, 0, 255], m.pixel(700, 280))
+      m.assertEqual([0, 255, 0], m.pixel(560, 430))
+      m.assertEqual([0, 0, 0], m.pixel(720, 440))
+    end function
+
+    @it("draws rows when depth changes along v")
+    function _()
+      leaning = [-100.0, 100.0, -400.0, 100.0, 100.0, -400.0, -100.0, -100.0, -200.0]
+      m.assertTrue(m.drawer.drawTriangleTo(m.target, leaning, m.upperLeftCuts(), -1) > 0)
+      m.assertTrue(m.drawer.lastUsedRows)
+    end function
+
+    @it("tints with its color")
+    function _()
+      m.drawer.drawTriangleTo(m.target, m.facingTriangle(), m.upperLeftCuts(), &h808080FF)
+      m.assertEqual([128, 0, 0], m.pixel(560, 280))
+    end function
+
+    @it("can't draw a triangle with a vertex behind the near plane")
+    function _()
+      triangle = m.facingTriangle()
+      triangle[2] = 50.0
+      m.assertEqual(-1, m.drawer.drawTriangleTo(m.target, triangle, m.upperLeftCuts(), -1))
+    end function
+
+    @it("sizes strips by render quality and screen span, in powers of two texels")
+    function _()
+      ' 128 texels, 256 px across: 64 strips 2 texels wide at Medium
+      m.drawer.drawTriangleTo(m.target, m.facingTriangle(), m.upperLeftCuts(), -1)
+      m.assertEqual(64, m.drawer.lastColumnCount)
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.ultra))
+      m.drawer.drawTriangleTo(m.target, m.facingTriangle(), m.upperLeftCuts(), -1)
+      m.assertEqual(128, m.drawer.lastColumnCount)
+      ' far away: 64 px across wants 17 at Medium, so 8 texels wide
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      far = m.facingTriangle()
+      for i = 2 to 8 step 3
+        far[i] = -2000.0
+      end for
+      m.drawer.drawTriangleTo(m.target, far, m.upperLeftCuts(), -1)
+      m.assertEqual(16, m.drawer.lastColumnCount)
+    end function
+
+    @it("widens strips to fit the per-frame budget")
+    function _()
+      m.drawer.maxColumnsPerFrame = 40
+      drawn = m.drawer.drawTriangleTo(m.target, m.facingTriangle(), m.upperLeftCuts(), -1)
+      m.assertEqual(32, m.drawer.lastColumnCount)
+      m.assertTrue(drawn <= 32)
+      ' what's left takes wider strips still
+      m.drawer.drawTriangleTo(m.target, m.facingTriangle(), m.upperLeftCuts(), -1)
+      m.assertTrue(m.drawer.lastColumnCount <= 40 - drawn, `strips ${m.drawer.lastColumnCount}`)
+      m.assertTrue(m.drawer.columnsThisFrame <= 40)
+    end function
+
+  end class
+
+end namespace
