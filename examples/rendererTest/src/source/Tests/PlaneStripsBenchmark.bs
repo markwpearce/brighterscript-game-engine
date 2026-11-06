@@ -1,0 +1,280 @@
+' A tiled ground drawn two ways (#453): the plane's top-down composite, or a grid of tiles
+' drawn as texture columns, coarser with distance. On a Roku Ultra the grid took ~100 ms a
+' frame against the plane's ~5 ms, so planes stay as they are. Up/down picks the method, OK
+' the motion: still, driving forward, or turning. Launch params: method=0-1, motion=0-2. Every case logs a `PLANESTRIPS` console line with
+' its average frame interval, drawing time and draw calls; sweep=1 steps through every case by itself, or
+' just those in the comma lists methods= and motions=.
+class PlaneStripsBenchmark extends RendererTest
+
+  ' frames to settle after a change, then frames to average
+  private warmupFrames as integer = 30
+  private sampleFrames as integer = 90
+  private frameCount as integer = 0
+  private sampleMs as float = 0
+  private sampleCalls as integer = 0
+  private sampleDrawMs as float = 0
+  private drawClock = CreateObject("roTimespan")
+  private lastDrawMs as float = 0
+  private frameClock = CreateObject("roTimespan")
+  private sweeping as boolean = false
+  private sweepIndex as integer = 0
+  private sweepCases = [] as integer[][]
+
+  private ownerGameStub as object
+  private owner as BGE.GameEntity
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private rendererRef as BGE.Renderer
+  private ground as BGE.DrawablePlane
+  ' tile regions of 1, 2, 4 and 8 tiles across, by tiles
+  private gridTextures = {} as roAssociativeArray
+  private methodIndex as integer = 0
+  private motionIndex as integer = 0
+  private methodNames = ["plane", "grid columns"]
+  private motionNames = ["still", "drive", "turn"]
+  private position = BGE.Math.VectorOps.create(0, 60, 0)
+  private yaw as float = 0
+
+  ' world units per tile, at the plane's default 1 unit per texel
+  private tileSize as float = 64
+  private tileTexels as integer = 64
+  private maxCellTiles as integer = 8
+  ' a cell splits while the camera is nearer than this many cell sizes
+  private lodFactor as float = 2.0
+  private gridCells as integer = 0
+
+  sub new()
+    super("Plane Strips (U/D method, OK motion)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.ownerGameStub = new BenchmarkGameStub()
+    m.owner = new BGE.GameEntity((m.ownerGameStub as dynamic), {name: "PlaneStripsOwner"})
+    m.camera = new BGE.Camera3d()
+    m.camera.maxDrawDistance = 1500
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+
+    tile = m.createTile()
+    m.ground = new BGE.DrawablePlane(m.owner, CreateObject("roRegion", tile, 0, 0, m.tileTexels, m.tileTexels), {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+    m.createGridTextures(tile)
+
+    if invalid <> m.launchParams.method
+      m.methodIndex = m.launchParams.method.toInt() mod m.methodNames.count()
+    end if
+    if invalid <> m.launchParams.motion
+      m.motionIndex = m.launchParams.motion.toInt() mod m.motionNames.count()
+    end if
+    m.sweeping = m.launchParams.sweep = "1"
+    if m.sweeping
+      for each method in m.indexList(m.launchParams.methods, m.methodNames.count())
+        for each motion in m.indexList(m.launchParams.motions, m.motionNames.count())
+          m.sweepCases.push([method, motion])
+        end for
+      end for
+      m.applySweepCase()
+    end if
+    m.applyMethod()
+  end sub
+
+  ' A comma list of indexes, or all of 0 to count - 1.
+  private function indexList(text as dynamic, count as integer) as integer[]
+    list = [] as integer[]
+    if invalid = text or text = ""
+      for i = 0 to count - 1
+        list.push(i)
+      end for
+      return list
+    end if
+    for each item in text.split(",")
+      list.push(item.toInt() mod count)
+    end for
+    return list
+  end function
+
+  private sub applySweepCase()
+    item = m.sweepCases[m.sweepIndex]
+    m.methodIndex = item[0]
+    m.motionIndex = item[1]
+  end sub
+
+  ' grass-like checks with a dark border, so seams and swimming show
+  private function createTile() as roBitmap
+    n = m.tileTexels
+    bmp = CreateObject("roBitmap", {width: n, height: n, alphaEnable: false})
+    bmp.Clear(&h3F7A3AFF)
+    bmp.DrawRect(0, 0, n / 2, n / 2, &h5C9E4FFF)
+    bmp.DrawRect(n / 2, n / 2, n / 2, n / 2, &h5C9E4FFF)
+    bmp.DrawRect(0, 0, n, 2, &h2A4F27FF)
+    bmp.DrawRect(0, 0, 2, n, &h2A4F27FF)
+    bmp.DrawRect(n / 4, n / 4, 6, 6, &hD8D060FF)
+    bmp.Finish()
+    return bmp
+  end function
+
+  ' One bitmap of maxCellTiles x maxCellTiles tiles; a cell of n tiles uses its top left n x n.
+  private sub createGridTextures(tile as roBitmap)
+    side = m.tileTexels * m.maxCellTiles
+    sheet = CreateObject("roBitmap", {width: side, height: side, alphaEnable: false})
+    for row = 0 to m.maxCellTiles - 1
+      for col = 0 to m.maxCellTiles - 1
+        sheet.DrawObject(col * m.tileTexels, row * m.tileTexels, tile)
+      end for
+    end for
+    sheet.Finish()
+    tiles = 1
+    while tiles <= m.maxCellTiles
+      region = CreateObject("roRegion", sheet, 0, 0, tiles * m.tileTexels, tiles * m.tileTexels)
+      m.gridTextures[tiles.toStr()] = BGE.RendererHelpers.createRegionWithId(region, `plane-strips-${tiles}`)
+      tiles = tiles * 2
+    end while
+  end sub
+
+  private sub applyMethod()
+    m.resetSample()
+    for each sceneObj in m.rendererRef.getSceneObjectsCopy()
+      m.rendererRef.removeSceneObject(sceneObj)
+    end for
+    if m.methodIndex = 0
+      m.ground.addToRenderer(m.rendererRef)
+    end if
+  end sub
+
+  ' Averages the frame interval (everything, swap included) and logs it once per case.
+  private sub sampleFrame(renderer as BGE.Renderer)
+    elapsed = m.frameClock.TotalMilliseconds()
+    m.frameClock.Mark()
+    m.frameCount++
+    if m.frameCount <= m.warmupFrames
+      return
+    end if
+    m.sampleMs += elapsed
+    m.sampleCalls += renderer.getDrawCallsLastFrame()
+    m.sampleDrawMs += m.lastDrawMs
+    if m.frameCount < m.warmupFrames + m.sampleFrames
+      return
+    end if
+    print `PLANESTRIPS ${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]} | ${Int(m.sampleMs / m.sampleFrames * 10) / 10} ms | draw ${Int(m.sampleDrawMs / m.sampleFrames * 10) / 10} ms | ${m.sampleCalls \ m.sampleFrames} calls | ${m.gridCells} cells`
+    m.resetSample()
+    if m.sweeping
+      m.sweepIndex++
+      if m.sweepIndex >= m.sweepCases.count()
+        print "PLANESTRIPS done"
+        m.sweeping = false
+        return
+      end if
+      m.applySweepCase()
+      m.applyMethod()
+    end if
+  end sub
+
+  private sub resetSample()
+    m.frameCount = 0
+    m.sampleMs = 0
+    m.sampleCalls = 0
+    m.sampleDrawMs = 0
+  end sub
+
+  override sub update(dt as float)
+    if m.motionIndex = 1
+      m.position.x -= sin(m.yaw) * 200 * dt
+      m.position.z -= cos(m.yaw) * 200 * dt
+    else if m.motionIndex = 2
+      m.yaw += 0.5 * dt
+    end if
+    m.camera.position = BGE.Math.VectorOps.copy(m.position)
+    m.camera.setTarget(BGE.Math.VectorOps.create(m.position.x - sin(m.yaw) * 100, m.position.y - 25, m.position.z - cos(m.yaw) * 100))
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    m.owner.updateTransformationMatrix()
+    m.gridCells = 0
+    m.drawClock.Mark()
+    if m.methodIndex = 1
+      m.drawGrid(renderer)
+    end if
+    renderer.render()
+    m.lastDrawMs = m.drawClock.TotalMilliseconds()
+    m.sampleFrame(renderer)
+    renderer.drawText(`${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]}`, 20, 80, BGE.Colors.White)
+  end sub
+
+  ' The ground within the plane draw distance, as a quadtree of tile-aligned cells.
+  private sub drawGrid(renderer as BGE.Renderer)
+    distance = m.camera.getPlaneDrawDistanceForTexelScale(1)
+    root = m.tileSize * m.maxCellTiles
+    x0 = Int((m.position.x - distance) / root) * root - root
+    z0 = Int((m.position.z - distance) / root) * root - root
+    x1 = m.position.x + distance
+    z1 = m.position.z + distance
+    halfFov = BGE.Math.DegreesToRadians(m.camera.fieldOfViewDegrees) / 2
+    heading = BGE.Math.atan2(-cos(m.yaw), -sin(m.yaw))
+    x = x0
+    while x < x1
+      z = z0
+      while z < z1
+        m.drawCell(renderer, x, z, root, distance, heading, halfFov)
+        z += root
+      end while
+      x += root
+    end while
+  end sub
+
+  private sub drawCell(renderer as BGE.Renderer, x0 as float, z0 as float, size as float, distance as float, heading as float, halfFov as float)
+    dx = x0 + size / 2 - m.position.x
+    dz = z0 + size / 2 - m.position.z
+    radius = size * 0.7072
+    centreDistance = Sqr(dx * dx + dz * dz)
+    if centreDistance - radius > distance
+      return
+    end if
+    if centreDistance > radius
+      ' outside the view wedge, widened by the cell's angular radius
+      off = Abs(BGE.Math.wrapAngle(BGE.Math.atan2(dz, dx) - heading))
+      if off > halfFov + Atn(radius / Sqr(centreDistance * centreDistance - radius * radius)) + 0.05
+        return
+      end if
+    end if
+    tiles = Int(size / m.tileSize + 0.5)
+    if tiles > 1 and centreDistance < m.lodFactor * size
+      half = size / 2
+      m.drawCell(renderer, x0, z0, half, distance, heading, halfFov)
+      m.drawCell(renderer, x0 + half, z0, half, distance, heading, halfFov)
+      m.drawCell(renderer, x0, z0 + half, half, distance, heading, halfFov)
+      m.drawCell(renderer, x0 + half, z0 + half, half, distance, heading, halfFov)
+      return
+    end if
+    corners = [
+      BGE.Math.VectorOps.create(x0, 0, z0),
+      BGE.Math.VectorOps.create(x0 + size, 0, z0),
+      BGE.Math.VectorOps.create(x0, 0, z0 + size),
+      BGE.Math.VectorOps.create(x0 + size, 0, z0 + size)
+    ]
+    renderer.drawTexturedQuadTo(renderer.getDraw2d(), corners, m.gridTextures[tiles.toStr()])
+    m.gridCells++
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "up" or buttonName = "down"
+      delta = 1
+      if buttonName = "up"
+        delta = m.methodNames.count() - 1
+      end if
+      m.methodIndex = (m.methodIndex + delta) mod m.methodNames.count()
+      m.applyMethod()
+    else if buttonName = "OK"
+      m.motionIndex = (m.motionIndex + 1) mod m.motionNames.count()
+      m.resetSample()
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class
