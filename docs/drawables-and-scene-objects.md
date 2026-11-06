@@ -693,6 +693,8 @@ of two texels wide and runs only as far as the face's UV triangle reaches. The c
 face and strip width (`BGE.TriangleColumnCuts`, via `Model3dTexture.getColumnCuts()`) and shared by
 every instance of the model, so drawing a face only projects its strips. A moving model draws its
 faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
+With `useImpostor` (the default), only the model's own movement or turning counts: while just the
+camera moves, the impostor reuses its last capture.
 `Renderer.drawModelFacesAsColumns = false` (or a `Camera2d`) uses the older affine triangle warp,
 `Renderer.drawBitmapTriangle(To)`, with per-face rasters reused while moving. Two ways to get
 textures onto a model:
