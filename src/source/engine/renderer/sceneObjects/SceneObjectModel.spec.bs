@@ -47,7 +47,7 @@ namespace tests
       return face
     end function
 
-    @it("draws a textured face via the solo draw path without crashing, using drawBitmapTriangle")
+    @it("draws a textured face via the solo draw path without crashing, as texture columns")
     function _()
       face = m.makeTexturedFace()
       model = new BGE.Model3d([face])
@@ -291,134 +291,69 @@ namespace tests
       m.assertTrue(sceneObj.getFaceBrightness(0) >= drawableModel.ambientBrightness)
     end function
 
-    @describe("per-face raster reuse (issue #163)")
+    @describe("faces columns can't draw")
 
-    ' A textured, continuously-rotating model was paying the full drawBitmapTriangleTo
-    ' pipeline for every visible face on every single frame after #128's fix disabled
-    ' the (unsound) whole-model reuse - this is what actually cuts that cost back down:
-    ' each face reuses its own last-rendered raster (repositioned, not redrawn) for
-    ' maxStaleFrames frames before a real redraw, alternating fresh/reused/fresh/...
-    @it("redraws a face fresh, then reuses its cache once, then redraws fresh again")
-    function _()
+    ' A textured model on a 320x240 Camera3d, `frames` frames turning then held still.
+    private function renderTexturedModel(face as BGE.Model3dFace, maxColumns as integer, frames = 1 as integer) as BGE.SceneObjectModel
       game3d = new BGE.Game(320, 240)
       entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
-      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
-      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
-      ' face rasters are only kept for the triangle warp
-      renderer3d.drawModelFacesAsColumns = false
+      renderer3d = new BGE.Renderer(CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true}), game3d, new BGE.Camera3d())
+      renderer3d.quadColumns.maxColumnsPerFrame = maxColumns
       entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
-
-      face = m.makeTexturedFace()
-      model = new BGE.Model3d([face])
-      drawableModel = new BGE.DrawableModel(entity3d, model)
-      ' per-face reuse is what's under test, and the impostor turns it off
-      drawableModel.useImpostor = false
-      drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
-      sceneObj = drawableModel.addToRenderer(renderer3d) as BGE.SceneObjectModel
-
-      staleCounts = []
-      for i = 1 to 3
-        entity3d.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
-        entity3d.updateTransformationMatrix()
-        renderer3d.setupCameraForFrame()
-        renderer3d.render()
-        staleCounts.push(sceneObj.getFaceStaleFrameCount(0))
-      end for
-
-      m.assertEqual(0, staleCounts[0]) ' frame 1: no cache yet, fresh redraw
-      m.assertEqual(1, staleCounts[1]) ' frame 2: reused (maxStaleFrames defaults to 1)
-      m.assertEqual(0, staleCounts[2]) ' frame 3: maxStaleFrames reached, fresh again
-    end function
-
-    @it("fills a moving solid face fresh every frame, keeping no face raster")
-    function _()
-      game3d = new BGE.Game(320, 240)
-      entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
-      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
-      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
-      ' the triangle warp path, where textured faces would keep a raster
-      renderer3d.drawModelFacesAsColumns = false
-      entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
-
-      face = BGE.Model3dFaceOps.create([BGE.Math.VectorOps.create(-10, -10, 0), BGE.Math.VectorOps.create(10, -10, 0), BGE.Math.VectorOps.create(0, 10, 0)])
       drawableModel = new BGE.DrawableModel(entity3d, new BGE.Model3d([face]))
       drawableModel.useImpostor = false
       drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
       sceneObj = drawableModel.addToRenderer(renderer3d) as BGE.SceneObjectModel
-
-      for i = 1 to 3
-        entity3d.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
+      for i = 1 to frames
+        entity3d.rotation = BGE.Math.VectorOps.create(0, BGE.Math.Min(i, 2) * 0.01, 0)
         entity3d.updateTransformationMatrix()
         renderer3d.setupCameraForFrame()
         renderer3d.render()
-        m.assertTrue(sceneObj.didDrawLastFrame())
-        m.assertEqual(-1, sceneObj.getFaceStaleFrameCount(0))
       end for
+      m.lastRenderer = renderer3d
+      return sceneObj
     end function
 
-    ' A whole-model zoom-stretch (attemptTransformTempBitmap, gated to negligible
-    ' rotation only - see there) must never stretch a temp bitmap that's itself a
-    ' patchwork of some-fresh-some-reused per-face content, or the two approximations
-    ' compound. This pins that down using the same 2-frame setup as the test above,
-    ' whose frame 2 is already known to take the per-face reuse path.
-    @it("refuses a whole-model zoom-stretch right after any face reused its own cache")
+    private lastRenderer as BGE.Renderer = invalid
+
+    @it("draws a textured face as columns while the frame's budget lasts")
     function _()
-      game3d = new BGE.Game(320, 240)
-      entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
-      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
-      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
-      ' face rasters are only kept for the triangle warp
-      renderer3d.drawModelFacesAsColumns = false
-      entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
-
-      face = m.makeTexturedFace()
-      model = new BGE.Model3d([face])
-      drawableModel = new BGE.DrawableModel(entity3d, model)
-      ' per-face reuse is what's under test, and the impostor turns it off
-      drawableModel.useImpostor = false
-      drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
-      sceneObj = drawableModel.addToRenderer(renderer3d) as BGE.SceneObjectModel
-
-      entity3d.rotation = BGE.Math.VectorOps.create(0, 0.01, 0)
-      entity3d.updateTransformationMatrix()
-      renderer3d.setupCameraForFrame()
-      renderer3d.render()
-
-      entity3d.rotation = BGE.Math.VectorOps.create(0, 0.02, 0)
-      entity3d.updateTransformationMatrix()
-      renderer3d.setupCameraForFrame()
-      renderer3d.render()
-      m.assertEqual(1, sceneObj.getFaceStaleFrameCount(0)) ' confirms frame 2 reused, not a fresh redraw
-
-      m.assertFalse(sceneObj.canReuseTransformedTempBitmap(renderer3d, BGE.SceneObjectDrawMode.orientedDrawBackFace))
+      sceneObj = m.renderTexturedModel(m.makeTexturedFace(), 8000)
+      m.assertTrue(sceneObj.didDrawLastFrame())
+      m.assertEqual(0, sceneObj.getColorFilledFaceCount())
     end function
 
-    ' DrawableModel.maxStaleFrames is the tunable knob - confirms it's actually read,
-    ' not just a hardcoded default.
-    @it("never reuses when maxStaleFrames is set to 0")
+    @it("fills a textured face with its color once the frame's column budget is spent")
     function _()
-      game3d = new BGE.Game(320, 240)
-      entity3d = new BGE.GameEntity(game3d, {name: "TestEntity3d"})
-      bitmap3d = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
-      renderer3d = new BGE.Renderer(bitmap3d, game3d, new BGE.Camera3d())
-      ' face rasters are only kept for the triangle warp
-      renderer3d.drawModelFacesAsColumns = false
-      entity3d.position = BGE.Math.VectorOps.create(0, 0, 500)
+      sceneObj = m.renderTexturedModel(m.makeTexturedFace(), 0)
+      m.assertTrue(sceneObj.didDrawLastFrame())
+      m.assertEqual(1, sceneObj.getColorFilledFaceCount())
+    end function
 
+    @it("fills a face whose texture has no UV area with its color")
+    function _()
       face = m.makeTexturedFace()
-      model = new BGE.Model3d([face])
-      drawableModel = new BGE.DrawableModel(entity3d, model)
-      drawableModel.drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace
-      drawableModel.maxStaleFrames = 0
-      sceneObj = drawableModel.addToRenderer(renderer3d) as BGE.SceneObjectModel
+      face.Texture = new BGE.Model3dTexture(face.Texture.srcRegionWithId, [
+        BGE.Math.VectorOps.create(0, 0, 0),
+        BGE.Math.VectorOps.create(4, 4, 0),
+        BGE.Math.VectorOps.create(8, 8, 0)
+      ])
+      sceneObj = m.renderTexturedModel(face, 8000)
+      m.assertTrue(sceneObj.didDrawLastFrame())
+      m.assertEqual(1, sceneObj.getColorFilledFaceCount())
+    end function
 
-      for i = 1 to 3
-        entity3d.rotation = BGE.Math.VectorOps.create(0, 0.01 * i, 0)
-        entity3d.updateTransformationMatrix()
-        renderer3d.setupCameraForFrame()
-        renderer3d.render()
-        m.assertEqual(0, sceneObj.getFaceStaleFrameCount(0))
-      end for
+    ' an impostor capture or a stretch of a stand-in fill would keep showing it
+    @it("marks a cached drawing with a color-filled face as not reusable")
+    function _()
+      sceneObj = m.renderTexturedModel(m.makeTexturedFace(), 8000, 5) as dynamic
+      m.assertNotInvalid(sceneObj.getTempBitmapCapacity())
+      m.assertTrue(sceneObj.lastDrawWasFullyFresh)
+
+      sceneObj = m.renderTexturedModel(m.makeTexturedFace(), 0, 5) as dynamic
+      m.assertNotInvalid(sceneObj.getTempBitmapCapacity())
+      m.assertFalse(sceneObj.lastDrawWasFullyFresh)
+      m.assertFalse(sceneObj.canReuseTransformedTempBitmap(m.lastRenderer, BGE.SceneObjectDrawMode.orientedDrawBackFace))
     end function
 
     @it("keeps drawing correctly across many frames of continuous rotation")
@@ -468,7 +403,6 @@ namespace tests
         renderer3d.render()
       end for
       ' no face raster, no temp bitmap: every strip is its own draw
-      m.assertEqual(-1, sceneObj.getFaceStaleFrameCount(0))
       m.assertInvalid(sceneObj.getTempBitmapCapacity())
       m.assertTrue(renderer3d.getDrawCallsLastFrame() > 1)
     end function
@@ -519,7 +453,6 @@ namespace tests
         renderer3d.setupCameraForFrame()
         renderer3d.render()
       end for
-      m.assertEqual(-1, sceneObj.getFaceStaleFrameCount(0))
       m.assertNotInvalid(sceneObj.getTempBitmapCapacity())
       ' just the blit
       m.assertEqual(1, renderer3d.getDrawCallsLastFrame())

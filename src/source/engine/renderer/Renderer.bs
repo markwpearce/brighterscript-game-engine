@@ -31,7 +31,6 @@ import "quadColumns/QuadColumnDrawer.bs"
 import "quadColumns/QuadColumnTexture.bs"
 import "quadColumns/TriangleColumnCuts.bs"
 import "ScratchBitmap.bs"
-import "TriangleCache.bs"
 
 namespace BGE
 
@@ -91,19 +90,6 @@ namespace BGE
     private debugCellStart as BGE.Math.Vector = BGE.Math.VectorOps.create(100, 100)
     drawDebugCells = false
     drawDebugTrianglePoints = false
-
-    ' Pixels each triangle's shared edge is extended by in drawPinnedCornersTo() - see
-    ' padPointAwayFrom() - to hide the seam left by warping each triangle independently.
-    private pinnedCornersSeamPadding as float = 2.0
-
-    ' The largest scratch bitmap (in pixels per side) a textured triangle is warped in.
-    ' A bigger triangle is warped smaller and scaled back up as it's drawn, so it's a little
-    ' softer but doesn't need a huge bitmap - a face seen edge-on across the screen used to
-    ' need one ~1700px square, and those ran a Roku out of texture memory (#345).
-    ' 0 uses 640, or the scratch bitmap pool's size if smaller, when it pools (real devices),
-    ' else no limit. Orbiting examples/terrain's chapel still ran a Roku Ultra down to <3MB
-    ' of texture memory with a 1080 limit.
-    maxTriangleWarpSize as integer = 0
 
     private draw2d as ifDraw2D = invalid
 
@@ -214,18 +200,10 @@ namespace BGE
 
     camera as Camera
 
-    triangleCache = new TriangleCache(5)
-
     ' Draws textured quads as projected texture columns (see drawTexturedQuadTo())
     quadColumns = new BGE.QuadColumnDrawer()
     ' Most textures getQuadColumnTexture() keeps before starting over (each holds its bitmap)
     maxQuadColumnTextures as integer = 64
-    ' Draw oriented images, sprites, text, circles and filled rectangles as texture columns
-    ' (no temp bitmaps or corner-pin warps) on a perspective camera. Off falls back to the pin path.
-    drawFlatQuadsAsColumns as boolean = true
-    ' Draw textured model faces as texture columns (see drawTriangleColumnsTo()) on a
-    ' perspective camera, with no per-face rasters. Off falls back to the triangle warp.
-    drawModelFacesAsColumns as boolean = true
     private quadColumnTextures as roAssociativeArray = {}
     private quadColumnTextureCount as integer = 0
 
@@ -1307,9 +1285,6 @@ namespace BGE
       end for
       primitiveEntries.SortBy("depth")
       for each entry in primitiveEntries
-        ' A drawPrimitive() call here may use scratch bitmaps (e.g. a textured Model3d
-        ' face via drawBitmapTriangleTo) - once the pool is used up for this frame,
-        ' ScratchBitmapPool hands out one-off bitmaps, so a big cluster can't exhaust it.
         entry.sceneObj.drawPrimitive(m, entry.index)
       end for
       for each sceneObj in m.pendingClusterDraws
@@ -1487,8 +1462,7 @@ namespace BGE
 
       ' Every other path that draws into a bitmap and relies on reading it back
       ' afterward (a further draw, or SwapBuffers()) already forces completion via
-      ' forceDraw() (see makeIntoTriangle/drawPinnedCornersTo/etc and
-      ' SceneObjectBillboard.createTempBitmap for the oriented temp-bitmap paths) -
+      ' forceDraw() (see SceneObjectBillboard.createTempBitmap for the oriented temp-bitmap paths) -
       ' but render() itself never did, for the plain single-blit path every
       ' screen-aligned Image (matchCamera/directToCamera) actually uses. One
       ' .Finish() per frame here is cheap insurance against the same class of
@@ -1571,7 +1545,6 @@ namespace BGE
       if m.frameCount = 30
         m.statsString = `[${m.name}] Draw Calls: ${m.drawCallsLastFrame} | Scene Objects: ${m.sceneObjects.count()}`
         m.frameCount = 0
-        m.triangleCache.cleanCache()
       end if
 
     end sub
@@ -1936,11 +1909,6 @@ namespace BGE
     end function
 
 
-    function drawPinnedCorners(cornerPoints as BGE.Math.CornerPoints, drawableRegion as BGE.RendererHelpers.RegionWithId, options = {} as DrawPinnedCornersOptions, color = -1 as integer) as boolean
-      return m.drawPinnedCornersTo(m.draw2d, cornerPoints, drawableRegion, options, color)
-    end function
-
-
     ' Convenience wrapper for drawRotatedImageWithCenterTo that draws to this renderer's own canvas.
     '
     ' @param {ifDraw2d} srcRegion the source region to draw from
@@ -1974,769 +1942,6 @@ namespace BGE
         return m.drawRotatedObjectTo(draw2d, finalTranslation.x, finalTranslation.y, theta, srcRegion)
       end if
       return m.drawTransformedObjectTo(draw2d, finalTranslation.x, finalTranslation.y, drawScale.x, drawScale.y, theta, srcRegion)
-    end function
-
-
-    function makeIntoTriangle(srcRegionWithId as BGE.RendererHelpers.RegionWithId, points as BGE.Math.Vector[], makeAcute = false as boolean, useCache = false as boolean) as BGE.RendererHelpers.TriangleBitmap
-      if useCache
-        existingItem = m.triangleCache.getTriangle(srcRegionWithId.id, points)
-        if invalid <> existingItem
-          return existingItem
-        end if
-      end if
-
-      if points.count() < 3
-        return invalid
-      end if
-
-      ' TriangleOps.create() reorders a clockwise array in place - cache under the order asked for
-      pointsAskedFor = [points[0], points[1], points[2]]
-      srcRegion = srcRegionWithId.region
-
-      srcPreX = 0
-      srcPreY = 0
-
-      srcRegion.SetAlphaEnable(true)
-
-      srcRegion.GetPretranslationX()
-      srcRegion.GetPretranslationY()
-      scratchRegion1 as BGE.ScratchRegion = invalid
-      if srcPreX <> 0 or srcPreY <> 0
-        m.addDebugCell(srcRegion, "srcRegionPreTran")
-        scratchRegion1 as BGE.ScratchRegion = m.getTriangleBuildRegion(srcRegion.getWidth(), srcRegion.getHeight(), false, useCache)
-        if invalid = scratchRegion1
-          return invalid
-        end if
-        unPreTranslated = scratchRegion1.region
-        if not m.drawObjectTo(unPreTranslated, -srcPreX, -srcPreY, srcRegion)
-          m.bmpPool.returnRegions([scratchRegion1])
-          return invalid
-        end if
-        srcRegion = unPreTranslated
-      end if
-      canGetPoints = true
-      for i = 0 to 2
-        canGetPoints = canGetPoints and m.isInsideCanvas(srcRegion, points[i].x, points[i].y, 1, 1, 0)
-        if not canGetPoints
-          exit for
-        end if
-      end for
-      if not canGetPoints
-        m.bmpPool.returnRegions([scratchRegion1])
-        return invalid
-      end if
-      srcTri = BGE.Math.TriangleOps.create(points, false)
-
-      m.addDebugCell(srcRegion, "srcRegion")
-
-      halfPi = BGE.Math.HALF_PI
-      longestIndex = srcTri.longestIndex
-      startIndex = BGE.Math.TriangleOps.nextIndex(longestIndex)
-      longestSide = BGE.Math.TriangleOps.getLongestSide(srcTri)
-      bmpSizeW = longestSide
-      bmpSizeH = longestSide
-      originPoint = srcTri.points[startIndex]
-      scratchRegion2 = m.getTriangleBuildRegion(bmpSizeW, bmpSizeH, originPoint.x > 0, useCache)
-
-      if invalid = scratchRegion2
-        m.bmpPool.returnRegions([scratchRegion1])
-        return invalid
-      end if
-      initialRegion = scratchRegion2.region
-
-      initialAngle = srcTri.anglesToPrevious[startIndex]
-      initialCenter = BGE.Math.VectorOps.negative(originPoint)
-      m.drawRotatedImageWithCenterTo(initialRegion, srcRegion, originPoint, initialAngle, initialCenter, scratchRegion2.scale)
-
-      m.addDebugCell(initialRegion, "initialRegion")
-
-      ' At this point, we have region where the top line is the longest side of the triangle
-      ' find the angle to rotate to cut off the right side
-      prevIndex = BGE.Math.TriangleOps.previousIndex(startIndex)
-      rightSideTheta = -initialAngle - halfPi + srcTri.anglesToPrevious[prevIndex]
-      scratchRegion3 = m.getTriangleBuildRegion(bmpSizeW, bmpSizeH, true, useCache)
-      if invalid = scratchRegion3
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return invalid
-      end if
-
-      region2 = scratchRegion3.region
-
-      m.drawRotatedImageWithCenterTo(region2, initialRegion, BGE.Math.VectorOps.create(bmpSizeW, 0), rightSideTheta)
-
-      m.addDebugCell(region2, "rotatedRegion")
-
-      bitmap3 = invalid as roBitmap
-      region3 = invalid as roRegion
-      scratchRegion4 = invalid as BGE.ScratchRegion
-      if useCache
-        bitmap3 = CreateObject("roBitmap", {width: fix(bmpSizeW + 1), height: fix(bmpSizeH + 1), AlphaEnable: true})
-        if invalid = bitmap3
-          m.bmpPool.returnRegions([scratchRegion1, scratchRegion2, scratchRegion3])
-          return invalid
-        end if
-        region3 = CreateObject("roRegion", bitmap3, 0, 0, bmpSizeW, bmpSizeW)
-        bitmap3.SetAlphaEnable(true)
-        region3.SetAlphaEnable(true)
-        bitmap3.Clear(0)
-      else
-        scratchRegion4 = m.bmpPool.getRegion(bmpSizeW, bmpSizeH)
-        if invalid = scratchRegion4
-          m.bmpPool.returnRegions([scratchRegion1, scratchRegion2, scratchRegion3])
-          return invalid
-        end if
-        region3 = scratchRegion4.region
-      end if
-
-      if invalid = region3
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2, scratchRegion3])
-        return invalid
-      end if
-      region3.SetScaleMode(1)
-      prevIndex = BGE.Math.TriangleOps.previousIndex(prevIndex)
-
-      lastRotCenter = BGE.Math.VectorOps.create(longestSide - longestSide * cos(rightSideTheta), longestSide * sin(rightSideTheta))
-      leftSideTheta = -srcTri.angles[prevIndex]
-      m.drawRotatedImageWithCenterTo(region3, region2, lastRotCenter, leftSideTheta, BGE.Math.VectorOps.negative(lastRotCenter))
-
-      resultPoints = [BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create()]
-
-      ' next point is always mapped to (0,0)
-      index = (longestIndex + 1) mod 3
-      resultPoints[index].x = 0
-      resultPoints[index].y = 0
-
-      ' prevPoint is always on the y-axis
-      nextLength = srcTri.lengths[index]
-      index = (index + 1) mod 3
-      resultPoints[index].y = nextLength ' prevpoint is where the next leg ends
-
-      ' last point(longestPoint) is found via trig
-      index = longestIndex
-
-      finalAngle = srcTri.angles[(longestIndex + 1) mod 3]
-      resultPoints[index].x = fix(longestSide * cos(halfPi - finalAngle))
-      resultPoints[index].y = fix(longestSide * sin(halfPi - finalAngle))
-
-      m.drawTrianglePointsTo(region3, resultPoints)
-
-      result = BGE.RendererHelpers.createTriangleBitmap(region3, resultPoints)
-
-      if not useCache
-        result.scratchRegion = scratchRegion4
-      end if
-      result.triangle.angleRotatedFromOriginal = BGE.Math.HALF_PI - srcTri.anglesToNext[BGE.Math.TriangleOps.nextIndex(longestIndex)]
-      m.addDebugCell(region3, "triangle")
-
-      if not BGE.Math.TriangleOps.isAcute(result.triangle) and makeAcute
-        ' Make the cached triangles Acute, so it is easier to transform them into obtuse triangles later
-        ' a long thin triangle can't be stretched acute within a scratch bitmap - warp it as it is
-        acuteResult = m.scaleTriangleToBeAcuteTriangle(result, useCache)
-        if invalid <> acuteResult
-          result = acuteResult
-          m.addDebugCell(result.bitmap, "acuteTriangle")
-        end if
-      end if
-
-      m.forceDraw(result.bitmap)
-      if useCache
-        m.triangleCache.addTriangle(srcRegionWithId.id, pointsAskedFor, result)
-      end if
-
-      ' Everything worked here, so stage regions for return after completing drawing the frame.
-      m.bmpPool.returnRegions([scratchRegion1, scratchRegion2, scratchRegion3])
-      return result
-    end function
-
-    ' Draws a bitmap warped from srcPoints onto destPoints, directly to this renderer's own canvas.
-    ' See drawBitmapTriangleTo() for the note about staged scratch bitmaps.
-    '
-    ' @param {BGE.RendererHelpers.RegionWithId} srcRegionWithId the region to draw from
-    ' @param  srcPoints the points describing the triangle to draw from
-    ' @param  destPoints the points describing the on the output surface to draw to
-    ' @return true if it worked
-    function drawBitmapTriangle(srcRegionWithId as BGE.RendererHelpers.RegionWithId, srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[], rgba = -1 as integer) as boolean
-      return m.drawBitmapTriangleTo(m.draw2d, srcRegionWithId, srcPoints, destPoints, rgba)
-    end function
-
-    ' NOTE: This method uses scratch bitmaps, which are only reused from the next frame on -
-    ' call onSwapBuffers() once per frame if you use a Renderer without a Game.
-    '
-    ' @param  draw2d Surface to draw to
-    ' @param {BGE.RendererHelpers.RegionWithId} srcRegionWithId the region to draw from
-    ' @param  srcPoints the points describing the triangle to draw from
-    ' @param  destPoints the points describing the on the output surface to draw to
-    ' @param  rgba The color to apply to the triangle
-    ' @return true if it worked
-    function drawBitmapTriangleTo(draw2d as ifDraw2d, srcRegionWithId as BGE.RendererHelpers.RegionWithId, srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[], rgba = -1 as integer) as boolean
-      if srcPoints.count() < 3 or destPoints.count() < 3
-        return false
-      end if
-      ' the bounding box, not the vertices: a triangle can cover a clipped target with every
-      ' vertex outside it (#439)
-      minX = BGE.Math.Min(destPoints[0].x, BGE.Math.Min(destPoints[1].x, destPoints[2].x))
-      minY = BGE.Math.Min(destPoints[0].y, BGE.Math.Min(destPoints[1].y, destPoints[2].y))
-      maxX = BGE.Math.Max(destPoints[0].x, BGE.Math.Max(destPoints[1].x, destPoints[2].x))
-      maxY = BGE.Math.Max(destPoints[0].y, BGE.Math.Max(destPoints[1].y, destPoints[2].y))
-      if not m.shouldDrawTo(draw2d, minX, minY, BGE.Math.Max(1, maxX - minX), BGE.Math.Max(1, maxY - minY), 0)
-        return false
-      end if
-      if m.onlyDrawWhenInFrame and not BGE.RendererHelpers.triangleMayOverlapRect(destPoints, draw2d.GetWidth(), draw2d.GetHeight())
-        return false
-      end if
-
-      ' The warp below only rotates and scales, which can't mirror (issue #269)
-      if m.isTriangleMirrored(srcPoints, destPoints)
-        return m.drawMirroredBitmapTriangleTo(draw2d, srcRegionWithId, srcPoints, destPoints, rgba)
-      end if
-
-      srcTriangleBmp = m.makeIntoTriangle(srcRegionWithId, srcPoints, true, true)
-      if invalid = srcTriangleBmp
-        return false
-      end if
-
-      ' Warp a too-big triangle at a smaller size, about (0,0), and scale it back up at the end
-      warpScale = m.getTriangleWarpScale(destPoints)
-      if warpScale < 1
-        scaledDestPoints = []
-        for each p in destPoints
-          scaledDestPoints.push(BGE.Math.VectorOps.create(p.x * warpScale, p.y * warpScale))
-        end for
-        destPoints = scaledDestPoints
-      end if
-
-      srcTriangle = srcTriangleBmp.triangle
-      destTriangle = BGE.Math.TriangleOps.create(destPoints)
-      srcOriginIndex = BGE.Math.TriangleOps.getOriginIndex(srcTriangle)
-
-      if srcOriginIndex <> BGE.Math.TriangleOps.nextIndex(destTriangle.longestIndex) and BGE.Math.TriangleOps.isObtuse(destTriangle)
-        'rearrange srcTriangle so side that corresponds to dest's longest side is on top of a bitmap
-        srcTriangleBmp = m.rotateAcuteTriangleForDesiredOrigin(srcTriangleBmp, BGE.Math.TriangleOps.nextIndex(destTriangle.longestIndex))
-      end if
-
-      if invalid = srcTriangleBmp
-        return false
-      end if
-      srcTriangle = srcTriangleBmp.triangle
-
-      pivotIndex = BGE.Math.TriangleOps.previousIndex(BGE.Math.TriangleOps.getOriginIndex(srcTriangle))
-
-      nextIndex = BGE.Math.TriangleOps.nextIndex(pivotIndex)
-      prevIndex = BGE.Math.TriangleOps.previousIndex(pivotIndex)
-
-
-      'finalBitmapWidth = BGE.Math.TriangleOps.getLongestSide(destTriangle) * 1.33
-      'finalBitmapExtraScale = 1
-      'while finalBitmapWidth > m.bmpPool.getMaxSize().height
-      '  finalBitmapWidth = finalBitmapWidth / 2
-      '  finalBitmapExtraScale = finalBitmapExtraScale * 2
-      'end while
-
-      finalBitmapWidth = BGE.Math.TriangleOps.getLongestSide(destTriangle) * m.TRIANGLE_WARP_BITMAP_FACTOR
-      finalBitmapExtraScale = 1
-
-
-      finalBitmapHeight = finalBitmapWidth
-
-      mappedLongestLength = destTriangle.lengths[pivotIndex]
-      mappedNextLength = destTriangle.lengths[nextIndex]
-
-      srcScales = m.getScalesForTriangleMapping(srcTriangle, destTriangle)
-      srcXScale = srcScales.x
-      srcYScale = srcScales.y
-
-      srcPivot = srcTriangle.points[pivotIndex]
-      mappedOriginPointAfterLengthSet = BGE.Math.VectorOps.create(srcPivot.x * srcXScale, srcPivot.y * srcYScale)
-      changedPointOnYAxis = BGE.Math.VectorOps.copy(srcTriangle.points[prevIndex])
-      changedPointOnYAxis.y *= srcYScale
-
-      angleToMappedLongest = BGE.Math.GetAngle(BGE.Math.VectorOps.create(), mappedOriginPointAfterLengthSet)
-      distanceToMappedLongest = BGE.Math.VectorOps.length(mappedOriginPointAfterLengthSet)
-      newHeightAfterChange = changedPointOnYAxis.y
-
-      scratchRegion1 = m.bmpPool.getRegion(distanceToMappedLongest, newHeightAfterChange)
-      if invalid = scratchRegion1
-        m.bmpPool.returnRegions([scratchRegion1])
-        return false
-      end if
-
-      scaledSrcRegion = scratchRegion1.region
-
-      ' Update the distances here to be based on what is actually allowed with scratch bitmaps
-      scaleDueToScratchBitmapSize = scratchRegion1.scale
-      distanceToMappedLongest = BGE.Math.min(distanceToMappedLongest, scaledSrcRegion.GetWidth())
-      newHeightAfterChange = BGE.Math.min(newHeightAfterChange, scaledSrcRegion.GetHeight())
-
-      m.drawScaledObjectTo(scaledSrcRegion, 0, 0, srcXScale * scratchRegion1.scale.x, srcYScale * scratchRegion1.scale.y, srcTriangleBmp.bitmap)
-
-      m.drawTrianglePointsTo(scaledSrcRegion, [
-        BGE.Math.VectorOps.create(),
-        BGE.Math.VectorOps.create(0, newHeightAfterChange), ' was changedPointOnYAxis, but this is not safe - could be too big
-        mappedOriginPointAfterLengthSet
-      ])
-
-      m.addDebugCell(scaledSrcRegion, "scaledSrcRegion")
-
-      destOrigin = destTriangle.points[nextIndex]
-
-      finalAngle = BGE.Math.GetAngle(destOrigin, destTriangle.points[pivotIndex])
-      rotatedTriHeight = newHeightAfterChange * cos(angleToMappedLongest)
-
-      rotatedRegionHeight = rotatedTriHeight
-
-      scratchRegion2 = m.bmpPool.getRegion(distanceToMappedLongest, rotatedRegionHeight)
-      if invalid = scratchRegion2
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return false
-      end if
-
-      rotatedRegion = scratchRegion2.region
-
-      angleToMappedLongest = Bge.Math.Max(angleToMappedLongest, 0.05)
-
-      m.drawRotatedObjectTo(rotatedRegion, 0, 0, angleToMappedLongest, scaledSrcRegion)
-
-      m.addDebugCell(rotatedRegion, "rotatedRegion")
-      firstPartLength = BGE.Math.Max(newHeightAfterChange * sin(angleToMappedLongest), 0)
-      ' BGE.Math.Max(changedPointOnYAxis.y * sin(angleToMappedLongest), 0)
-
-      ' a tiny triangle can work out wider than its rotated region - a one-off scratch
-      ' bitmap is only that wide, and roRegion can't extend past it
-      firstPartLength = BGE.Math.Min(firstPartLength, distanceToMappedLongest)
-      secondPartLength = distanceToMappedLongest - firstPartLength
-
-      firstPartRegion = CreateObject("roRegion", scratchRegion2.getBitmapObject(), 0, 0, firstPartLength, rotatedTriHeight)
-      if invalid = firstPartRegion
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return false
-      end if
-      firstPartRegion.SetAlphaEnable(true)
-      firstPartRegion.SetScaleMode(1)
-
-      secondPartRegion = invalid
-      if secondPartLength >= 1
-        secondPartRegion = CreateObject("roRegion", scratchRegion2.getBitmapObject(), BGE.Math.Max(0, firstPartLength - 1), 0, secondPartLength, rotatedTriHeight)
-        if invalid = secondPartRegion
-          m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-          return false
-        end if
-        secondPartRegion.SetAlphaEnable(true)
-        secondPartRegion.SetScaleMode(1)
-      end if
-      destFirstPartWidth = (mappedNextLength * cos(destTriangle.angles[nextIndex])) / finalBitmapExtraScale
-      destSecondPartWidth = (mappedLongestLength - destFirstPartWidth) / finalBitmapExtraScale
-
-      firstPartScaleX = 0
-      if firstPartLength > 0
-        firstPartScaleX = destFirstPartWidth / (firstPartLength)
-      end if
-
-      secondPartScaleX = 0
-      if secondPartLength > 0
-        secondPartScaleX = destSecondPartWidth / (secondPartLength)
-      end if
-      if rotatedTriHeight = 0
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return false
-      end if
-
-      finalScaleY = BGE.Math.TriangleOps.getHeightByTangentIndex(destTriangle, nextIndex) / rotatedTriHeight
-
-      scratchRegion3 = m.bmpPool.getRegion(finalBitmapWidth, finalBitmapHeight)
-      if invalid = scratchRegion3 or scratchRegion3.region = invalid
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return false
-      end if
-
-      finalRegion = scratchRegion3.region
-
-      m.addDebugCell(firstPartRegion, "firstPartRegion")
-
-      m.addDebugCell(secondPartRegion, "secondPartRegion")
-
-      finalRegion.SetScaleMode(1)
-      didDraw = true
-      didDrawFirst = true
-      didDrawSecond = true
-      if firstPartScaleX <> 0
-        didDrawFirst = m.DrawScaledObjectTo(finalRegion, 0, 0, firstPartScaleX * 1.01, finalScaleY * 1.01, firstPartRegion)
-      end if
-      if invalid <> secondPartRegion
-        didDrawSecond = m.DrawScaledObjectTo(finalRegion, (destFirstPartWidth) - 1, 0, secondPartScaleX * 1.01, finalScaleY * 1.01, secondPartRegion)
-      end if
-      didDraw = didDrawFirst or didDrawSecond
-      m.addDebugCell(finalRegion, "finalRegion")
-      scalesAreNonZero = (scaleDueToScratchBitmapSize.x <> 0) and (srcTriangleBmp.scale.x <> 0) and (scaleDueToScratchBitmapSize.y <> 0) and (srcTriangleBmp.scale.y <> 0)
-      if didDraw and scalesAreNonZero
-        finalScaleX = finalBitmapExtraScale / (warpScale * scaleDueToScratchBitmapSize.x * srcTriangleBmp.scale.x)
-        finalScaleY = finalBitmapExtraScale / (warpScale * scaleDueToScratchBitmapSize.y * srcTriangleBmp.scale.y)
-        didDraw = m.drawTransformedObjectTo(draw2d, destOrigin.x / warpScale, destOrigin.y / warpScale, finalScaleX, finalScaleY, -finalAngle, finalRegion, rgba)
-        'didDraw = m.drawTransformedObjectTo(draw2d, destOrigin.x, destOrigin.y, 1 / (scaleDueToScratchBitmapSize.x * srcTriangleBmp.scale.x), 1 / (scaleDueToScratchBitmapSize.y * srcTriangleBmp.scale.y), -finalAngle, finalRegion, rgba)
-      else
-        didDraw = false
-      end if
-      m.bmpPool.stageRegionsForReturn([scratchRegion1, scratchRegion2, scratchRegion3])
-      '   draw2d.finish()
-      return didDraw
-    end function
-
-    ' The warp's final bitmap is this much bigger than the dest triangle's longest side.
-    private TRIANGLE_WARP_BITMAP_FACTOR = 1.33
-    private DEFAULT_TRIANGLE_WARP_SIZE = 640
-
-    ' How much to shrink destPoints by so drawBitmapTriangleTo()'s bitmaps fit maxTriangleWarpSize.
-    private function getTriangleWarpScale(destPoints as BGE.Math.Vector[]) as float
-      maxSize = m.maxTriangleWarpSize
-      if maxSize <= 0 and m.bmpPool.isPooling()
-        maxSize = BGE.Math.Min(m.DEFAULT_TRIANGLE_WARP_SIZE, m.bmpPool.getMaxSize().width)
-      end if
-      if maxSize <= 0
-        return 1.0
-      end if
-      longest = 0.0
-      for i = 0 to 2
-        longest = BGE.Math.Max(longest, BGE.Math.TotalDistance(destPoints[i], destPoints[(i + 1) mod 3]))
-      end for
-      needed = longest * m.TRIANGLE_WARP_BITMAP_FACTOR
-      if needed <= maxSize
-        return 1.0
-      end if
-      return maxSize / needed
-    end function
-
-    ' Whether mapping srcPoints onto destPoints is a reflection - their windings differ.
-    private function isTriangleMirrored(srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[]) as boolean
-      srcCross = (srcPoints[1].x - srcPoints[0].x) * (srcPoints[2].y - srcPoints[0].y) - (srcPoints[1].y - srcPoints[0].y) * (srcPoints[2].x - srcPoints[0].x)
-      destCross = (destPoints[1].x - destPoints[0].x) * (destPoints[2].y - destPoints[0].y) - (destPoints[1].y - destPoints[0].y) * (destPoints[2].x - destPoints[0].x)
-      return (srcCross < 0 and destCross > 0) or (srcCross > 0 and destCross < 0)
-    end function
-
-    ' Draws a triangle whose dest is wound the other way from its src: mirrors the src
-    ' triangle's bounding box into a scratch bitmap (a flip at rotation 0, which real
-    ' hardware does correctly - see issue #237), then warps that, which needs no mirror.
-    private function drawMirroredBitmapTriangleTo(draw2d as ifDraw2d, srcRegionWithId as BGE.RendererHelpers.RegionWithId, srcPoints as BGE.Math.Vector[], destPoints as BGE.Math.Vector[], rgba as integer) as boolean
-      minX = BGE.Math.Min(srcPoints[0].x, BGE.Math.Min(srcPoints[1].x, srcPoints[2].x))
-      maxX = BGE.Math.Max(srcPoints[0].x, BGE.Math.Max(srcPoints[1].x, srcPoints[2].x))
-      minY = BGE.Math.Min(srcPoints[0].y, BGE.Math.Min(srcPoints[1].y, srcPoints[2].y))
-      maxY = BGE.Math.Max(srcPoints[0].y, BGE.Math.Max(srcPoints[1].y, srcPoints[2].y))
-      left = Int(minX)
-      right = -Int(-maxX)
-      top = Int(minY)
-      bottom = -Int(-maxY)
-      width = BGE.Math.Max(1, right - left)
-      height = BGE.Math.Max(1, bottom - top)
-
-      mirroredPoints = [] as BGE.Math.Vector[]
-      for each point in srcPoints
-        mirroredPoints.push(BGE.Math.VectorOps.create(right - point.x, point.y - top))
-      end for
-      ' The id carries the box's offset, so equal local points from different boxes don't share a cache entry
-      mirrored = {region: srcRegionWithId.region, id: ""} as BGE.RendererHelpers.RegionWithId
-      if srcRegionWithId.id <> ""
-        mirrored.id = `${srcRegionWithId.id}|mirror:${right},${top}`
-      end if
-      if mirrored.id <> "" and invalid <> m.triangleCache.getTriangle(mirrored.id, mirroredPoints)
-        ' already cached, so the region is never read
-        return m.drawBitmapTriangleTo(draw2d, mirrored, mirroredPoints, destPoints, rgba)
-      end if
-
-      ' a cached triangle is built from it, so it must not go back to the pool (see getTriangleBuildRegion())
-      scratch = invalid as BGE.ScratchRegion
-      if mirrored.id = ""
-        scratch = m.bmpPool.getRegion(width, height)
-      end if
-      pooled = invalid <> scratch and scratch.scale.x = 1 and scratch.scale.y = 1
-      if not pooled
-        ' too big for the pool, which would shrink it
-        m.bmpPool.returnRegion(scratch)
-        scratch = BGE.getNewMemoryScratchRegion(width + 1, height + 1)
-        if invalid = scratch
-          return false
-        end if
-      end if
-
-      srcRegion = srcRegionWithId.region
-      preTransX = srcRegion.GetPretranslationX()
-      preTransY = srcRegion.GetPretranslationY()
-      srcRegion.SetPretranslation(0, 0)
-      scratch.region.DrawScaledObject(right, -top, -1, 1, srcRegion)
-      srcRegion.SetPretranslation(preTransX, preTransY)
-      m.drawCallsLastFrame++
-
-      mirrored.region = scratch.region
-      result = m.drawBitmapTriangleTo(draw2d, mirrored, mirroredPoints, destPoints, rgba)
-      if pooled
-        m.bmpPool.returnRegion(scratch)
-      end if
-      return result
-    end function
-
-    private function getScalesForTriangleMapping(srcTriangle as BGE.Math.Triangle, destTriangle as BGE.Math.Triangle) as BGE.Math.Vector
-
-      srcXScale = 1
-      srcYScale = 1
-      foundXScale = false
-
-      pivotIndex = BGE.Math.TriangleOps.previousIndex(BGE.Math.TriangleOps.getOriginIndex(srcTriangle))
-
-      nextIndex = BGE.Math.TriangleOps.nextIndex(pivotIndex)
-      prevIndex = BGE.Math.TriangleOps.previousIndex(pivotIndex)
-      mappedLongestLength = destTriangle.lengths[pivotIndex]
-      mappedPreviousLength = destTriangle.lengths[prevIndex]
-      mappedNextLength = destTriangle.lengths[nextIndex]
-
-      srcNextLength = srcTriangle.lengths[nextIndex]
-
-      srcOriginPointX = srcTriangle.points[pivotIndex].x
-
-      destFirstPartWidth = mappedNextLength * cos(destTriangle.angles[nextIndex])
-      destSecondPartWidth = mappedLongestLength - destFirstPartWidth
-      srcOriginPointYAfterScale = 0
-      whereSrcOriginPointXNeedsToBe = 0
-      if (destSecondPartWidth > 0) and (destFirstPartWidth > 0)
-        k = destFirstPartWidth / destSecondPartWidth
-        y = srcNextLength
-        y1 = srcTriangle.points[pivotIndex].y
-        y2 = y - y1
-
-        insideSqr = ((y * y + y1 * y1 - y2 * y2) / (2 * k * k + 2 * k))
-
-        if insideSqr > 0
-          beta = sqr(insideSqr)
-          alpha = beta * k
-          c = alpha + beta
-          insideSqr2 = c * c - y1 * y1
-          if insideSqr2 > 0
-            whereSrcOriginPointXNeedsToBe = sqr(insideSqr2)
-
-            whereSrcOriginPointXNeedsToBe = BGE.Math.min(whereSrcOriginPointXNeedsToBe, 10 * mappedLongestLength)
-            foundXScale = true
-          end if
-        end if
-      end if
-
-      if not foundXScale
-        srcYScale = mappedNextLength / srcTriangle.lengths[nextIndex]
-        srcPointOnYAxis = srcTriangle.points[prevIndex]
-        changedPointOnYAxis = BGE.Math.VectorOps.copy(srcPointOnYAxis)
-        changedPointOnYAxis.y *= srcYScale
-        srcOriginPointYAfterScale = srcTriangle.points[pivotIndex].y * srcYScale
-
-        ' Scale so yAxis edge and bottom edge are correct length for dest
-        pythagorasLeg = mappedNextLength - srcOriginPointYAfterScale
-        insideSqrForLegs = mappedPreviousLength * mappedPreviousLength - pythagorasLeg * pythagorasLeg
-        if insideSqrForLegs > 0
-          whereSrcOriginPointXNeedsToBe = sqr(insideSqrForLegs)
-          checkLength = whereSrcOriginPointXNeedsToBe * whereSrcOriginPointXNeedsToBe - srcOriginPointYAfterScale * srcOriginPointYAfterScale
-          if checkLength > 0
-            foundXScale = true
-          end if
-        end if
-      end if
-
-      if not foundXScale
-        'make angle at origin the same as the "nextAngle" of destTri
-        whereSrcOriginPointXNeedsToBe = srcOriginPointYAfterScale * tan(destTriangle.angles[nextIndex])
-        checkLength = whereSrcOriginPointXNeedsToBe * whereSrcOriginPointXNeedsToBe - srcOriginPointYAfterScale * srcOriginPointYAfterScale
-        if checkLength > 0
-          foundXScale = true
-        end if
-      end if
-
-      if not foundXScale
-        ' Scale so yAxis edge and top edge are correct length for dest
-        insideSqrForTopSide = mappedLongestLength * mappedLongestLength - srcOriginPointYAfterScale * srcOriginPointYAfterScale
-        if insideSqrForTopSide > 0
-          whereSrcOriginPointXNeedsToBe = sqr(insideSqrForTopSide)
-          foundXScale = true
-        end if
-      end if
-
-      if not foundXScale
-        ' Scale so point's x is equal to dest longest length
-        whereSrcOriginPointXNeedsToBe = mappedLongestLength
-        foundXScale = true
-      end if
-
-
-      if foundXScale and srcOriginPointX <> 0
-        srcXScale = whereSrcOriginPointXNeedsToBe / srcOriginPointX
-      end if
-      return BGE.Math.VectorOps.create(srcXScale, srcYScale)
-    end function
-
-
-    ' There can be problems transforming a source triangle to a destination triangle when they are obtuse and the longest sides don't match up
-    ' This function will scale a source triangle along the axis of its longest side so that it is an acute-triangle
-    private function scaleTriangleToBeAcuteTriangle(srcTriangleBmp as BGE.RendererHelpers.TriangleBitmap, forCache as boolean) as BGE.RendererHelpers.TriangleBitmap
-      srcTriangle = srcTriangleBmp.triangle
-
-      pivotIndex = BGE.Math.TriangleOps.previousIndex(BGE.Math.TriangleOps.getOriginIndex(srcTriangle))
-      nextIndex = BGE.Math.TriangleOps.nextIndex(pivotIndex)
-      prevIndex = BGE.Math.TriangleOps.previousIndex(pivotIndex)
-
-      srcLongestLength = BGE.Math.TriangleOps.getLongestSide(srcTriangle)
-      srcNextLength = srcTriangle.lengths[nextIndex]
-      srcPrevLength = srcTriangle.lengths[prevIndex]
-
-      firstRotation = srcTriangle.anglesToPrevious[nextIndex]
-
-      ' Scaling from Y-axis will mean the ratio between triangle legs will be constant
-      ' So we can set that ratio equal to tan(newNextAngle) and use atn() to get newNextAngle
-      ' Once We know newNextAngle, we can use its complement to find the distance of the acuteAngle of the scaled triangle
-      ' from the y-axis
-      ' And from that, get the scale
-      newPrevPointY = srcNextLength * cos(firstRotation)
-      newPrevPointX = srcNextLength * sin(firstRotation)
-      ratio = srcPrevLength / srcNextLength
-      newNextAngle = atn(ratio)
-      scaleYToMakeAcute = 1.2
-      bottomYForRightTriangle = srcNextLength / sin(newNextAngle)
-      acuteNextY = scaleYToMakeAcute * bottomYForRightTriangle
-      scaleY = acuteNextY / newPrevPointY
-      newSrcLongest = srcLongestLength
-      newNextLength = sqr(newPrevPointX * newPrevPointX + acuteNextY * acuteNextY)
-      newBitmapSize = BGE.Math.Max(srcLongestLength * scaleYToMakeAcute, newNextLength)
-      ' the pool would clamp a bigger scratch region and clip the stretched triangle
-      maxSize = m.bmpPool.getMaxSize()
-      if m.bmpPool.isPooling() and newBitmapSize > BGE.Math.Min(maxSize.width, maxSize.height)
-        return invalid
-      end if
-
-
-      'rotatedSrcBitmap = CreateObject("roBitmap", {width: srcLongestLength, height: srcLongestLength, AlphaEnable: true})
-      'rotatedSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
-
-      scratchRegion1 = m.getTriangleBuildRegion(srcLongestLength, srcLongestLength, false, forCache)
-      if invalid = scratchRegion1
-        return invalid
-      end if
-      scratchRegion1.region.setAlphaEnable(true)
-
-      rotatedSrcRegion = scratchRegion1.region
-
-      m.drawRotatedObjectTo(rotatedSrcRegion, 0, 0, firstRotation, srcTriangleBmp.bitmap)
-
-      m.addDebugCell(rotatedSrcRegion, "rotatedSrcRegion")
-
-      'acuteTriBitmap = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
-      '  acuteTriangleSrcRegion = CreateObject("roRegion", rotatedSrcBitmap, 0, 0, finalBitmapWidth, finalBitmapHeight)
-
-      scratchRegion2 = m.getTriangleBuildRegion(newBitmapSize, newBitmapSize, false, forCache)
-      if invalid = scratchRegion2
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return invalid
-      end if
-
-      acuteTriRegion = scratchRegion2.region
-
-      m.drawScaledObjectTo(acuteTriRegion, 0, 0, 1, scaleY, rotatedSrcRegion)
-
-      m.addDebugCell(acuteTriRegion, "acuteTriRegion")
-
-      'acuteTriRotBmp as ifDraw2D = invalid
-      'scratchAcuteTriRotBmp as BGE.ScratchRegion = invalid
-      ' if forCache
-      '   acuteTriRotBmp = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
-      'else
-      'scratchAcuteTriRotBmp = m.bmpPool.getRegion(newBitmapSize, newBitmapSize)
-      'acuteTriRotBmp = scratchAcuteTriRotBmp.region
-      acuteTriRotBmp = CreateObject("roBitmap", {width: newBitmapSize, height: newBitmapSize, AlphaEnable: true})
-
-      'end if
-
-      if invalid = acuteTriRotBmp
-        'if not forCache
-        '  m.bmpPool.returnRegions([scratchAcuteTriRotBmp])
-        'end if
-        m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-        return invalid
-      end if
-
-      afterScaleHeight = acuteNextY'(srcTriangle.height * scaleYToMakeAcute)
-      afterScaleTheta = atn(newPrevPointX / afterScaleHeight)
-
-      m.drawRotatedObjectTo(acuteTriRotBmp, 0, 0, -afterScaleTheta, acuteTriRegion)
-
-      m.addDebugCell(acuteTriRotBmp, "acuteTriRotBmp")
-
-
-
-      newLongestPoint = BGE.Math.VectorOps.create(cos(afterScaleTheta), sin(afterScaleTheta))
-      yAxisPoint = newNextLength'sqr(acuteAngleOffsetToMakeItARightTriangle * acuteAngleOffsetToMakeItARightTriangle + afterScaleHeight * afterScaleHeight)
-
-
-      acuteTrianglePoints = [BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create()]
-      yaxisPointIndex = BGE.Math.TriangleOps.nextIndex(BGE.Math.TriangleOps.getOriginIndex(srcTriangle))
-      acuteTrianglePoints[yaxisPointIndex] = BGE.Math.VectorOps.create(0, yAxisPoint)
-
-      acuteTrianglePoints[srcTriangle.longestIndex] = BGE.Math.VectorOps.scale(newLongestPoint, newSrcLongest)
-
-      '  m.addDebugCell(acuteTriRotBmp, "acuteTriRotBmp")
-
-      acuteTriangle = BGE.RendererHelpers.createTriangleBitmap(acuteTriRotBmp, acuteTrianglePoints)
-      m.bmpPool.returnRegions([scratchRegion1, scratchRegion2])
-      m.forceDraw(acuteTriangle.bitmap)
-      return acuteTriangle
-    end function
-
-
-    private function rotateAcuteTriangleForDesiredOrigin(srcTriangleBmp as BGE.RendererHelpers.TriangleBitmap, indexForOrigin as integer) as BGE.RendererHelpers.TriangleBitmap
-      srcTriangle = srcTriangleBmp.triangle
-
-      if srcTriangle.points[indexForOrigin].x = 0 and srcTriangle.points[indexForOrigin].y = 0
-        return srcTriangleBmp
-      end if
-      bitmapSize = BGE.Math.TriangleOps.getLongestSide(srcTriangle)
-
-      rotForCorrectOrigin = CreateObject("roBitmap", {width: bitmapSize, height: bitmapSize, AlphaEnable: true})
-
-      beforeOrigin = srcTriangle.points[indexForOrigin]
-      theta = BGE.Math.HALF_PI - srcTriangle.anglesToNext[indexForOrigin]
-
-      translation = BGE.Math.VectorOps.negative(beforeOrigin)
-
-      m.drawRotatedImageWithCenterTo(rotForCorrectOrigin, srcTriangleBmp.bitmap, beforeOrigin, -theta, translation)
-
-      newTrianglePoints = [
-        BGE.Math.VectorOps.create(),
-        BGE.Math.VectorOps.create(),
-        BGE.Math.VectorOps.create()
-      ]
-      nextIndex = BGE.Math.TriangleOps.nextIndex(indexForOrigin)
-      newTrianglePoints[nextIndex].y = srcTriangle.lengths[indexForOrigin]
-
-      prevIndex = BGE.Math.TriangleOps.previousIndex(indexForOrigin)
-
-      newTrianglePoints[prevIndex].x = srcTriangle.lengths[prevIndex] * sin(srcTriangle.angles[indexForOrigin])
-      newTrianglePoints[prevIndex].y = srcTriangle.lengths[prevIndex] * cos(srcTriangle.angles[indexForOrigin])
-
-      m.drawTrianglePointsTo(rotForCorrectOrigin, newTrianglePoints)
-
-      rotatedTriangle = BGE.RendererHelpers.createTriangleBitmap(rotForCorrectOrigin, newTrianglePoints)
-
-      return rotatedTriangle
-    end function
-
-    ' A scratch region for building a triangle bitmap. One that will be cached gets its own
-    ' bitmap: a pooled one is cleared and redrawn from the next frame, and on a real Roku
-    ' that can still wipe the queued copy into the cached bitmap, so it draws blank.
-    private function getTriangleBuildRegion(width as float, height as float, onTopRight as boolean, forCache as boolean) as BGE.ScratchRegion
-      if forCache
-        return BGE.getNewMemoryScratchRegion(width + 1, height + 1)
-      end if
-      return m.bmpPool.getRegion(width, height, onTopRight)
-    end function
-
-    ' Moves point directly away from awayFrom by padding pixels - used to extend a
-    ' triangle's shared edge slightly past its true position so it overlaps the
-    ' neighboring triangle drawn along that same edge (see drawPinnedCornersTo()).
-    private function padPointAwayFrom(point as BGE.Math.Vector, awayFrom as BGE.Math.Vector, padding as float) as BGE.Math.Vector
-      direction = BGE.Math.VectorOps.subtract(point, awayFrom)
-      if BGE.Math.VectorOps.isZero(direction)
-        return BGE.Math.VectorOps.copy(point)
-      end if
-      return BGE.Math.VectorOps.add(point, BGE.Math.VectorOps.scale(BGE.Math.VectorOps.getNormalizedCopy(direction), padding))
     end function
 
     ' The column texture for `texture`, cut once and cached by its id (an empty id isn't
@@ -2784,9 +1989,6 @@ namespace BGE
     ' @param {integer[]} colors one RGBA tint, or one per corner (blended across the quad)
     ' @return {integer} columns drawn
     function drawTexturedQuadTo(target as ifDraw2D, corners as BGE.Math.Vector[], texture as BGE.RendererHelpers.RegionWithId, colors = [-1] as integer[]) as integer
-      if not m.camera.isPerspective()
-        return 0
-      end if
       return m.drawColumnTextureTo(target, corners, m.getQuadColumnTexture(texture), colors)
     end function
 
@@ -2842,12 +2044,9 @@ namespace BGE
     end function
 
     ' Sets the column drawer's projection for `target`, and returns `points` in camera space
-    ' (x, y, z each), or invalid without a perspective camera.
+    ' (x, y, z each). A Camera2d's camera space is its orthographic clip space.
     private function prepareColumnProjection(target as ifDraw2D, points as BGE.Math.Vector[], targetOrigin as BGE.Math.Vector) as float[]
       camera = m.camera
-      if not camera.isPerspective()
-        return invalid
-      end if
       if invalid = camera.worldToCamera
         camera.computeWorldToCameraMatrix()
       end if
@@ -2863,12 +2062,20 @@ namespace BGE
         cameraPoints.push((point.x * m0[1] + point.y * m1[1] + point.z * m2[1] + m3[1]) / w)
         cameraPoints.push((point.x * m0[2] + point.y * m1[2] + point.z * m2[2] + m3[2]) / w)
       end for
-      camera3d = camera as BGE.Camera3d
-      if invalid = targetOrigin
-        m.quadColumns.setProjection(camera3d.getFocalLength(), camera.frameSize.x, camera.frameSize.y)
-      else
+      width = camera.frameSize.x
+      height = camera.frameSize.y
+      if invalid <> targetOrigin
         targetBitmap = target as roBitmap
-        m.quadColumns.setProjection(camera3d.getFocalLength(), targetBitmap.GetWidth(), targetBitmap.GetHeight())
+        width = targetBitmap.GetWidth()
+        height = targetBitmap.GetHeight()
+      end if
+      if camera.isPerspective()
+        m.quadColumns.setProjection((camera as BGE.Camera3d).getFocalLength(), width, height)
+      else
+        ' clip space -1..1 spans the frame
+        m.quadColumns.setOrthographicProjection(camera.frameSize.x * 0.5, camera.frameSize.y * 0.5, width, height)
+      end if
+      if invalid <> targetOrigin
         m.quadColumns.setProjectionCenter(camera.frameSize.x * 0.5 - targetOrigin.x, camera.frameSize.y * 0.5 - targetOrigin.y)
       end if
       return cameraPoints
@@ -2896,159 +2103,6 @@ namespace BGE
         m.resources.whiteColumnTexture = new BGE.QuadColumnTexture(CreateObject("roRegion", bitmap, 0, 0, size, size), "__bge_white")
       end if
       return m.resources.whiteColumnTexture
-    end function
-
-    function drawPinnedCornersTo(draw2d as ifDraw2d, cornerPoints as BGE.Math.CornerPoints, drawableRegion as BGE.RendererHelpers.RegionWithId, options = {} as DrawPinnedCornersOptions, color = -1 as integer) as boolean
-      diagonalLengths = cornerPoints.computeDiagonalLengths()
-      srcWidth = drawableRegion.region.getWidth()
-      srcHeight = drawableRegion.region.getHeight()
-
-      splitIntoFour = false or isTrue(options?.splitIntoFour)
-
-      alwaysUseTLtoBR = false or isTrue(options?.alwaysUseTLtoBR)
-      worked = true
-
-      if splitIntoFour
-
-        srcPoints = new Bge.Math.CornerPoints()
-
-        srcPoints.topLeft = BGE.Math.VectorOps.create(0, 0)
-        srcPoints.topRight = BGE.Math.VectorOps.create(srcWidth, 0)
-        srcPoints.bottomLeft = BGE.Math.VectorOps.create(0, srcHeight)
-        srcPoints.bottomRight = BGE.Math.VectorOps.create(srcWidth, srcHeight)
-
-        srcCenter = srcPoints.getCenter()
-
-        destCenter = options?.center
-        if invalid = destCenter
-          destCenter = cornerPoints.getCenter()
-        end if
-
-        src = [
-          srcPoints.topLeft,
-          srcCenter,
-          srcPoints.topRight
-        ]
-
-        dest = [
-          cornerPoints.topLeft,
-          destCenter
-          cornerPoints.topRight,
-        ]
-
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, src, dest, color)
-
-
-        src = [
-          srcPoints.topRight,
-          srcCenter,
-          srcPoints.bottomRight
-        ]
-
-        dest = [
-          cornerPoints.topRight,
-          destCenter
-          cornerPoints.bottomRight,
-        ]
-
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, src, dest, color)
-
-        src = [
-          srcPoints.bottomRight,
-          srcCenter,
-          srcPoints.bottomLeft
-        ]
-
-        dest = [
-          cornerPoints.bottomRight,
-          destCenter
-          cornerPoints.bottomLeft,
-        ]
-
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, src, dest, color)
-        src = [
-          srcPoints.bottomLeft,
-          srcCenter,
-          srcPoints.topLeft
-        ]
-
-        dest = [
-          cornerPoints.bottomLeft,
-          destCenter
-          cornerPoints.topLeft,
-        ]
-
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, src, dest, color)
-
-
-
-        ' split into two triangles
-      else if alwaysUseTLtoBR or diagonalLengths[0] > diagonalLengths[1]
-        'topLeft to BottomRight Diag
-
-        topRightSrc = [
-          BGE.Math.VectorOps.create(0, 0),
-          BGE.Math.VectorOps.create(srcWidth, srcHeight),
-          BGE.Math.VectorOps.create(srcWidth, 0)
-        ]
-        bottomLeftSrc = [
-          BGE.Math.VectorOps.create(srcWidth, srcHeight)
-          BGE.Math.VectorOps.create(0, 0),
-          BGE.Math.VectorOps.create(0, srcHeight),
-        ]
-
-        ' Each triangle is rasterized independently, so their shared diagonal edge
-        ' (topLeft-bottomRight here) gets rounded slightly differently by each triangle's
-        ' own warp - nudge each triangle's copy of that edge outward, away from its own
-        ' apex corner, so the two triangles overlap by a hair instead of leaving a seam
-        ' (same class of fix as SceneObjectPlane's/SceneObjectSkybox's seamPadding).
-        topRightDest = [
-          m.padPointAwayFrom(cornerPoints.topLeft, cornerPoints.topRight, m.pinnedCornersSeamPadding),
-          m.padPointAwayFrom(cornerPoints.bottomRight, cornerPoints.topRight, m.pinnedCornersSeamPadding),
-          cornerPoints.topRight,
-        ]
-
-        bottomLeftDest = [
-          m.padPointAwayFrom(cornerPoints.bottomRight, cornerPoints.bottomLeft, m.pinnedCornersSeamPadding),
-          m.padPointAwayFrom(cornerPoints.topLeft, cornerPoints.bottomLeft, m.pinnedCornersSeamPadding),
-          cornerPoints.bottomLeft
-        ]
-
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, topRightSrc, topRightDest, color)
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, bottomLeftSrc, bottomLeftDest, color)
-      else
-        'topRight to BottomLeft Diag
-
-        topLeftSrc = [
-          BGE.Math.VectorOps.create(0, srcHeight),
-          BGE.Math.VectorOps.create(srcWidth, 0),
-          BGE.Math.VectorOps.create(0, 0),
-
-        ]
-        bottomRightSrc = [
-          BGE.Math.VectorOps.create(srcWidth, 0),
-          BGE.Math.VectorOps.create(0, srcHeight)
-          BGE.Math.VectorOps.create(srcWidth, srcHeight),
-        ]
-
-        ' See the topLeft/bottomRight branch above for why these edge points are padded.
-        topLeftDest = [
-          m.padPointAwayFrom(cornerPoints.bottomLeft, cornerPoints.topLeft, m.pinnedCornersSeamPadding)
-          m.padPointAwayFrom(cornerPoints.topRight, cornerPoints.topLeft, m.pinnedCornersSeamPadding),
-          cornerPoints.topLeft,
-        ]
-
-        bottomRightDest = [
-          m.padPointAwayFrom(cornerPoints.topRight, cornerPoints.bottomRight, m.pinnedCornersSeamPadding),
-          m.padPointAwayFrom(cornerPoints.bottomLeft, cornerPoints.bottomRight, m.pinnedCornersSeamPadding)
-          cornerPoints.bottomRight,
-        ]
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, topLeftSrc, topLeftDest, color)
-        worked = worked and m.drawBitmapTriangleTo(draw2d, drawableRegion, bottomRightSrc, bottomRightDest, color)
-      end if
-      m.forceDraw(draw2d)
-
-      return worked
     end function
 
 
@@ -3812,12 +2866,5 @@ namespace BGE
   end class
 
 
-  interface DrawPinnedCornersOptions
-    optional splitIntoFour as boolean
-    ' with `splitIntoFour`, where the bitmap's centre goes (default: the middle of the top
-    ' left to bottom right diagonal)
-    optional center as BGE.Math.Vector
-    optional alwaysUseTLtoBR as boolean
-  end interface
 
 end namespace

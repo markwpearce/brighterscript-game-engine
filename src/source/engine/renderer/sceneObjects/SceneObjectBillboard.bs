@@ -100,8 +100,7 @@ namespace BGE
     private fastDrawParallelogramTolerance as float = 0.03
     private fastDrawPerpendicularityTolerance as float = 0.05
 
-    ' Whether the renderer drawing this may draw it as texture columns, and whether this frame does
-    protected columnsAllowed = false
+    ' Whether this frame draws texture columns straight to the canvas
     protected drawsColumnsThisFrame = false
     ' Whether this moved relative to the camera this draw: only then are columns drawn
     ' straight to the canvas (a still object blits its cached columns instead)
@@ -110,17 +109,8 @@ namespace BGE
     private sub captureFastDrawTolerances(rendererObj as BGE.Renderer)
       m.fastDrawParallelogramTolerance = rendererObj.qualitySettings.fastDrawParallelogramTolerance
       m.fastDrawPerpendicularityTolerance = rendererObj.qualitySettings.fastDrawPerpendicularityTolerance
-      m.columnsAllowed = m.areColumnsAllowed(rendererObj)
       m.movedThisDraw = m.objMovedInRelationToCamera(rendererObj.camera)
     end sub
-
-    ' Whether `rendererObj` lets this draw as texture columns.
-    '
-    ' @param {BGE.Renderer} rendererObj
-    ' @return {boolean}
-    protected function areColumnsAllowed(rendererObj as BGE.Renderer) as boolean
-      return rendererObj.drawFlatQuadsAsColumns and rendererObj.camera.isPerspective()
-    end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       m.captureFastDrawTolerances(rendererObj)
@@ -163,7 +153,11 @@ namespace BGE
             ' return value frame-to-frame for the same draw mode, unlike every other
             ' caller where it's constant per mode - so a cached m.tempBitmap from an
             ' earlier frame could otherwise sit around stale and get wrongly reused via
-            ' attemptTransformTempBitmap() once this flips back to true.
+            ' attemptTransformTempBitmap() once this flips back to true. Its allocation is
+            ' kept for when it settles (columns drawn while moving, then cached).
+            if invalid <> m.tempBitmap
+              m.spareTempBitmap = m.tempBitmap as roBitmap
+            end if
             m.tempBitmap = invalid
             m.tempBitmapRegion = invalid
             retval = m.drawToCanvas(rendererObj, drawMode)
@@ -230,7 +224,7 @@ namespace BGE
 
 
     ' Whether the most recent oriented/solid draw took the cheap rotate+scale fast path
-    ' (drawRegionAsRotatedQuad, below) instead of the exact drawPinnedCorners warp - see
+    ' (drawRegionAsRotatedQuad, below) instead of exact texture columns - see
     ' canUseTransformedFastDraw() below. Exposed read-only for tests/telemetry via
     ' usedTransformedFastDraw(). Shared by every single-quad billboard subclass that opts
     ' into the fast-draw check (SceneObjectCircle/#105, SceneObjectImage+SceneObjectText/#163).
@@ -256,8 +250,7 @@ namespace BGE
 
     ' Whether m.canvasPoints (this frame's projected quad) is close enough to a pure
     ' rotation + non-uniform scale of a rectangle that drawRegionAsRotatedQuad() - one
-    ' native DrawTransformedObject call - is a safe stand-in for the exact
-    ' drawPinnedCorners triangle warp. True for a flat quad rotated only about the axis
+    ' native DrawTransformedObject call - is a safe stand-in for exact texture columns. True for a flat quad rotated only about the axis
     ' facing the camera (including not rotated at all); false once perspective
     ' foreshortening skews the quad into a general trapezoid - see issue #105.
     '
@@ -331,7 +324,7 @@ namespace BGE
           return false
         end if
       end if
-      if m.columnsAllowed and m.movedThisDraw and m.canDrawAsColumns(drawMode)
+      if m.movedThisDraw and m.canDrawAsColumns(drawMode)
         m.drawsColumnsThisFrame = true
         return false
       end if
@@ -529,7 +522,7 @@ namespace BGE
     ' `directScaled` can always use this (its quad is built from a rotation in the first
     ' place - see updateCanvasPointsForCameraFacingQuad); a caller drawing a genuinely
     ' projected/oriented quad (e.g. SceneObjectCircle's fast path, issue #105) must check that
-    ' condition itself first and fall back to the exact drawPinnedCorners warp otherwise.
+    ' condition itself first and fall back to exact texture columns otherwise.
     '
     ' @param {BGE.Renderer} rendererObj
     ' @param {roRegion} regionObj the region to blit
@@ -762,21 +755,10 @@ namespace BGE
       if invalid = regionToDraw or invalid = regionToDraw.region
         return {worked: false, didFastDraw: false}
       end if
-      if m.columnsAllowed and m.canDrawAsColumns(drawMode)
-        return {worked: m.drawColumnsToBitmap(rendererObj, tempBitmap, canvasPointsTopLeftBound), didFastDraw: false}
+      if not m.canDrawAsColumns(drawMode)
+        return {worked: false, didFastDraw: false}
       end if
-      regionObj = regionToDraw.region
-      preTransX = regionObj.getPretranslationX()
-      preTransY = regionObj.getPretranslationY()
-      offsetCanvasPoints = m.canvasPoints.subtract(canvasPointsTopLeftBound)
-      regionObj.setPretranslation(0, 0)
-      tempBmpDidDraw = rendererObj.drawPinnedCornersTo(tempBitmap, offsetCanvasPoints, regionToDraw, m.getPinnedCornersOptions(), m.getDrawColorRGBA(rendererObj))
-      regionObj.setPretranslation(preTransX, preTransY)
-      return {worked: tempBmpDidDraw, didFastDraw: false}
-    end function
-
-    protected function getPinnedCornersOptions() as DrawPinnedCornersOptions
-      return {}
+      return {worked: m.drawColumnsToBitmap(rendererObj, tempBitmap, canvasPointsTopLeftBound), didFastDraw: false}
     end function
 
     protected function didRegionToDrawChange() as boolean
@@ -1396,9 +1378,16 @@ namespace BGE
 
     ' @return {BGE.Math.Vector} unit direction from the camera to the quad's centre
     private function getViewDirection(rendererObj as Renderer) as BGE.Math.Vector
-      direction = BGE.Math.VectorOps.subtract(m.worldPoints.getCenter(), rendererObj.camera.position)
+      direction = BGE.Math.VectorOps.subtract(m.getViewCenter(), rendererObj.camera.position)
       BGE.Math.VectorOps.normalize(direction)
       return direction
+    end function
+
+    ' Where the camera looks at this from, for the reuse angle limit.
+    '
+    ' @return {BGE.Math.Vector}
+    protected function getViewCenter() as BGE.Math.Vector
+      return m.worldPoints.getCenter()
     end function
 
     ' @return {float} cosine of the angle the view direction turned since the temp bitmap was drawn
