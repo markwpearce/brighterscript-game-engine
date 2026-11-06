@@ -17,8 +17,10 @@ namespace BGE
     ' Most columns drawn per frame, across every quad (Roku drops all draws into a bitmap
     ' once about 13,000 queue in a frame)
     maxColumnsPerFrame as integer = 8000
-    ' Camera-space z a point must be at or below to be in front of the camera
-    nearZ as float = -1.0
+    ' Camera-space z a point must be at or below to be in front of the camera. setProjection()
+    ' sets it to -focal / 64, so nothing clipped there projects more than ~64x off center:
+    ' huge columns aren't drawn reliably.
+    nearZ as float = -10.0
 
     ' Columns drawn this frame
     columnsThisFrame as integer = 0
@@ -33,6 +35,19 @@ namespace BGE
     private centerY as float = 0.0
     private canvasWidth as float = 0.0
     private canvasHeight as float = 0.0
+    ' the current quad's top and foot edges: start and per-column step, camera space
+    private tx0 as float = 0.0
+    private ty0 as float = 0.0
+    private tz0 as float = 0.0
+    private tdx as float = 0.0
+    private tdy as float = 0.0
+    private tdz as float = 0.0
+    private fx0 as float = 0.0
+    private fy0 as float = 0.0
+    private fz0 as float = 0.0
+    private fdx as float = 0.0
+    private fdy as float = 0.0
+    private fdz as float = 0.0
 
     ' column end points, camera space then screen; grown, never shrunk
     private topX = [] as float[]
@@ -58,6 +73,7 @@ namespace BGE
     ' @param {float} canvasHeight
     sub setProjection(focal as float, canvasWidth as float, canvasHeight as float)
       m.focal = focal
+      m.nearZ = -focal / 64
       m.canvasWidth = canvasWidth
       m.canvasHeight = canvasHeight
       m.centerX = canvasWidth * 0.5
@@ -66,14 +82,14 @@ namespace BGE
 
     ' Draws a textured quad into `target`.
     '
-    ' @param {object} target an roBitmap or roScreen
+    ' @param {ifDraw2D} target an roBitmap or roScreen
     ' @param {float[]} corners 12 floats: camera-space x, y, z (in front is -z) of the texture's
     '   top-left, top-right, bottom-left and bottom-right
     ' @param {BGE.QuadColumnTexture} texture
     ' @param {integer[]} colors one RGBA tint (with fade alpha), or one per corner in the same
     '   order, blended across the columns (e.g. lighting)
     ' @return {integer} how many columns were drawn
-    function drawTo(target as object, corners as float[], texture as BGE.QuadColumnTexture, colors as integer[]) as integer
+    function drawTo(target as ifDraw2D, corners as float[], texture as BGE.QuadColumnTexture, colors as integer[]) as integer
       m.lastColumnCount = 0
       budget = m.maxColumnsPerFrame - m.columnsThisFrame
       if budget <= 0
@@ -105,9 +121,6 @@ namespace BGE
       end if
       m.lastUsedRows = useRows
 
-      focal = m.focal
-      cx = m.centerX
-      cy = m.centerY
       n = int(texN * m.columnsPerTexel + 0.999)
       extent = m.screenExtent(corners, t0, t1, f0, f1)
       if extent >= 0
@@ -133,48 +146,37 @@ namespace BGE
       footX = m.footX
       footY = m.footY
       edgeOk = m.edgeOk
-      tx0 = corners[t0 * 3]
-      ty0 = corners[t0 * 3 + 1]
-      tz0 = corners[t0 * 3 + 2]
-      tdx = (corners[t1 * 3] - tx0) / n
-      tdy = (corners[t1 * 3 + 1] - ty0) / n
-      tdz = (corners[t1 * 3 + 2] - tz0) / n
-      fx0 = corners[f0 * 3]
-      fy0 = corners[f0 * 3 + 1]
-      fz0 = corners[f0 * 3 + 2]
-      fdx = (corners[f1 * 3] - fx0) / n
-      fdy = (corners[f1 * 3 + 1] - fy0) / n
-      fdz = (corners[f1 * 3 + 2] - fz0) / n
+      m.tx0 = corners[t0 * 3]
+      m.ty0 = corners[t0 * 3 + 1]
+      m.tz0 = corners[t0 * 3 + 2]
+      m.tdx = (corners[t1 * 3] - m.tx0) / n
+      m.tdy = (corners[t1 * 3 + 1] - m.ty0) / n
+      m.tdz = (corners[t1 * 3 + 2] - m.tz0) / n
+      m.fx0 = corners[f0 * 3]
+      m.fy0 = corners[f0 * 3 + 1]
+      m.fz0 = corners[f0 * 3 + 2]
+      m.fdx = (corners[f1 * 3] - m.fx0) / n
+      m.fdy = (corners[f1 * 3 + 1] - m.fy0) / n
+      m.fdz = (corners[f1 * 3 + 2] - m.fz0) / n
+      anyBehind = false
       for k = 0 to n
-        ax = tx0 + tdx * k
-        ay = ty0 + tdy * k
-        az = tz0 + tdz * k
-        bx = fx0 + fdx * k
-        by = fy0 + fdy * k
-        bz = fz0 + fdz * k
-        ' an edge crossing the near plane is clipped there, squeezing its column's texture
-        ' into what's left; columns run along constant-ish depth, so this is rare
-        if az > near
-          if bz > near
-            edgeOk[k] = false
-            continue for
-          end if
-          t = (near - bz) / (az - bz)
-          ax = bx + (ax - bx) * t
-          ay = by + (ay - by) * t
-          az = near
-        else if bz > near
-          t = (near - az) / (bz - az)
-          bx = ax + (bx - ax) * t
-          by = ay + (by - ay) * t
-          bz = near
+        if not m.projectEdge(k, k)
+          anyBehind = true
         end if
-        edgeOk[k] = true
-        topX[k] = cx - focal * ax / az
-        topY[k] = cy + focal * ay / az
-        footX[k] = cx - focal * bx / bz
-        footY[k] = cy + focal * by / bz
       end for
+      ' an edge wholly behind the camera next to one in front moves to where the quad
+      ' crosses the near plane, so the nearest column isn't lost
+      if anyBehind
+        for k = 0 to n
+          if not edgeOk[k]
+            if k < n and edgeOk[k + 1]
+              m.projectEdge(k, m.nearCrossing(k, k + 1))
+            else if k > 0 and edgeOk[k - 1]
+              m.projectEdge(k, m.nearCrossing(k, k - 1))
+            end if
+          end if
+        end for
+      end if
 
       ' a column's width runs to the right of foot->top; seen from behind, that's back toward
       ' the previous edge, so anchor each column at its far edge instead
@@ -230,26 +232,9 @@ namespace BGE
         if width < 1
           width = 1.0
         end if
-        ' off the canvas: the column's box is its two ends grown by its width
-        minX = fx
-        if tx < minX
-          minX = tx
-        end if
-        if fx > tx
-          colMaxX = fx
-        else
-          colMaxX = tx
-        end if
-        minY = fy
-        if ty < minY
-          minY = ty
-        end if
-        if fy > ty
-          colMaxY = fy
-        else
-          colMaxY = ty
-        end if
-        if colMaxX + width < -margin or minX - width > maxX or colMaxY + width < -margin or minY - width > maxY
+        ' off the canvas: both ends, grown by the width, past the same edge
+        reachX = width + margin
+        if (fx < -reachX and tx < -reachX) or (fx > maxX + width and tx > maxX + width) or (fy < -reachX and ty < -reachX) or (fy > maxY + width and ty > maxY + width)
           continue for
         end if
         if cosA > 0
@@ -271,6 +256,68 @@ namespace BGE
       end for
       m.columnsThisFrame += drawn
       return drawn
+    end function
+
+    ' Projects column edge k at position s (in columns) along the quad, clipping it to the near
+    ' plane, which squeezes its column's texture into what's left (columns run along
+    ' constant-ish depth, so this is rare). Sets edgeOk[k]: false if it's wholly behind.
+    private function projectEdge(k as integer, s as float) as boolean
+      near = m.nearZ
+      ax = m.tx0 + m.tdx * s
+      ay = m.ty0 + m.tdy * s
+      az = m.tz0 + m.tdz * s
+      bx = m.fx0 + m.fdx * s
+      by = m.fy0 + m.fdy * s
+      bz = m.fz0 + m.fdz * s
+      if az > near
+        if bz > near
+          m.edgeOk[k] = false
+          return false
+        end if
+        t = (near - bz) / (az - bz)
+        ax = bx + (ax - bx) * t
+        ay = by + (ay - by) * t
+        az = near
+      else if bz > near
+        t = (near - az) / (bz - az)
+        bx = ax + (bx - ax) * t
+        by = ay + (by - ay) * t
+        bz = near
+      end if
+      focal = m.focal
+      m.edgeOk[k] = true
+      m.topX[k] = m.centerX - focal * ax / az
+      m.topY[k] = m.centerY + focal * ay / az
+      m.footX[k] = m.centerX - focal * bx / bz
+      m.footY[k] = m.centerY + focal * by / bz
+      return true
+    end function
+
+    ' Where, between edge `behind` (wholly behind the near plane) and edge `ahead`, the top
+    ' or foot first reaches it, in columns.
+    private function nearCrossing(behind as integer, ahead as integer) as float
+      lo = behind
+      hi = ahead
+      if ahead < behind
+        lo = ahead
+        hi = behind
+      end if
+      near = m.nearZ
+      best = ahead * 1.0
+      if m.tdz <> 0
+        s = (near - m.tz0) / m.tdz
+        if s >= lo and s <= hi and abs(s - behind) < abs(best - behind)
+          best = s
+        end if
+      end if
+      if m.fdz <> 0
+        s = (near - m.fz0) / m.fdz
+        if s >= lo and s <= hi and abs(s - behind) < abs(best - behind)
+          best = s
+        end if
+      end if
+      ' nudge in front, so rounding can't leave it behind
+      return best + (ahead - best) * 0.001
     end function
 
     ' The longer of the top and foot edges on screen, or -1 if a corner is behind the camera.
@@ -304,17 +351,20 @@ namespace BGE
       if colors[0] = colors[1] and colors[0] = colors[2] and colors[0] = colors[3]
         return false
       end if
-      channels = m.channels
-      channels.Clear()
-      for each i in [t0, t1, f0, f1]
-        c = colors[i]
-        channels.push((c >> 24) and &hFF)
-        channels.push((c >> 16) and &hFF)
-        channels.push((c >> 8) and &hFF)
-        channels.push(c and &hFF)
-      end for
+      m.channels.Clear()
+      m.pushChannels(colors[t0])
+      m.pushChannels(colors[t1])
+      m.pushChannels(colors[f0])
+      m.pushChannels(colors[f1])
       return true
     end function
+
+    private sub pushChannels(c as integer)
+      m.channels.push((c >> 24) and &hFF)
+      m.channels.push((c >> 16) and &hFF)
+      m.channels.push((c >> 8) and &hFF)
+      m.channels.push(c and &hFF)
+    end sub
 
     ' The tint a fraction `s` of the way across the columns: the top and foot edges' tints there, averaged.
     private function columnColor(s as float) as integer
