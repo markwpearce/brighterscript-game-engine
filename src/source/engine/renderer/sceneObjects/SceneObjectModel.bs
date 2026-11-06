@@ -46,8 +46,6 @@ namespace BGE
     ' stable across frames even though modelCanvasFaces itself is re-filtered/re-sorted
     ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
     private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
-    ' Whether any face has a texture, as of the last updateWorldPosition()
-    private hasTexturedFaces as boolean = false
     ' The transform version as of the last draw, to tell whether the model has moved or turned since
     private lastDrawTransformVersion as integer = -1
 
@@ -196,10 +194,10 @@ namespace BGE
       return m.faceRasterCaches[faceIndex]
     end function
 
-    ' Draws one face onto `tempBitmap`, reusing its own small cached raster - unchanged
-    ' content, repositioned to this frame's actual (always freshly, correctly computed)
-    ' position - for up to `maxStaleFrames` frames before doing a real redraw (issue
-    ' #163). This is what actually cuts the per-frame cost that #128's fix introduced:
+    ' Draws one textured face onto `tempBitmap` with the triangle warp, reusing its own small
+    ' cached raster - unchanged content, repositioned to this frame's actual (always freshly,
+    ' correctly computed) position - for up to `maxStaleFrames` frames before doing a real
+    ' redraw (issue #163). This is what actually cuts the per-frame cost that #128's fix introduced:
     ' a continuously-rotating textured model was paying the full drawBitmapTriangleTo
     ' pipeline (multiple scratch-bitmap allocations and draws) for every visible face,
     ' every single frame. Only the pixel CONTENT can go briefly stale here, never the
@@ -211,8 +209,7 @@ namespace BGE
     ' @param {BGE.Model3dFace} face
     ' @param {float} modelOffsetX the model's own canvas-bounds top-left, negated (see drawToTempBitmap)
     ' @param {float} modelOffsetY
-    ' @param {boolean} allowFastDraw whether the model is moving (see mayReuseFaceRaster()), and
-    '   forwarded to drawTriangleTo for an untextured face - see Renderer.drawTriangleTo
+    ' @param {boolean} allowFastDraw whether the model is moving (see mayReuseFaceRaster())
     ' @return {boolean} true if something was actually drawn
     private function drawFaceWithReuse(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, face as BGE.Model3dFace, modelOffsetX as float, modelOffsetY as float, allowFastDraw as boolean) as boolean
       bounds = BGE.Math.getBounds(face.vertices)
@@ -266,12 +263,7 @@ namespace BGE
       localOffsetX = -bounds[0].x - clipX
       localOffsetY = -bounds[0].y - clipY
       shadedColor = face.shadedColor
-      drawn = false
-      if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
-        drawn = rendererObj.drawBitmapTriangleTo(faceBitmap, face.Texture.srcRegionWithId, face.Texture.points, m.getOffsetTriangleBuffer(face.vertices, localOffsetX, localOffsetY), shadedColor)
-      else
-        drawn = rendererObj.drawTriangleTo(faceBitmap, face.vertices, localOffsetX, localOffsetY, shadedColor, allowFastDraw)
-      end if
+      drawn = rendererObj.drawBitmapTriangleTo(faceBitmap, face.Texture.srcRegionWithId, face.Texture.points, m.getOffsetTriangleBuffer(face.vertices, localOffsetX, localOffsetY), shadedColor)
 
       if not drawn
         return false
@@ -288,6 +280,11 @@ namespace BGE
       cache.color = shadedColor
       m.facesClippedThisDraw = m.facesClippedThisDraw or clipped
       return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
+    end function
+
+    ' Whether `face` has a texture loaded to draw.
+    private function isTexturedFace(face as BGE.Model3dFace) as boolean
+      return invalid <> face.Texture and invalid <> face.Texture.srcRegionWithId.region
     end function
 
     ' Whether part of `face` lies past this frame's face clip rect, which the temp bitmap ends at.
@@ -309,11 +306,12 @@ namespace BGE
       return rendererObj.drawModelFacesAsColumns and rendererObj.camera.isPerspective()
     end function
 
-    ' While moving, a model with textured faces draws them straight to the canvas as columns.
-    ' With an impostor, only while the model itself moves or turns, which no capture can
-    ' follow; while just the camera moves, it draws into its temp bitmap to capture it.
+    ' While moving, a model draws straight to the canvas: textured faces as columns, solid
+    ' ones as plain fills (#452). With an impostor, only while the model itself moves or
+    ' turns, which no capture can follow; while just the camera moves, it draws into its
+    ' temp bitmap to capture it.
     protected override function canDrawAsColumns(drawMode as SceneObjectDrawMode) as boolean
-      return m.hasTexturedFaces and (not m.drawable.useImpostor or m.transformVersion <> m.lastDrawTransformVersion) and m.isFlatQuadColumnMode(drawMode)
+      return (not m.drawable.useImpostor or m.transformVersion <> m.lastDrawTransformVersion) and m.isFlatQuadColumnMode(drawMode)
     end function
 
     ' How far past each canvas edge a face image holds: 10% of the canvas, and at least the
@@ -416,13 +414,17 @@ namespace BGE
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
           strips = -1
-          if m.columnsAllowed and face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
+          if m.columnsAllowed and m.isTexturedFace(face)
             ' exact and cheap, so there's no face raster to keep
             strips = rendererObj.drawTriangleColumnsTo(tempBitmap, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), face.shadedColor, canvasPointsTopLeftBound)
             m.facesClippedThisDraw = m.facesClippedThisDraw or (strips >= 0 and m.isFaceOutsideClipRect(face))
           end if
           if strips >= 0
             thisWorked = strips > 0
+          else if not m.isTexturedFace(face)
+            ' A plain fill is cheaper than drawing into a face raster and blitting it (#452)
+            thisWorked = rendererObj.drawTriangleTo(tempBitmap, face.vertices, offsetX, offsetY, face.shadedColor, allowFastDraw and not m.drawable.useImpostor)
+            m.facesClippedThisDraw = m.facesClippedThisDraw or m.isFaceOutsideClipRect(face)
           else
             thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
           end if
@@ -558,7 +560,6 @@ namespace BGE
       m.modelWorldFaces = []
       m.worldPosition = m.drawable.getWorldPosition()
       m.modelWorldBounds = []
-      m.hasTexturedFaces = false
       i = 0
 
       for each face in m.drawable.model.faces as BGE.Model3dFace[]
@@ -583,9 +584,6 @@ namespace BGE
         end for
         worldFace = BGE.Model3dFaceOps.create(worldVerts)
         worldFace.Texture = face.Texture
-        if invalid <> face.Texture
-          m.hasTexturedFaces = true
-        end if
         worldFace.color = face.color
         m.modelWorldFaces.Push(worldFace)
         i++
