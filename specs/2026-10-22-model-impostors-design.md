@@ -237,3 +237,28 @@ Review follow-ups: a pinned impostor's bounds now include every breakpoint of th
 the centre), the zoom limit is checked against the pin's most stretched triangle edge
 (`pinMaxStretch()`), and the four-triangle pin is a quality setting,
 `modelImpostorPinFourTriangles` - off at Basic, which keeps the cheaper two-triangle pin.
+
+## Pin removed; columns while turning (#451)
+
+With textured faces drawn as texture columns (#450), a fresh redraw got 3-6x cheaper, and the
+pin stopped paying for itself. rendererTest's `model-faces-benchmark` on a Roku Ultra, camera
+orbiting still models, ms per frame:
+
+| scene | columns, no impostor | impostor with pin | impostor, rotate only |
+|---|---|---|---|
+| 4 cubes (12 faces each) | 35.5 | 42.8 | 19.3 |
+| 9 cubes | 81.3 | 145.3 | 32.6 |
+| sphere (176 faces) | 73.6 | 30.6 | 17.7 |
+
+The pin's four triangle warps cost more than redrawing the faces as columns, so it was removed
+(`useImpostorPin`, the `modelImpostorPin*` quality settings, `ImpostorFit.fitPinnedCorners()`
+and its helpers). The rotate-scale impostor stays: one `DrawTransformedObject` beats any face
+redraw.
+
+A model that moves or turns itself can't use a capture, so it now draws its textured faces
+straight to the canvas as columns, as a model without an impostor does, instead of into its
+temp bitmap and then blitting that. Once its transform stops changing, it draws into the temp
+bitmap again for the impostor to capture. Spinning in place, 4 cubes with an impostor went from
+53.5 to 46.2 ms (42.1 without one) and 9 cubes from 114.9 to 101.7 ms (94.7). With the camera
+orbiting, the rotate-only impostor takes 17.6 / 28.6 / 19.5 ms for the three scenes, against
+35.6 / 81.6 / 74.9 ms without one.

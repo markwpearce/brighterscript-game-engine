@@ -1,11 +1,13 @@
 import "../../../math/math.bs"
 import "../../quality/RenderQualitySettings.bs"
 import "QuadColumnTexture.bs"
+import "TriangleColumnCuts.bs"
 
 namespace BGE
 
   ' Draws a perspective-textured quad as projected texture columns: one
   ' `DrawTransformedObject` per 1-texel column, perspective correct, with no scratch bitmaps.
+  ' Textured triangles (model faces) draw the same way with drawTriangleTo().
   '
   ' Corners are given in camera space and projected once; column ends are lerped in camera
   ' space then divided. Columns run along whichever texture axis changes depth least, so each
@@ -266,6 +268,206 @@ namespace BGE
       end for
       m.columnsThisFrame += drawn
       return drawn
+    end function
+
+    ' Draws a textured triangle (a model face) into `target` as strips cut to the triangle
+    ' (see `BGE.TriangleColumnCuts`), a power of two texels wide, sized like drawTo()'s columns.
+    '
+    ' @param {ifDraw2D} target an roBitmap or roScreen
+    ' @param {float[]} vertices 9 floats: camera-space x, y, z of the face's 3 vertices, in
+    '   the order of the texture points `cuts` was made from
+    ' @param {BGE.TriangleColumnCuts} cuts
+    ' @param {integer} color RGBA tint
+    ' @return {integer} how many strips were drawn, or -1 if it can't be drawn this way (no
+    '   UV area, a vertex isn't in front of the camera, or this frame's budget is spent)
+    function drawTriangleTo(target as ifDraw2D, vertices as float[], cuts as BGE.TriangleColumnCuts, color as integer) as integer
+      m.lastColumnCount = 0
+      near = m.nearZ
+      if not cuts.isValid or vertices[2] > near or vertices[5] > near or vertices[8] > near
+        return -1
+      end if
+      budget = m.maxColumnsPerFrame - m.columnsThisFrame
+      if budget <= 0
+        ' the caller warps it instead, so a cached model isn't left with holes
+        return -1
+      end if
+
+      ' camera space is affine in (u, v): C = base + u * Cu + v * Cv
+      e1x = vertices[3] - vertices[0]
+      e1y = vertices[4] - vertices[1]
+      e1z = vertices[5] - vertices[2]
+      e2x = vertices[6] - vertices[0]
+      e2y = vertices[7] - vertices[1]
+      e2z = vertices[8] - vertices[2]
+      cux = cuts.ua * e1x + cuts.ub * e2x
+      cuy = cuts.ua * e1y + cuts.ub * e2y
+      cuz = cuts.ua * e1z + cuts.ub * e2z
+      cvx = cuts.va * e1x + cuts.vb * e2x
+      cvy = cuts.va * e1y + cuts.vb * e2y
+      cvz = cuts.va * e1z + cuts.vb * e2z
+      u0 = cuts.u[0]
+      v0 = cuts.v[0]
+      bx = vertices[0] - u0 * cux - v0 * cvx
+      by = vertices[1] - u0 * cuy - v0 * cvy
+      bz = vertices[2] - u0 * cuz - v0 * cvz
+
+      ' strips run along whichever texture axis changes depth least, as in drawTo()
+      useRows = abs(cuz) * (cuts.maxU - cuts.minU) < abs(cvz) * (cuts.maxV - cuts.minV)
+      m.lastUsedRows = useRows
+      if useRows
+        span = cuts.maxV - cuts.minV
+        acrossPoints = cuts.v
+        ' a strip's step across, and its run along
+        sx = cvx
+        sy = cvy
+        sz = cvz
+        lx = cux
+        ly = cuy
+        lz = cuz
+      else
+        span = cuts.maxU - cuts.minU
+        acrossPoints = cuts.u
+        sx = cux
+        sy = cuy
+        sz = cuz
+        lx = cvx
+        ly = cvy
+        lz = cvz
+      end if
+
+      n = int(span * m.columnsPerTexel + 0.999)
+      byPixels = int(m.triangleScreenExtent(vertices, acrossPoints) / m.minPixelsPerColumn) + 1
+      if byPixels < n
+        n = byPixels
+      end if
+      if n < 1
+        n = 1
+      end if
+      stepLog2 = 0
+      stepSize = 1
+      while stepSize * n < span or cuts.stripCount(useRows, stepSize) > budget
+        stepSize = stepSize * 2
+        stepLog2++
+      end while
+      strips = cuts.getStrips(useRows, stepLog2)
+      m.lastColumnCount = strips.starts.count()
+
+      focal = m.focal
+      cx = m.centerX
+      cy = m.centerY
+      margin = 2.0
+      maxX = m.canvasWidth + margin
+      maxY = m.canvasHeight + margin
+      drawn = 0
+      for k = 0 to strips.starts.count() - 1
+        region = strips.regions[k]
+        if invalid = region
+          continue for
+        end if
+        low = strips.lows[k]
+        high = strips.highs[k]
+        across = strips.starts[k]
+        ' top (low along) and foot (high along) at the strip's near edge
+        ax = bx + across * sx
+        ay = by + across * sy
+        az = bz + across * sz
+        topX = ax + low * lx
+        topY = ay + low * ly
+        topZ = az + low * lz
+        footX = ax + high * lx
+        footY = ay + high * ly
+        footZ = az + high * lz
+        width = strips.ends[k] - across
+        nTopZ = topZ + width * sz
+        nFootZ = footZ + width * sz
+        ' a strip can reach a little past the triangle, so past the near plane
+        if topZ > near or footZ > near or nTopZ > near or nFootZ > near
+          continue for
+        end if
+        nTopX = topX + width * sx
+        nTopY = topY + width * sy
+        nFootX = footX + width * sx
+        nFootY = footY + width * sy
+        tx = cx - focal * topX / topZ
+        ty = cy + focal * topY / topZ
+        fx = cx - focal * footX / footZ
+        fy = cy + focal * footY / footZ
+        ntx = cx - focal * nTopX / nTopZ
+        nty = cy + focal * nTopY / nTopZ
+        nfx = cx - focal * nFootX / nFootZ
+        nfy = cy + focal * nFootY / nFootZ
+
+        ' anchored at the far edge when seen from behind, as in drawTo()
+        if (nfx - fx) * (fy - ty) + (nfy - fy) * (tx - fx) < 0
+          swap = fx
+          fx = nfx
+          nfx = swap
+          swap = fy
+          fy = nfy
+          nfy = swap
+          swap = tx
+          tx = ntx
+          ntx = swap
+          swap = ty
+          ty = nty
+          nty = swap
+        end if
+        dx = tx - fx
+        dy = ty - fy
+        length = sqr(dx * dx + dy * dy)
+        if length < 0.5
+          continue for
+        end if
+        sinA = -dx / length
+        cosA = -dy / length
+        reach = (nfx - fx) * cosA - (nfy - fy) * sinA
+        topReach = (ntx - tx) * cosA - (nty - ty) * sinA
+        if topReach > reach
+          reach = topReach
+        end if
+        drawWidth = reach + 1
+        if drawWidth < 1
+          drawWidth = 1.0
+        end if
+        reachX = drawWidth + margin
+        if (fx < -reachX and tx < -reachX) or (fx > maxX + drawWidth and tx > maxX + drawWidth) or (fy < -reachX and ty < -reachX) or (fy > maxY + drawWidth and ty > maxY + drawWidth)
+          continue for
+        end if
+        if cosA > 0
+          angle = Atn(sinA / cosA) * 57.2957795
+        else
+          angle = BGE.Math.Atan2(sinA, cosA) * 57.2957795
+        end if
+        texLength = high - low
+        if useRows
+          target.DrawTransformedObject(fx, fy, angle - 90, length / texLength, drawWidth, region, color)
+        else
+          target.DrawTransformedObject(fx, fy, angle, drawWidth, length / texLength, region, color)
+        end if
+        drawn++
+      end for
+      m.columnsThisFrame += drawn
+      return drawn
+    end function
+
+    ' How far apart on screen the triangle's vertices nearest and farthest across its strips are.
+    private function triangleScreenExtent(vertices as float[], acrossPoints as float[]) as float
+      lo = 0
+      hi = 0
+      for i = 1 to 2
+        if acrossPoints[i] < acrossPoints[lo]
+          lo = i
+        end if
+        if acrossPoints[i] > acrossPoints[hi]
+          hi = i
+        end if
+      end for
+      focal = m.focal
+      ax = -focal * vertices[lo * 3] / vertices[lo * 3 + 2]
+      ay = focal * vertices[lo * 3 + 1] / vertices[lo * 3 + 2]
+      bx = -focal * vertices[hi * 3] / vertices[hi * 3 + 2]
+      by = focal * vertices[hi * 3 + 1] / vertices[hi * 3 + 2]
+      return sqr((bx - ax) * (bx - ax) + (by - ay) * (by - ay))
     end function
 
     ' Projects column edge k at position s (in columns) along the quad, clipping it to the near

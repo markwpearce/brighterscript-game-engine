@@ -46,6 +46,10 @@ namespace BGE
     ' stable across frames even though modelCanvasFaces itself is re-filtered/re-sorted
     ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
     private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
+    ' Whether any face has a texture, as of the last updateWorldPosition()
+    private hasTexturedFaces as boolean = false
+    ' The transform version as of the last draw, to tell whether the model has moved or turned since
+    private lastDrawTransformVersion as integer = -1
 
     ' Each face's shaded color as of its last projection, by faceIndex - lets a light
     ' change that didn't alter any face's color skip the redraw.
@@ -69,10 +73,7 @@ namespace BGE
     private impostorThisFrame as TransformTempBitmapDetails = invalid
     ' true while modelCanvasFaces is left over from an earlier frame (an impostor frame)
     private canvasFacesStale as boolean = false
-    ' whether a corner pin has been drawn (and its triangles cached) since the last capture
-    private pinUsedSinceCapture as boolean = false
-    private impostorCaptureId as integer = 0
-    ' this frame's impostor kind, for tests and profiling: "", "rotate" or "pin"
+    ' this frame's impostor kind, for tests and profiling: "" or "rotate"
     private impostorKindThisFrame as string = ""
     ' the bounding box's canvas diagonal when last projected, which sizes the error an
     ' impostor may have - see getOccluderInset()
@@ -144,6 +145,12 @@ namespace BGE
       shadedColor = BGE.RendererHelpers.applyAlphaFade(face.shadedColor, m.distanceFadeAlpha)
       if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
         if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
+          if m.areColumnsAllowed(rendererObj)
+            strips = rendererObj.drawTriangleColumns(m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), shadedColor)
+            if strips >= 0
+              return strips > 0
+            end if
+          end if
           return rendererObj.drawBitmapTriangle(face.Texture.srcRegionWithId, face.Texture.points, face.vertices, shadedColor)
         end if
         return rendererObj.drawTriangle(face.vertices, 0, 0, shadedColor)
@@ -283,6 +290,32 @@ namespace BGE
       return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
     end function
 
+    ' Whether part of `face` lies past this frame's face clip rect, which the temp bitmap ends at.
+    private function isFaceOutsideClipRect(face as BGE.Model3dFace) as boolean
+      clip = m.faceClipRect
+      if invalid = clip
+        return false
+      end if
+      for each vertex in face.vertices
+        if vertex.x < clip.x0 or vertex.x > clip.x1 or vertex.y < clip.y0 or vertex.y > clip.y1
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' Textured faces draw as columns with the renderer's drawModelFacesAsColumns.
+    protected override function areColumnsAllowed(rendererObj as BGE.Renderer) as boolean
+      return rendererObj.drawModelFacesAsColumns and rendererObj.camera.isPerspective()
+    end function
+
+    ' While moving, a model with textured faces draws them straight to the canvas as columns.
+    ' With an impostor, only while the model itself moves or turns, which no capture can
+    ' follow; while just the camera moves, it draws into its temp bitmap to capture it.
+    protected override function canDrawAsColumns(drawMode as SceneObjectDrawMode) as boolean
+      return m.hasTexturedFaces and (not m.drawable.useImpostor or m.transformVersion <> m.lastDrawTransformVersion) and m.isFlatQuadColumnMode(drawMode)
+    end function
+
     ' How far past each canvas edge a face image holds: 10% of the canvas, and at least the
     ' whole-model stretch's reuse threshold, so zooming out while reusing doesn't show a gap.
     private function getFaceClipMargin(rendererObj as BGE.Renderer) as BGE.Math.Vector
@@ -382,7 +415,17 @@ namespace BGE
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
+          strips = -1
+          if m.columnsAllowed and face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
+            ' exact and cheap, so there's no face raster to keep
+            strips = rendererObj.drawTriangleColumnsTo(tempBitmap, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), face.shadedColor, canvasPointsTopLeftBound)
+            m.facesClippedThisDraw = m.facesClippedThisDraw or (strips >= 0 and m.isFaceOutsideClipRect(face))
+          end if
+          if strips >= 0
+            thisWorked = strips > 0
+          else
+            thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
+          end if
         else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
           ' Outlines are cheap already (no texture warp) - not worth caching, and a
           ' debug wireframe shouldn't lag a frame behind the model's real position.
@@ -417,69 +460,8 @@ namespace BGE
       samples.canvasSamplePoints = m.modelCanvasSamplePoints
       samples.clipped = m.facesClippedThisDraw
       samples.clipRect = m.faceClipRect
-      if m.drawable.useImpostorPin
-        if m.pinUsedSinceCapture
-          ' the triangles cached from the old rendering are stale now
-          rendererObj.triangleCache.removeTrianglesWithId(m.getImpostorPinRegionId())
-          m.pinUsedSinceCapture = false
-        end if
-        ' the outline is only worked out if a pin is tried (see getImpostorOutline()), so it
-        ' costs nothing on this frame, which is already a full redraw; both face lists are
-        ' replaced, not changed, when they're rebuilt
-        samples.canvasFaces = m.modelCanvasFaces
-        samples.worldFaces = m.modelWorldFaces
-        m.impostorCaptureId++
-      end if
       m.impostorCapture = samples
     end sub
-
-    ' The visible faces' outline (their canvas convex hull) as world points, with where they
-    ' sat in the temp bitmap - what a corner pin is fitted against. Worked out from the
-    ' capture the first time it's asked for. invalid if there isn't one.
-    private function getImpostorOutline(capture as roAssociativeArray, maxPoints as integer) as roAssociativeArray
-      if invalid <> capture.outline and capture.outline.maxPoints = maxPoints
-        return capture.outline
-      end if
-      bounds = capture.canvasBounds
-      if invalid = capture.canvasFaces or invalid = bounds or bounds.count() < 2
-        return invalid
-      end if
-      xs = [] as float[]
-      ys = [] as float[]
-      worldPoints = [] as BGE.Math.Vector[]
-      for each face in capture.canvasFaces
-        worldFace = capture.worldFaces[face.faceIndex]
-        for i = 0 to 2
-          xs.push(face.vertices[i].x)
-          ys.push(face.vertices[i].y)
-          worldPoints.push(worldFace.vertices[i])
-        end for
-      end for
-      hull = BGE.ImpostorFit.convexHullIndexes(xs, ys)
-      if hull.count() < 4
-        return invalid
-      end if
-      outline = {maxPoints: maxPoints, world: [] as BGE.Math.Vector[], x: [] as float[], y: [] as float[]}
-      stepSize = BGE.Math.Max(1, hull.count() / BGE.Math.Max(4, maxPoints))
-      position = 0.0
-      while Int(position) < hull.count()
-        index = hull[Int(position)]
-        outline.world.push(worldPoints[index])
-        outline.x.push(xs[index] - capture.originX)
-        outline.y.push(ys[index] - capture.originY)
-        position += stepSize
-      end while
-      ' the temp bitmap's size - see createTempBitmap()
-      outline.bitmapWidth = Int(bounds[1].x - bounds[0].x + 1)
-      outline.bitmapHeight = Int(bounds[1].y - bounds[0].y + 1)
-      capture.outline = outline
-      return outline
-    end function
-
-    ' a new id per capture, so a pin never draws triangles cached from an older rendering
-    private function getImpostorPinRegionId() as string
-      return m.id + "_impostor" + m.impostorCaptureId.toStr()
-    end function
 
     ' The bounding box corners' canvas x and y this frame and the direction from the camera
     ' to their centre, or invalid if one won't project.
@@ -505,7 +487,7 @@ namespace BGE
     end function
 
     ' The blit of the captured rendering that fits this frame, or invalid: a scale and
-    ' rotation fitted to the box corners first, then a corner pin fitted to the outline.
+    ' rotation fitted to the box corners.
     private function attemptImpostor(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       capture = m.impostorCapture
       if invalid = capture or m.drawsOccluderExactly()
@@ -537,40 +519,7 @@ namespace BGE
           return {origin: origin, rotation: -p.rotation, scaleX: p.scaleX, scaleY: p.scaleY}
         end if
       end if
-      ' a pin can't tell where the capture's clipped edges would land
-      if capture.clipped or not m.drawable.useImpostorPin or settings.modelImpostorPinMaxAngleDegrees <= 0 or cosine < Cos(BGE.Math.DegreesToRadians(settings.modelImpostorPinMaxAngleDegrees))
-        return invalid
-      end if
-      outline = m.getImpostorOutline(capture, settings.modelImpostorPinOutlinePoints)
-      if invalid = outline
-        return invalid
-      end if
-      projected = m.projectImpostorOutline(renderObj, outline.world)
-      if invalid = projected
-        return invalid
-      end if
-      fit = BGE.ImpostorFit.fitPinnedCorners(outline.x, outline.y, projected.xs, projected.ys, outline.bitmapWidth, outline.bitmapHeight, settings.modelImpostorPinFourTriangles)
-      p = fit.params
-      if invalid = p or fit.residual > m.getImpostorAllowedError(settings.modelImpostorPinError, diagonal, drawMode)
-        return invalid
-      end if
-      corners = new BGE.Math.CornerPoints()
-      corners.topLeft = BGE.Math.VectorOps.create(p.cornersX[0], p.cornersY[0])
-      corners.topRight = BGE.Math.VectorOps.create(p.cornersX[1], p.cornersY[1])
-      corners.bottomRight = BGE.Math.VectorOps.create(p.cornersX[2], p.cornersY[2])
-      corners.bottomLeft = BGE.Math.VectorOps.create(p.cornersX[3], p.cornersY[3])
-      zoom = BGE.Math.Max(corners.getAvgWidth() / outline.bitmapWidth, corners.getAvgHeight() / outline.bitmapHeight)
-      ' a fitted centre can stretch one triangle far more than the corners' average shows
-      if BGE.Math.Max(zoom, BGE.ImpostorFit.pinMaxStretch(p)) > settings.modelImpostorMaxZoom
-        return invalid
-      end if
-      capture.fit = {kind: "pin", params: p}
-      m.pinUsedSinceCapture = true
-      details = {origin: corners.topLeft, rotation: 0, scaleX: zoom, scaleY: zoom, pinCorners: corners, pinRegionId: m.getImpostorPinRegionId()} as TransformTempBitmapDetails
-      if BGE.ImpostorFit.isFourTrianglePin(p)
-        details.pinCenter = BGE.Math.VectorOps.create(p.cornersX[4], p.cornersY[4])
-      end if
-      return details
+      return invalid
     end function
 
     ' Whether a capture that left out its off-canvas parts, moved by `params`, still covers the
@@ -595,20 +544,6 @@ namespace BGE
       return allowed
     end function
 
-    ' The captured outline's canvas x and y this frame, or invalid if a point won't project.
-    private function projectImpostorOutline(rendererObj as BGE.Renderer, points as BGE.Math.Vector[]) as roAssociativeArray
-      if not (rendererObj.camera as Camera3d).projectPointsWithDepth(points, m.impostorProjected)
-        return invalid
-      end if
-      xs = [] as float[]
-      ys = [] as float[]
-      for i = 0 to points.count() - 1
-        xs.push(m.impostorProjected[i * 3])
-        ys.push(m.impostorProjected[i * 3 + 1])
-      end for
-      return {xs: xs, ys: ys}
-    end function
-
     private function getScreenDiagonal(xs as float[], ys as float[]) as float
       width = BGE.Math.arrayMax(xs) - BGE.Math.arrayMin(xs)
       height = BGE.Math.arrayMax(ys) - BGE.Math.arrayMin(ys)
@@ -623,6 +558,7 @@ namespace BGE
       m.modelWorldFaces = []
       m.worldPosition = m.drawable.getWorldPosition()
       m.modelWorldBounds = []
+      m.hasTexturedFaces = false
       i = 0
 
       for each face in m.drawable.model.faces as BGE.Model3dFace[]
@@ -647,6 +583,9 @@ namespace BGE
         end for
         worldFace = BGE.Model3dFaceOps.create(worldVerts)
         worldFace.Texture = face.Texture
+        if invalid <> face.Texture
+          m.hasTexturedFaces = true
+        end if
         worldFace.color = face.color
         m.modelWorldFaces.Push(worldFace)
         i++
@@ -790,13 +729,16 @@ namespace BGE
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       if m.isOffCanvasThisFrame()
         ' skipped without dropping the cached temp bitmap
+        m.lastDrawTransformVersion = m.transformVersion
         return false
       end if
       if m.canvasFacesStale and invalid = m.impostorThisFrame
         ' the impostor isn't drawing this frame, and the bitmap is sized from the canvas bounds
         m.projectCanvasFaces(rendererObj, drawMode)
       end if
-      return super.performDraw(rendererObj, drawMode)
+      drawn = super.performDraw(rendererObj, drawMode)
+      m.lastDrawTransformVersion = m.transformVersion
+      return drawn
     end function
 
     protected override sub releaseCachedDrawings()
@@ -837,15 +779,10 @@ namespace BGE
       if capture.canvasBounds.count() = 2
         lo = capture.canvasBounds[0]
         hi = capture.canvasBounds[1]
-        if capture.fit.kind = "pin"
-          ' a pin bends the bounds' edges where they cross its triangles
-          corners = BGE.ImpostorFit.mapPinnedRect(capture.fit.params, lo.x - capture.originX, lo.y - capture.originY, hi.x - capture.originX, hi.y - capture.originY)
-        else
-          ' a rotation moves the bounds' corners apart, so bound all four
-          for each corner in [[lo.x, lo.y], [hi.x, lo.y], [hi.x, hi.y], [lo.x, hi.y]]
-            corners.push(m.mapByImpostorFit(capture, corner[0], corner[1]))
-          end for
-        end if
+        ' a rotation moves the bounds' corners apart, so bound all four
+        for each corner in [[lo.x, lo.y], [hi.x, lo.y], [hi.x, hi.y], [lo.x, hi.y]]
+          corners.push(m.mapByImpostorFit(capture, corner[0], corner[1]))
+        end for
         m.modelCanvasBounds.push(BGE.Math.VectorOps.copy(corners[0]))
         m.modelCanvasBounds.push(BGE.Math.VectorOps.copy(corners[0]))
         for each corner in corners
@@ -861,9 +798,6 @@ namespace BGE
 
     ' Where this frame's impostor fit takes a canvas point of the captured rendering.
     private function mapByImpostorFit(capture as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
-      if capture.fit.kind = "pin"
-        return BGE.ImpostorFit.mapPinnedCorners(capture.fit.params, x - capture.originX, y - capture.originY)
-      end if
       return BGE.ImpostorFit.mapRotateScale(capture.fit.params, x, y)
     end function
 
@@ -1068,7 +1002,7 @@ namespace BGE
     end function
 
     ' For tests/profiling: how this frame reused the last full rendering - "rotate" (scaled
-    ' and rotated), "pin" (corner pinned), or "" (it didn't).
+    ' and rotated), or "" (it didn't).
     '
     ' @return {string}
     function getImpostorKindThisFrame() as string
@@ -1227,12 +1161,7 @@ namespace BGE
       if invalid = m.impostorCapture or not m.mayReuseTransformedTempBitmap(drawMode)
         return 0.0
       end if
-      settings = rendererObj.qualitySettings
-      fraction = settings.modelImpostorError
-      if m.drawable.useImpostorPin and settings.modelImpostorPinMaxAngleDegrees > 0
-        fraction = BGE.Math.Max(fraction, settings.modelImpostorPinError)
-      end if
-      return m.getImpostorAllowedError(fraction, m.impostorLastDiagonal, drawMode) + 1
+      return m.getImpostorAllowedError(rendererObj.qualitySettings.modelImpostorError, m.impostorLastDiagonal, drawMode) + 1
     end function
 
     ' Also needs the cached bitmap to be every face freshly drawn - see attemptTransformTempBitmap().
