@@ -409,8 +409,8 @@ m.sprite = m.addOrientedSprite("body", frames, 0, 0, 16, 1, {
 
 > **Cost.** Lights are free while they stay still: objects keep their cached drawings until
 > something moves. A light that moves or changes every frame relights everything it reaches
-> every frame - about what it costs for those objects to rotate - so keep animated lights to
-> the few that need it. A model with `useImpostor` (the default) keeps its drawing through
+> every frame. Nothing is re-projected, so this costs less than moving those objects, but
+> their cached drawings are still redrawn, so keep animated lights to the few that need it. A model with `useImpostor` (the default) keeps its drawing through
 > small light changes - while each light has turned less than the quality level's
 > `modelImpostorMaxAngleDegrees` and changed brightness by less than
 > `modelImpostorMaxLightChange` since it was drawn - so a slowly moving lamp only redraws it

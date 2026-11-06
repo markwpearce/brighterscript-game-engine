@@ -745,6 +745,21 @@ namespace BGE
       return projected
     end function
 
+    ' Reshades the faces projected last time. After an impostor frame there are none
+    ' current, so this projects them as findCanvasPosition() would.
+    protected override function relight(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.canvasFacesStale
+        return m.findCanvasPosition(rendererObj, drawMode)
+      end if
+      keptThroughLightChange = m.keepImpostorThroughSmallLightChange(rendererObj)
+      m.shadeCanvasFaces(rendererObj)
+      if keptThroughLightChange
+        ' the cached drawing still has the capture's colors, not these
+        m.lastFaceShadedColors = []
+      end if
+      return true
+    end function
+
     ' How the renderer's lights reach this model's centre - see BGE.Lighting.snapshotLightsAt().
     private function snapshotLights(rendererObj as BGE.Renderer) as BGE.Lighting.LightSnapshot[]
       centre = m.worldPosition
@@ -870,10 +885,8 @@ namespace BGE
       '   i++
       ' end for
 
-      isShaded = m.drawable.isShaded
       lights = rendererObj.getPreparedLights()
-      useLights = isShaded and lights.count() > 0
-      ambientBrightness = m.drawable.ambientBrightness
+      useLights = m.drawable.isShaded and lights.count() > 0
       faceColorsChanged = false
 
       worldFaceIndex = 0
@@ -910,19 +923,11 @@ namespace BGE
             canvasFace = BGE.Model3dFaceOps.create(canvasPoints)
             canvasFace.Texture = worldFace.Texture
             canvasFace.color = worldFace.color
-            if useLights
-              m.lightCanvasFace(canvasFace, worldFace, lights, facingAmount < 0, ambientBrightness)
-            else
-              canvasFace.brightness = isShaded? BGE.Math.Max(facingAmount, ambientBrightness) : 1
-              canvasFace.shadedColor = BGE.colorBrightness(worldFace.color, canvasFace.brightness)
-            end if
-            previousColor = m.lastFaceShadedColors[thisFaceIndex]
-            if invalid = previousColor or previousColor <> canvasFace.shadedColor
+            canvasFace.faceIndex = thisFaceIndex
+            if m.shadeCanvasFace(canvasFace, worldFace, facingAmount, lights, useLights)
               faceColorsChanged = true
-              m.lastFaceShadedColors[thisFaceIndex] = canvasFace.shadedColor
             end if
             canvasFace.priority = -BGE.Math.arrayMax(negDistances)
-            canvasFace.faceIndex = thisFaceIndex
             m.modelCanvasFaces.Push(canvasFace)
             m.modelCanvasSamplePoints.push(canvasPoints[0])
           end if
@@ -935,6 +940,49 @@ namespace BGE
       end if
       m.modelCanvasFaces.SortBy("priority", "r")
       return true
+    end function
+
+    ' Recolors the faces projected last time for this draw's lights, without projecting.
+    '
+    ' @param {Renderer} rendererObj
+    private sub shadeCanvasFaces(rendererObj as Renderer)
+      lights = rendererObj.getPreparedLights()
+      useLights = m.drawable.isShaded and lights.count() > 0
+      faceColorsChanged = false
+      for each canvasFace in m.modelCanvasFaces
+        worldFace = m.modelWorldFaces[canvasFace.faceIndex]
+        facingAmount = getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal)
+        if m.shadeCanvasFace(canvasFace, worldFace, facingAmount, lights, useLights)
+          faceColorsChanged = true
+        end if
+      end for
+      if not faceColorsChanged
+        m.lightingChangedThisDraw = false
+      end if
+    end sub
+
+    ' Sets `canvasFace`'s brightness and shaded color.
+    '
+    ' @param {BGE.Model3dFace} canvasFace with its faceIndex set
+    ' @param {BGE.Model3dFace} worldFace
+    ' @param {float} facingAmount how squarely the face's outward normal faces the camera
+    ' @param {BGE.Lighting.PreparedLight[]} lights
+    ' @param {boolean} useLights
+    ' @return {boolean} true if its color differs from the last one recorded for the face
+    private function shadeCanvasFace(canvasFace as BGE.Model3dFace, worldFace as BGE.Model3dFace, facingAmount as float, lights as BGE.Lighting.PreparedLight[], useLights as boolean) as boolean
+      ambientBrightness = m.drawable.ambientBrightness
+      if useLights
+        m.lightCanvasFace(canvasFace, worldFace, lights, facingAmount < 0, ambientBrightness)
+      else
+        canvasFace.brightness = m.drawable.isShaded? BGE.Math.Max(facingAmount, ambientBrightness) : 1
+        canvasFace.shadedColor = BGE.colorBrightness(worldFace.color, canvasFace.brightness)
+      end if
+      previousColor = m.lastFaceShadedColors[canvasFace.faceIndex]
+      if invalid = previousColor or previousColor <> canvasFace.shadedColor
+        m.lastFaceShadedColors[canvasFace.faceIndex] = canvasFace.shadedColor
+        return true
+      end if
+      return false
     end function
 
     ' Shades `canvasFace` by the renderer's lights, from its world-space twin.
