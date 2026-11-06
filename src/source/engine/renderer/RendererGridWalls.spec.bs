@@ -1,0 +1,469 @@
+import "../../math/math.bs"
+import "../../math/vector.bs"
+import "../drawables/DrawableGridWalls.bs"
+import "../drawables/DrawableRectangle.bs"
+import "../drawables/Image.bs"
+import "../Game.bs"
+import "../GameEntity.bs"
+import "cameras/Camera3d.bs"
+import "gridWalls/GridWallsMap.bs"
+import "gridWalls/GridWallsView.bs"
+import "Renderer.bs"
+import "sceneObjects/SceneObject.bs"
+import "sceneObjects/SceneObjectGridWalls.bs"
+
+namespace tests
+
+  ' Records redrawStrips() calls, and appends "redraw" to a shared event log.
+  class RedrawSpyGridWalls extends BGE.SceneObjectGridWalls
+
+    public redraws = [] as roAssociativeArray[]
+    public eventLog = [] as string[]
+
+    sub new(name as string, drawableObj as BGE.DrawableGridWalls)
+      super(name, drawableObj)
+    end sub
+
+    override sub redrawStrips(rendererObj as BGE.Renderer, firstRay as integer, lastRay as integer, nearerThan as float)
+      m.redraws.push({firstRay: firstRay, lastRay: lastRay, nearerThan: nearerThan})
+      m.eventLog.push("redraw")
+      super.redrawStrips(rendererObj, firstRay, lastRay, nearerThan)
+    end sub
+
+  end class
+
+  ' The Task 3 room: one open 6-unit cell (x and z -3..3) with walls 10 high, the camera at
+  ' (0, 1.8, 0) looking down -z at the north wall face (z = -3).
+  @suite("BGE.Renderer - grid walls")
+  class RendererGridWallsTests extends rooibos.BaseTestSuite
+
+    private game as BGE.Game
+    private renderer as BGE.Renderer
+    private camera as BGE.Camera3d
+    private walls as tests.RedrawSpyGridWalls
+
+    protected override sub beforeEach()
+      m.game = new BGE.Game(1280, 720)
+      m.camera = new BGE.Camera3d()
+      m.camera.fieldOfViewDegrees = 90
+      m.camera.position = BGE.Math.VectorOps.create(0, 1.8, 0)
+      m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      m.camera.drawDistanceFadeFraction = 0
+      m.camera.drawDistanceTransitionSeconds = 0
+      bitmap = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      m.renderer = new BGE.Renderer(bitmap, m.game, m.camera)
+    end sub
+
+    ' Adds walls for the given rows (Task 3's legend, cells 6 units from (-9, 0, -9)).
+    private sub addWalls(rows as string[])
+      map = new BGE.GridWallsMap(rows, {
+        cellSize: 6.0,
+        wallHeight: 10.0,
+        origin: BGE.Math.VectorOps.create(-9, 0, -9),
+        solid: {"#": "stone", "A": "door"}
+      })
+      texture = CreateObject("roBitmap", {width: 16, height: 32, alphaEnable: true})
+      texture.Clear(&hFFFFFFFF)
+      region = CreateObject("roRegion", texture, 0, 0, 16, 32)
+      drawable = new BGE.DrawableGridWalls(invalid, map, {stone: region, door: region})
+      m.walls = new tests.RedrawSpyGridWalls("walls", drawable)
+      m.renderer.addSceneObject(m.walls)
+    end sub
+
+    private sub addRoom()
+      m.addWalls(["###", "#.#", "#A#"])
+    end sub
+
+    ' The room with its north wall opened into a corridor running to z = -9.
+    private sub addCorridorRoom()
+      m.addWalls(["#.#", "#.#", "#A#"])
+    end sub
+
+    ' A width x height billboard image hanging from (x, y, z), spied on for performDraw() and
+    ' drawPrimitive() calls.
+    private function newBillboard(x as float, z as float, width = 2 as integer, height = 2 as integer, y = 3 as float) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "billboard"})
+      entity.position = BGE.Math.VectorOps.create(x, y, z)
+      entity.updateTransformationMatrix()
+      bitmap = CreateObject("roBitmap", {width: width, height: height, alphaEnable: true})
+      bitmap.Clear(&hFF0000FF)
+      region = CreateObject("roRegion", bitmap, 0, 0, width, height)
+      drawable = new BGE.Image(entity, region, {drawMode: BGE.SceneObjectDrawMode.axisAligned})
+      return m.spy(drawable.addToRenderer(m.renderer))
+    end function
+
+    private function spy(sceneObj as BGE.SceneObject) as BGE.SceneObject
+      target = sceneObj as dynamic
+      target.performDrawCount = 0
+      target.realPerformDraw = target.performDraw
+      target.performDraw = function(rendererObj as object, drawMode as integer) as boolean
+        m.performDrawCount++
+        return m.realPerformDraw(rendererObj, drawMode)
+      end function
+      return sceneObj
+    end function
+
+    ' Logs "primitive" to the walls' event log for each of the object's cluster primitives.
+    private sub logPrimitives(sceneObj as BGE.SceneObject)
+      target = sceneObj as dynamic
+      target.eventLog = m.walls.eventLog
+      target.realDrawPrimitive = target.drawPrimitive
+      target.drawPrimitive = function(rendererObj as object, index as integer) as boolean
+        m.eventLog.push("primitive")
+        return m.realDrawPrimitive(rendererObj, index)
+      end function
+    end sub
+
+    private function performDrawCount(sceneObj as BGE.SceneObject) as integer
+      return (sceneObj as dynamic).performDrawCount
+    end function
+
+    private sub renderFrames(count = 2 as integer)
+      for i = 1 to count
+        for each sceneObj in m.renderer.getSceneObjectsCopy()
+          owner = sceneObj.drawable.owner
+          if owner <> invalid
+            owner.updateTransformationMatrix()
+          end if
+        end for
+        m.walls.redraws.clear()
+        m.walls.eventLog.clear()
+        m.renderer.setupCameraForFrame()
+        m.renderer.render()
+      end for
+    end sub
+
+    ' The span the renderer tests sceneObj by this frame.
+    private function spanOf(sceneObj as BGE.SceneObject) as BGE.GridWallsSpan
+      span = {valid: false, firstRay: 0, lastRay: 0, nearestDistance: 0.0} as BGE.GridWallsSpan
+      m.walls.view.findSpan(sceneObj.getOcclusionTestPoints(m.camera), span)
+      return span
+    end function
+
+    ' How many rays in the span have a wall nearer than the span's nearest point by more than
+    ' tolerance (the view's hideTolerance by default).
+    private function hiddenRayCount(span as BGE.GridWallsSpan, tolerance = -1.0 as float) as integer
+      if tolerance < 0
+        tolerance = m.walls.view.hideTolerance
+      end if
+      count = 0
+      for i = span.firstRay to span.lastRay
+        if m.walls.view.getDepth(i) < span.nearestDistance - tolerance
+          count++
+        end if
+      end for
+      return count
+    end function
+
+    private sub assertRedrawsSpan(span as BGE.GridWallsSpan)
+      m.assertEqual(1, m.walls.redraws.count())
+      if m.walls.redraws.count() <> 1
+        return
+      end if
+      redraw = m.walls.redraws[0]
+      firstRay = span.firstRay - 1
+      if firstRay < 0
+        firstRay = 0
+      end if
+      lastRay = span.lastRay + 1
+      if lastRay > m.walls.view.rayCount - 1
+        lastRay = m.walls.view.rayCount - 1
+      end if
+      m.assertEqual(firstRay, redraw.firstRay)
+      m.assertEqual(lastRay, redraw.lastRay)
+      nearerThan = span.nearestDistance - m.walls.view.hideTolerance
+      m.assertTrue(abs(redraw.nearerThan - nearerThan) < 0.0001, `nearerThan ${redraw.nearerThan} vs ${nearerThan}`)
+    end sub
+
+    @describe("hiding sorted objects behind grid walls")
+
+    @it("skips an object wholly behind a wall, as occluded")
+    function _()
+      m.addRoom()
+      billboard = m.newBillboard(-1, -5)
+      m.renderFrames()
+      m.assertNotInvalid(m.renderer.getGridWalls())
+      m.assertEqual(0, m.performDrawCount(billboard))
+      m.assertTrue(billboard.hiddenByWallsThisFrame)
+      m.assertFalse(billboard.occludedThisFrame)
+      m.assertEqual(BGE.VisibilityState.occluded, billboard.getVisibility())
+      m.assertEqual(1, m.renderer.getOccludedCountLastFrame())
+      m.assertEqual(0, m.walls.redraws.count())
+    end function
+
+    @it("draws an object in front of the walls without redrawing strips")
+    function _()
+      m.addRoom()
+      billboard = m.newBillboard(-1, -2)
+      m.renderFrames()
+      m.assertTrue(m.performDrawCount(billboard) > 0)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(BGE.VisibilityState.visible, billboard.getVisibility())
+      m.assertEqual(0, m.renderer.getOccludedCountLastFrame())
+      m.assertEqual(0, m.walls.redraws.count())
+    end function
+
+    @it("draws an object partly behind a wall, then redraws the nearer strips over it")
+    function _()
+      m.addCorridorRoom()
+      billboard = m.newBillboard(-1, -5, 6)
+      m.renderFrames()
+      span = m.spanOf(billboard)
+      m.assertTrue(span.valid)
+      hidden = m.hiddenRayCount(span)
+      m.assertTrue(hidden > 0 and hidden < span.lastRay - span.firstRay + 1, `hidden rays ${hidden}`)
+      m.assertTrue(m.performDrawCount(billboard) > 0)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(BGE.VisibilityState.visible, billboard.getVisibility())
+      m.assertRedrawsSpan(span)
+    end function
+
+    @it("draws a tall object behind a wall and redraws strips over it")
+    function _()
+      m.addRoom()
+      billboard = m.newBillboard(-1, -5, 2, 60, 20)
+      m.renderFrames()
+      m.assertTrue(m.performDrawCount(billboard) > 0)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(1, m.walls.redraws.count())
+    end function
+
+    @it("hides nothing with the camera outside the grid")
+    function _()
+      m.camera.position = BGE.Math.VectorOps.create(0, 1.8, 20)
+      m.addRoom()
+      billboard = m.newBillboard(-1, 5)
+      m.renderFrames()
+      m.assertTrue(m.performDrawCount(billboard) > 0)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(0, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("leaves an image flush against a receding side wall alone")
+    function _()
+      ' a corridor along z, the camera looking down it from z = 14
+      m.addWalls(["#.#", "#.#", "#.#", "#.#", "#.#"])
+      m.camera.position = BGE.Math.VectorOps.create(0, 1.8, 14)
+      ' 0.01 off the west wall (x = -3), running from z = 3.95 to z = -0.05; its near edge
+      ' rounds to a ray that meets the wall slightly nearer
+      entity = new BGE.GameEntity(m.game, {name: "poster"})
+      entity.position = BGE.Math.VectorOps.create(-2.99, 3, 3.95)
+      entity.rotation = BGE.Math.VectorOps.create(0, -BGE.Math.HALF_PI, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 4, 2, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      poster = m.spy(drawable.addToRenderer(m.renderer))
+      behind = m.newBillboard(-6, 2, 1)
+      m.renderFrames()
+      span = m.spanOf(poster)
+      m.assertTrue(span.valid)
+      m.assertTrue(m.hiddenRayCount(span, 0.001) > 0, "a wall ray should be just nearer than the poster")
+      m.assertTrue(m.performDrawCount(poster) > 0)
+      m.assertFalse(poster.hiddenByWallsThisFrame)
+      m.assertEqual(0, m.walls.redraws.count())
+      m.assertTrue(behind.hiddenByWallsThisFrame)
+      m.assertEqual(0, m.performDrawCount(behind))
+    end function
+
+    @it("never hides an object with a point behind the camera")
+    function _()
+      m.addRoom()
+      ' turned to run along z, from behind the north wall to behind the camera
+      entity = new BGE.GameEntity(m.game, {name: "log"})
+      entity.position = BGE.Math.VectorOps.create(-1, 2, 2)
+      entity.rotation = BGE.Math.VectorOps.create(0, -BGE.Math.HALF_PI, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 14, 1, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      longObj = m.spy(drawable.addToRenderer(m.renderer))
+      m.renderFrames()
+      m.assertTrue(longObj.negDistanceFromCamera < 0, "its centre should be in front of the camera")
+      behindCamera = 0
+      for each point in longObj.getOcclusionTestPoints(m.camera)
+        if point.z > 0
+          behindCamera++
+        end if
+      end for
+      m.assertTrue(behindCamera > 0, "a point should be behind the camera")
+      m.assertFalse(m.spanOf(longObj).valid)
+      m.assertFalse(longObj.hiddenByWallsThisFrame)
+      m.assertNotEqual(BGE.VisibilityState.occluded, longObj.getVisibility())
+      m.assertEqual(0, m.walls.redraws.count())
+    end function
+
+    @it("leaves the span map's verdicts and their caching alone")
+    function _()
+      m.addRoom()
+      entity = new BGE.GameEntity(m.game, {name: "screen", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(-3, 8, -2)
+      entity.updateTransformationMatrix()
+      occluder = new BGE.DrawableRectangle(entity, 6, 12, {isOccluder: true, drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      occluder.addToRenderer(m.renderer)
+      ' behind the occluder but in front of the wall, and behind both
+      nearObj = m.newBillboard(-0.5, -2.5, 1)
+      farObj = m.newBillboard(-0.5, -5, 1)
+      m.renderFrames(3)
+      m.assertTrue(nearObj.occludedThisFrame)
+      m.assertFalse(nearObj.hiddenByWallsThisFrame)
+      m.assertTrue(farObj.occludedThisFrame)
+      m.assertEqual(0, m.performDrawCount(nearObj))
+      m.assertEqual(0, m.performDrawCount(farObj))
+      m.assertEqual(2, m.renderer.getOccludedCountLastFrame())
+      builds = m.renderer.getOcclusionMapBuildCount()
+      nearVersion = nearObj.occlusionMapVersion
+      farVersion = farObj.occlusionMapVersion
+      m.renderFrames(2)
+      m.assertEqual(builds, m.renderer.getOcclusionMapBuildCount())
+      m.assertEqual(nearVersion, nearObj.occlusionMapVersion)
+      m.assertEqual(farVersion, farObj.occlusionMapVersion)
+      m.assertTrue(nearObj.occludedThisFrame)
+      m.assertTrue(farObj.occludedThisFrame)
+      m.assertEqual(BGE.VisibilityState.occluded, nearObj.getVisibility())
+      m.assertEqual(BGE.VisibilityState.occluded, farObj.getVisibility())
+      m.assertEqual(2, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("hides objects in the static geometry draw path too")
+    function _()
+      m.addRoom()
+      entity = new BGE.GameEntity(m.game, {name: "panel", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(1, 1, -2)
+      entity.updateTransformationMatrix()
+      panel = new BGE.DrawableRectangle(entity, 1, 1, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})
+      panel.addToRenderer(m.renderer)
+      billboard = m.newBillboard(-1, -5)
+      m.renderFrames()
+      m.assertTrue(m.renderer.hasStaticGeometryTree())
+      m.assertEqual(0, m.performDrawCount(billboard))
+      m.assertTrue(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(BGE.VisibilityState.occluded, billboard.getVisibility())
+      m.assertEqual(1, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("shows again the frame it comes out from behind the wall")
+    function _()
+      m.addRoom()
+      billboard = m.newBillboard(-1, -5)
+      m.renderFrames()
+      m.assertTrue(billboard.hiddenByWallsThisFrame)
+      billboard.drawable.owner.position.z = -2
+      m.renderFrames(1)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(BGE.VisibilityState.visible, billboard.getVisibility())
+      m.assertEqual(0, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("hides a culled object on the frame the camera turns to it behind a wall")
+    function _()
+      m.addRoom()
+      billboard = m.newBillboard(-1, -5)
+      m.renderFrames()
+      ' Camera3d's frustum reaches its focal length behind the camera, so a real cull needs a
+      ' far bigger world; latch it as the renderer does for one culled last frame
+      billboard.markSkippedBehindCamera(m.camera)
+      m.assertTrue(billboard.isCulled(), "it should start culled")
+      (billboard as dynamic).performDrawCount = 0
+      m.camera.orientation = BGE.Math.VectorOps.create(0.05, 0, -0.99875)
+      m.renderFrames(1)
+      m.assertEqual(0, m.performDrawCount(billboard))
+      m.assertTrue(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(BGE.VisibilityState.occluded, billboard.getVisibility())
+      m.assertFalse(billboard.isCulled())
+      ' re-examined normally once it's out from behind the wall
+      billboard.drawable.owner.position.z = -2
+      m.renderFrames(1)
+      m.assertTrue(m.performDrawCount(billboard) > 0)
+      m.assertEqual(BGE.VisibilityState.visible, billboard.getVisibility())
+    end function
+
+    @it("skips a clustered object wholly behind a wall")
+    function _()
+      m.addRoom()
+      billboard = m.newBillboard(-1, -5)
+      ' clustering stays off, so the count holds as set
+      billboard.clusterMemberCount = 2
+      m.logPrimitives(billboard)
+      m.renderFrames()
+      m.assertTrue(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(BGE.VisibilityState.occluded, billboard.getVisibility())
+      m.assertEqual(0, m.walls.eventLog.count())
+      m.assertEqual(1, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("redraws strips over a partly hidden clustered object after the cluster pass")
+    function _()
+      m.addCorridorRoom()
+      billboard = m.newBillboard(-1, -5, 6)
+      billboard.clusterMemberCount = 2
+      m.logPrimitives(billboard)
+      m.renderFrames()
+      span = m.spanOf(billboard)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(["primitive", "redraw"], m.walls.eventLog)
+      m.assertRedrawsSpan(span)
+    end function
+
+    @it("shows wall-hidden objects in the occlusion debug overlay")
+    function _()
+      m.addRoom()
+      m.newBillboard(-1, -5)
+      m.renderFrames()
+      m.renderer.resetDrawCallCounter()
+      m.renderFrames(1)
+      plainCalls = m.renderer.getDrawCallsLastFrame()
+      m.renderer.showOcclusionDebug = true
+      m.renderer.resetDrawCallCounter()
+      m.renderFrames(1)
+      m.assertTrue(m.renderer.getDrawCallsLastFrame() > plainCalls, `${m.renderer.getDrawCallsLastFrame()} vs ${plainCalls}`)
+    end function
+
+    @it("does nothing without grid walls")
+    function _()
+      billboard = m.newBillboard(-1, -5)
+      m.addRoom()
+      m.walls.drawable.enabled = false
+      m.renderFrames()
+      m.assertInvalid(m.renderer.getGridWalls())
+      m.assertTrue(m.performDrawCount(billboard) > 0)
+      m.assertFalse(billboard.hiddenByWallsThisFrame)
+      m.assertEqual(0, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @describe("in-world overlays and the point query")
+
+    @it("hides a drawWorldBar behind a wall but draws one in front")
+    function _()
+      m.addRoom()
+      m.renderFrames()
+      m.assertFalse(m.renderer.drawWorldBar(BGE.Math.VectorOps.create(0, 2, -5), 20, 4, 1, &hFF0000FF, &h0000FFFF))
+      m.assertTrue(m.renderer.drawWorldBar(BGE.Math.VectorOps.create(0, 2, -2), 20, 4, 1, &hFF0000FF, &h0000FFFF))
+    end function
+
+    @it("skips a polyline segment with an end behind a wall")
+    function _()
+      m.addRoom()
+      m.renderFrames()
+      behind = [BGE.Math.VectorOps.create(0, 1, -2), BGE.Math.VectorOps.create(0, 1, -5)]
+      m.assertFalse(m.renderer.drawWorldPolyline(behind, &hFF0000FF))
+      inFront = [BGE.Math.VectorOps.create(-1, 1, -2), BGE.Math.VectorOps.create(1, 1, -2)]
+      m.assertTrue(m.renderer.drawWorldPolyline(inFront, &hFF0000FF))
+    end function
+
+    @it("reports whether a point is behind the walls drawn this frame")
+    function _()
+      m.addRoom()
+      m.renderFrames()
+      m.assertTrue(m.renderer.isBehindGridWalls(BGE.Math.VectorOps.create(0, 2, -5)))
+      m.assertFalse(m.renderer.isBehindGridWalls(BGE.Math.VectorOps.create(0, 2, -2)))
+    end function
+
+    @it("reports no point behind walls when none drew")
+    function _()
+      m.addRoom()
+      m.walls.drawable.enabled = false
+      m.renderFrames()
+      m.assertFalse(m.renderer.isBehindGridWalls(BGE.Math.VectorOps.create(0, 2, -5)))
+      m.assertTrue(m.renderer.drawWorldBar(BGE.Math.VectorOps.create(0, 2, -5), 20, 4, 1, &hFF0000FF, &h0000FFFF))
+    end function
+
+  end class
+
+end namespace

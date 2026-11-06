@@ -1,0 +1,192 @@
+import "GridWallsMap.bs"
+import "GridWallsView.bs"
+import "../cameras/Camera3d.bs"
+import "../../../math/vector.bs"
+
+namespace tests
+
+  @suite("BGE.GridWallsView")
+  class GridWallsViewTests extends rooibos.BaseTestSuite
+
+    private view as BGE.GridWallsView
+    private camera as BGE.Camera3d
+
+    protected override sub beforeEach()
+      map = new BGE.GridWallsMap(["###", "#.#", "#A#"], {
+        cellSize: 6.0,
+        wallHeight: 10.0,
+        origin: BGE.Math.VectorOps.create(-9, 0, -9),
+        solid: {"#": "stone", "A": "door"}
+      })
+      m.view = new BGE.GridWallsView(map)
+      m.camera = new BGE.Camera3d()
+      m.camera.setFrameSize(1280, 720)
+      m.camera.fieldOfViewDegrees = 90
+      m.camera.position = BGE.Math.VectorOps.create(0, 1.8, 0)
+      m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+    end sub
+
+    private function newSpan() as BGE.GridWallsSpan
+      return {valid: false, firstRay: 0, lastRay: 0, nearestDistance: 0.0}
+    end function
+
+    private sub assertNear(expected as float, actual as float, tolerance = 0.001 as float)
+      m.assertTrue(abs(expected - actual) <= tolerance, `expected ${expected} but got ${actual}`)
+    end sub
+
+    @describe("GridWallsView.update")
+
+    @it("fans rays across a level view")
+    function _()
+      m.assertTrue(m.view.update(m.camera, 4))
+      m.assertTrue(m.view.rayCount >= 320 and m.view.rayCount <= 324, `rayCount ${m.view.rayCount}`)
+      m.assertNear(-1 - m.view.tanStep, m.view.firstTan, 0.01)
+      mid = int(m.view.rayCount / 2)
+      m.assertTrue(m.view.hasHit(mid))
+      m.assertNear(3.0, m.view.getHit(mid).distance, 0.01)
+    end function
+
+    @it("covers the bottom corners when pitched down")
+    function _()
+      m.view.update(m.camera, 4)
+      levelCount = m.view.rayCount
+      s = sin(35 * 3.14159265 / 180)
+      c = cos(35 * 3.14159265 / 180)
+      m.camera.orientation = BGE.Math.VectorOps.create(0, -s, -c)
+      m.assertTrue(m.view.update(m.camera, 4))
+      m.assertTrue(m.view.rayCount > levelCount, `${m.view.rayCount} vs ${levelCount}`)
+    end function
+
+    @it("shrinks the fan with a wider strip and keeps the last hit reachable")
+    function _()
+      m.view.update(m.camera, 4)
+      wide = m.view.rayCount
+      m.assertTrue(m.view.hasHit(wide - 1) = true or m.view.hasHit(wide - 1) = false)
+      m.assertTrue(m.view.getHit(wide - 1) <> invalid)
+      m.view.update(m.camera, 16)
+      m.assertTrue(m.view.rayCount < wide)
+      m.assertTrue(m.view.getHit(m.view.rayCount - 1) <> invalid)
+      m.view.update(m.camera, 4)
+      m.assertEqual(m.view.rayCount, wide)
+      m.assertTrue(m.view.getHit(wide - 1) <> invalid)
+    end function
+
+    @it("gives unit ray directions with y = 0")
+    function _()
+      m.view.update(m.camera, 4)
+      d = m.view.rayDirection(int(m.view.rayCount / 2))
+      m.assertNear(0.0, d.y)
+      m.assertNear(-1.0, d.z, 0.001)
+    end function
+
+    @it("caps the ray count when pitched far beyond the supported range")
+    function _()
+      cap = 4 * 1280 / 4
+      for each pitch in [-70, 70]
+        s = sin(pitch * 3.14159265 / 180)
+        c = cos(pitch * 3.14159265 / 180)
+        m.camera.orientation = BGE.Math.VectorOps.create(0, s, -c)
+        m.assertTrue(m.view.update(m.camera, 4))
+        m.assertTrue(m.view.rayCount <= cap, `pitch ${pitch}: rayCount ${m.view.rayCount}`)
+        m.assertTrue(m.view.rayCount > 0)
+      end for
+    end function
+
+    @describe("GridWallsView.getDepth")
+
+    @it("is the forward depth of the wall: flat across the view")
+    function _()
+      m.view.update(m.camera, 4)
+      m.assertNear(3.0, m.view.getDepth(int(m.view.rayCount / 2)), 0.01)
+      m.assertNear(3.0, m.view.getDepth(20), 0.01)
+      m.assertTrue(m.view.getHit(20).distance > 3.5)
+    end function
+
+    @it("is 1e30 for a ray with no hit")
+    function _()
+      map = new BGE.GridWallsMap(["###", "#.#", "#A#"], {
+        cellSize: 6.0,
+        wallHeight: 0.5,
+        origin: BGE.Math.VectorOps.create(-9, 0, -9),
+        solid: {"#": "stone", "A": "door"}
+      })
+      view = new BGE.GridWallsView(map)
+      m.camera.maxDrawDistance = 0.1
+      m.assertTrue(view.update(m.camera, 4))
+      m.assertFalse(view.hasHit(int(view.rayCount / 2)))
+      m.assertEqual(view.getDepth(int(view.rayCount / 2)), 1.0e30)
+    end function
+
+    @describe("GridWallsView.isPointHidden")
+
+    @it("hides points beyond a wall only")
+    function _()
+      m.view.update(m.camera, 4)
+      m.assertTrue(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 1, -5)))
+      m.assertFalse(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 1, -2)))
+    end function
+
+    @it("doesn't hide points within a quarter cell behind the wall face")
+    function _()
+      m.view.update(m.camera, 4)
+      m.assertEqual(1.5, m.view.hideTolerance)
+      m.assertFalse(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 1, -4.4)))
+      m.assertTrue(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 1, -4.6)))
+    end function
+
+    @it("hides nothing with the camera outside the grid")
+    function _()
+      m.camera.position = BGE.Math.VectorOps.create(0, 1.8, 20)
+      m.assertTrue(m.view.update(m.camera, 4))
+      mid = int(m.view.rayCount / 2)
+      m.assertFalse(m.view.hasHit(mid))
+      m.assertEqual(1.0e30, m.view.getDepth(mid))
+      m.assertFalse(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 1, 5)))
+    end function
+
+    @it("doesn't hide a point whose sight line passes above the wall top")
+    function _()
+      ' wall face at depth 3, top at 10; the sight line at depth 3 to a point at z = -5 is
+      ' 1.8 + (y - 1.8) * 0.6
+      m.view.update(m.camera, 4)
+      m.assertTrue(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 15, -5)))
+      m.assertFalse(m.view.isPointHidden(BGE.Math.VectorOps.create(0, 16, -5)))
+    end function
+
+    @describe("GridWallsView.findSpan")
+
+    @it("flags a span with a point above the wall tops")
+    function _()
+      m.view.update(m.camera, 4)
+      span = m.newSpan()
+      m.assertTrue(m.view.findSpan([BGE.Math.VectorOps.create(0, 1, -5), BGE.Math.VectorOps.create(0, 15, -5)], span))
+      m.assertFalse(span.anyAboveWalls)
+      m.assertTrue(m.view.findSpan([BGE.Math.VectorOps.create(0, 1, -5), BGE.Math.VectorOps.create(0, 16, -5)], span))
+      m.assertTrue(span.anyAboveWalls)
+    end function
+
+    @it("spans points in front of the camera")
+    function _()
+      m.view.update(m.camera, 4)
+      span = m.newSpan()
+      m.assertTrue(m.view.findSpan([BGE.Math.VectorOps.create(-1, 0, -2), BGE.Math.VectorOps.create(1, 0, -2)], span))
+      m.assertTrue(span.valid)
+      m.assertTrue(span.firstRay < span.lastRay)
+      m.assertNear(2.0, span.nearestDistance)
+    end function
+
+    @it("is invalid with a point behind the camera or no points")
+    function _()
+      m.view.update(m.camera, 4)
+      span = m.newSpan()
+      span.valid = true
+      m.assertFalse(m.view.findSpan([BGE.Math.VectorOps.create(-1, 0, -2), BGE.Math.VectorOps.create(1, 0, 1)], span))
+      m.assertFalse(span.valid)
+      span.valid = true
+      m.assertFalse(m.view.findSpan([], span))
+      m.assertFalse(span.valid)
+    end function
+
+  end class
+
+end namespace

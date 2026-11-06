@@ -1,0 +1,460 @@
+import "../../../math/math.bs"
+import "../../../math/vector.bs"
+import "../../../utils/colors.bs"
+import "../../../utils/utils.bs"
+import "../../debug/LogLevel.bs"
+import "../../drawables/DrawableGridWalls.bs"
+import "../cameras/Camera.bs"
+import "../cameras/Camera3d.bs"
+import "../gridWalls/GridWallsMap.bs"
+import "../gridWalls/GridWallStripBuilder.bs"
+import "../gridWalls/GridWallsRayCaster.bs"
+import "../gridWalls/GridWallsView.bs"
+import "../lighting/Lighting.bs"
+import "../Renderer.bs"
+import "../RendererHelpers.bs"
+import "SceneObject.bs"
+
+namespace BGE
+
+  ' One wall strip, as drawn: a 1px texture column scaled and rotated about its foot.
+  interface GridWallStrip
+    ' Canvas position of the strip's foot, the point it's drawn and rotated about.
+    x as float
+    y as float
+    ' Lean from upright in radians, counter-clockwise on screen.
+    angle as float
+    ' Width in pixels.
+    scaleX as float
+    ' Foot-to-top length over the column's height.
+    scaleY as float
+    column as roRegion
+    ' Packed RGBA tint, with lighting and distance fade applied.
+    rgba as integer
+    ' The wall's forward depth on this strip's ray (GridWallsView.getDepth()).
+    distance as float
+  end interface
+
+  ' Draws a DrawableGridWalls: casts the GridWallsView each time the camera changes, then
+  ' draws one leaning strip per ray, far to near.
+  class SceneObjectGridWalls extends SceneObject
+
+    drawable as DrawableGridWalls
+
+    ' This frame's ray fan and depth buffer.
+    view as BGE.GridWallsView
+
+    ' Rays cast and strips drawn by the last draw.
+    raysLastFrame as integer = 0
+    stripsDrawnLastFrame as integer = 0
+    ' Rays the last draw skipped as wholly off the canvas before working out their strip.
+    raysCulledEarlyLastFrame as integer = 0
+
+    private rendererObj as Renderer
+    private warnedCamera2d as boolean = false
+    private castRequested as boolean = true
+    ' Bumped on each successful view update; the strip and shade caches key off it.
+    private viewStamp as integer = 0
+    private viewStripWidth as integer = -1
+    private viewGeometryVersion as integer = -1
+    private stripStamp as integer = -1
+    private shadeStamp as integer = -1
+    private shadeBase as integer = 0
+    private shadeShaded as boolean = false
+    private shadeAmbient as float = -1.0
+    private shadeWrap as float = -1.0
+
+    ' Strip geometry, per ray, for the draw; and a second builder for computeStrip().
+    private builder as BGE.GridWallStripBuilder
+    private singleBuilder as BGE.GridWallStripBuilder
+    ' Per ray, grown and never shrunk.
+    private stripRgba = [] as integer[]
+    private stripShade = [] as integer[]
+    ' Draw order keys: quantised depth * sortIndexMul + ray, sorted ascending.
+    private drawOrder = [] as integer[]
+    private sortIndexMul as integer = 1
+    private sortMaxDepthKey as integer = 0
+    private sortScale as float = 1.0
+    ' Scratch vectors for shadeRay().
+    private shadePoint as BGE.Math.Vector
+    private shadeNormal as BGE.Math.Vector
+
+    sub new(name as string, drawableObj as DrawableGridWalls)
+      super(name, drawableObj, BGE.SceneObjectType.GridWalls)
+      ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
+      m.drawable = drawableObj
+      m.view = new BGE.GridWallsView(drawableObj.map)
+      m.viewGeometryVersion = drawableObj.geometryVersion
+      m.builder = new BGE.GridWallStripBuilder()
+      m.singleBuilder = new BGE.GridWallStripBuilder()
+      m.shadePoint = BGE.Math.VectorOps.create(0, 0, 0)
+      m.shadeNormal = BGE.Math.VectorOps.create(0, 0, 0)
+    end sub
+
+    override function drawsInFixedStage() as boolean
+      return true
+    end function
+
+    ' The walls are drawn in their own stage, never interleaved.
+    override function participatesInOverlapDetection() as boolean
+      return false
+    end function
+
+    ' Strips fade one by one instead.
+    override function participatesInDistanceFade() as boolean
+      return false
+    end function
+
+    override function isEligibleForStaticBsp() as boolean
+      return false
+    end function
+
+    ' The walls surround the camera, so there's always something to cast.
+    protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      return true
+    end function
+
+    ' Only requests a cast, so performDraw() casts at most once per draw - and not at all when
+    ' only the lights changed.
+    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      camera = rendererObj.camera
+      if m.lastFrameWasCulled or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.objMovedInRelationToCamera(camera) or m.geometryChanged() or m.projectionChanged(camera) or m.drawModeChanged(drawMode)
+        m.castRequested = true
+      end if
+      return true
+    end function
+
+    ' Casts the view's rays for rendererObj's camera now. The renderer does this each frame
+    ' the camera changes; call it yourself only in tests.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {boolean} false with a Camera2d, or a camera looking straight up or down
+    function updateView(rendererObj as Renderer) as boolean
+      m.rendererObj = rendererObj
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      if m.viewGeometryVersion <> m.drawable.geometryVersion
+        m.view = new BGE.GridWallsView(m.drawable.map)
+        m.viewGeometryVersion = m.drawable.geometryVersion
+      end if
+      m.viewStripWidth = m.getStripWidth(rendererObj)
+      if not m.view.update(rendererObj.camera as Camera3d, m.viewStripWidth)
+        return false
+      end if
+      m.viewStamp++
+      return true
+    end function
+
+    ' Computes ray `index`'s strip from the last updateView(), lit exactly at that ray.
+    '
+    ' @param {integer} index ray index
+    ' @param {GridWallStrip} out filled in
+    ' @return {boolean} false if the ray has no wall to draw: no hit, beyond the draw
+    '   distance, or wholly off the canvas
+    function computeStrip(index as integer, out as GridWallStrip) as boolean
+      if invalid = m.rendererObj or not m.hasCamera3d(m.rendererObj) or index < 0 or index >= m.view.rayCount
+        return false
+      end if
+      b = m.singleBuilder
+      b.prepare(m.rendererObj.camera as Camera3d, m.drawable, m.viewStripWidth)
+      b.build(m.view, index, index)
+      if not b.drawn[0]
+        return false
+      end if
+      out.x = b.x[0]
+      out.y = b.y[0]
+      out.angle = b.angle[0]
+      out.scaleX = b.scaleX[0]
+      out.scaleY = b.scaleY[0]
+      out.column = b.column[0]
+      out.distance = b.distance[0]
+      base = m.drawable.getFillColorRGBA()
+      shade = base
+      if m.drawable.isShaded
+        shade = m.shadeRay(index, base)
+      end if
+      out.rgba = BGE.RendererHelpers.applyAlphaFade(shade, b.fade[0])
+      return true
+    end function
+
+    ' The strip drawn on ray `index` by the last draw, or invalid if none was.
+    '
+    ' @param {integer} index ray index
+    ' @return {dynamic} GridWallStrip or invalid
+    function getDrawnStrip(index as integer) as dynamic
+      b = m.builder
+      if index < 0 or index >= m.raysLastFrame or not b.drawn[index]
+        return invalid
+      end if
+      return {x: b.x[index], y: b.y[index], angle: b.angle[index], scaleX: b.scaleX[index], scaleY: b.scaleY[index], column: b.column[index], rgba: m.stripRgba[index], distance: b.distance[index]}
+    end function
+
+    ' Draws again, far to near, the strips drawn this frame on rays firstRay..lastRay whose
+    ' depth is less than nearerThan - to put walls back over something drawn after them.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} firstRay
+    ' @param {integer} lastRay
+    ' @param {float} nearerThan forward depth, as GridWallStrip.distance
+    sub redrawStrips(rendererObj as Renderer, firstRay as integer, lastRay as integer, nearerThan as float)
+      if firstRay < 0
+        firstRay = 0
+      end if
+      if lastRay > m.raysLastFrame - 1
+        lastRay = m.raysLastFrame - 1
+      end if
+      m.drawStrips(rendererObj, firstRay, lastRay, nearerThan)
+    end sub
+
+    protected override function performDraw(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      m.rendererObj = rendererObj
+      camera = rendererObj.camera as Camera3d
+      if m.castRequested or m.viewStamp = 0 or m.viewStripWidth <> m.getStripWidth(rendererObj) or camera.farDistanceChangedThisFrame() or m.viewGeometryVersion <> m.drawable.geometryVersion
+        m.castRequested = false
+        if not m.updateView(rendererObj)
+          return false
+        end if
+      end if
+      rayCount = m.view.rayCount
+      m.raysLastFrame = rayCount
+      m.growStripPool(rayCount)
+
+      stripsChanged = m.stripStamp <> m.viewStamp
+      if stripsChanged
+        m.builder.prepare(camera, m.drawable, m.viewStripWidth)
+        m.builder.build(m.view, 0, rayCount - 1)
+        m.raysCulledEarlyLastFrame = m.builder.earlyCulled
+        m.prepareSort(camera, rayCount)
+        m.stripStamp = m.viewStamp
+      end if
+      m.shadeStrips(rendererObj, rayCount, stripsChanged)
+      m.stripsDrawnLastFrame = m.drawStrips(rendererObj, 0, rayCount - 1, 1.0e30)
+      m.drawDebug(rendererObj, rayCount)
+      return true
+    end function
+
+    ' Sets the depth quantisation for drawStrips()' sort keys: ray in the low bits, depth in
+    ' the rest, scaled so the furthest possible hit still fits.
+    private sub prepareSort(camera as Camera3d, rayCount as integer)
+      mul = 2
+      while mul <= rayCount
+        mul = mul * 2
+      end while
+      m.sortIndexMul = mul
+      m.sortMaxDepthKey = int(2147483647 / mul) - 1
+      ' no hit is further than the cast's own reach (GridWallsView.update())
+      bound = camera.getCurrentDrawDistance() / m.view.cosPitch + m.drawable.map.wallHeight
+      if bound <= 0
+        bound = 1.0
+      end if
+      m.sortScale = m.sortMaxDepthKey / bound
+    end sub
+
+    ' Draws the drawn strips on rays firstRay..lastRay with depth below nearerThan, far to
+    ' near. Returns how many it drew.
+    private function drawStrips(rendererObj as Renderer, firstRay as integer, lastRay as integer, nearerThan as float) as integer
+      b = m.builder
+      drawn = b.drawn
+      distances = b.distance
+      order = m.drawOrder
+      order.clear()
+      scale = m.sortScale
+      mul = m.sortIndexMul
+      maxKey = m.sortMaxDepthKey
+      for i = firstRay to lastRay
+        if drawn[i]
+          d = distances[i]
+          if d < nearerThan
+            q = int(d * scale)
+            if q > maxKey
+              q = maxKey
+            else if q < 0
+              q = 0
+            end if
+            order.push(q * mul + i)
+          end if
+        end if
+      end for
+      count = order.count()
+      if count > 1
+        order.Sort()
+      end if
+      xs = b.x
+      ys = b.y
+      scaleXs = b.scaleX
+      scaleYs = b.scaleY
+      angles = b.angle
+      columns = b.column
+      rgbas = m.stripRgba
+      mask = mul - 1
+      for n = count - 1 to 0 step -1
+        i = order[n] and mask
+        rendererObj.drawTransformedObject(xs[i], ys[i], scaleXs[i], scaleYs[i], angles[i], columns[i], rgbas[i])
+      end for
+      order.clear()
+      return count
+    end function
+
+    private function hasCamera3d(rendererObj as Renderer) as boolean
+      if rendererObj.camera.name = "Camera3d"
+        return true
+      end if
+      if not m.warnedCamera2d
+        m.warnedCamera2d = true
+        m.drawable.log("Drawable '" + m.drawable.name + "' (grid walls) needs a Camera3d - it draws nothing with a " + rendererObj.camera.name, BGE.Debug.LogLevel.warning)
+      end if
+      return false
+    end function
+
+    private function getStripWidth(rendererObj as Renderer) as integer
+      width = rendererObj.qualitySettings.gridWallStripWidth
+      if width < 1
+        return 1
+      end if
+      return width
+    end function
+
+    private sub growStripPool(rayCount as integer)
+      for i = m.stripRgba.count() to rayCount - 1
+        m.stripRgba.push(-1)
+        m.stripShade.push(-1)
+      end for
+    end sub
+
+    ' Sets each drawn strip's rgba: the tint, lit at every lightInterval-th strip of a run
+    ' on one wall face (and at each run's ends) and interpolated between, then faded.
+    private sub shadeStrips(rendererObj as Renderer, rayCount as integer, stripsChanged as boolean)
+      d = m.drawable
+      base = d.getFillColorRGBA()
+      if not stripsChanged and m.shadeStamp = m.stripStamp and not m.lightingChangedThisDraw and not m.qualityChangedThisDraw and base = m.shadeBase and d.isShaded = m.shadeShaded and d.ambientBrightness = m.shadeAmbient and d.lightWrap = m.shadeWrap
+        return
+      end if
+      m.shadeStamp = m.stripStamp
+      m.shadeBase = base
+      m.shadeShaded = d.isShaded
+      m.shadeAmbient = d.ambientBrightness
+      m.shadeWrap = d.lightWrap
+
+      shades = m.stripShade
+      drawn = m.builder.drawn
+      if d.isShaded
+        sameNext = m.builder.sameFaceNext
+        interval = rendererObj.qualitySettings.gridWallLightInterval
+        i = 0
+        while i < rayCount
+          if drawn[i]
+            runEnd = i
+            while runEnd + 1 < rayCount and drawn[runEnd + 1] and sameNext[runEnd]
+              runEnd++
+            end while
+            m.shadeRun(i, runEnd, interval, base)
+            i = runEnd
+          end if
+          i++
+        end while
+      end if
+
+      rgbas = m.stripRgba
+      fades = m.builder.fade
+      shaded = d.isShaded
+      for i = 0 to rayCount - 1
+        if drawn[i]
+          shade = base
+          if shaded
+            shade = shades[i]
+          end if
+          ' BGE.RendererHelpers.applyAlphaFade(), inlined
+          fade = fades[i]
+          if fade < 1
+            shade = (shade and &hFFFFFF00) or int((shade and &hFF) * fade + 0.5)
+          end if
+          rgbas[i] = shade
+        end if
+      end for
+    end sub
+
+    ' Lights rays first..last (one wall face) every interval rays and at both ends, and
+    ' interpolates between.
+    private sub shadeRun(first as integer, last as integer, interval as integer, base as integer)
+      if interval < 1
+        interval = 1
+      end if
+      m.stripShade[first] = m.shadeRay(first, base)
+      sampled = first
+      while sampled < last
+        nextSample = sampled + interval
+        if nextSample > last
+          nextSample = last
+        end if
+        m.stripShade[nextSample] = m.shadeRay(nextSample, base)
+        m.interpolateShades(sampled, nextSample)
+        sampled = nextSample
+      end while
+    end sub
+
+    ' Fills the shades strictly between two sampled rays, per channel.
+    private sub interpolateShades(fromRay as integer, toRay as integer)
+      shades = m.stripShade
+      a = shades[fromRay]
+      b = shades[toRay]
+      ar = (a >> 24) and &hFF
+      ag = (a >> 16) and &hFF
+      ab = (a >> 8) and &hFF
+      aa = a and &hFF
+      dr = ((b >> 24) and &hFF) - ar
+      dg = ((b >> 16) and &hFF) - ag
+      db = ((b >> 8) and &hFF) - ab
+      da = (b and &hFF) - aa
+      span = toRay - fromRay
+      for i = fromRay + 1 to toRay - 1
+        t = (i - fromRay) / span
+        shades[i] = (int(ar + dr * t + 0.5) << 24) + (int(ag + dg * t + 0.5) << 16) + (int(ab + db * t + 0.5) << 8) + int(aa + da * t + 0.5)
+      end for
+    end sub
+
+    ' The tint lit at ray i's hit, at mid-height - with the renderer's lights, or by how
+    ' squarely the wall faces the camera when there are none (as SceneObjectBillboard does).
+    private function shadeRay(i as integer, base as integer) as integer
+      hit = m.view.getHit(i)
+      map = m.drawable.map
+      point = m.shadePoint
+      point.x = hit.x
+      point.y = map.origin.y + map.wallHeight * 0.5
+      point.z = hit.z
+      normal = m.shadeNormal
+      normal.x = hit.normalX
+      normal.y = 0
+      normal.z = hit.normalZ
+      rendererObj = m.rendererObj
+      if rendererObj.hasLights()
+        return BGE.Lighting.shadeColor(base, rendererObj.getPreparedLights(), point, normal, m.drawable.ambientBrightness, m.drawable.lightWrap)
+      end if
+      facing = getOutwardNormalFacingAmount(rendererObj, point, normal)
+      return BGE.colorBrightness(base, BGE.Math.Max(facing, m.drawable.ambientBrightness))
+    end function
+
+    ' With the draw_scene_object_normals debug value: a dot at every 8th strip's foot, and
+    ' rays/strips counts top left.
+    private sub drawDebug(rendererObj as Renderer, rayCount as integer)
+      game = m.drawable.getGame()
+      if invalid = game or not isTrue(game.getDebugValue("draw_scene_object_normals"))
+        return
+      end if
+      for i = 0 to rayCount - 1 step 8
+        if m.builder.drawn[i]
+          rendererObj.drawRectangle(m.builder.x[i] - 2, m.builder.y[i] - 2, 4, 4, BGE.Colors.Red)
+        end if
+      end for
+      rendererObj.drawText(`walls ${rayCount}/${m.stripsDrawnLastFrame}`, 140, 80)
+    end sub
+
+  end class
+
+end namespace

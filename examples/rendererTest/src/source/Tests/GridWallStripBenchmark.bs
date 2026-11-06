@@ -1,0 +1,151 @@
+' Decides how grid-wall strips (one 4 px wide, 360 px tall column of a wall texture per
+' screen strip, 320 per frame) get drawn on a real Roku:
+'
+'   upright      - DrawScaledObject, no lean (the cheap reference)
+'   transformed  - DrawTransformedObject per strip, with a lean that grows from 0 at screen
+'                  centre to the phase's maximum at the edges (as camera pitch leans verticals)
+'   stacked      - upright DrawScaledObject pieces offset along a 30 degree lean
+'
+' setup() times each phase over 60 frames into an offscreen bitmap (Finish()ed so queued
+' work is counted) and prints `PHASE <name>: <ms> ms/frame`. up/down then picks a phase to
+' draw live, so the on-screen fps shows the real queued-draw cost; OK reruns the timings.
+class GridWallStripBenchmark extends RendererTest
+
+  private stripCount = 320
+  private stripWidth = 4
+  private stripHeight = 360
+  private texWidth = 64
+  private texHeight = 128
+  private frames = 60
+  private pieceCount = 4
+
+  private columns as roRegion[] = []
+  private pieces as roRegion[] = []
+  private phaseNames as string[] = ["upright", "transformed 0deg", "transformed 10deg", "transformed 30deg", "stacked4 30deg"]
+  private phaseMs as float[] = []
+  private livePhase = 3
+  private liveFrames = 0
+  private liveSeconds = 0.0
+
+  sub new()
+    super("Grid Wall Strip Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.buildTexture()
+    m.runBenchmark()
+  end sub
+
+  private sub buildTexture()
+    bmp = CreateObject("roBitmap", {width: m.texWidth, height: m.texHeight, alphaEnable: true})
+    bmp.Clear(&h000000FF)
+    for x = 0 to m.texWidth - 1
+      for y = 0 to m.texHeight - 1 step 16
+        shade = 80 + ((x * 3 + y) mod 160)
+        bmp.DrawRect(x, y, 1, 16, shade * &h1000000 + shade * &h10000 + 255 * &h100 + &hFF)
+      end for
+    end for
+    m.columns = []
+    m.pieces = []
+    pieceH = m.texHeight / m.pieceCount
+    for x = 0 to m.texWidth - 1
+      col = CreateObject("roRegion", bmp, x, 0, 1, m.texHeight)
+      col.SetPreTranslation(0, -m.texHeight / 2)
+      m.columns.push(col)
+      for p = 0 to m.pieceCount - 1
+        piece = CreateObject("roRegion", bmp, x, p * pieceH, 1, pieceH)
+        piece.SetPreTranslation(0, -pieceH / 2)
+        m.pieces.push(piece)
+      end for
+    end for
+  end sub
+
+  ' Draws one frame of a phase onto target (centre line at y = centreY).
+  private sub drawPhase(target as object, phase as integer)
+    centreY = 360
+    scaleX = m.stripWidth
+    scaleY = m.stripHeight / m.texHeight
+    maxDeg = 0.0
+    if phase = 2
+      maxDeg = 10.0
+    else if phase = 3 or phase = 4
+      maxDeg = 30.0
+    end if
+    pieceScaleY = scaleY
+    pieceSpacing = m.stripHeight / m.pieceCount
+    for i = 0 to m.stripCount - 1
+      x = i * m.stripWidth
+      tex = i mod m.texWidth
+      lean = maxDeg * (x - 640) / 640
+      if phase = 0
+        target.DrawScaledObject(x, centreY, scaleX, scaleY, m.columns[tex], -1)
+      else if phase < 4
+        target.DrawTransformedObject(x, centreY, lean, scaleX, scaleY, m.columns[tex], -1)
+      else
+        rad = lean * 3.14159265 / 180
+        for p = 0 to m.pieceCount - 1
+          d = (p - (m.pieceCount - 1) / 2) * pieceSpacing
+          target.DrawScaledObject(x + d * sin(rad), centreY + d * cos(rad), scaleX, pieceScaleY, m.pieces[tex * m.pieceCount + p], -1)
+        end for
+      end if
+    end for
+  end sub
+
+  private sub runBenchmark()
+    target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+    timer = CreateObject("roTimespan")
+    m.phaseMs = []
+    print "=== Grid Wall Strip Benchmark ==="
+    for phase = 0 to m.phaseNames.count() - 1
+      target.Clear(&h000000FF)
+      target.Finish()
+      timer.Mark()
+      for f = 1 to m.frames
+        m.drawPhase(target, phase)
+        target.Finish()
+      end for
+      ms = timer.TotalMilliseconds() / m.frames
+      m.phaseMs.push(ms)
+      print `PHASE ${m.phaseNames[phase]}: ${ms} ms/frame`
+    end for
+    print "=== end ==="
+  end sub
+
+  override sub update(dt as float)
+    m.liveFrames++
+    m.liveSeconds += dt
+    if m.liveSeconds >= 3
+      print `LIVE ${m.phaseNames[m.livePhase]}: ${m.liveFrames / m.liveSeconds} fps`
+      m.liveFrames = 0
+      m.liveSeconds = 0
+    end if
+  end sub
+
+  override sub onInput(buttonName as string)
+    count = m.phaseNames.count()
+    if buttonName = "up"
+      m.livePhase = (m.livePhase + count - 1) mod count
+    else if buttonName = "down"
+      m.livePhase = (m.livePhase + 1) mod count
+    else if buttonName = "OK"
+      m.runBenchmark()
+    end if
+    m.liveFrames = 0
+    m.liveSeconds = 0
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    m.drawPhase(m.screenRef, m.livePhase)
+    y = 60
+    for i = 0 to m.phaseMs.count() - 1
+      prefix = "  "
+      if i = m.livePhase
+        prefix = "> "
+      end if
+      renderer.drawText(`${prefix}${m.phaseNames[i]}: ${m.phaseMs[i]} ms/frame`, 40, y, BGE.Colors.Yellow)
+      y += 26
+    end for
+    renderer.drawText("Up/Down: live phase   OK: rerun timings", 40, y + 10, BGE.Colors.Gray)
+  end sub
+
+end class

@@ -1,0 +1,293 @@
+import "GridWallsMap.bs"
+import "GridWallsRayCaster.bs"
+import "../cameras/Camera3d.bs"
+import "../../../math/vector.bs"
+
+namespace BGE
+
+  ' A run of rays covering some world points, filled by GridWallsView.findSpan().
+  interface GridWallsSpan
+    valid as boolean
+    firstRay as integer
+    lastRay as integer
+    ' The smallest forward depth of the points, measured along the level forward vector.
+    nearestDistance as float
+    ' True if some point's sight line clears the wall top at the wall's depth, so it can show
+    ' above walls that hide the rest.
+    optional anyAboveWalls as boolean
+  end interface
+
+  ' A fan of horizontal rays across the camera's view, cast through a GridWallsMap each frame
+  ' and kept as a depth buffer in ground-plane terms (bearing + horizontal distance), so camera
+  ' pitch doesn't affect it. Ray i has bearing tangent firstTan + i * tanStep relative to
+  ' levelForward, i.e. direction normalise(levelForward + levelRight * tan).
+  class GridWallsView
+
+    rayCount as integer = 0
+    firstTan as float = 0
+    tanStep as float = 1
+    ' Camera forward flattened onto the ground plane (unit), and its right (unit).
+    levelForward as BGE.Math.Vector = BGE.Math.VectorOps.create(0, 0, -1)
+    levelRight as BGE.Math.Vector = BGE.Math.VectorOps.create(1, 0, 0)
+    ' Horizontal length of the camera's orientation.
+    cosPitch as float = 1
+    ' Camera position on the ground plane, as of the last update().
+    originX as float = 0
+    originY as float = 0
+    originZ as float = 0
+    ' Per-ray unit direction (x, z), filled by update(); read these in hot loops instead of
+    ' rayDirection(), which allocates.
+    rayDirX = [] as float[]
+    rayDirZ = [] as float[]
+    ' How much nearer than a point a wall must be to hide it, in forward depth. Ray indices
+    ' round to the nearest strip, so a point flush against a wall receding from the camera can
+    ' land on a ray hitting that wall up to half a strip nearer; anything really behind a wall
+    ' is at least a solid cell further than its face.
+    hideTolerance as float = 0
+
+    private map as BGE.GridWallsMap
+    private caster as BGE.GridWallsRayCaster
+    ' Preallocated, grown with rayCount and never shrunk.
+    private hits = [] as BGE.GridWallsHit[]
+    private hitFlags = [] as boolean[]
+    private depths = [] as float[]
+
+    sub new(map as BGE.GridWallsMap)
+      m.map = map
+      m.caster = new BGE.GridWallsRayCaster(map)
+      m.hideTolerance = map.cellSize * 0.25
+    end sub
+
+    ' Casts every ray for this frame. stripWidth is the screen width in pixels one ray covers.
+    ' Returns false (rayCount 0) if the camera looks too close to straight up or down for a
+    ' ground-plane bearing to exist.
+    '
+    ' Supports pitch from about 15 degrees up to 35 degrees down; beyond that the ray count
+    ' grows fast, so it is capped at 4 rays per screen strip width and the fan thins out
+    ' (strips then cover more than stripWidth). Camera roll is ignored. A camera outside the
+    ' grid sees no walls, so nothing is hidden.
+    function update(camera as BGE.Camera3d, stripWidth as integer) as boolean
+      orient = camera.orientation
+      cosPitch = sqr(orient.x * orient.x + orient.z * orient.z)
+      m.cosPitch = cosPitch
+      if cosPitch < 0.02
+        m.rayCount = 0
+        return false
+      end if
+
+      camPos = camera.position
+      m.originX = camPos.x
+      m.originY = camPos.y
+      m.originZ = camPos.z
+
+      lfx = orient.x / cosPitch
+      lfz = orient.z / cosPitch
+      m.levelForward = BGE.Math.VectorOps.create(lfx, 0, lfz)
+      right = camera.getLevelRightVector()
+      m.levelRight = BGE.Math.VectorOps.create(right.x, 0, right.z)
+      rx = right.x
+      rz = right.z
+      up = camera.getLevelUpVector()
+
+      focal = camera.getFocalLength()
+      halfW = camera.frameSize.x * 0.5
+      halfH = camera.frameSize.y * 0.5
+      minTan = 1.0e30
+      maxTan = -1.0e30
+      for each sx in [-1, 1]
+        for each sy in [-1, 1]
+          cx = orient.x * focal + right.x * halfW * sx + up.x * halfH * sy
+          cz = orient.z * focal + right.z * halfW * sx + up.z * halfH * sy
+          fwd = cx * lfx + cz * lfz
+          if fwd < focal * 0.01
+            fwd = focal * 0.01
+          end if
+          t = (cx * rx + cz * rz) / fwd
+          if t < minTan
+            minTan = t
+          end if
+          if t > maxTan
+            maxTan = t
+          end if
+        end for
+      end for
+
+      tanStep = stripWidth * cosPitch / focal
+      m.tanStep = tanStep
+      firstTan = minTan - tanStep
+      m.firstTan = firstTan
+      rayCount = int((maxTan + tanStep - firstTan) / tanStep) + 1
+      maxRays = int(4 * camera.frameSize.x / stripWidth + 0.999)
+      if rayCount > maxRays
+        ' thin the fan, still spanning minTan..maxTan with a ray's margin each side
+        tanStep = (maxTan - minTan) / (maxRays - 3)
+        m.tanStep = tanStep
+        firstTan = minTan - tanStep
+        m.firstTan = firstTan
+        rayCount = maxRays
+      end if
+      m.rayCount = rayCount
+
+      hits = m.hits
+      hitFlags = m.hitFlags
+      rayDirX = m.rayDirX
+      rayDirZ = m.rayDirZ
+      depths = m.depths
+      for i = hits.count() to rayCount - 1
+        hits.push({distance: 0.0, x: 0.0, z: 0.0, u: 0.0, texture: "", normalX: 0.0, normalZ: 0.0, col: 0, row: 0})
+        hitFlags.push(false)
+        depths.push(1.0e30)
+        rayDirX.push(0.0)
+        rayDirZ.push(0.0)
+      end for
+
+      ' the caster reports an outside origin as a wall at distance 0, which would hide everything
+      cell = m.map.cellAt(camPos.x, camPos.z)
+      isOutside = cell.col < 0 or cell.row < 0 or cell.col >= m.map.colCount or cell.row >= m.map.rowCount
+      maxDistance = camera.getCurrentDrawDistance() / cosPitch + m.map.wallHeight
+      caster = m.caster
+      ox = camPos.x
+      oz = camPos.z
+      for i = 0 to rayCount - 1
+        t = firstTan + i * tanStep
+        invLen = 1.0 / sqr(1.0 + t * t)
+        dx = (lfx + rx * t) * invLen
+        dz = (lfz + rz * t) * invLen
+        rayDirX[i] = dx
+        rayDirZ[i] = dz
+        if not isOutside and caster.cast(ox, oz, dx, dz, maxDistance, hits[i])
+          hitFlags[i] = true
+          depths[i] = hits[i].distance * (dx * lfx + dz * lfz)
+        else
+          hitFlags[i] = false
+          depths[i] = 1.0e30
+        end if
+      end for
+      return true
+    end function
+
+    ' True if ray i found a wall. Valid for i in 0..rayCount-1 (unchecked).
+    function hasHit(i as integer) as boolean
+      return m.hitFlags[i]
+    end function
+
+    ' The hit of ray i; only meaningful when hasHit(i). Valid for i in 0..rayCount-1 (unchecked).
+    function getHit(i as integer) as BGE.GridWallsHit
+      return m.hits[i]
+    end function
+
+    ' The wall's forward depth on ray i, measured along the level forward vector (hit distance
+    ' times the ray's cosine with it), or 1e30 when the ray has no hit. A flat wall facing the
+    ' camera has the same depth on every ray. Valid for i in 0..rayCount-1 (unchecked).
+    function getDepth(i as integer) as float
+      return m.depths[i]
+    end function
+
+    ' Every ray's hit, indexed by ray, for hot loops (meaningful only where getHitFlags() is true).
+    function getHits() as BGE.GridWallsHit[]
+      return m.hits
+    end function
+
+    ' Every ray's hasHit(), indexed by ray, for hot loops.
+    function getHitFlags() as boolean[]
+      return m.hitFlags
+    end function
+
+    ' Every ray's getDepth(), indexed by ray, for hot loops.
+    function getDepths() as float[]
+      return m.depths
+    end function
+
+    ' The unit ground-plane direction of ray i (allocates; see rayDirX/rayDirZ).
+    function rayDirection(i as integer) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(m.rayDirX[i], 0, m.rayDirZ[i])
+    end function
+
+    ' Fills `out` with the rays covering a set of world points, without allocating. Invalid if
+    ' empty or any point is level with or behind the camera horizontally.
+    '
+    ' @param {BGE.Math.Vector[]} points
+    ' @param {BGE.GridWallsSpan} out the span to fill
+    ' @return {boolean} out.valid
+    function findSpan(points as BGE.Math.Vector[], out as BGE.GridWallsSpan) as boolean
+      out.valid = false
+      if points.count() = 0 or m.rayCount = 0
+        return false
+      end if
+      first = m.rayCount
+      last = -1
+      nearest = 1.0e30
+      anyAbove = false
+      for each point in points
+        fwd = m.forwardDepth(point)
+        if fwd <= 0
+          return false
+        end if
+        i = m.rayIndexFor(point, fwd)
+        if i < first
+          first = i
+        end if
+        if i > last
+          last = i
+        end if
+        if fwd < nearest
+          nearest = fwd
+        end if
+        if not anyAbove and m.isAboveWallTop(point, fwd, m.depths[i])
+          anyAbove = true
+        end if
+      end for
+      out.anyAboveWalls = anyAbove
+      out.valid = true
+      out.firstRay = first
+      out.lastRay = last
+      out.nearestDistance = nearest
+      return true
+    end function
+
+    ' True when the point's ray has a wall nearer than the point by more than hideTolerance, in
+    ' forward depth.
+    function isPointHidden(point as BGE.Math.Vector) as boolean
+      if m.rayCount = 0
+        return false
+      end if
+      fwd = m.forwardDepth(point)
+      if fwd <= 0
+        return false
+      end if
+      i = m.rayIndexFor(point, fwd)
+      depth = m.depths[i]
+      return depth < fwd - m.hideTolerance and not m.isAboveWallTop(point, fwd, depth)
+    end function
+
+    ' True if a wall at forward depth `wallDepth` hides the point in plan view (nearer than it
+    ' by more than hideTolerance) but the line of sight to it clears the wall top.
+    private function isAboveWallTop(point as BGE.Math.Vector, fwd as float, wallDepth as float) as boolean
+      if wallDepth >= fwd - m.hideTolerance
+        return false
+      end if
+      wallTop = m.map.origin.y + m.map.wallHeight
+      return m.originY + (point.y - m.originY) * wallDepth / fwd > wallTop
+    end function
+
+    private function forwardDepth(point as BGE.Math.Vector) as float
+      lf = m.levelForward
+      return (point.x - m.originX) * lf.x + ((point.z ?? 0) - m.originZ) * lf.z
+    end function
+
+    private function rayIndexFor(point as BGE.Math.Vector, fwd as float) as integer
+      lr = m.levelRight
+      t = ((point.x - m.originX) * lr.x + ((point.z ?? 0) - m.originZ) * lr.z) / fwd
+      i = int((t - m.firstTan) / m.tanStep + 0.5)
+      if i < 0
+        return 0
+      end if
+      if i >= m.rayCount
+        return m.rayCount - 1
+      end if
+      return i
+    end function
+
+  end class
+
+end namespace
