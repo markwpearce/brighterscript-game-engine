@@ -1,0 +1,527 @@
+import "../../../math/math.bs"
+import "../../drawables/DrawableGridWalls.bs"
+import "../cameras/Camera3d.bs"
+import "GridWallsMap.bs"
+import "GridWallsRayCaster.bs"
+import "GridWallsView.bs"
+
+namespace BGE
+
+  ' Builds SceneObjectGridWalls' strips into parallel arrays. One pass runs from the last ray
+  ' to the first, projecting each ray's wall foot and top once and carrying them back to the
+  ' ray before, whose width reaches to them. Strip k of the last build() is ray first + k.
+  class GridWallStripBuilder
+
+    ' Per strip, grown and never shrunk; the rest are meaningful only where drawn[k].
+    drawn = [] as boolean[]
+    x = [] as float[]
+    y = [] as float[]
+    angle = [] as float[]
+    scaleX = [] as float[]
+    scaleY = [] as float[]
+    column = [] as roRegion[]
+    distance = [] as float[]
+    fade = [] as float[]
+    ' Per ray: whether ray i's hit is on the same wall face as ray i + 1's.
+    sameFaceNext = [] as boolean[]
+    ' Rays the last build() skipped as wholly off the canvas before working out their strip.
+    earlyCulled as integer = 0
+
+    private drawable as BGE.DrawableGridWalls
+    private stripWidth as float = 1.0
+
+    ' Camera-space x of the wall point (px, foot or top, pz) is px * ax0 + pz * ax2 + axFoot
+    ' (or axTop); likewise y and z. Read from Camera3d.worldToCamera.
+    private ax0 as float = 0.0
+    private ax2 as float = 0.0
+    private axFoot as float = 0.0
+    private axTop as float = 0.0
+    private ay0 as float = 0.0
+    private ay2 as float = 0.0
+    private ayFoot as float = 0.0
+    private ayTop as float = 0.0
+    private az0 as float = 0.0
+    private az2 as float = 0.0
+    private azFoot as float = 0.0
+    private azTop as float = 0.0
+    private focal as float = 1.0
+    private halfWidth as float = 0.0
+    private halfHeight as float = 0.0
+    ' Camera-space z a point must be at or below to be in front of the camera.
+    private limit as float = -0.01
+    private drawDistance as float = 0.0
+    private fades as boolean = false
+    private fadeBandStart as float = 0.0
+    ' Results of clipSegment().
+    private clipFootX as float = 0.0
+    private clipFootY as float = 0.0
+    private clipTopX as float = 0.0
+    private clipTopY as float = 0.0
+
+    ' Reads the camera's projection and draw distance for the builds that follow.
+    '
+    ' @param {Camera3d} camera
+    ' @param {DrawableGridWalls} drawable
+    ' @param {integer} stripWidth the screen width one ray covers, in pixels
+    sub prepare(camera as Camera3d, drawable as BGE.DrawableGridWalls, stripWidth as integer)
+      m.drawable = drawable
+      m.stripWidth = stripWidth
+      if invalid = camera.worldToCamera
+        camera.computeWorldToCameraMatrix()
+      end if
+      mat = camera.worldToCamera
+      m0 = mat[0]
+      m1 = mat[1]
+      m2 = mat[2]
+      m3 = mat[3]
+      map = drawable.map
+      floorY = map.origin.y
+      wallTop = floorY + map.wallHeight
+      m.ax0 = m0[0]
+      m.ax2 = m2[0]
+      m.axFoot = floorY * m1[0] + m3[0]
+      m.axTop = wallTop * m1[0] + m3[0]
+      m.ay0 = m0[1]
+      m.ay2 = m2[1]
+      m.ayFoot = floorY * m1[1] + m3[1]
+      m.ayTop = wallTop * m1[1] + m3[1]
+      m.az0 = m0[2]
+      m.az2 = m2[2]
+      m.azFoot = floorY * m1[2] + m3[2]
+      m.azTop = wallTop * m1[2] + m3[2]
+      m.focal = camera.getFocalLength()
+      m.halfWidth = camera.frameSize.x * 0.5
+      m.halfHeight = camera.frameSize.y * 0.5
+      m.limit = -map.cellSize * 0.01
+      ' as Camera3d.getDistanceFadeAlpha()
+      far = camera.getCurrentDrawDistance()
+      m.drawDistance = far
+      fraction = camera.drawDistanceFadeFraction
+      m.fades = fraction > 0
+      if fraction > 1
+        fraction = 1.0
+      end if
+      m.fadeBandStart = far * (1 - fraction)
+    end sub
+
+    ' Builds the strips of rays first..last of the view's last update(), after prepare().
+    '
+    ' @param {GridWallsView} view
+    ' @param {integer} first
+    ' @param {integer} last
+    sub build(view as BGE.GridWallsView, first as integer, last as integer)
+      m.grow(view.rayCount, last - first + 1)
+      m.buildRange(view, first, last)
+    end sub
+
+    private sub grow(rayCount as integer, stripCount as integer)
+      for i = m.sameFaceNext.count() to rayCount - 1
+        m.sameFaceNext.push(false)
+      end for
+      for k = m.drawn.count() to stripCount - 1
+        m.drawn.push(false)
+        m.x.push(0.0)
+        m.y.push(0.0)
+        m.angle.push(0.0)
+        m.scaleX.push(1.0)
+        m.scaleY.push(1.0)
+        m.column.push(invalid)
+        m.distance.push(0.0)
+        m.fade.push(1.0)
+      end for
+    end sub
+
+    private sub buildRange(view as BGE.GridWallsView, first as integer, last as integer)
+      hits = view.getHits()
+      flags = view.getHitFlags()
+      depths = view.getDepths()
+      rayCount = view.rayCount
+      sameNext = m.sameFaceNext
+      ax0 = m.ax0
+      ax2 = m.ax2
+      axFoot = m.axFoot
+      axTop = m.axTop
+      ay0 = m.ay0
+      ay2 = m.ay2
+      ayFoot = m.ayFoot
+      ayTop = m.ayTop
+      az0 = m.az0
+      az2 = m.az2
+      azFoot = m.azFoot
+      azTop = m.azTop
+      focal = m.focal
+      hw = m.halfWidth
+      hh = m.halfHeight
+      limit = m.limit
+      drawnOut = m.drawn
+      xOut = m.x
+      yOut = m.y
+      angleOut = m.angle
+      scaleXOut = m.scaleX
+      scaleYOut = m.scaleY
+      columnOut = m.column
+      distanceOut = m.distance
+      fadeOut = m.fade
+      drawDistance = m.drawDistance
+      fades = m.fades
+      bandStart = m.fadeBandStart
+      canvasWidth = hw * 2
+      canvasHeight = hh * 2
+      stripWidth = m.stripWidth
+      drawable = m.drawable
+      texture = ""
+      columns = invalid
+      columnCount = 0
+      columnHeight = 1.0
+      earlyCulled = 0
+
+      ' the ray after this one, carried back: its hit, projection and whether each end is
+      ' in front of the camera
+      nHas = false
+      nCol = 0
+      nRow = 0
+      nnx = 0.0
+      nnz = 0.0
+      nOk = false
+      nFootOk = false
+      nTopOk = false
+      nfx = 0.0
+      nfy = 0.0
+      ntx = 0.0
+      nty = 0.0
+
+      projectFrom = last + 1
+      if projectFrom > rayCount - 1
+        projectFrom = rayCount - 1
+      end if
+      for i = projectFrom to first step -1
+        has = flags[i]
+        hx = 0.0
+        hz = 0.0
+        nx = 0.0
+        nz = 0.0
+        dist = 0.0
+        hitCol = 0
+        hitRow = 0
+        if has
+          rayHit = hits[i]
+          hx = rayHit.x
+          hz = rayHit.z
+          hitCol = rayHit.col
+          hitRow = rayHit.row
+          nx = rayHit.normalX
+          nz = rayHit.normalZ
+          dist = rayHit.distance
+        end if
+        same = false
+        ' same plane: compare the hit cell's index, not float hit coordinates, which drift
+        ' apart far from the origin
+        if has and nHas and nx = nnx and nz = nnz
+          if nx <> 0
+            same = hitCol = nCol
+          else
+            same = hitRow = nRow
+          end if
+        end if
+        ' the first ray projected has no next ray to compare with unless it's the last
+        if i < projectFrom or i = rayCount - 1
+          sameNext[i] = same
+        end if
+
+        ok = false
+        footOk = false
+        topOk = false
+        fx = 0.0
+        fy = 0.0
+        tx = 0.0
+        ty = 0.0
+        fwd = 0.0
+        if has and dist > 0
+          cx = hx * ax0 + hz * ax2
+          cy = hx * ay0 + hz * ay2
+          cz = hx * az0 + hz * az2
+          czFoot = cz + azFoot
+          czTop = cz + azTop
+          if czFoot <= limit and czTop <= limit
+            fx = hw + focal * (cx + axFoot) / -czFoot
+            fy = hh - focal * (cy + ayFoot) / -czFoot
+            tx = hw + focal * (cx + axTop) / -czTop
+            ty = hh - focal * (cy + ayTop) / -czTop
+            footOk = true
+            topOk = true
+            ok = true
+          else if m.clipSegment(cx + axFoot, cy + ayFoot, czFoot, cx + axTop, cy + ayTop, czTop)
+            fx = m.clipFootX
+            fy = m.clipFootY
+            tx = m.clipTopX
+            ty = m.clipTopY
+            footOk = czFoot <= limit
+            topOk = czTop <= limit
+            ok = true
+          end if
+          fwd = -(czFoot + czTop) * 0.5
+        end if
+
+        ' take the next ray's projection, and carry this one back
+        stored = same and nOk
+        jFootOk = nFootOk
+        jTopOk = nTopOk
+        jfx = nfx
+        jfy = nfy
+        jtx = ntx
+        jty = nty
+        nHas = has
+        nCol = hitCol
+        nRow = hitRow
+        nnx = nx
+        nnz = nz
+        nOk = ok
+        nFootOk = footOk
+        nTopOk = topOk
+        nfx = fx
+        nfy = fy
+        ntx = tx
+        nty = ty
+
+        if i > last
+          continue for
+        end if
+        k = i - first
+        drawnOut[k] = false
+        if not ok or fwd >= drawDistance
+          continue for
+        end if
+
+        ' early cull: the strip can't reach further from its foot and top than the next
+        ' ray's foot or top (in x + y), plus its pixel of overlap
+        if stored
+          pad = -1.0
+          if jFootOk
+            pad = abs(jfx - fx) + abs(jfy - fy)
+          end if
+          if jTopOk
+            topPad = abs(jtx - tx) + abs(jty - ty)
+            if topPad > pad
+              pad = topPad
+            end if
+          end if
+          if pad < 0
+            pad = stripWidth
+          else
+            pad += 1
+          end if
+          minX = fx
+          maxX = tx
+          if tx < fx
+            minX = tx
+            maxX = fx
+          end if
+          minY = fy
+          maxY = ty
+          if ty < fy
+            minY = ty
+            maxY = fy
+          end if
+          if maxX + pad < 0 or maxY + pad < 0 or minX - pad > canvasWidth or minY - pad > canvasHeight
+            earlyCulled++
+            continue for
+          end if
+        end if
+
+        ' as Camera3d.getDistanceFadeAlpha() at mid-height
+        fade = 1.0
+        if fades and fwd > bandStart
+          fade = (drawDistance - fwd) / (drawDistance - bandStart)
+        end if
+
+        dx = tx - fx
+        dy = ty - fy
+        length = sqr(dx * dx + dy * dy)
+        if length < 0.5
+          continue for
+        end if
+        sinA = -dx / length
+        cosA = -dy / length
+
+        ' width: across to the next ray's foot or top, whichever is further (pitched down,
+        ' verticals converge below the screen so tops spread wider), plus a pixel of overlap
+        reach = -1.0e30
+        if stored
+          if jFootOk
+            reach = (jfx - fx) * cosA - (jfy - fy) * sinA
+          end if
+          if jTopOk
+            topReach = (jtx - tx) * cosA - (jty - ty) * sinA
+            if topReach > reach
+              reach = topReach
+            end if
+          end if
+        else
+          reach = m.neighbourReach(view, i, same, fx, fy, tx, ty, sinA, cosA)
+        end if
+        width = stripWidth
+        if reach > -1.0e30
+          width = reach + 1
+          if width < 1
+            width = 1.0
+          end if
+        end if
+
+        ' cull a strip wholly off the canvas
+        wx = width * cosA
+        wy = -width * sinA
+        minX = fx
+        maxX = fx
+        if tx < minX
+          minX = tx
+        else if tx > maxX
+          maxX = tx
+        end if
+        if wx < 0
+          minX += wx
+        else
+          maxX += wx
+        end if
+        minY = fy
+        maxY = fy
+        if ty < minY
+          minY = ty
+        else if ty > maxY
+          maxY = ty
+        end if
+        if wy < 0
+          minY += wy
+        else
+          maxY += wy
+        end if
+        if maxX < 0 or maxY < 0 or minX > canvasWidth or minY > canvasHeight
+          continue for
+        end if
+
+        hit = hits[i]
+        if hit.texture <> texture or invalid = columns
+          texture = hit.texture
+          columns = drawable.getColumns(texture)
+          if invalid <> columns
+            columnCount = columns.count()
+            columnHeight = columns[0].GetHeight()
+          end if
+        end if
+        if invalid = columns
+          continue for
+        end if
+        columnIndex = int(hit.u * columnCount)
+        if columnIndex < 0
+          columnIndex = 0
+        else if columnIndex >= columnCount
+          columnIndex = columnCount - 1
+        end if
+
+        if cosA > 0
+          angleOut[k] = Atn(sinA / cosA)
+        else
+          angleOut[k] = BGE.Math.Atan2(sinA, cosA)
+        end if
+        xOut[k] = fx
+        yOut[k] = fy
+        scaleXOut[k] = width
+        scaleYOut[k] = length / columnHeight
+        columnOut[k] = columns[columnIndex]
+        distanceOut[k] = depths[i]
+        fadeOut[k] = fade
+        drawnOut[k] = true
+      end for
+      m.earlyCulled = earlyCulled
+    end sub
+
+    ' The reach across the strip (sinA, cosA) from its foot or top to ray i + 1's wall point,
+    ' whichever is further: on ray i + 1's own hit if that's on the same face, otherwise at
+    ' this hit's distance along it. -1e30 if neither is in front of the camera.
+    private function neighbourReach(view as BGE.GridWallsView, i as integer, sameFace as boolean, fx as float, fy as float, tx as float, ty as float, sinA as float, cosA as float) as float
+      hits = view.getHits()
+      j = i + 1
+      if sameFace
+        nextHit = hits[j]
+        qx = nextHit.x
+        qz = nextHit.z
+      else
+        distance = hits[i].distance
+        if j < view.rayCount
+          dirX = view.rayDirX[j]
+          dirZ = view.rayDirZ[j]
+        else
+          t = view.firstTan + j * view.tanStep
+          invLength = 1.0 / sqr(1.0 + t * t)
+          lf = view.levelForward
+          lr = view.levelRight
+          dirX = (lf.x + lr.x * t) * invLength
+          dirZ = (lf.z + lr.z * t) * invLength
+        end if
+        qx = view.originX + dirX * distance
+        qz = view.originZ + dirZ * distance
+      end if
+      cx = qx * m.ax0 + qz * m.ax2
+      cy = qx * m.ay0 + qz * m.ay2
+      cz = qx * m.az0 + qz * m.az2
+      reach = -1.0e30
+      czFoot = cz + m.azFoot
+      if czFoot <= m.limit
+        px = m.halfWidth + m.focal * (cx + m.axFoot) / -czFoot
+        py = m.halfHeight - m.focal * (cy + m.ayFoot) / -czFoot
+        reach = (px - fx) * cosA - (py - fy) * sinA
+      end if
+      czTop = cz + m.azTop
+      if czTop <= m.limit
+        px = m.halfWidth + m.focal * (cx + m.axTop) / -czTop
+        py = m.halfHeight - m.focal * (cy + m.ayTop) / -czTop
+        topReach = (px - tx) * cosA - (py - ty) * sinA
+        if topReach > reach
+          reach = topReach
+        end if
+      end if
+      return reach
+    end function
+
+    ' Projects a vertical segment with an end behind the camera into clipFoot/clipTop: the
+    ' end is clipped, and the visible part's screen line is extended to where that end would
+    ' be if the texture mapped linearly - it lands far off the canvas. False if both ends are
+    ' behind.
+    private function clipSegment(cx0 as float, cy0 as float, cz0 as float, cx1 as float, cy1 as float, cz1 as float) as boolean
+      limit = m.limit
+      if cz0 > limit and cz1 > limit
+        return false
+      end if
+      ' camera space is affine in y along the segment, so clip by interpolating
+      startT = 0.0
+      endT = 1.0
+      if cz0 > limit
+        startT = (limit - cz0) / (cz1 - cz0)
+      else if cz1 > limit
+        endT = (limit - cz0) / (cz1 - cz0)
+      end if
+      focal = m.focal
+      ax = cx0 + (cx1 - cx0) * startT
+      ay = cy0 + (cy1 - cy0) * startT
+      az = cz0 + (cz1 - cz0) * startT
+      bx = cx0 + (cx1 - cx0) * endT
+      by = cy0 + (cy1 - cy0) * endT
+      bz = cz0 + (cz1 - cz0) * endT
+      sax = m.halfWidth + focal * ax / -az
+      say = m.halfHeight - focal * ay / -az
+      sbx = m.halfWidth + focal * bx / -bz
+      sby = m.halfHeight - focal * by / -bz
+      visible = endT - startT
+      if visible < 0.001
+        ' all but a sliver is behind: extending it would overflow (or divide by zero)
+        return false
+      end if
+      m.clipFootX = sax - (sbx - sax) * startT / visible
+      m.clipFootY = say - (sby - say) * startT / visible
+      m.clipTopX = sax + (sbx - sax) * (1 - startT) / visible
+      m.clipTopY = say + (sby - say) * (1 - startT) / visible
+      return true
+    end function
+
+  end class
+
+end namespace

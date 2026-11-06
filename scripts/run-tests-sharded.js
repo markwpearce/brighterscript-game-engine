@@ -14,10 +14,12 @@ const { spawnSync } = require('child_process');
 const ROOT_DIR = path.join(__dirname, '..');
 const SHARD_DIR = path.join(ROOT_DIR, 'test-build-shards');
 
-// Spec globs (relative to rootDir) for each shard, added after every spec is excluded
+// Spec globs (relative to rootDir) for each shard, added after every spec is excluded.
+// UiContainer.spec.bs stays with the engine shard: Game.spec.bs uses its test widgets.
 const SHARDS = [
     { name: 'renderer', specs: ['source/engine/renderer/**/*.spec.bs'] },
-    { name: 'engine', specs: ['source/engine/**/*.spec.bs', '!source/engine/renderer/**/*.spec.bs'] },
+    { name: 'engine', specs: ['source/engine/**/*.spec.bs', '!source/engine/renderer/**/*.spec.bs', '!source/engine/ui/**/*.spec.bs', '!source/engine/loading/**/*.spec.bs', '!source/engine/quality/**/*.spec.bs', 'source/engine/ui/UiContainer.spec.bs'] },
+    { name: 'engine-ui', specs: ['source/engine/ui/**/*.spec.bs', 'source/engine/loading/**/*.spec.bs', 'source/engine/quality/**/*.spec.bs', '!source/engine/ui/UiContainer.spec.bs'] },
     { name: 'other', specs: ['source/**/*.spec.bs', '!source/engine/**/*.spec.bs'] }
 ];
 
