@@ -135,15 +135,15 @@ is set, which is why they look the same as they always did.
 
 ### Texture columns for flat quads
 
-On a `Camera3d`, images, sprites, text, circles and filled rectangles in the oriented and solid draw
-modes draw as **projected texture columns**: one `DrawTransformedObject` per 1-texel column of the
-texture, placed and sized in camera space, so the result is perspective correct with no scratch or temp
-bitmaps. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
+Images, sprites, text, circles and filled rectangles in the oriented and solid draw modes draw as
+**projected texture columns**: one `DrawTransformedObject` per 1-texel column of the texture, placed
+and sized in camera space, so the result is perspective correct with no scratch or temp bitmaps. On a
+`Camera2d` the same columns are projected orthographically. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
 `quadMinPixelsPerColumn`), and a per-frame budget keeps the draw count under Roku's queue limit.
 
 Columns go straight to the canvas only while the object moves relative to the camera. Once it's
 still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far
-cheaper than redrawing every column each frame. A still object never goes through the corner-pin warp.
+cheaper than redrawing every column each frame.
 
 A quad that comes out as a plain rotated rectangle on screen (facing the camera, rotated only about the
 view axis) still takes the one-call fast path, because a single draw beats any number of columns.
@@ -155,29 +155,21 @@ The column cuts (`BGE.QuadColumnTexture`) are made once and shared:
 - Other textures are cached by the renderer under their region id (`Renderer.getQuadColumnTexture()`).
 - Filled rectangles use one shared white texture, tinted (`Renderer.getWhiteColumnTexture()`).
 
-Set `Renderer.drawFlatQuadsAsColumns = false` to go back to the temp bitmap and corner-pin path, for
-example to compare the two on a device.
-
 ### How a rectangle is drawn, and why it's a billboard
 
 `SceneObjectRectangle` extends `SceneObjectBillboard`, so a rectangle orients and foreshortens in 3D
 just like an image (see `examples/3d`'s RectanglesScene, which cycles a ring of panels through every
-draw mode). But unlike an image it has no texture to sample - it's one flat color - so it never uses
-the inherited **pinned-corners** path: filling the projected quad produces identical pixels for far
-less work, and `DrawableRectangle` never has to hold a bitmap of its own. That's how
-`SceneObjectPolygon` draws, for the same reason.
+draw mode). But it's one flat color with no texture to sample, so `DrawableRectangle` never has to
+hold a bitmap of its own.
 
-On a perspective camera (`Camera3d`), a filled rectangle in the oriented and solid draw modes is
-drawn as **texture columns** instead: tinted columns of a shared white texture, projected straight onto
-the canvas while it moves (see [Texture columns](#texture-columns-for-flat-quads) below). Once still, it
-fills its temp bitmap with triangles as before. With
-`Renderer.drawFlatQuadsAsColumns` off, or on a `Camera2d`, it caches that fill into a **temp bitmap**
-in the oriented draw modes, exactly like a polygon does. Filling a rotated quad means rasterizing two triangles through scratch bitmaps, which
-is far too expensive to repeat every frame for something that hasn't moved - skipping the cache here
-cost `examples/3d`'s RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was
-put back. Whether a `SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which
-`SceneObjectRectangle` overrides to also require `filled` - an outline-only rectangle has no fill
-worth caching.
+In the oriented and solid draw modes, a filled rectangle is drawn as **texture columns**: tinted
+columns of a shared white texture, projected straight onto the canvas while it moves (see
+[Texture columns](#texture-columns-for-flat-quads) below). Once still, it fills a **temp bitmap** with
+two triangles and blits that, exactly like a polygon does. Filling a rotated quad is far too expensive
+to repeat every frame for something that hasn't moved - skipping the cache here cost `examples/3d`'s
+RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was put back. Whether a
+`SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which `SceneObjectRectangle`
+overrides to also require `filled` - an outline-only rectangle has no fill worth caching.
 
 In the direct (billboard) draw modes with no rotation - which is the 2D case, since a `Camera2d`
 resolves `matchCamera` to `directToCamera` - it takes a shorter path still, going out as a single
@@ -610,17 +602,11 @@ but most of the expensive work is skipped unless something actually changed:
   when nothing's moved, rather than re-rasterizing from scratch every frame - drawing that cached
   bitmap is far cheaper than recomputing the object's projected geometry and re-drawing it.
 
-Two supporting pieces worth knowing about if you're touching rendering performance:
+One supporting piece worth knowing about if you're touching rendering performance:
 
-- **`TriangleCache`** caches rasterized triangle bitmaps - triangle drawing (`drawBitmapTriangleTo`,
-  `drawPinnedCorners`) is comparatively expensive per call, since it checks out and rasterizes
-  scratch bitmaps internally. Code that draws the same triangle-heavy shape every frame should
-  render once into a cached bitmap and blit that, rather than redoing the full draw at 60fps -
-  `examples/rendererTest/CornerPinGridTest.bs` is a worked example of this pattern (and of what
-  happens without it: most of a 26-tile grid silently failed to render after the first few tiles).
 - **`ScratchBitmapPool`** (`engine/renderer/ScratchBitmap.bs`) hands out reusable off-screen bitmaps
-  for exactly this kind of intermediate rendering work, so it doesn't need to allocate a fresh
-  `roBitmap` every frame. **Pooled bitmaps are handed out as-is, not cleared** - if you draw into
+  for intermediate rendering work (now only the mirrored-and-rotated blit), so it doesn't need to
+  allocate a fresh `roBitmap` every frame. **Pooled bitmaps are handed out as-is, not cleared** - if you draw into
   one and don't cover its entire area, whatever was left over from its previous, unrelated use will
   still be there. Always `Clear()` a scratch region yourself before drawing into it unless you're
   certain your draw call will fully cover it.
@@ -695,8 +681,10 @@ every instance of the model, so drawing a face only projects its strips. A movin
 faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
 With `useImpostor` (the default), only the model's own movement or turning counts: while just the
 camera moves, the impostor reuses its last capture.
-`Renderer.drawModelFacesAsColumns = false` (or a `Camera2d`) uses the older affine triangle warp,
-`Renderer.drawBitmapTriangle(To)`, with per-face rasters reused while moving. Solid (untextured)
+A `Camera2d` projects the strips orthographically (rendererTest's `camera2d-model` demo). A face
+that crosses the camera's near plane has its strips cut back to it. A face columns can't draw (the
+per-frame column budget is spent, or its UV triangle has no area) is filled with its shaded color
+instead, and the model's cached drawing isn't reused until it redraws in full. Solid (untextured)
 faces are filled straight into the canvas or the temp bitmap the same way, with no per-face rasters:
 on a Roku Ultra that was 1.5-3x faster than drawing each into its own raster and blitting it (#452).
 Two ways to get textures onto a model:

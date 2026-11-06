@@ -1,0 +1,139 @@
+' Textured models on a Camera2d (orthographic), drawn as texture columns (#454). Before #454
+' columns needed a perspective camera and Camera2d models fell back to the triangle warp.
+' OK toggles spin/still: still models draw once into their temp bitmap and blit it.
+class Camera2dModelTest extends RendererTest
+
+  private previousCamera as BGE.Camera
+  private texture as BGE.RendererHelpers.RegionWithId
+  private models = [] as BGE.DrawableModel[]
+  private angle as float = 0
+  private spinning as boolean = true
+
+  sub new()
+    super("Camera2d Model (OK spin/still)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.previousCamera = renderer.camera
+    camera = new BGE.Camera2d()
+    renderer.setCamera(camera)
+    camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+    m.texture = BGE.RendererHelpers.createRegionWithId(CreateObject("roRegion", m.createTexture(), 0, 0, 128, 128), "camera2d-model-test")
+    m.addModel(renderer, m.createCubeModel(110), BGE.Math.VectorOps.create(-220, 0, 0))
+    m.addModel(renderer, m.createSphereModel(130, 16, 12), BGE.Math.VectorOps.create(220, 0, 0))
+  end sub
+
+  private sub addModel(renderer as BGE.Renderer, model as BGE.Model3d, offset as BGE.Math.Vector)
+    drawable = new BGE.DrawableModel(invalid, model, {drawMode: BGE.SceneObjectDrawMode.oriented, offset: offset, rotation: BGE.Math.VectorOps.create(0.4, 0, 0)})
+    drawable.addToRenderer(renderer)
+    m.models.push(drawable)
+  end sub
+
+  ' 2x2 colored quadrants with a grid, so warping and seams show.
+  private function createTexture() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: false})
+    bmp.DrawRect(0, 0, 64, 64, &hD04040FF)
+    bmp.DrawRect(64, 0, 64, 64, &h4060D0FF)
+    bmp.DrawRect(0, 64, 64, 64, &h40B040FF)
+    bmp.DrawRect(64, 64, 64, 64, &hE0E0E0FF)
+    for i = 0 to 128 step 16
+      bmp.DrawRect(i, 0, 1, 128, &h202020FF)
+      bmp.DrawRect(0, i, 128, 1, &h202020FF)
+    end for
+    bmp.Finish()
+    return bmp
+  end function
+
+  private function createCubeModel(halfSize as float) as BGE.Model3d
+    s = halfSize
+    corners = []
+    for each c in [[-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s], [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]]
+      corners.push(BGE.Math.VectorOps.create(c[0], c[1], c[2]))
+    end for
+    faces = [] as BGE.Model3dFace[]
+    for each quad in [[4, 5, 6, 7], [1, 0, 3, 2], [5, 1, 2, 6], [0, 4, 7, 3], [7, 6, 2, 3], [0, 1, 5, 4]]
+      a = corners[quad[0]]
+      b = corners[quad[1]]
+      c = corners[quad[2]]
+      d = corners[quad[3]]
+      faces.push(m.texturedFace([a, b, c], [[0, 128], [128, 128], [128, 0]]))
+      faces.push(m.texturedFace([a, c, d], [[0, 128], [128, 0], [0, 0]]))
+    end for
+    return new BGE.Model3d(faces)
+  end function
+
+  private function createSphereModel(radius as float, slices as integer, stacks as integer) as BGE.Model3d
+    faces = [] as BGE.Model3dFace[]
+    for stack = 0 to stacks - 1
+      for slice = 0 to slices - 1
+        p = []
+        uv = []
+        for each corner in [[stack, slice], [stack, slice + 1], [stack + 1, slice + 1], [stack + 1, slice]]
+          phi = BGE.Math.PI * corner[0] / stacks
+          theta = 2 * BGE.Math.PI * corner[1] / slices
+          p.push(BGE.Math.VectorOps.create(radius * sin(phi) * cos(theta), radius * cos(phi), radius * sin(phi) * sin(theta)))
+          uv.push([128.0 * corner[1] / slices, 128.0 * corner[0] / stacks])
+        end for
+        if stack > 0
+          faces.push(m.texturedFace([p[0], p[2], p[1]], [uv[0], uv[2], uv[1]]))
+        end if
+        if stack < stacks - 1
+          faces.push(m.texturedFace([p[0], p[3], p[2]], [uv[0], uv[3], uv[2]]))
+        end if
+      end for
+    end for
+    return new BGE.Model3d(faces)
+  end function
+
+  ' A face wound to point away from the model's centre, textured with the given UVs.
+  private function texturedFace(vertices as BGE.Math.Vector[], uvs as object) as BGE.Model3dFace
+    face = BGE.Model3dFaceOps.create(vertices)
+    a = vertices[0]
+    b = vertices[1]
+    c = vertices[2]
+    if BGE.Math.VectorOps.dotProduct(face.normal, BGE.Math.VectorOps.create(a.x + b.x + c.x, a.y + b.y + c.y, a.z + b.z + c.z)) < 0
+      face = BGE.Model3dFaceOps.create([b, a, c])
+      uvs = [uvs[1], uvs[0], uvs[2]]
+    end if
+    points = [] as BGE.Math.Vector[]
+    for each uv in uvs
+      points.push(BGE.Math.VectorOps.create(uv[0], uv[1]))
+    end for
+    face.Texture = new BGE.Model3dTexture(m.texture, points)
+    return face
+  end function
+
+  override sub update(dt as float)
+    if m.spinning
+      m.angle += dt * 0.8
+    end if
+    for each model in m.models
+      model.rotation = BGE.Math.VectorOps.create(0.4, m.angle, 0)
+      model.update()
+    end for
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    renderer.render()
+    state = "still"
+    if m.spinning
+      state = "spinning"
+    end if
+    renderer.drawText(`Camera2d, textured faces as columns | ${state}`, 140, 80, BGE.Colors.White)
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "OK"
+      m.spinning = not m.spinning
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class
