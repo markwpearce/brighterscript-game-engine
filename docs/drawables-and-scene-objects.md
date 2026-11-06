@@ -696,8 +696,10 @@ faces straight to the canvas, and a still one draws them once into its temp bitm
 With `useImpostor` (the default), only the model's own movement or turning counts: while just the
 camera moves, the impostor reuses its last capture.
 `Renderer.drawModelFacesAsColumns = false` (or a `Camera2d`) uses the older affine triangle warp,
-`Renderer.drawBitmapTriangle(To)`, with per-face rasters reused while moving. Two ways to get
-textures onto a model:
+`Renderer.drawBitmapTriangle(To)`, with per-face rasters reused while moving. Solid (untextured)
+faces are filled straight into the canvas or the temp bitmap the same way, with no per-face rasters:
+on a Roku Ultra that was 1.5-3x faster than drawing each into its own raster and blitting it (#452).
+Two ways to get textures onto a model:
 
 - **Materials**: the `.obj` references a `mtllib <file>.mtl`, and each `usemtl <name>` line sets the
   material of the faces after it. Each material's `map_Kd <image>` is its texture, resolved relative
