@@ -5,6 +5,7 @@
 '              DrawTransformedObject from its projected foot to its projected top, as wide as
 '              the gap to the next column's projection plus a pixel
 '   cols 4px - as cols 1:1, but about one column per 4 screen pixels (at most 1:1)
+'   B..U     - the engine's BGE.QuadColumnDrawer at each render quality level, Basic to Ultra
 '
 ' Columns run along whichever texture axis changes depth least (rows of a transposed copy of
 ' the texture otherwise), so each is near constant depth and its linear mapping close to exact.
@@ -24,7 +25,7 @@ class TexturedQuadColumnsBenchmark extends RendererTest
   private warmupFrames = 3
   private buildRepeats = 10
 
-  private methodNames as string[] = ["pin", "cols 1:1", "cols 4px"]
+  private methodNames as string[] = ["pin", "cols 1:1", "cols 4px", "B", "L", "M", "H", "U"]
   private caseNames as string[] = []
   ' 12 floats per quad: world x, y, z of its top-left, top-right, bottom-left, bottom-right
   private caseQuads as object[] = []
@@ -35,6 +36,9 @@ class TexturedQuadColumnsBenchmark extends RendererTest
   private textureWithId as BGE.RendererHelpers.RegionWithId
   private columnsU as roRegion[] = []
   private columnsV as roRegion[] = []
+  private engineDrawer as BGE.QuadColumnDrawer
+  private engineTexture as BGE.QuadColumnTexture
+  private engineCorners as float[] = []
 
   ' camera
   private camX = 0.0
@@ -117,6 +121,9 @@ class TexturedQuadColumnsBenchmark extends RendererTest
     transposed = m.buildTexture(true)
     region = CreateObject("roRegion", plain, 0, 0, m.texSize, m.texSize)
     m.textureWithId = BGE.RendererHelpers.createRegionWithId(region, "textured-quad-columns")
+    m.engineTexture = new BGE.QuadColumnTexture(region, "textured-quad-columns")
+    m.engineDrawer = new BGE.QuadColumnDrawer()
+    m.engineDrawer.setProjection(m.focal, m.hw * 2, m.hh * 2)
     m.columnsU = []
     m.columnsV = []
     for c = 0 to m.texSize - 1
@@ -345,6 +352,8 @@ class TexturedQuadColumnsBenchmark extends RendererTest
   private sub drawCase(target as object, caseIndex as integer, method as integer)
     if method = 0
       m.drawCasePinned(target, caseIndex)
+    else if method >= 3
+      m.drawCaseEngine(target, caseIndex, method - 3)
     else
       m.buildCaseStrips(caseIndex, method)
       m.drawStrips(target)
@@ -364,6 +373,27 @@ class TexturedQuadColumnsBenchmark extends RendererTest
         m.rendererRef.drawPinnedCornersTo(target, corners, m.textureWithId, {}, -1)
       end if
     end for
+  end sub
+
+  ' Draws with the engine's column drawer at quality `level`; stripCount gets its columns.
+  private sub drawCaseEngine(target as object, caseIndex as integer, level as integer)
+    m.engineDrawer.beginFrame(BGE.getRenderQualityPreset(level as BGE.RenderQualityLevel))
+    quads = m.caseQuads[caseIndex]
+    cull = m.caseCull[caseIndex]
+    corners = m.engineCorners
+    for q = 0 to quads.count() / 12 - 1
+      if m.projectQuad(quads, q) and (not cull or m.isFrontFacing())
+        corners.Clear()
+        for i = 0 to 3
+          ' engine camera space looks down -z
+          corners.push(m.qx[i])
+          corners.push(m.qy[i])
+          corners.push(-m.qz[i])
+        end for
+        m.engineDrawer.drawTo(target, corners, m.engineTexture, [-1])
+      end if
+    end for
+    m.stripCount = m.engineDrawer.columnsThisFrame
   end sub
 
   private sub buildCaseStrips(caseIndex as integer, method as integer)
@@ -567,7 +597,9 @@ class TexturedQuadColumnsBenchmark extends RendererTest
     frameMs = m.sweepMsTotal / m.phaseFrames
     buildMs = 0.0
     strips = 0
-    if method > 0
+    if method >= 3
+      strips = m.stripCount
+    else if method > 0
       m.timer.Mark()
       for i = 1 to m.buildRepeats
         m.buildCaseStrips(caseIndex, method)
@@ -579,7 +611,9 @@ class TexturedQuadColumnsBenchmark extends RendererTest
     m.resultBuildMs.push(buildMs)
     m.resultStrips.push(strips)
     line = `PHASE ${m.caseNames[caseIndex]} | ${m.methodNames[method]}: ${m.format(frameMs)} ms/frame`
-    if method > 0
+    if method >= 3
+      line += ` (${strips} columns)`
+    else if method > 0
       line += ` (build ${m.format(buildMs)} ms, ${strips} strips)`
     end if
     print line
@@ -656,8 +690,8 @@ class TexturedQuadColumnsBenchmark extends RendererTest
     methodCount = m.methodNames.count()
     x = 40
     y = 90
-    m.screenRef.DrawRect(x - 10, y - 6, 560, 28 + 22 * m.caseNames.count(), &h000000B0)
-    renderer.drawText("ms/frame   pin    cols 1:1 (build)   cols 4px (build, strips)", x, y, BGE.Colors.Gray, m.smallFont)
+    m.screenRef.DrawRect(x - 10, y - 6, 1200, 28 + 22 * m.caseNames.count(), &h000000B0)
+    renderer.drawText("ms/frame   pin    cols 1:1 (build)   cols 4px (build, strips)   engine B L M H U (columns)", x, y, BGE.Colors.Gray, m.smallFont)
     y += 24
     for c = 0 to m.caseNames.count() - 1
       line = m.caseNames[c]
@@ -668,7 +702,9 @@ class TexturedQuadColumnsBenchmark extends RendererTest
         i = c * methodCount + method
         if i < m.resultMs.count()
           line += "  " + m.format(m.resultMs[i])
-          if method > 0
+          if method >= 3
+            line += ` (${m.resultStrips[i]})`
+          else if method > 0
             line += ` (${m.format(m.resultBuildMs[i])}`
             if method = 2
               line += `, ${m.resultStrips[i]}`

@@ -27,6 +27,8 @@ import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
 import "sceneObjects/SceneObject.bs"
 import "sceneObjects/SceneObjectGridWalls.bs"
+import "quadColumns/QuadColumnDrawer.bs"
+import "quadColumns/QuadColumnTexture.bs"
 import "ScratchBitmap.bs"
 import "TriangleCache.bs"
 
@@ -212,6 +214,10 @@ namespace BGE
     camera as Camera
 
     triangleCache = new TriangleCache(5)
+
+    ' Draws textured quads as projected texture columns (see drawTexturedQuadTo())
+    quadColumns = new BGE.QuadColumnDrawer()
+    private quadColumnTextures as roAssociativeArray = {}
 
     frameCount = 0
 
@@ -1333,6 +1339,7 @@ namespace BGE
       ' a free-running timer, so both readings round down alike and averages stay unbiased
       lap = m.occlusionTimer.TotalMilliseconds()
       m.activeGridWalls = invalid
+      m.quadColumns.beginFrame(m.qualitySettings)
       m.updateLighting()
       m.applyOccluderDrawPolicy()
       m.updateSceneObjects()
@@ -2719,6 +2726,56 @@ namespace BGE
         return BGE.Math.VectorOps.copy(point)
       end if
       return BGE.Math.VectorOps.add(point, BGE.Math.VectorOps.scale(BGE.Math.VectorOps.getNormalizedCopy(direction), padding))
+    end function
+
+    ' The column texture for `texture`, cut once and cached by its id (an empty id isn't cached).
+    '
+    ' @param {BGE.RendererHelpers.RegionWithId} texture
+    ' @return {BGE.QuadColumnTexture}
+    function getQuadColumnTexture(texture as BGE.RendererHelpers.RegionWithId) as BGE.QuadColumnTexture
+      id = texture.id
+      if id <> "" and m.quadColumnTextures.DoesExist(id)
+        return m.quadColumnTextures[id]
+      end if
+      columnTexture = new BGE.QuadColumnTexture(texture.region, id)
+      if id <> ""
+        m.quadColumnTextures[id] = columnTexture
+      end if
+      return columnTexture
+    end function
+
+    ' Draws a texture onto a world-space quad as projected texture columns (perspective
+    ' correct, no scratch bitmaps), with as many columns as render quality allows. Needs a
+    ' Camera3d.
+    '
+    ' @param {object} target an roBitmap or roScreen
+    ' @param {BGE.Math.Vector[]} corners the texture's top-left, top-right, bottom-left and bottom-right in world space
+    ' @param {BGE.RendererHelpers.RegionWithId} texture
+    ' @param {integer[]} colors one RGBA tint, or one per corner (blended across the quad)
+    ' @return {integer} columns drawn
+    function drawTexturedQuadTo(target as object, corners as BGE.Math.Vector[], texture as BGE.RendererHelpers.RegionWithId, colors = [-1] as integer[]) as integer
+      camera = m.camera
+      if not camera.isPerspective()
+        return 0
+      end if
+      if invalid = camera.worldToCamera
+        camera.computeWorldToCameraMatrix()
+      end if
+      mat = camera.worldToCamera
+      m0 = mat[0]
+      m1 = mat[1]
+      m2 = mat[2]
+      m3 = mat[3]
+      cameraCorners = [] as float[]
+      for each point in corners
+        w = point.x * m0[3] + point.y * m1[3] + point.z * m2[3] + m3[3]
+        cameraCorners.push((point.x * m0[0] + point.y * m1[0] + point.z * m2[0] + m3[0]) / w)
+        cameraCorners.push((point.x * m0[1] + point.y * m1[1] + point.z * m2[1] + m3[1]) / w)
+        cameraCorners.push((point.x * m0[2] + point.y * m1[2] + point.z * m2[2] + m3[2]) / w)
+      end for
+      camera3d = camera as BGE.Camera3d
+      m.quadColumns.setProjection(camera3d.getFocalLength(), camera.frameSize.x, camera.frameSize.y)
+      return m.quadColumns.drawTo(target, cameraCorners, m.getQuadColumnTexture(texture), colors)
     end function
 
     function drawPinnedCornersTo(draw2d as ifDraw2d, cornerPoints as BGE.Math.CornerPoints, drawableRegion as BGE.RendererHelpers.RegionWithId, options = {} as DrawPinnedCornersOptions, color = -1 as integer) as boolean
