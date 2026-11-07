@@ -51,6 +51,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
+| `DrawableGridWalls`   | `SceneObjectGridWalls`   | The solid cells of a grid maze as raycast walls - one textured strip per few screen pixels (see below). |
 | `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
 | `DrawableParticles`   | `SceneObjectParticle`    | A whole emitter's worth of simulated particles (lines, rectangles, or images), drawn through one `SceneObject` for the entire emitter (see below). |
 | _(billboard drawables, e.g. images used with `directToCamera`/`directScaled` draw modes)_ | `SceneObjectBillboard` | Always faces the camera regardless of its own rotation. |
@@ -132,22 +133,43 @@ In the `wireFrame` draw modes the outline *is* the entire drawing, so it's strok
 `drawToCanvas` and skipped by the hook. Those modes fall back to the fill color when no `outlineRGBA`
 is set, which is why they look the same as they always did.
 
+### Texture columns for flat quads
+
+Images, sprites, text, circles and filled rectangles in the oriented and solid draw modes draw as
+**projected texture columns**: one `DrawTransformedObject` per 1-texel column of the texture, placed
+and sized in camera space, so the result is perspective correct with no scratch or temp bitmaps. On a
+`Camera2d` the same columns are projected orthographically. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
+`quadMinPixelsPerColumn`), and a per-frame budget keeps the draw count under Roku's queue limit.
+
+Columns go straight to the canvas only while the object moves relative to the camera. Once it's
+still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far
+cheaper than redrawing every column each frame.
+
+A quad that comes out as a plain rotated rectangle on screen (facing the camera, rotated only about the
+view axis) still takes the one-call fast path, because a single draw beats any number of columns.
+
+The column cuts (`BGE.QuadColumnTexture`) are made once and shared:
+
+- A sprite's frames are cut through its `BGE.SpriteFrames` (`getColumnTexture(frameIndex)`), so every
+  sprite sharing those frames shares the cuts. The regions in `SpriteFrames` are never touched.
+- Other textures are cached by the renderer under their region id (`Renderer.getQuadColumnTexture()`).
+- Filled rectangles use one shared white texture, tinted (`Renderer.getWhiteColumnTexture()`).
+
 ### How a rectangle is drawn, and why it's a billboard
 
 `SceneObjectRectangle` extends `SceneObjectBillboard`, so a rectangle orients and foreshortens in 3D
 just like an image (see `examples/3d`'s RectanglesScene, which cycles a ring of panels through every
-draw mode). But unlike an image it has no texture to sample - it's one flat color - so it never uses
-the inherited **pinned-corners** path: filling the projected quad produces identical pixels for far
-less work, and `DrawableRectangle` never has to hold a bitmap of its own. That's how
-`SceneObjectPolygon` draws, for the same reason.
+draw mode). But it's one flat color with no texture to sample, so `DrawableRectangle` never has to
+hold a bitmap of its own.
 
-It does still cache that fill into a **temp bitmap** in the oriented draw modes, exactly like a
-polygon does. Filling a rotated quad means rasterizing two triangles through scratch bitmaps, which
-is far too expensive to repeat every frame for something that hasn't moved - skipping the cache here
-cost `examples/3d`'s RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was
-put back. Whether a `SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which
-`SceneObjectRectangle` overrides to also require `filled` - an outline-only rectangle has no fill
-worth caching.
+In the oriented and solid draw modes, a filled rectangle is drawn as **texture columns**: tinted
+columns of a shared white texture, projected straight onto the canvas while it moves (see
+[Texture columns](#texture-columns-for-flat-quads) below). Once still, it fills a **temp bitmap** with
+two triangles and blits that, exactly like a polygon does. Filling a rotated quad is far too expensive
+to repeat every frame for something that hasn't moved - skipping the cache here cost `examples/3d`'s
+RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was put back. Whether a
+`SceneObject` caches a given draw mode is `usesTempBitmap(drawMode)`, which `SceneObjectRectangle`
+overrides to also require `filled` - an outline-only rectangle has no fill worth caching.
 
 In the direct (billboard) draw modes with no rotation - which is the 2D case, since a `Camera2d`
 resolves `matchCamera` to `directToCamera` - it takes a shorter path still, going out as a single
@@ -408,8 +430,8 @@ m.sprite = m.addOrientedSprite("body", frames, 0, 0, 16, 1, {
 
 > **Cost.** Lights are free while they stay still: objects keep their cached drawings until
 > something moves. A light that moves or changes every frame relights everything it reaches
-> every frame - about what it costs for those objects to rotate - so keep animated lights to
-> the few that need it. A model with `useImpostor` (the default) keeps its drawing through
+> every frame. Nothing is re-projected, so this costs less than moving those objects, but
+> their cached drawings are still redrawn, so keep animated lights to the few that need it. A model with `useImpostor` (the default) keeps its drawing through
 > small light changes - while each light has turned less than the quality level's
 > `modelImpostorMaxAngleDegrees` and changed brightness by less than
 > `modelImpostorMaxLightChange` since it was drawn - so a slowly moving lamp only redraws it
@@ -580,17 +602,11 @@ but most of the expensive work is skipped unless something actually changed:
   when nothing's moved, rather than re-rasterizing from scratch every frame - drawing that cached
   bitmap is far cheaper than recomputing the object's projected geometry and re-drawing it.
 
-Two supporting pieces worth knowing about if you're touching rendering performance:
+One supporting piece worth knowing about if you're touching rendering performance:
 
-- **`TriangleCache`** caches rasterized triangle bitmaps - triangle drawing (`drawBitmapTriangleTo`,
-  `drawPinnedCorners`) is comparatively expensive per call, since it checks out and rasterizes
-  scratch bitmaps internally. Code that draws the same triangle-heavy shape every frame should
-  render once into a cached bitmap and blit that, rather than redoing the full draw at 60fps -
-  `examples/rendererTest/CornerPinGridTest.bs` is a worked example of this pattern (and of what
-  happens without it: most of a 26-tile grid silently failed to render after the first few tiles).
 - **`ScratchBitmapPool`** (`engine/renderer/ScratchBitmap.bs`) hands out reusable off-screen bitmaps
-  for exactly this kind of intermediate rendering work, so it doesn't need to allocate a fresh
-  `roBitmap` every frame. **Pooled bitmaps are handed out as-is, not cleared** - if you draw into
+  for intermediate rendering work (now only the mirrored-and-rotated blit), so it doesn't need to
+  allocate a fresh `roBitmap` every frame. **Pooled bitmaps are handed out as-is, not cleared** - if you draw into
   one and don't cover its entire area, whatever was left over from its previous, unrelated use will
   still be there. Always `Clear()` a scratch region yourself before drawing into it unless you're
   certain your draw call will fully cover it.
@@ -656,9 +672,22 @@ See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `exa
 
 ## Textured 3D models (`Model3d` / `OBJParser`)
 
-An `.obj` model can carry diffuse textures, sampled via UV coordinates and affine-mapped onto each
-triangular face (not perspective-correct - see the "Bitmap Triangle Warp" demo in `rendererTest` for
-the underlying primitive, `Renderer.drawBitmapTriangle(To)`). Two ways to get textures onto a model:
+An `.obj` model can carry diffuse textures, sampled via UV coordinates. On a `Camera3d`, each
+textured face draws as texture columns, like a flat quad (see
+[Texture columns](#texture-columns-for-flat-quads)), but cut to the triangle: each strip is a power
+of two texels wide and runs only as far as the face's UV triangle reaches. The cuts are made once per
+face and strip width (`BGE.TriangleColumnCuts`, via `Model3dTexture.getColumnCuts()`) and shared by
+every instance of the model, so drawing a face only projects its strips. A moving model draws its
+faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
+With `useImpostor` (the default), only the model's own movement or turning counts: while just the
+camera moves, the impostor reuses its last capture.
+A `Camera2d` projects the strips orthographically (rendererTest's `camera2d-model` demo). A face
+that crosses the camera's near plane has its strips cut back to it. A face columns can't draw (the
+per-frame column budget is spent, or its UV triangle has no area) is filled with its shaded color
+instead, and the model's cached drawing isn't reused until it redraws in full. Solid (untextured)
+faces are filled straight into the canvas or the temp bitmap the same way, with no per-face rasters:
+on a Roku Ultra that was 1.5-3x faster than drawing each into its own raster and blitting it (#452).
+Two ways to get textures onto a model:
 
 - **Materials**: the `.obj` references a `mtllib <file>.mtl`, and each `usemtl <name>` line sets the
   material of the faces after it. Each material's `map_Kd <image>` is its texture, resolved relative
@@ -899,6 +928,90 @@ geometry instead of a planar ground.
 **Note:** unlike `SceneObjectPlane`, `SceneObjectSkybox` has no per-frame dirty-check caching yet—it
 recomputes and re-blits its visible band every frame even when yaw/pitch/roll haven't changed. Correct,
 just not optimized; tracked as a follow-up issue.
+
+## Deep dive: `SceneObjectGridWalls` (`DrawableGridWalls`)
+
+`DrawableGridWalls` draws the walls of a grid maze (a Wolfenstein-style view, but with a
+free-pitching `Camera3d`) by raycasting instead of drawing a 3D model per wall. It costs the
+same however many walls the map has. Describe the grid as rows of characters, say which
+characters are walls, and attach the drawable:
+
+```brighterscript
+map = new BGE.GridWallsMap([
+  "#######"
+  "#..#..#"
+  "#.....#"
+  "#######"
+], {
+  cellSize: 192,
+  wallHeight: 128,
+  origin: BGE.Math.VectorOps.create(0, 0, 0),
+  solid: {"#": "stone"}
+})
+walls = new BGE.DrawableGridWalls(invalid, map, {stone: stoneRegion}, {isShaded: true})
+walls.addToRenderer(game.gameRenderer)
+```
+
+Row 0 is -z and column 0 is -x; `origin` is the -x/-z corner of cell (0, 0) and its `y` is the
+floor height. Anything outside the grid counts as solid, so an unclosed map still has walls
+(they use `outsideTexture`, defaulting to the first legend entry). A legend key is one
+character, and since the legend is an associative array, characters differing only by case
+(`"a"`/`"A"`) collide. The whole map is replaceable: set `walls.map` and call
+`invalidateGeometry()`.
+
+Each texture is an `roRegion` one cell wide and one wall height tall; the drawable slices it
+into one-pixel columns on first use. Swap them with `setTextures()`. `color`, `alpha` and
+`flash()` work as on other drawables.
+
+### Lights and the floor
+
+Set `isShaded: true` and the walls are lit by the renderer's lights like any other shaded
+drawable (see [Lighting](#lighting)). Light is sampled every `gridWallLightInterval` strips, so a
+flickering torch costs little. A change to lights alone relights the walls without casting the
+rays again. Pair the walls with a `DrawablePlane` floor (and optionally ceiling); the walls
+lean with the camera's pitch to stay planted on it, with no seam.
+
+### Hiding what's behind a wall
+
+Walls draw in their own `gridWalls` stage, after planes and before the sorted objects. Every
+sorted object is tested against the walls, and anything behind a wall is skipped (or redrawn
+only where it is in front, for an object peeking round a corner). The test includes objects
+that are off-screen, so one turning into view from behind a wall never flickers; such an
+object reports `occluded` rather than `offCamera`. Props hung on a wall (an alcove image a
+hair off the face) stay in front of it: an object counts as behind only if it is more than a
+quarter cell (`cellSize * 0.25`) farther than the wall. Depth is measured forward along the
+camera, not radially.
+
+Your own overlays need the same treatment. `drawWorldBar()`, `drawWorldPolyline()` and the
+shapes built on them (`drawWorldCircle`, `drawWorldArc`) already skip anything behind a wall.
+For other overlays ask the renderer:
+
+```brighterscript
+if not renderer.isBehindGridWalls(enemy.position)
+  ' draw the marker
+end if
+```
+
+The UI canvas is a separate renderer, so walls never hide UI.
+
+### What it expects
+
+- The camera is a `Camera3d` standing inside the maze, below the wall tops. Pitch is supported from
+  about 15 degrees up to 35 degrees down; beyond that the ray count is capped (4 rays per strip
+  width of screen), so strips get coarser. Camera roll is ignored. A camera outside the grid sees
+  no walls, so nothing is hidden.
+- Depth is tested in plan view, but a point whose line of sight clears the wall top is not hidden:
+  a tall object (or `drawWorldBar`) behind a wall shows over it, with the strips redrawn over its
+  lower part. There is no ceiling.
+- There is no collision. The walls are drawn, not solid; use the same grid (`map.isSolid(col, row)`,
+  `map.cellAt(x, z)`) for your movement.
+- One grid-walls drawable per renderer: a second one is ignored.
+- Strip width and light interval come from the quality level (see
+  [Render quality](/render-quality)); strips are rotated texture columns, so wall feet stay on
+  the floor as the camera pitches.
+
+`examples/rendererTest` has a `Grid Walls` demo (`--param demo=grid-walls`) with a tiled floor, a
+wall-hung alcove and a figure pacing behind a corner.
 
 ## Parallax layers (`DrawableParallaxLayer`)
 

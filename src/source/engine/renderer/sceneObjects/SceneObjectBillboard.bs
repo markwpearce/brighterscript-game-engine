@@ -11,6 +11,7 @@ import "../lighting/Lighting.bs"
 import "../occlusion/ConvexInset.bs"
 import "../occlusion/OcclusionTypes.bs"
 import "../cameras/Camera3d.bs"
+import "../quadColumns/QuadColumnTexture.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
@@ -22,12 +23,6 @@ namespace BGE
     rotation as float
     scaleX as float
     scaleY as float
-    ' set to corner pin the temp bitmap instead (drawPinnedCorners: four triangles meeting
-    ' at pinCenter, or two along the top left to bottom right diagonal without one), with
-    ' this id for the renderer's triangle cache
-    optional pinCorners as BGE.Math.CornerPoints
-    optional pinCenter as BGE.Math.Vector
-    optional pinRegionId as string
   end interface
 
   interface TempBitmapDrawResult
@@ -105,9 +100,16 @@ namespace BGE
     private fastDrawParallelogramTolerance as float = 0.03
     private fastDrawPerpendicularityTolerance as float = 0.05
 
+    ' Whether this frame draws texture columns straight to the canvas
+    protected drawsColumnsThisFrame = false
+    ' Whether this moved relative to the camera this draw: only then are columns drawn
+    ' straight to the canvas (a still object blits its cached columns instead)
+    private movedThisDraw = false
+
     private sub captureFastDrawTolerances(rendererObj as BGE.Renderer)
       m.fastDrawParallelogramTolerance = rendererObj.qualitySettings.fastDrawParallelogramTolerance
       m.fastDrawPerpendicularityTolerance = rendererObj.qualitySettings.fastDrawPerpendicularityTolerance
+      m.movedThisDraw = m.objMovedInRelationToCamera(rendererObj.camera)
     end sub
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -141,15 +143,7 @@ namespace BGE
           if invalid <> transformDetails and invalid <> m.tempBitmapRegion
             ' the object moved, but the temporary bitmap can be reused
             m.hasAccurateTempBitmap = false
-            if invalid <> transformDetails.pinCorners
-              pinOptions = {alwaysUseTLtoBR: true} as DrawPinnedCornersOptions
-              if invalid <> transformDetails.pinCenter
-                pinOptions = {splitIntoFour: true, center: transformDetails.pinCenter}
-              end if
-              retVal = rendererObj.drawPinnedCorners(transformDetails.pinCorners, {region: m.tempBitmapRegion, id: transformDetails.pinRegionId}, pinOptions, blitColor)
-            else
-              retVal = rendererObj.drawTransformedObject(transformDetails.origin.x, transformDetails.origin.y, transformDetails.scaleX, transformDetails.scaleY, transformDetails.rotation, m.tempBitmapRegion, blitColor)
-            end if
+            retVal = rendererObj.drawTransformedObject(transformDetails.origin.x, transformDetails.origin.y, transformDetails.scaleX, transformDetails.scaleY, transformDetails.rotation, m.tempBitmapRegion, blitColor)
           end if
         end if
         if not retVal
@@ -159,7 +153,11 @@ namespace BGE
             ' return value frame-to-frame for the same draw mode, unlike every other
             ' caller where it's constant per mode - so a cached m.tempBitmap from an
             ' earlier frame could otherwise sit around stale and get wrongly reused via
-            ' attemptTransformTempBitmap() once this flips back to true.
+            ' attemptTransformTempBitmap() once this flips back to true. Its allocation is
+            ' kept for when it settles (columns drawn while moving, then cached).
+            if invalid <> m.tempBitmap
+              m.spareTempBitmap = m.tempBitmap as roBitmap
+            end if
             m.tempBitmap = invalid
             m.tempBitmapRegion = invalid
             retval = m.drawToCanvas(rendererObj, drawMode)
@@ -226,7 +224,7 @@ namespace BGE
 
 
     ' Whether the most recent oriented/solid draw took the cheap rotate+scale fast path
-    ' (drawRegionAsRotatedQuad, below) instead of the exact drawPinnedCorners warp - see
+    ' (drawRegionAsRotatedQuad, below) instead of exact texture columns - see
     ' canUseTransformedFastDraw() below. Exposed read-only for tests/telemetry via
     ' usedTransformedFastDraw(). Shared by every single-quad billboard subclass that opts
     ' into the fast-draw check (SceneObjectCircle/#105, SceneObjectImage+SceneObjectText/#163).
@@ -252,8 +250,7 @@ namespace BGE
 
     ' Whether m.canvasPoints (this frame's projected quad) is close enough to a pure
     ' rotation + non-uniform scale of a rectangle that drawRegionAsRotatedQuad() - one
-    ' native DrawTransformedObject call - is a safe stand-in for the exact
-    ' drawPinnedCorners triangle warp. True for a flat quad rotated only about the axis
+    ' native DrawTransformedObject call - is a safe stand-in for exact texture columns. True for a flat quad rotated only about the axis
     ' facing the camera (including not rotated at all); false once perspective
     ' foreshortening skews the quad into a general trapezoid - see issue #105.
     '
@@ -293,6 +290,9 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function drawFastPath(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.drawsColumnsThisFrame
+        return m.drawColumnsToCanvas(rendererObj)
+      end if
       regionToDraw = m.getRegionWithIdToDraw(rendererObj)
       if invalid = regionToDraw or invalid = regionToDraw.region
         return false
@@ -315,12 +315,80 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
-      if m.isEligibleForFastDrawCheck(drawMode)
-        m.usedTransformedFastDrawLastFrame = m.canUseTransformedFastDraw()
-        return not m.usedTransformedFastDrawLastFrame
-      end if
       m.usedTransformedFastDrawLastFrame = false
-      return m.useTempBitmapMap[drawMode]
+      m.drawsColumnsThisFrame = false
+      fastDrawEligible = m.isEligibleForFastDrawCheck(drawMode)
+      if fastDrawEligible
+        m.usedTransformedFastDrawLastFrame = m.canUseTransformedFastDraw()
+        if m.usedTransformedFastDrawLastFrame
+          return false
+        end if
+      end if
+      if m.movedThisDraw and m.canDrawAsColumns(drawMode)
+        m.drawsColumnsThisFrame = true
+        return false
+      end if
+      return fastDrawEligible or m.useTempBitmapMap[drawMode]
+    end function
+
+    ' Opt-in hook: whether this object's fill can be drawn as texture columns from
+    ' getColumnTexture() over its worldPoints quad, in place of a temp bitmap, in this draw mode.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function canDrawAsColumns(drawMode as SceneObjectDrawMode) as boolean
+      return false
+    end function
+
+    ' The flat quad modes columns can draw: oriented and solid, not screen-aligned or wireframe.
+    '
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean}
+    protected function isFlatQuadColumnMode(drawMode as SceneObjectDrawMode) as boolean
+      return not isScreenAlignedDrawMode(drawMode) and not isWireFrameDrawMode(drawMode)
+    end function
+
+    ' The column texture to draw this object's fill with.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {BGE.QuadColumnTexture} or invalid if there's nothing to draw
+    protected function getColumnTexture(rendererObj as BGE.Renderer) as BGE.QuadColumnTexture
+      regionToDraw = m.getRegionWithIdToDraw(rendererObj)
+      if invalid = regionToDraw or invalid = regionToDraw.region
+        return invalid
+      end if
+      return rendererObj.getQuadColumnTexture(regionToDraw)
+    end function
+
+    ' Draws the fill as columns into a temp bitmap whose (0,0) is at `origin` on the canvas,
+    ' without the distance fade (that's applied to the blit).
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {ifDraw2d} bitmap
+    ' @param {BGE.Math.Vector} origin
+    ' @return {boolean} whether any column was drawn
+    protected function drawColumnsToBitmap(rendererObj as BGE.Renderer, bitmap as ifDraw2d, origin as BGE.Math.Vector) as boolean
+      texture = m.getColumnTexture(rendererObj)
+      if invalid = texture
+        return false
+      end if
+      points = m.worldPoints
+      corners = [points.topLeft, points.topRight, points.bottomLeft, points.bottomRight]
+      return rendererObj.drawColumnTextureTo(bitmap, corners, texture, [m.getDrawColorRGBA(rendererObj)], origin) > 0
+    end function
+
+    ' Draws the fill straight to the canvas as projected texture columns, perspective correct.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @return {boolean} whether any column was drawn
+    protected function drawColumnsToCanvas(rendererObj as BGE.Renderer) as boolean
+      texture = m.getColumnTexture(rendererObj)
+      if invalid = texture
+        return false
+      end if
+      points = m.worldPoints
+      corners = [points.topLeft, points.topRight, points.bottomLeft, points.bottomRight]
+      return rendererObj.drawColumnTexture(corners, texture, [m.getCanvasDrawColorRGBA(rendererObj)]) > 0
     end function
 
     ' For tests/telemetry only - the backing temp bitmap's actual allocated size, which
@@ -403,6 +471,9 @@ namespace BGE
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}
     protected function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.drawsColumnsThisFrame
+        return m.drawColumnsToCanvas(rendererObj)
+      end if
       regionToDraw = m.getRegionWithIdToDraw(rendererObj)
       regionObj = regionToDraw.region
       retVal = false
@@ -451,7 +522,7 @@ namespace BGE
     ' `directScaled` can always use this (its quad is built from a rotation in the first
     ' place - see updateCanvasPointsForCameraFacingQuad); a caller drawing a genuinely
     ' projected/oriented quad (e.g. SceneObjectCircle's fast path, issue #105) must check that
-    ' condition itself first and fall back to the exact drawPinnedCorners warp otherwise.
+    ' condition itself first and fall back to exact texture columns otherwise.
     '
     ' @param {BGE.Renderer} rendererObj
     ' @param {roRegion} regionObj the region to blit
@@ -684,18 +755,10 @@ namespace BGE
       if invalid = regionToDraw or invalid = regionToDraw.region
         return {worked: false, didFastDraw: false}
       end if
-      regionObj = regionToDraw.region
-      preTransX = regionObj.getPretranslationX()
-      preTransY = regionObj.getPretranslationY()
-      offsetCanvasPoints = m.canvasPoints.subtract(canvasPointsTopLeftBound)
-      regionObj.setPretranslation(0, 0)
-      tempBmpDidDraw = rendererObj.drawPinnedCornersTo(tempBitmap, offsetCanvasPoints, regionToDraw, m.getPinnedCornersOptions(), m.getDrawColorRGBA(rendererObj))
-      regionObj.setPretranslation(preTransX, preTransY)
-      return {worked: tempBmpDidDraw, didFastDraw: false}
-    end function
-
-    protected function getPinnedCornersOptions() as DrawPinnedCornersOptions
-      return {}
+      if not m.canDrawAsColumns(drawMode)
+        return {worked: false, didFastDraw: false}
+      end if
+      return {worked: m.drawColumnsToBitmap(rendererObj, tempBitmap, canvasPointsTopLeftBound), didFastDraw: false}
     end function
 
     protected function didRegionToDrawChange() as boolean
@@ -1315,9 +1378,16 @@ namespace BGE
 
     ' @return {BGE.Math.Vector} unit direction from the camera to the quad's centre
     private function getViewDirection(rendererObj as Renderer) as BGE.Math.Vector
-      direction = BGE.Math.VectorOps.subtract(m.worldPoints.getCenter(), rendererObj.camera.position)
+      direction = BGE.Math.VectorOps.subtract(m.getViewCenter(), rendererObj.camera.position)
       BGE.Math.VectorOps.normalize(direction)
       return direction
+    end function
+
+    ' Where the camera looks at this from, for the reuse angle limit.
+    '
+    ' @return {BGE.Math.Vector}
+    protected function getViewCenter() as BGE.Math.Vector
+      return m.worldPoints.getCenter()
     end function
 
     ' @return {float} cosine of the angle the view direction turned since the temp bitmap was drawn

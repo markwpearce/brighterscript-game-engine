@@ -1,0 +1,712 @@
+' Compares ways of drawing a perspective-textured quad (a wall image, a model face) as
+' texture columns (the corner-pin warp it was first measured against was removed in #454):
+'
+'   cols 1:1 - one 1-texel-wide texture column per texel, each drawn with one
+'              DrawTransformedObject from its projected foot to its projected top, as wide as
+'              the gap to the next column's projection plus a pixel
+'   cols 4px - as cols 1:1, but about one column per 4 screen pixels (at most 1:1)
+'   B..U     - the engine's BGE.QuadColumnDrawer at each render quality level, Basic to Ultra
+'
+' Columns run along whichever texture axis changes depth least (rows of a transposed copy of
+' the texture otherwise), so each is near constant depth and its linear mapping close to exact.
+' Projection uses an inlined camera basis: corners go to camera space once, column ends are
+' lerped there and divided.
+'
+' On start it sweeps every case x method for `phaseFrames` frames into an offscreen bitmap
+' (Finish()ed, so queued draws count) and prints `PHASE <case> | <method>: <ms> ms/frame`.
+' Then left/right picks a case and up/down a method to draw live (`LIVE ... fps` printed every
+' 3 s); OK reruns the sweep; play toggles the table. The camera sways a few degrees so no
+' frame repeats the last one's warps.
+class TexturedQuadColumnsBenchmark extends RendererTest
+
+  private texSize = 128
+  private adaptivePixels = 4.0
+  private phaseFrames = 20
+  private warmupFrames = 3
+  private buildRepeats = 10
+
+  private methodNames as string[] = ["cols 1:1", "cols 4px", "B", "L", "M", "H", "U"]
+  private caseNames as string[] = []
+  ' 12 floats per quad: world x, y, z of its top-left, top-right, bottom-left, bottom-right
+  private caseQuads as object[] = []
+  private caseCull as boolean[] = []
+
+  private rendererRef as BGE.Renderer
+  private target as roBitmap
+  private columnsU as roRegion[] = []
+  private columnsV as roRegion[] = []
+  private engineDrawer as BGE.QuadColumnDrawer
+  private engineTexture as BGE.QuadColumnTexture
+  private engineCorners as float[] = []
+
+  ' camera
+  private camX = 0.0
+  private camY = 120.0
+  private camZ = 0.0
+  private pitch = -0.14
+  private focal = 1108.5
+  private hw = 640.0
+  private hh = 360.0
+  private rX = 1.0
+  private rY = 0.0
+  private rZ = 0.0
+  private uX = 0.0
+  private uY = 1.0
+  private uZ = 0.0
+  private fX = 0.0
+  private fY = 0.0
+  private fZ = -1.0
+
+  ' the current quad: camera space and screen corners
+  private qx as float[] = [0.0, 0.0, 0.0, 0.0]
+  private qy as float[] = [0.0, 0.0, 0.0, 0.0]
+  private qz as float[] = [0.0, 0.0, 0.0, 0.0]
+  private sx as float[] = [0.0, 0.0, 0.0, 0.0]
+  private sy as float[] = [0.0, 0.0, 0.0, 0.0]
+
+  ' column end points of the current quad
+  private topX as float[] = []
+  private topY as float[] = []
+  private footX as float[] = []
+  private footY as float[] = []
+
+  ' strips built for a whole case, drawn after
+  private stripCount = 0
+  private stripX as float[] = []
+  private stripY as float[] = []
+  private stripAngle as float[] = []
+  private stripScaleX as float[] = []
+  private stripScaleY as float[] = []
+  private stripColumn as roRegion[] = []
+
+  ' sweep
+  private sweeping = false
+  private sweepPhase = 0
+  private sweepFrame = 0
+  private sweepMsTotal = 0
+  private globalFrame = 0
+  private resultMs as float[] = []
+  private resultBuildMs as float[] = []
+  private resultStrips as integer[] = []
+  private timer as roTimespan
+  private smallFont as roFont
+
+  ' live
+  private liveCase = 0
+  private liveMethod = 0
+  private liveTime = 0.0
+  private liveFrames = 0
+  private liveSeconds = 0.0
+  private showTable = true
+
+  sub new()
+    super("Textured Quad Columns Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.timer = CreateObject("roTimespan")
+    m.smallFont = CreateObject("roFontRegistry").GetDefaultFont(18, false, false)
+    m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+    m.buildTextures()
+    m.buildCases()
+    m.startSweep()
+  end sub
+
+  ' --- setup ---
+
+  private sub buildTextures()
+    plain = m.buildTexture(false)
+    transposed = m.buildTexture(true)
+    region = CreateObject("roRegion", plain, 0, 0, m.texSize, m.texSize)
+    m.engineTexture = new BGE.QuadColumnTexture(region, "textured-quad-columns")
+    m.engineDrawer = new BGE.QuadColumnDrawer()
+    m.engineDrawer.setProjection(m.focal, m.hw * 2, m.hh * 2)
+    m.columnsU = []
+    m.columnsV = []
+    for c = 0 to m.texSize - 1
+      column = CreateObject("roRegion", plain, c, 0, 1, m.texSize)
+      column.SetPreTranslation(0, -m.texSize)
+      m.columnsU.push(column)
+      row = CreateObject("roRegion", transposed, c, 0, 1, m.texSize)
+      row.SetPreTranslation(0, -m.texSize)
+      m.columnsV.push(row)
+    end for
+  end sub
+
+  ' Bricks with a coloured border and both diagonals - straight lines show a warp's bends.
+  private function buildTexture(transposed as boolean) as roBitmap
+    size = m.texSize
+    bmp = CreateObject("roBitmap", {width: size, height: size, alphaEnable: true})
+    bmp.Clear(&h4A4038FF)
+    for row = 0 to size / 16 - 1
+      offset = (row mod 2) * 16
+      for bx = -32 to size step 32
+        shade = 140 + ((row * 7 + bx) mod 5) * 12
+        color = shade * &h1000000 + (shade \ 2) * &h10000 + (shade \ 3) * &h100 + &hFF
+        m.texRect(bmp, transposed, bx + offset + 1, row * 16 + 1, 30, 14, color)
+      end for
+    end for
+    for i = 0 to size - 4 step 2
+      m.texRect(bmp, transposed, i, i, 4, 4, &hFFFFFFFF)
+      m.texRect(bmp, transposed, size - 4 - i, i, 4, 4, &h00FFFFFF)
+    end for
+    m.texRect(bmp, transposed, 0, 0, size, 5, &hFF2020FF)
+    m.texRect(bmp, transposed, 0, size - 5, size, 5, &h2040FFFF)
+    m.texRect(bmp, transposed, 0, 0, 5, size, &h20E020FF)
+    m.texRect(bmp, transposed, size - 5, 0, 5, size, &hFFE020FF)
+    bmp.Finish()
+    return bmp
+  end function
+
+  private sub texRect(bmp as roBitmap, transposed as boolean, x as integer, y as integer, w as integer, h as integer, color as integer)
+    if x < 0
+      w += x
+      x = 0
+    end if
+    if x + w > m.texSize
+      w = m.texSize - x
+    end if
+    if w <= 0
+      return
+    end if
+    if transposed
+      bmp.DrawRect(y, x, h, w, color)
+    else
+      bmp.DrawRect(x, y, w, h, color)
+    end if
+  end sub
+
+  private sub buildCases()
+    m.caseNames = []
+    m.caseQuads = []
+    m.caseCull = []
+    sizes = [1.0, 0.5, 0.25]
+    labels = ["L", "M", "S"]
+    for i = 0 to 2
+      m.addCase(`wall ${labels[i]}`, m.buildWall(sizes[i]), false)
+    end for
+    for i = 0 to 2
+      m.addCase(`facing ${labels[i]}`, m.buildFacing(sizes[i]), false)
+    end for
+    for i = 0 to 2
+      m.addCase(`tilted ${labels[i]}`, m.buildTilted(sizes[i]), false)
+    end for
+    m.addCase("cube M", m.buildModel(1.0, [-100]), true)
+    m.addCase("model M", m.buildModel(1.0, [-300, -100, 100, 300]), true)
+    m.addCase("model S", m.buildModel(0.5, [-300, -100, 100, 300]), true)
+  end sub
+
+  private sub addCase(name as string, quads as float[], cull as boolean)
+    m.caseNames.push(name)
+    m.caseQuads.push(quads)
+    m.caseCull.push(cull)
+  end sub
+
+  ' A vertical wall receding from near right to far left, about 60 degrees off facing.
+  private function buildWall(size as float) as float[]
+    quads = [] as float[]
+    centerX = 3.5
+    centerY = 90.0
+    centerZ = -625.0
+    m.pushScaled(quads, -154, 180, -900, centerX, centerY, centerZ, size)
+    m.pushScaled(quads, 161, 180, -350, centerX, centerY, centerZ, size)
+    m.pushScaled(quads, -154, 0, -900, centerX, centerY, centerZ, size)
+    m.pushScaled(quads, 161, 0, -350, centerX, centerY, centerZ, size)
+    return quads
+  end function
+
+  private function buildFacing(size as float) as float[]
+    quads = [] as float[]
+    m.pushScaled(quads, -100, 200, -440, 0, 100, -440, size)
+    m.pushScaled(quads, 100, 200, -440, 0, 100, -440, size)
+    m.pushScaled(quads, -100, 0, -440, 0, 100, -440, size)
+    m.pushScaled(quads, 100, 0, -440, 0, 100, -440, size)
+    return quads
+  end function
+
+  ' A 300 unit square ramp leaning back 50 degrees, turned 25 degrees.
+  private function buildTilted(size as float) as float[]
+    quads = [] as float[]
+    half = 150.0 * size
+    tilt = BGE.Math.DegreesToRadians(50)
+    yaw = BGE.Math.DegreesToRadians(25)
+    ux = cos(yaw)
+    uz = -sin(yaw)
+    vx = sin(tilt) * sin(yaw)
+    vy = -cos(tilt)
+    vz = sin(tilt) * cos(yaw)
+    cx = 0.0
+    cy = 40.0
+    cz = -560.0
+    m.pushPoint(quads, cx - ux * half - vx * half, cy - vy * half, cz - uz * half - vz * half)
+    m.pushPoint(quads, cx + ux * half - vx * half, cy - vy * half, cz + uz * half - vz * half)
+    m.pushPoint(quads, cx - ux * half + vx * half, cy + vy * half, cz - uz * half + vz * half)
+    m.pushPoint(quads, cx + ux * half + vx * half, cy + vy * half, cz + uz * half + vz * half)
+    return quads
+  end function
+
+  ' Cubes turned 30 degrees, centred at each of centersX: about 3 faces of each face the camera.
+  private function buildModel(size as float, centersX as float[]) as float[]
+    quads = [] as float[]
+    half = 45.0 * size
+    yaw = BGE.Math.DegreesToRadians(30)
+    cosYaw = cos(yaw)
+    sinYaw = sin(yaw)
+    ' outward normal, then the face's up
+    faces = [
+      [1, 0, 0, 0, 1, 0],
+      [-1, 0, 0, 0, 1, 0],
+      [0, 0, 1, 0, 1, 0],
+      [0, 0, -1, 0, 1, 0],
+      [0, 1, 0, 0, 0, -1],
+      [0, -1, 0, 0, 0, 1]
+    ]
+    corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]]
+    for each centerX in centersX
+      centerY = half
+      centerZ = -640.0
+      for each face in faces
+        nx = face[0]
+        ny = face[1]
+        nz = face[2]
+        wx = face[3]
+        wy = face[4]
+        wz = face[5]
+        ' right = (-n) x up
+        rx = -ny * wz + nz * wy
+        ry = -nz * wx + nx * wz
+        rz = -nx * wy + ny * wx
+        for each corner in corners
+          lx = (nx + rx * corner[0] + wx * corner[1]) * half
+          ly = (ny + ry * corner[0] + wy * corner[1]) * half
+          lz = (nz + rz * corner[0] + wz * corner[1]) * half
+          m.pushPoint(quads, centerX + lx * cosYaw + lz * sinYaw, centerY + ly, centerZ - lx * sinYaw + lz * cosYaw)
+        end for
+      end for
+    end for
+    return quads
+  end function
+
+  private sub pushScaled(quads as float[], x as float, y as float, z as float, centerX as float, centerY as float, centerZ as float, size as float)
+    m.pushPoint(quads, centerX + (x - centerX) * size, centerY + (y - centerY) * size, centerZ + (z - centerZ) * size)
+  end sub
+
+  private sub pushPoint(quads as float[], x as float, y as float, z as float)
+    quads.push(x)
+    quads.push(y)
+    quads.push(z)
+  end sub
+
+  ' --- camera and projection ---
+
+  private sub setCamera(time as float)
+    yaw = 0.05 * sin(time * 1.5)
+    cosYaw = cos(yaw)
+    sinYaw = sin(yaw)
+    cosPitch = cos(m.pitch)
+    sinPitch = sin(m.pitch)
+    m.fX = -sinYaw * cosPitch
+    m.fY = sinPitch
+    m.fZ = -cosYaw * cosPitch
+    m.rX = cosYaw
+    m.rY = 0.0
+    m.rZ = -sinYaw
+    m.uX = sinYaw * sinPitch
+    m.uY = cosPitch
+    m.uZ = cosYaw * sinPitch
+  end sub
+
+  ' Projects quad q of quads into qx/qy/qz and sx/sy. False if a corner is behind the camera.
+  private function projectQuad(quads as float[], q as integer) as boolean
+    base = q * 12
+    for i = 0 to 3
+      dx = quads[base + i * 3] - m.camX
+      dy = quads[base + i * 3 + 1] - m.camY
+      dz = quads[base + i * 3 + 2] - m.camZ
+      x = dx * m.rX + dy * m.rY + dz * m.rZ
+      y = dx * m.uX + dy * m.uY + dz * m.uZ
+      z = dx * m.fX + dy * m.fY + dz * m.fZ
+      if z < 1
+        return false
+      end if
+      m.qx[i] = x
+      m.qy[i] = y
+      m.qz[i] = z
+      m.sx[i] = m.hw + m.focal * x / z
+      m.sy[i] = m.hh - m.focal * y / z
+    end for
+    return true
+  end function
+
+  private function isFrontFacing() as boolean
+    sx = m.sx
+    sy = m.sy
+    return (sx[1] - sx[0]) * (sy[2] - sy[0]) - (sy[1] - sy[0]) * (sx[2] - sx[0]) > 0
+  end function
+
+  ' --- drawing ---
+
+  private sub drawCase(target as object, caseIndex as integer, method as integer)
+    if method >= 2
+      m.drawCaseEngine(target, caseIndex, method - 2)
+    else
+      m.buildCaseStrips(caseIndex, method)
+      m.drawStrips(target)
+    end if
+  end sub
+
+  ' Draws with the engine's column drawer at quality `level`; stripCount gets its columns.
+  private sub drawCaseEngine(target as object, caseIndex as integer, level as integer)
+    m.engineDrawer.beginFrame(BGE.getRenderQualityPreset(level as BGE.RenderQualityLevel))
+    quads = m.caseQuads[caseIndex]
+    cull = m.caseCull[caseIndex]
+    corners = m.engineCorners
+    for q = 0 to quads.count() / 12 - 1
+      if m.projectQuad(quads, q) and (not cull or m.isFrontFacing())
+        corners.Clear()
+        for i = 0 to 3
+          ' engine camera space looks down -z
+          corners.push(m.qx[i])
+          corners.push(m.qy[i])
+          corners.push(-m.qz[i])
+        end for
+        m.engineDrawer.drawTo(target, corners, m.engineTexture, [-1])
+      end if
+    end for
+    m.stripCount = m.engineDrawer.columnsThisFrame
+  end sub
+
+  private sub buildCaseStrips(caseIndex as integer, method as integer)
+    m.stripCount = 0
+    quads = m.caseQuads[caseIndex]
+    cull = m.caseCull[caseIndex]
+    for q = 0 to quads.count() / 12 - 1
+      if m.projectQuad(quads, q) and (not cull or m.isFrontFacing())
+        m.buildQuadStrips(method)
+      end if
+    end for
+  end sub
+
+  ' Appends the current quad's strips.
+  private sub buildQuadStrips(method as integer)
+    qx = m.qx
+    qy = m.qy
+    qz = m.qz
+    ' corners the strips' tops run between (texture top / left edge), then their feet
+    du = abs(qz[1] - qz[0]) + abs(qz[3] - qz[2])
+    dv = abs(qz[2] - qz[0]) + abs(qz[3] - qz[1])
+    if du >= dv
+      t0 = 0
+      t1 = 1
+      f0 = 2
+      f1 = 3
+      columns = m.columnsU
+    else
+      t0 = 0
+      t1 = 2
+      f0 = 1
+      f1 = 3
+      columns = m.columnsV
+    end if
+    texN = columns.count()
+    n = texN
+    if method = 1
+      topLength = sqr((m.sx[t1] - m.sx[t0]) ^ 2 + (m.sy[t1] - m.sy[t0]) ^ 2)
+      footLength = sqr((m.sx[f1] - m.sx[f0]) ^ 2 + (m.sy[f1] - m.sy[f0]) ^ 2)
+      extent = topLength
+      if footLength > extent
+        extent = footLength
+      end if
+      n = int(extent / m.adaptivePixels) + 1
+      if n < 2
+        n = 2
+      else if n > texN
+        n = texN
+      end if
+    end if
+
+    focal = m.focal
+    hw = m.hw
+    hh = m.hh
+    tx0 = qx[t0]
+    ty0 = qy[t0]
+    tz0 = qz[t0]
+    tdx = (qx[t1] - tx0) / n
+    tdy = (qy[t1] - ty0) / n
+    tdz = (qz[t1] - tz0) / n
+    fx0 = qx[f0]
+    fy0 = qy[f0]
+    fz0 = qz[f0]
+    fdx = (qx[f1] - fx0) / n
+    fdy = (qy[f1] - fy0) / n
+    fdz = (qz[f1] - fz0) / n
+    topX = m.topX
+    topY = m.topY
+    footX = m.footX
+    footY = m.footY
+    for k = topX.count() to n
+      topX.push(0.0)
+      topY.push(0.0)
+      footX.push(0.0)
+      footY.push(0.0)
+    end for
+    for k = 0 to n
+      z = tz0 + tdz * k
+      topX[k] = hw + focal * (tx0 + tdx * k) / z
+      topY[k] = hh - focal * (ty0 + tdy * k) / z
+      z = fz0 + fdz * k
+      footX[k] = hw + focal * (fx0 + fdx * k) / z
+      footY[k] = hh - focal * (fy0 + fdy * k) / z
+    end for
+
+    ' a strip's width runs to the right of foot->top; seen from behind, that's back toward
+    ' the previous edge, so anchor each strip at its far edge instead
+    dx = topX[0] - footX[0]
+    dy = topY[0] - footY[0]
+    reversed = (footX[1] - footX[0]) * -dy + (footY[1] - footY[0]) * dx < 0
+
+    m.growStrips(m.stripCount + n)
+    stripX = m.stripX
+    stripY = m.stripY
+    stripAngle = m.stripAngle
+    stripScaleX = m.stripScaleX
+    stripScaleY = m.stripScaleY
+    stripColumn = m.stripColumn
+    s = m.stripCount
+    columnHeight = m.texSize
+    texPerStrip = texN / n
+    for k = 0 to n - 1
+      a = k
+      b = k + 1
+      if reversed
+        a = k + 1
+        b = k
+      end if
+      fx = footX[a]
+      fy = footY[a]
+      tx = topX[a]
+      ty = topY[a]
+      dx = tx - fx
+      dy = ty - fy
+      length = sqr(dx * dx + dy * dy)
+      if length < 0.5
+        continue for
+      end if
+      sinA = -dx / length
+      cosA = -dy / length
+      reach = (footX[b] - fx) * cosA - (footY[b] - fy) * sinA
+      topReach = (topX[b] - tx) * cosA - (topY[b] - ty) * sinA
+      if topReach > reach
+        reach = topReach
+      end if
+      width = reach + 1
+      if width < 1
+        width = 1.0
+      end if
+      if cosA > 0
+        stripAngle[s] = Atn(sinA / cosA) * 57.2957795
+      else
+        stripAngle[s] = BGE.Math.Atan2(sinA, cosA) * 57.2957795
+      end if
+      stripX[s] = fx
+      stripY[s] = fy
+      stripScaleX[s] = width
+      stripScaleY[s] = length / columnHeight
+      stripColumn[s] = columns[int((k + 0.5) * texPerStrip)]
+      s++
+    end for
+    m.stripCount = s
+  end sub
+
+  private sub growStrips(count as integer)
+    for i = m.stripX.count() to count - 1
+      m.stripX.push(0.0)
+      m.stripY.push(0.0)
+      m.stripAngle.push(0.0)
+      m.stripScaleX.push(1.0)
+      m.stripScaleY.push(1.0)
+      m.stripColumn.push(invalid)
+    end for
+  end sub
+
+  private sub drawStrips(target as object)
+    stripX = m.stripX
+    stripY = m.stripY
+    stripAngle = m.stripAngle
+    stripScaleX = m.stripScaleX
+    stripScaleY = m.stripScaleY
+    stripColumn = m.stripColumn
+    for s = 0 to m.stripCount - 1
+      target.DrawTransformedObject(stripX[s], stripY[s], stripAngle[s], stripScaleX[s], stripScaleY[s], stripColumn[s], -1)
+    end for
+  end sub
+
+  ' --- sweep ---
+
+  private sub startSweep()
+    m.sweeping = true
+    m.sweepPhase = 0
+    m.sweepFrame = 0
+    m.sweepMsTotal = 0
+    m.resultMs = []
+    m.resultBuildMs = []
+    m.resultStrips = []
+    print "=== Textured Quad Columns Benchmark ==="
+  end sub
+
+  private sub sweepStep()
+    methodCount = m.methodNames.count()
+    caseIndex = m.sweepPhase \ methodCount
+    method = m.sweepPhase mod methodCount
+    m.globalFrame++
+    m.setCamera(m.globalFrame / 30.0)
+    m.target.Clear(&h202830FF)
+    m.target.Finish()
+    m.timer.Mark()
+    m.drawCase(m.target, caseIndex, method)
+    m.target.Finish()
+    ms = m.timer.TotalMilliseconds()
+    m.sweepFrame++
+    if m.sweepFrame > m.warmupFrames
+      m.sweepMsTotal += ms
+    end if
+    if m.sweepFrame < m.warmupFrames + m.phaseFrames
+      return
+    end if
+
+    frameMs = m.sweepMsTotal / m.phaseFrames
+    buildMs = 0.0
+    strips = 0
+    if method >= 2
+      strips = m.stripCount
+    else
+      m.timer.Mark()
+      for i = 1 to m.buildRepeats
+        m.buildCaseStrips(caseIndex, method)
+      end for
+      buildMs = m.timer.TotalMilliseconds() / m.buildRepeats
+      strips = m.stripCount
+    end if
+    m.resultMs.push(frameMs)
+    m.resultBuildMs.push(buildMs)
+    m.resultStrips.push(strips)
+    line = `PHASE ${m.caseNames[caseIndex]} | ${m.methodNames[method]}: ${m.format(frameMs)} ms/frame`
+    if method >= 2
+      line += ` (${strips} columns)`
+    else
+      line += ` (build ${m.format(buildMs)} ms, ${strips} strips)`
+    end if
+    print line
+
+    m.sweepPhase++
+    m.sweepFrame = 0
+    m.sweepMsTotal = 0
+    if m.sweepPhase >= m.caseNames.count() * methodCount
+      m.sweeping = false
+      print "=== end ==="
+    end if
+  end sub
+
+  ' --- RendererTest ---
+
+  override sub update(dt as float)
+    if m.sweeping
+      return
+    end if
+    m.liveTime += dt
+    m.liveFrames++
+    m.liveSeconds += dt
+    if m.liveSeconds >= 3
+      print `LIVE ${m.caseNames[m.liveCase]} | ${m.methodNames[m.liveMethod]}: ${m.format(m.liveFrames / m.liveSeconds)} fps`
+      m.liveFrames = 0
+      m.liveSeconds = 0
+    end if
+  end sub
+
+  override sub onInput(buttonName as string)
+    caseCount = m.caseNames.count()
+    methodCount = m.methodNames.count()
+    if buttonName = "left"
+      m.liveCase = (m.liveCase + caseCount - 1) mod caseCount
+    else if buttonName = "right"
+      m.liveCase = (m.liveCase + 1) mod caseCount
+    else if buttonName = "up"
+      m.liveMethod = (m.liveMethod + methodCount - 1) mod methodCount
+    else if buttonName = "down"
+      m.liveMethod = (m.liveMethod + 1) mod methodCount
+    else if buttonName = "OK"
+      m.startSweep()
+    else if buttonName = "play"
+      m.showTable = not m.showTable
+    end if
+    m.liveFrames = 0
+    m.liveSeconds = 0
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    if m.sweeping
+      m.sweepStep()
+      m.screenRef.DrawObject(0, 0, m.target)
+      methodCount = m.methodNames.count()
+      phase = m.sweepPhase
+      if phase >= m.caseNames.count() * methodCount
+        phase = m.caseNames.count() * methodCount - 1
+      end if
+      renderer.drawText(`sweeping ${phase + 1}/${m.caseNames.count() * methodCount}: ${m.caseNames[phase \ methodCount]} | ${m.methodNames[phase mod methodCount]}`, 40, 60, BGE.Colors.Yellow, m.smallFont)
+    else
+      ' into a canvas bitmap, as Game does
+      m.setCamera(m.liveTime)
+      m.target.Clear(&h202830FF)
+      m.drawCase(m.target, m.liveCase, m.liveMethod)
+      m.screenRef.DrawObject(0, 0, m.target)
+      renderer.drawText(`live: ${m.caseNames[m.liveCase]} | ${m.methodNames[m.liveMethod]}`, 40, 60, BGE.Colors.Yellow, m.smallFont)
+    end if
+    if m.showTable
+      m.drawTable(renderer)
+    end if
+  end sub
+
+  private sub drawTable(renderer as BGE.Renderer)
+    methodCount = m.methodNames.count()
+    x = 40
+    y = 90
+    m.screenRef.DrawRect(x - 10, y - 6, 1200, 28 + 22 * m.caseNames.count(), &h000000B0)
+    renderer.drawText("ms/frame   cols 1:1 (build)   cols 4px (build, strips)   engine B L M H U (columns)", x, y, BGE.Colors.Gray, m.smallFont)
+    y += 24
+    for c = 0 to m.caseNames.count() - 1
+      line = m.caseNames[c]
+      while len(line) < 10
+        line += " "
+      end while
+      for method = 0 to methodCount - 1
+        i = c * methodCount + method
+        if i < m.resultMs.count()
+          line += "  " + m.format(m.resultMs[i])
+          if method >= 2
+            line += ` (${m.resultStrips[i]})`
+          else
+            line += ` (${m.format(m.resultBuildMs[i])}`
+            if method = 1
+              line += `, ${m.resultStrips[i]}`
+            end if
+            line += ")"
+          end if
+        end if
+      end for
+      color = BGE.Colors.White
+      if not m.sweeping and c = m.liveCase
+        color = BGE.Colors.Yellow
+        line = "> " + line
+      end if
+      renderer.drawText(line, x, y, color, m.smallFont)
+      y += 22
+    end for
+    renderer.drawText("Left/Right: case   Up/Down: method   OK: rerun   Play: table", x, y + 4, BGE.Colors.Gray, m.smallFont)
+  end sub
+
+  private function format(value as float) as string
+    return Str(int(value * 10 + 0.5) / 10.0).trim()
+  end function
+
+end class

@@ -1,0 +1,187 @@
+import "../../quality/RenderQualityLevel.bs"
+import "../../quality/RenderQualityPresets.bs"
+import "QuadColumnDrawer.bs"
+import "QuadColumnTexture.bs"
+
+namespace tests
+
+  @suite("BGE.QuadColumnDrawer")
+  class QuadColumnDrawerTests extends rooibos.BaseTestSuite
+
+    private drawer as BGE.QuadColumnDrawer
+    private texture as BGE.QuadColumnTexture
+    private target as roBitmap
+
+    protected override sub beforeEach()
+      m.drawer = new BGE.QuadColumnDrawer()
+      m.drawer.setProjection(640, 1280, 720)
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.texture = new BGE.QuadColumnTexture(m.quadrantTexture(), "quadrants")
+      m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      m.target.Clear(&h000000FF)
+    end sub
+
+    ' 128x128: top-left red, top-right blue, bottom-left green, bottom-right white
+    private function quadrantTexture() as roRegion
+      bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: true})
+      bmp.DrawRect(0, 0, 64, 64, &hFF0000FF)
+      bmp.DrawRect(64, 0, 64, 64, &h0000FFFF)
+      bmp.DrawRect(0, 64, 64, 64, &h00FF00FF)
+      bmp.DrawRect(64, 64, 64, 64, &hFFFFFFFF)
+      bmp.Finish()
+      return CreateObject("roRegion", bmp, 0, 0, 128, 128)
+    end function
+
+    ' 200 units square facing the camera at depth 500: 256 px across on screen
+    private function facingQuad() as float[]
+      return [-100.0, 100.0, -500.0, 100.0, 100.0, -500.0, -100.0, -100.0, -500.0, 100.0, -100.0, -500.0]
+    end function
+
+    ' leaning back: the top is farther than the bottom, so depth changes along v
+    private function leaningQuad() as float[]
+      return [-100.0, 100.0, -400.0, 100.0, 100.0, -400.0, -100.0, -100.0, -200.0, 100.0, -100.0, -200.0]
+    end function
+
+    private function pixel(x as integer, y as integer) as integer[]
+      m.target.Finish()
+      bytes = m.target.GetByteArray(x, y, 1, 1)
+      return [bytes[0], bytes[1], bytes[2]]
+    end function
+
+    private sub assertQuadrants(upperY as integer, lowerY as integer)
+      m.assertEqual([255, 0, 0], m.pixel(590, upperY))
+      m.assertEqual([0, 0, 255], m.pixel(690, upperY))
+      m.assertEqual([0, 255, 0], m.pixel(590, lowerY))
+      m.assertEqual([255, 255, 255], m.pixel(690, lowerY))
+    end sub
+
+    @describe("QuadColumnTexture")
+
+    @it("cuts 1-texel columns and rows from the texture's region")
+    function _()
+      bmp = CreateObject("roBitmap", {width: 64, height: 64})
+      texture = new BGE.QuadColumnTexture(CreateObject("roRegion", bmp, 8, 16, 32, 24), "t")
+      column = texture.getColumn(5)
+      m.assertEqual(13, column.GetX())
+      m.assertEqual(16, column.GetY())
+      m.assertEqual(1, column.GetWidth())
+      m.assertEqual(24, column.GetHeight())
+      row = texture.getRow(3)
+      m.assertEqual(8, row.GetX())
+      m.assertEqual(19, row.GetY())
+      m.assertEqual(32, row.GetWidth())
+      m.assertEqual(1, row.GetHeight())
+    end function
+
+    @describe("drawing")
+
+    @it("draws columns along u when depth changes least across them")
+    function _()
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
+      m.assertFalse(m.drawer.lastUsedRows)
+      m.assertQuadrants(310, 410)
+    end function
+
+    @it("draws turned rows when depth changes along v")
+    function _()
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      m.assertTrue(m.drawer.lastUsedRows)
+      m.assertQuadrants(300, 420)
+    end function
+
+    @it("draws with an orthographic projection")
+    function _()
+      m.drawer.setOrthographicProjection(640, 360, 1280, 720)
+      ' clip space: 256 x 144 px from (512, 288)
+      quad = [-0.2, 0.2, -0.5, 0.2, 0.2, -0.5, -0.2, -0.2, -0.5, 0.2, -0.2, -0.5]
+      m.assertTrue(m.drawer.drawTo(m.target, quad, m.texture, [-1]) > 0)
+      m.assertQuadrants(310, 410)
+    end function
+
+    @it("tints with one color, or blends one per corner")
+    function _()
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [&h808080FF])
+      m.assertEqual([128, 128, 128], m.pixel(690, 410))
+      m.target.Clear(&h000000FF)
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [&hFFFFFFFF, &h000000FF, &hFFFFFFFF, &h000000FF])
+      left = m.pixel(520, 410)
+      right = m.pixel(760, 410)
+      ' green: the bottom-left quadrant is green and the bottom-right white
+      m.assertTrue(left[1] > 200, `left ${left[1]}`)
+      m.assertTrue(right[1] < 55, `right ${right[1]}`)
+    end function
+
+    @it("draws nothing when the quad is behind the camera")
+    function _()
+      quad = [-100.0, 100.0, 50.0, 100.0, 100.0, 50.0, -100.0, -100.0, 50.0, 100.0, -100.0, 50.0]
+      m.assertEqual(0, m.drawer.drawTo(m.target, quad, m.texture, [-1]))
+    end function
+
+    @it("draws the part of a quad in front of the near plane")
+    function _()
+      ' a floor from behind the camera to depth 600, below eye level
+      quad = [-100.0, -50.0, -600.0, 100.0, -50.0, -600.0, -100.0, -50.0, 100.0, 100.0, -50.0, 100.0]
+      drawn = m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      m.assertTrue(drawn > 0)
+      m.assertTrue(drawn < m.drawer.lastColumnCount)
+    end function
+
+    @it("keeps the column that crosses the near plane")
+    function _()
+      ' a wall on the left running from behind the camera to depth 3100: at Basic its 32
+      ' columns are 100 units apart, so the one from depth 0 to 100 (cut at the near plane,
+      ' depth 10) covers x -3200..256 on screen
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      quad = [-60.0, 50.0, 100.0, -60.0, 50.0, -3100.0, -60.0, -50.0, 100.0, -60.0, -50.0, -3100.0]
+      m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      m.assertNotEqual([0, 0, 0], m.pixel(100, 360))
+    end function
+
+    @describe("column count")
+
+    @it("takes the smaller of texels x columnsPerTexel and screen span / minPixelsPerColumn")
+    function _()
+      ' 128 texels; 256 px across
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
+      m.assertEqual(64, m.drawer.lastColumnCount)
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
+      m.assertEqual(32, m.drawer.lastColumnCount)
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.ultra))
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
+      m.assertEqual(128, m.drawer.lastColumnCount)
+      ' far away: 64 px across, so 64 / 4 + 1 at Medium
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      far = m.facingQuad()
+      for i = 2 to 11 step 3
+        far[i] = -2000.0
+      end for
+      m.drawer.drawTo(m.target, far, m.texture, [-1])
+      m.assertEqual(17, m.drawer.lastColumnCount)
+    end function
+
+    @it("stops at the per-frame budget until the next frame")
+    function _()
+      m.drawer.maxColumnsPerFrame = 100
+      m.assertEqual(64, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
+      m.assertEqual(36, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
+      m.assertEqual(0, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
+      m.assertEqual(100, m.drawer.columnsThisFrame)
+      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.assertEqual(64, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
+    end function
+
+    @it("skips columns off the canvas")
+    function _()
+      quad = m.facingQuad()
+      for i = 0 to 9 step 3
+        quad[i] += 500.0
+      end for
+      ' x 1152..1408 on screen: only about the first half is on the 1280 canvas
+      drawn = m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      m.assertTrue(drawn > 28 and drawn < 40, `drawn ${drawn}`)
+    end function
+
+  end class
+
+end namespace

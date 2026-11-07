@@ -1,0 +1,293 @@
+' Textured models drawn with their faces as texture columns, with or without an impostor
+' (#450, #451; the triangle warp it compared against was removed in #454). Left/right picks
+' the scene, up/down the method, OK the motion: models spinning, still (blitting their cached
+' drawing), or the camera orbiting still models (what an impostor is for). Launch params:
+' scene=0-2, method=0-1, motion=0-2.
+' faces=solid draws untextured faces instead, with or without an impostor (#452).
+' Every case logs a `MODELFACES` console line with its average frame interval and draw
+' calls; sweep=1 steps through every case by itself, or just those in the comma lists
+' scenes=, methods= and motions=.
+class ModelFacesBenchmark extends RendererTest
+
+  ' frames to settle after a change, then frames to average
+  private warmupFrames as integer = 30
+  private sampleFrames as integer = 90
+  private frameCount as integer = 0
+  private sampleMs as float = 0
+  private sampleCalls as integer = 0
+  private frameClock = CreateObject("roTimespan")
+  private sweeping as boolean = false
+  private sweepIndex as integer = 0
+  private sweepCases = [] as integer[][]
+
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private rendererRef as BGE.Renderer
+  private texture as BGE.RendererHelpers.RegionWithId
+  private models = [] as BGE.DrawableModel[]
+  private sceneIndex as integer = 0
+  private methodIndex as integer = 0
+  private motionIndex as integer = 0
+  private angle as float = 0
+  private orbit as float = 0
+  private motionNames = ["spin", "still", "orbit"]
+  private sceneNames = ["4 cubes (12 faces)", "9 cubes", "sphere (176 faces)"]
+  private methodNames = ["columns", "columns + impostor"]
+  private solid as boolean = false
+
+  sub new()
+    super("Model Faces (L/R scene, U/D method, OK motion)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.camera = new BGE.Camera3d()
+    m.camera.position = BGE.Math.VectorOps.create(0, 60, 600)
+    m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+    m.camera.maxDrawDistance = 2000
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+    m.solid = m.launchParams.faces = "solid"
+    if m.solid
+      m.methodNames = ["solid", "solid + impostor"]
+    end if
+    m.texture = BGE.RendererHelpers.createRegionWithId(CreateObject("roRegion", m.createTexture(), 0, 0, 128, 128), "model-faces-benchmark")
+    if invalid <> m.launchParams.scene
+      m.sceneIndex = m.launchParams.scene.toInt() mod m.sceneNames.count()
+    end if
+    if invalid <> m.launchParams.method
+      m.methodIndex = m.launchParams.method.toInt() mod m.methodNames.count()
+    end if
+    if invalid <> m.launchParams.motion
+      m.motionIndex = m.launchParams.motion.toInt() mod m.motionNames.count()
+    end if
+    m.sweeping = m.launchParams.sweep = "1"
+    if m.sweeping
+      for each scene in m.indexList(m.launchParams.scenes, m.sceneNames.count())
+        for each method in m.indexList(m.launchParams.methods, m.methodNames.count())
+          for each motion in m.indexList(m.launchParams.motions, m.motionNames.count())
+            m.sweepCases.push([scene, method, motion])
+          end for
+        end for
+      end for
+      m.applySweepCase()
+    end if
+    m.buildScene()
+  end sub
+
+  ' A comma list of indexes, or all of 0 to count - 1.
+  private function indexList(text as dynamic, count as integer) as integer[]
+    list = [] as integer[]
+    if invalid = text or text = ""
+      for i = 0 to count - 1
+        list.push(i)
+      end for
+      return list
+    end if
+    for each item in text.split(",")
+      list.push(item.toInt() mod count)
+    end for
+    return list
+  end function
+
+  private sub applySweepCase()
+    item = m.sweepCases[m.sweepIndex]
+    m.sceneIndex = item[0]
+    m.methodIndex = item[1]
+    m.motionIndex = item[2]
+  end sub
+
+  ' Averages the frame interval (everything, swap included) and logs it once per case.
+  private sub sampleFrame(renderer as BGE.Renderer)
+    elapsed = m.frameClock.TotalMilliseconds()
+    m.frameClock.Mark()
+    m.frameCount++
+    if m.frameCount <= m.warmupFrames
+      return
+    end if
+    m.sampleMs += elapsed
+    m.sampleCalls += renderer.getDrawCallsLastFrame()
+    if m.frameCount < m.warmupFrames + m.sampleFrames
+      return
+    end if
+    print `MODELFACES ${m.sceneNames[m.sceneIndex]} | ${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]} | ${Int(m.sampleMs / m.sampleFrames * 10) / 10} ms | ${m.sampleCalls \ m.sampleFrames} calls`
+    m.resetSample()
+    if m.sweeping
+      m.sweepIndex++
+      if m.sweepIndex >= m.sweepCases.count()
+        print "MODELFACES done"
+        m.sweeping = false
+        return
+      end if
+      m.applySweepCase()
+      m.buildScene()
+    end if
+  end sub
+
+  private sub resetSample()
+    m.frameCount = 0
+    m.sampleMs = 0
+    m.sampleCalls = 0
+  end sub
+
+  ' 128x128 quadrants with a grid, so warps and seams show
+  private function createTexture() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: false})
+    bmp.DrawRect(0, 0, 64, 64, &hD04040FF)
+    bmp.DrawRect(64, 0, 64, 64, &h4060D0FF)
+    bmp.DrawRect(0, 64, 64, 64, &h40B040FF)
+    bmp.DrawRect(64, 64, 64, 64, &hE0E0E0FF)
+    for i = 0 to 128 step 16
+      bmp.DrawRect(i, 0, 1, 128, &h202020FF)
+      bmp.DrawRect(0, i, 128, 1, &h202020FF)
+    end for
+    bmp.Finish()
+    return bmp
+  end function
+
+  private sub buildScene()
+    m.resetSample()
+    for each sceneObj in m.rendererRef.getSceneObjectsCopy()
+      m.rendererRef.removeSceneObject(sceneObj)
+    end for
+    m.models = []
+    if m.sceneIndex = 2
+      m.addModel(m.createSphereModel(180, 16, 12), BGE.Math.VectorOps.create(0, 0, 0))
+    else
+      perRow = 2
+      spacing = 260
+      if m.sceneIndex = 1
+        perRow = 3
+        spacing = 200
+      end if
+      for row = 0 to perRow - 1
+        for col = 0 to perRow - 1
+          m.addModel(m.createCubeModel(70), BGE.Math.VectorOps.create((col - (perRow - 1) / 2) * spacing, ((perRow - 1) / 2 - row) * spacing * 0.7, 0))
+        end for
+      end for
+    end if
+  end sub
+
+  private sub addModel(model as BGE.Model3d, offset as BGE.Math.Vector)
+    drawable = new BGE.DrawableModel(invalid, model, {drawMode: BGE.SceneObjectDrawMode.oriented, offset: offset, rotation: BGE.Math.VectorOps.create(0.4, m.angle, 0)})
+    drawable.useImpostor = m.methodIndex = 1
+    drawable.addToRenderer(m.rendererRef)
+    m.models.push(drawable)
+  end sub
+
+  private function createCubeModel(halfSize as float) as BGE.Model3d
+    s = halfSize
+    corners = []
+    for each c in [[-s, -s, -s], [s, -s, -s], [s, s, -s], [-s, s, -s], [-s, -s, s], [s, -s, s], [s, s, s], [-s, s, s]]
+      corners.push(BGE.Math.VectorOps.create(c[0], c[1], c[2]))
+    end for
+    faces = [] as BGE.Model3dFace[]
+    ' each side's corners counterclockwise from outside, mapped to the whole texture
+    for each quad in [[4, 5, 6, 7], [1, 0, 3, 2], [5, 1, 2, 6], [0, 4, 7, 3], [7, 6, 2, 3], [0, 1, 5, 4]]
+      a = corners[quad[0]]
+      b = corners[quad[1]]
+      c = corners[quad[2]]
+      d = corners[quad[3]]
+      faces.push(m.texturedFace([a, b, c], [[0, 128], [128, 128], [128, 0]]))
+      faces.push(m.texturedFace([a, c, d], [[0, 128], [128, 0], [0, 0]]))
+    end for
+    return new BGE.Model3d(faces)
+  end function
+
+  ' A UV sphere with the texture wrapped once around it.
+  private function createSphereModel(radius as float, slices as integer, stacks as integer) as BGE.Model3d
+    faces = [] as BGE.Model3dFace[]
+    for stack = 0 to stacks - 1
+      for slice = 0 to slices - 1
+        p = []
+        uv = []
+        for each corner in [[stack, slice], [stack, slice + 1], [stack + 1, slice + 1], [stack + 1, slice]]
+          phi = BGE.Math.PI * corner[0] / stacks
+          theta = 2 * BGE.Math.PI * corner[1] / slices
+          p.push(BGE.Math.VectorOps.create(radius * sin(phi) * cos(theta), radius * cos(phi), radius * sin(phi) * sin(theta)))
+          uv.push([128.0 * corner[1] / slices, 128.0 * corner[0] / stacks])
+        end for
+        if stack > 0
+          faces.push(m.texturedFace([p[0], p[2], p[1]], [uv[0], uv[2], uv[1]]))
+        end if
+        if stack < stacks - 1
+          faces.push(m.texturedFace([p[0], p[3], p[2]], [uv[0], uv[3], uv[2]]))
+        end if
+      end for
+    end for
+    return new BGE.Model3d(faces)
+  end function
+
+  ' Every model here is centered on the origin, so a face is turned to face away from it.
+  private function texturedFace(vertices as BGE.Math.Vector[], uvs as object) as BGE.Model3dFace
+    face = BGE.Model3dFaceOps.create(vertices)
+    a = vertices[0]
+    b = vertices[1]
+    c = vertices[2]
+    if BGE.Math.VectorOps.dotProduct(face.normal, BGE.Math.VectorOps.create(a.x + b.x + c.x, a.y + b.y + c.y, a.z + b.z + c.z)) < 0
+      face = BGE.Model3dFaceOps.create([b, a, c])
+      uvs = [uvs[1], uvs[0], uvs[2]]
+    end if
+    if m.solid
+      ' a color per texture quadrant, so neighbouring faces differ
+      face.color = [BGE.Colors.Red, BGE.Colors.Blue, BGE.Colors.Lime, BGE.Colors.White][(Int(uvs[0][0] / 64) + 2 * Int(uvs[0][1] / 64)) mod 4]
+      return face
+    end if
+    points = [] as BGE.Math.Vector[]
+    for each uv in uvs
+      points.push(BGE.Math.VectorOps.create(uv[0], uv[1]))
+    end for
+    face.Texture = new BGE.Model3dTexture(m.texture, points)
+    return face
+  end function
+
+  override sub update(dt as float)
+    if m.motionIndex = 0
+      m.angle += dt * 0.8
+    else if m.motionIndex = 2
+      m.orbit += dt * 0.5
+    end if
+    m.camera.position = BGE.Math.VectorOps.create(600 * sin(m.orbit), 60, 600 * cos(m.orbit))
+    m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, 0))
+    for each model in m.models
+      model.rotation = BGE.Math.VectorOps.create(0.4, m.angle, 0)
+      model.update()
+    end for
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    renderer.render()
+    m.sampleFrame(renderer)
+    renderer.drawText(`${m.sceneNames[m.sceneIndex]} | ${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]}`, 20, 80, BGE.Colors.White)
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "left" or buttonName = "right"
+      delta = 1
+      if buttonName = "left"
+        delta = m.sceneNames.count() - 1
+      end if
+      m.sceneIndex = (m.sceneIndex + delta) mod m.sceneNames.count()
+      m.buildScene()
+    else if buttonName = "up" or buttonName = "down"
+      delta = 1
+      if buttonName = "up"
+        delta = m.methodNames.count() - 1
+      end if
+      m.methodIndex = (m.methodIndex + delta) mod m.methodNames.count()
+      m.buildScene()
+    else if buttonName = "OK"
+      m.motionIndex = (m.motionIndex + 1) mod m.motionNames.count()
+      m.resetSample()
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class

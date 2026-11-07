@@ -1,0 +1,243 @@
+import "../../../math/math.bs"
+
+namespace BGE
+
+  ' One set of strips cut across a texture triangle: strip k covers texels `starts[k]` to
+  ' `ends[k]` across, and `lows[k]` to `highs[k]` along, drawn from `regions[k]` (invalid
+  ' if the triangle misses it).
+  class TriangleColumnStrips
+    starts = [] as integer[]
+    ends = [] as integer[]
+    lows = [] as integer[]
+    highs = [] as integer[]
+    regions = [] as roRegion[]
+  end class
+
+  ' A textured triangle's texture columns and rows for `BGE.QuadColumnDrawer.drawTriangleTo()`,
+  ' each cut to the triangle's span. Strips are a power of two texels wide, and each width is
+  ' cut on first use and kept, so drawing only projects. Share one per face texture.
+  class TriangleColumnCuts
+
+    ' false if the UV triangle has no area, so it can't map onto the face
+    isValid as boolean = false
+    ' the triangle's texel points
+    u = [] as float[]
+    v = [] as float[]
+    ' (u, v) -> how far along the face's edges 0->1 (a) and 0->2 (b) it is:
+    ' a = ua * (u - u0) + va * (v - v0), b = ub * (u - u0) + vb * (v - v0)
+    ua as float = 0.0
+    va as float = 0.0
+    ub as float = 0.0
+    vb as float = 0.0
+    ' the texels the triangle covers, whole texels
+    minU as integer = 0
+    maxU as integer = 0
+    minV as integer = 0
+    maxV as integer = 0
+
+    private bitmap as roBitmap = invalid
+    private regionX as integer = 0
+    private regionY as integer = 0
+    private regionWidth as integer = 0
+    private regionHeight as integer = 0
+    ' by log2 of the strip width
+    private columnSets = [] as BGE.TriangleColumnStrips[]
+    private rowSets = [] as BGE.TriangleColumnStrips[]
+
+    ' @param {roRegion} region the texture
+    ' @param {BGE.Math.Vector[]} points the triangle's 3 texel points within `region`
+    sub new(region as roRegion, points as BGE.Math.Vector[])
+      m.bitmap = region.GetBitmap()
+      m.regionX = region.GetX()
+      m.regionY = region.GetY()
+      m.regionWidth = region.GetWidth()
+      m.regionHeight = region.GetHeight()
+      for i = 0 to 2
+        m.u.push(points[i].x)
+        m.v.push(points[i].y)
+      end for
+      du1 = m.u[1] - m.u[0]
+      dv1 = m.v[1] - m.v[0]
+      du2 = m.u[2] - m.u[0]
+      dv2 = m.v[2] - m.v[0]
+      det = du1 * dv2 - du2 * dv1
+      if abs(det) < 0.01
+        return
+      end if
+      m.ua = dv2 / det
+      m.va = -du2 / det
+      m.ub = -dv1 / det
+      m.vb = du1 / det
+      m.minU = m.clampTexel(int(BGE.Math.Min(m.u[0], BGE.Math.Min(m.u[1], m.u[2]))), m.regionWidth)
+      m.maxU = m.clampEdge(-int(-BGE.Math.Max(m.u[0], BGE.Math.Max(m.u[1], m.u[2]))), m.minU, m.regionWidth)
+      m.minV = m.clampTexel(int(BGE.Math.Min(m.v[0], BGE.Math.Min(m.v[1], m.v[2]))), m.regionHeight)
+      m.maxV = m.clampEdge(-int(-BGE.Math.Max(m.v[0], BGE.Math.Max(m.v[1], m.v[2]))), m.minV, m.regionHeight)
+      m.isValid = true
+    end sub
+
+    ' The strips `stepLog2` (log2 of their width in texels) wide: columns run along v at
+    ' fixed u, rows along u at fixed v.
+    '
+    ' @param {boolean} useRows
+    ' @param {integer} stepLog2
+    ' @return {BGE.TriangleColumnStrips}
+    function getStrips(useRows as boolean, stepLog2 as integer) as BGE.TriangleColumnStrips
+      sets = m.columnSets
+      if useRows
+        sets = m.rowSets
+      end if
+      while sets.count() <= stepLog2
+        sets.push(invalid)
+      end while
+      strips = sets[stepLog2]
+      if invalid = strips
+        strips = m.cut(useRows, 1 << stepLog2)
+        sets[stepLog2] = strips
+      end if
+      return strips
+    end function
+
+    ' Strip `k` of `strips` with only the texels from `low` to `high` along, for a strip cut
+    ' back to the near plane. A new region each call.
+    '
+    ' @param {boolean} useRows
+    ' @param {BGE.TriangleColumnStrips} strips from getStrips(useRows, ...)
+    ' @param {integer} k
+    ' @param {integer} low
+    ' @param {integer} high
+    ' @return {roRegion}
+    function getCroppedRegion(useRows as boolean, strips as BGE.TriangleColumnStrips, k as integer, low as integer, high as integer) as roRegion
+      alongSize = m.regionHeight
+      if useRows
+        alongSize = m.regionWidth
+      end if
+      low = m.clampTexel(low, alongSize)
+      high = m.clampEdge(high, low, alongSize)
+      return m.makeStripRegion(useRows, (strips.starts[k] + strips.ends[k] - 1) \ 2, low, high)
+    end function
+
+    ' How many strips `stepSize` texels wide cross the triangle.
+    '
+    ' @param {boolean} useRows
+    ' @param {integer} stepSize
+    ' @return {integer}
+    function stripCount(useRows as boolean, stepSize as integer) as integer
+      span = m.maxU - m.minU
+      if useRows
+        span = m.maxV - m.minV
+      end if
+      return (span + stepSize - 1) \ stepSize
+    end function
+
+    private function cut(useRows as boolean, stepSize as integer) as BGE.TriangleColumnStrips
+      strips = new BGE.TriangleColumnStrips()
+      ' across: the axis strips step along; along: the one each strip runs down
+      acrossPoints = m.u
+      alongPoints = m.v
+      first = m.minU
+      last = m.maxU
+      alongSize = m.regionHeight
+      if useRows
+        acrossPoints = m.v
+        alongPoints = m.u
+        first = m.minV
+        last = m.maxV
+        alongSize = m.regionWidth
+      end if
+      start = first
+      while start < last
+        finish = start + stepSize
+        if finish > last
+          finish = last
+        end if
+        strips.starts.push(start)
+        strips.ends.push(finish)
+        span = m.spanInSlab(acrossPoints, alongPoints, start, finish)
+        if invalid = span
+          strips.lows.push(0)
+          strips.highs.push(0)
+          strips.regions.push(invalid)
+        else
+          low = m.clampTexel(int(span[0]), alongSize)
+          high = m.clampEdge(-int(-span[1]), low, alongSize)
+          strips.lows.push(low)
+          strips.highs.push(high)
+          ' the middle texel of the strip
+          strips.regions.push(m.makeStripRegion(useRows, (start + finish - 1) \ 2, low, high))
+        end if
+        start = finish
+      end while
+      return strips
+    end function
+
+    ' One texel across at `texel`, from `low` to `high` along.
+    private function makeStripRegion(useRows as boolean, texel as integer, low as integer, high as integer) as roRegion
+      if useRows
+        region = CreateObject("roRegion", m.bitmap, m.regionX + low, m.regionY + texel, high - low, 1)
+        region.SetPreTranslation(-(high - low), -1)
+      else
+        region = CreateObject("roRegion", m.bitmap, m.regionX + texel, m.regionY + low, 1, high - low)
+        region.SetPreTranslation(0, -(high - low))
+      end if
+      return region
+    end function
+
+    ' The lowest and highest `along` the triangle reaches with `across` from a to b, or invalid
+    ' if it doesn't reach the slab. The whole slab, not its middle, so neighbouring faces don't gap.
+    private function spanInSlab(across as float[], along as float[], a as float, b as float) as float[]
+      values = [] as float[]
+      for i = 0 to 2
+        if across[i] >= a and across[i] <= b
+          values.push(along[i])
+        end if
+        j = (i + 1) mod 3
+        if across[i] <> across[j]
+          for each x in [a, b]
+            t = (x - across[i]) / (across[j] - across[i])
+            if t >= 0 and t <= 1
+              values.push(along[i] + (along[j] - along[i]) * t)
+            end if
+          end for
+        end if
+      end for
+      if values.count() = 0
+        return invalid
+      end if
+      low = values[0]
+      high = values[0]
+      for each value in values
+        if value < low
+          low = value
+        end if
+        if value > high
+          high = value
+        end if
+      end for
+      return [low, high]
+    end function
+
+    ' a texel index within 0 to size - 1
+    private function clampTexel(texel as integer, size as integer) as integer
+      if texel > size - 1
+        texel = size - 1
+      end if
+      if texel < 0
+        texel = 0
+      end if
+      return texel
+    end function
+
+    ' a texel edge past `low` and within `size`
+    private function clampEdge(edge as integer, low as integer, size as integer) as integer
+      if edge > size
+        edge = size
+      end if
+      if edge <= low
+        edge = low + 1
+      end if
+      return edge
+    end function
+
+  end class
+
+end namespace

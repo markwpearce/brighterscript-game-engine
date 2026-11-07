@@ -155,7 +155,7 @@ namespace tests
       m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
     end function
 
-    @it("redraw a face's cached raster when a light change alters its color")
+    @it("reshade a face when a light change alters its color")
     function _()
       sceneObj = m.addFacingModel()
       sceneObj.drawable.useImpostor = false
@@ -164,28 +164,7 @@ namespace tests
       m.renderFrame()
       lamp.position = m.v(0, 0, 100)
       m.renderFrame()
-      m.assertEqual(0, sceneObj.getFaceStaleFrameCount(0))
       m.assertTrue(sceneObj.getFaceBrightness(0) > 0.9, sceneObj.getFaceBrightness(0).toStr())
-    end function
-
-    @it("reuse an unmoved face's raster without counting it stale when only another face relights")
-    function _()
-      faceA = BGE.Model3dFaceOps.create([m.v(-150, -50, 0), m.v(-50, -50, 0), m.v(-100, 50, 0)])
-      faceB = BGE.Model3dFaceOps.create([m.v(50, -50, 0), m.v(150, -50, 0), m.v(100, 50, 0)])
-      drawableModel = new BGE.DrawableModel(m.entity, new BGE.Model3d([faceA, faceB]))
-      drawableModel.drawMode = BGE.SceneObjectDrawMode.solid
-      drawableModel.useImpostor = false
-      sceneObj = drawableModel.addToRenderer(m.renderer) as BGE.SceneObjectModel
-      ' reaches face A only
-      lamp = new BGE.PointLight(m.v(-100, 0, 60), 100)
-      m.renderer.addLight(lamp)
-      m.renderFrame()
-      ' at the stale limit, so only an exact reuse can keep face B's raster
-      (sceneObj as dynamic).faceRasterCaches[1].staleFrameCount = drawableModel.maxStaleFrames
-      lamp.position = m.v(-100, 0, 50)
-      m.renderFrame()
-      m.assertEqual(0, sceneObj.getFaceStaleFrameCount(0))
-      m.assertEqual(drawableModel.maxStaleFrames, sceneObj.getFaceStaleFrameCount(1))
     end function
 
     @it("keep an impostor's rendering through a light change too small to see")
@@ -204,6 +183,122 @@ namespace tests
       light.direction = m.v(1, 0, -1)
       m.renderFrame()
       m.assertTrue(sceneObj.getFaceBrightness(0) < 0.8, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @describe("relighting without re-projecting")
+
+    @it("relights a model whose light changed without re-projecting it")
+    function _()
+      counting = m.useCountingRenderer()
+      sceneObj = m.addFacingModel()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderFrame()
+      m.renderFrame()
+      light.direction = m.v(0, 0, 1)
+      counting.projections = 0
+      m.renderFrame()
+      m.assertEqual(0, counting.projections)
+      m.assertTrue(sceneObj.getFaceBrightness(0) < 0.3, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @it("still re-projects a model when the camera moves in the same frame as a light change")
+    function _()
+      counting = m.useCountingRenderer()
+      sceneObj = m.addFacingModel()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderFrame()
+      m.renderFrame()
+      light.direction = m.v(0, 0, 1)
+      m.renderer.camera.position = m.v(5, 0, 500)
+      counting.projections = 0
+      m.renderFrame()
+      m.assertTrue(counting.projections >= 3, counting.projections.toStr())
+      m.assertTrue(sceneObj.getFaceBrightness(0) < 0.3, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @it("keeps an impostor's rendering through a small light change without re-projecting it")
+    function _()
+      counting = m.useCountingRenderer()
+      m.addFacingModel()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderFrame()
+      m.renderFrame()
+      ' within Medium's modelImpostorMaxAngleDegrees
+      light.direction = m.v(0.1, 0, -1)
+      counting.projections = 0
+      m.renderer.resetDrawCallCounter()
+      m.renderFrame()
+      m.assertEqual(0, counting.projections)
+      m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @it("relights a model whose light changed while it was culled once it returns")
+    function _()
+      m.useCountingRenderer()
+      sceneObj = m.addFacingModel()
+      light = new BGE.DirectionalLight(m.v(0, 0, -1))
+      m.renderer.addLight(light)
+      m.renderFrame()
+      camera = m.renderer.camera as BGE.Camera3d
+      ' looking away
+      camera.setTarget(m.v(0, 0, 2000))
+      m.renderFrame()
+      m.assertTrue(sceneObj.isCulled())
+      light.direction = m.v(0, 0, 1)
+      m.renderFrame()
+      camera.setTarget(m.v(0, 0, 0))
+      m.renderFrame()
+      m.assertFalse(sceneObj.isCulled())
+      m.assertTrue(sceneObj.getFaceBrightness(0) < 0.3, sceneObj.getFaceBrightness(0).toStr())
+    end function
+
+    @it("relights an oriented billboard whose light changed without re-projecting it")
+    function _()
+      counting = m.useCountingRenderer()
+      rectangle = new BGE.DrawableRectangle(m.entity, 100, 100, {drawMode: BGE.SceneObjectDrawMode.solid, color: BGE.ColorsRGB.White, isShaded: true, ambientBrightness: 0})
+      sceneObj = rectangle.addToRenderer(m.renderer) as BGE.SceneObjectRectangle
+      light = new BGE.DirectionalLight(m.v(0, 0, -1), BGE.ColorsRGB.Red)
+      m.renderer.addLight(light)
+      m.renderFrame()
+      m.renderFrame()
+      light.color = BGE.ColorsRGB.Blue
+      counting.projections = 0
+      m.renderFrame()
+      m.assertEqual(0, counting.projections)
+      m.assertEqual(&h0000FFFF, sceneObj.getShadedColorRGBA(m.renderer))
+    end function
+
+    @it("relights a plane whose light changed without re-projecting it")
+    function _()
+      counting = m.useCountingRenderer()
+      plane = new BGE.DrawablePlane(m.entity, invalid, {normal: m.v(0, 1, 0), point: m.v(0, -100, 0)}, {fillMode: BGE.PlaneFillMode.color, isShaded: true})
+      plane.addToRenderer(m.renderer)
+      light = new BGE.DirectionalLight(m.v(0, -1, 0), BGE.ColorsRGB.Red)
+      m.renderer.addLight(light)
+      m.renderer.profileStages = true
+      m.renderFrame()
+      m.renderFrame()
+      light.color = BGE.ColorsRGB.Blue
+      counting.projections = 0
+      m.renderFrame()
+      m.assertEqual(0, counting.projections)
+      m.assertInvalid(m.renderer.getStageCountsLastFrame()["canvasPosition" + BGE.SceneObjectType.Plane])
+      m.assertNotInvalid(m.renderer.getStageCountsLastFrame()["performDraw" + BGE.SceneObjectType.Plane])
+    end function
+
+    ' Swaps in a renderer that counts point projections.
+    private function useCountingRenderer() as tests.CountingRenderer
+      bitmap = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      camera = new BGE.Camera3d()
+      camera.drawDistanceFadeFraction = 0
+      ' within the headless 900 draw distance, so a camera move doesn't cull the fixtures
+      camera.position = m.v(0, 0, 500)
+      counting = new tests.CountingRenderer(bitmap, m.game, camera)
+      m.renderer = counting
+      return counting
     end function
 
     @describe("planes")
