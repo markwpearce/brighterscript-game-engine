@@ -141,6 +141,11 @@ Images, sprites, text, circles and filled rectangles in the oriented and solid d
 in camera space, so the result is perspective correct with no scratch or temp bitmaps. On a
 `Camera2d` the same columns are projected orthographically. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
 `quadMinPixelsPerColumn`), and a per-frame budget keeps the draw count under Roku's queue limit.
+A slab is drawn affine, so it's only wrong where depth changes across it: `quadMaxAffineErrorPixels`
+caps the columns at as many as keep that error under its pixel count. A quad at near constant depth
+(facing the camera, or any quad on a `Camera2d`) then draws as one slab; a wall seen edge on gets
+many. Ultra turns the cap off. It isn't applied to quads with per-corner tints, whose colour blends
+per column.
 Each column is a slab a power of two texels wide, drawn whole, so fewer columns don't drop texture
 detail. A quad seen mirrored (from behind) draws each column's middle texel alone instead, because a
 slab would be mirrored within its column and a negative scale can't be rotated on a real Roku.
@@ -1043,16 +1048,17 @@ m.addDrawable("wall", wall)
 Points are in the owner's space. Move a wall with `setEnds()` and change its tiling with
 `setTileSize()`, not by writing the fields. It's `orientedDrawBackFace`, `isOccluder` and
 `isShaded` by default; give the owner `isStatic = true` so it sorts through the static BSP and
-can occlude. It draws like an oriented image, as perspective-correct texture columns, each tile
-its own quad (`QuadColumnDrawer.drawTiledTo()`, also reachable through
-`Renderer.drawColumnTextureTo()`'s `repeatU`/`repeatV`). An untiled wall can still take the
+can occlude. It draws like an oriented image, as perspective-correct texture columns:
+one pass of columns that wrap the texture, in a band per repeat along their length
+(`QuadColumnDrawer.drawTiledTo()`, also reachable through `Renderer.drawColumnTextureTo()`'s
+`repeatU`/`repeatV`). A column can't span two repeats, so a wall gets at least one per tile. An untiled wall can still take the
 one-call rotated-rectangle fast path.
 
 Limits:
 
 - Cost grows with wall count: each wall is a sorted object with its own columns and temp
-  bitmap. rendererTest's `walls-benchmark` measured about 14 ms for 4 walls and 155 ms for 32 on
-  device. Watch texture memory on HD devices.
+  bitmap, and every visible wall redraws its columns each frame the camera moves. Measure with
+  rendererTest's `walls-benchmark`. Watch texture memory on HD devices.
 - Hiding is whole-object (the span map) plus the painter's sort, with no per-strip hiding as
   with grid walls, so walls that cross, or something standing in a gap, can sort wrong.
 - No collision.

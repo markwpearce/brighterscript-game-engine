@@ -15,10 +15,23 @@ namespace tests
     protected override sub beforeEach()
       m.drawer = new BGE.QuadColumnDrawer()
       m.drawer.setProjection(640, 1280, 720)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.medium))
       m.texture = new BGE.QuadColumnTexture(m.quadrantTexture(), "quadrants")
       m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
       m.target.Clear(&h000000FF)
+    end sub
+
+    ' A preset with no perspective-error cap, so column counts come from density alone
+    private function dense(level as BGE.RenderQualityLevel) as BGE.RenderQualitySettings
+      settings = BGE.getRenderQualityPreset(level)
+      settings.quadMaxAffineErrorPixels = 0
+      return settings
+    end function
+
+    private sub capError(pixels as float)
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.quadMaxAffineErrorPixels = pixels
+      m.drawer.beginFrame(settings)
     end sub
 
     ' 128x128: top-left red, top-right blue, bottom-left green, bottom-right white
@@ -60,7 +73,7 @@ namespace tests
     ' Draws the banded texture onto `quad` (clip space, an orthographic projection 256 x 144
     ' px from (512, 288)) as slabs 16 texels wide, so each has a red and a blue band.
     private sub drawBandedSlabs(quad as float[], alongV as boolean)
-      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings = m.dense(BGE.RenderQualityLevel.medium)
       settings.quadColumnsPerTexel = 1 / 16
       settings.quadMinPixelsPerColumn = 1
       m.drawer.beginFrame(settings)
@@ -177,7 +190,7 @@ namespace tests
       ' a wall on the left running from behind the camera to depth 3100: at Basic its 32
       ' columns are 100 units apart, so the one from depth 0 to 100 (cut at the near plane,
       ' depth 10) covers x -3200..256 on screen
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.basic))
       quad = [-60.0, 50.0, 100.0, -60.0, 50.0, -3100.0, -60.0, -50.0, 100.0, -60.0, -50.0, -3100.0]
       m.drawer.drawTo(m.target, quad, m.texture, [-1])
       m.assertNotEqual([0, 0, 0], m.pixel(100, 360))
@@ -220,14 +233,14 @@ namespace tests
       ' 128 texels; 256 px across
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(64, m.drawer.lastColumnCount)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.basic))
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(32, m.drawer.lastColumnCount)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.ultra))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.ultra))
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(128, m.drawer.lastColumnCount)
       ' far away: 64 px across wants 64 / 4 + 1 at Medium, so slabs 8 texels wide
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.medium))
       far = m.facingQuad()
       for i = 2 to 11 step 3
         far[i] = -2000.0
@@ -245,7 +258,7 @@ namespace tests
       m.assertEqual(4, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
       m.assertEqual(0, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
       m.assertEqual(100, m.drawer.columnsThisFrame)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.medium))
       m.assertEqual(64, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
     end function
 
@@ -314,6 +327,46 @@ namespace tests
       m.assertEqual(64, part.height)
       m.assertEqual(64, part.y)
       m.assertEqual(part.id, m.texture.getPart(0, 64, 32, 64).id)
+    end function
+
+    @describe("perspective error cap")
+
+    @it("draws a quad at constant depth as one slab")
+    function _()
+      m.capError(1)
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
+      m.assertEqual(1, m.drawer.lastColumnCount)
+      m.assertQuadrants(310, 410)
+    end function
+
+    @it("gives a quad more columns the more its depth changes, and fewer for a looser cap")
+    function _()
+      m.capError(1)
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      tight = m.drawer.lastColumnCount
+      m.capError(8)
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      loose = m.drawer.lastColumnCount
+      m.capError(0)
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      uncapped = m.drawer.lastColumnCount
+      m.assertTrue(tight > 1)
+      m.assertTrue(loose < tight)
+      m.assertTrue(tight <= uncapped)
+    end function
+
+    @it("still draws a slab per repeat")
+    function _()
+      m.capError(1)
+      m.drawer.drawTiledTo(m.target, m.facingQuad(), m.texture, [-1], 3, 1)
+      m.assertEqual(3, m.drawer.lastColumnCount)
+    end function
+
+    @it("isn't applied to corner tints, which blend per column")
+    function _()
+      m.capError(1)
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [&hFF0000FF, &h0000FFFF, &hFF0000FF, &h0000FFFF])
+      m.assertTrue(m.drawer.lastColumnCount > 1)
     end function
 
     private function whiteTexture() as BGE.QuadColumnTexture
