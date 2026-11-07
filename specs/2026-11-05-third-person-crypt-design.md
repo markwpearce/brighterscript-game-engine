@@ -113,7 +113,7 @@ Profiling the walls (#464) showed the draw calls aren't the cost: at Medium, cas
 upright ones (`grid-walls-strip-benchmark`: 320 strips in 3.6-3.9 ms either way). With each
 face's light cached, shading drops to 1.8 ms: Medium runs at 26.2 fps, High (6 px) at 23.3, and
 adaptive settles at High at 22.8 fps (min 21.9).
-Known issue: torch flames (`DrawableParticles`) aren't hidden by grid walls (#463).
+Torch flames (`DrawableParticles`) are hidden by grid walls since #463.
 
 **Walking into walls.** The knight can't pass through walls or out of the maze. Use
 `BGE.SolidWorld.moveAndSlide()` (x/z mapped onto its 2D plane) built from the same grid,
