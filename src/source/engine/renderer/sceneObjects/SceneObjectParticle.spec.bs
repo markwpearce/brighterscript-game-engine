@@ -122,5 +122,113 @@ namespace tests
       sceneObj = emitter.addToRenderer(m.renderer)
       m.assertFalse((sceneObj as BGE.SceneObjectParticle).participatesInOverlapDetection())
     end function
+    @describe("bounding points cover what it draws (issue #463)")
+
+    @it("can be occluded")
+    function _()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle)
+      sceneObj = emitter.addToRenderer(m.renderer)
+      m.assertTrue(sceneObj.canBeOccluded())
+    end function
+
+    @it("returns the emitter's anchor while no particles are alive")
+    function _()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle)
+      sceneObj = emitter.addToRenderer(m.renderer)
+      m.entity.updateTransformationMatrix()
+      sceneObj.update(m.renderer.camera)
+      points = sceneObj.getBoundingPoints(m.renderer.camera)
+      m.assertEqual(1, points.count())
+    end function
+
+    @it("pads every particle by half a rectangle's diagonal, in pixels on a Camera2d")
+    function _()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 10, endSize: 20})
+      sceneObj = emitter.addToRenderer(m.renderer)
+      emitter.burst(2)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(50, 60, 0)
+      emitter.particles[1].position = BGE.Math.VectorOps.create(150, 80, 0)
+      bounds = BGE.Math.getBounds(sceneObj.getBoundingPoints(m.renderer.camera))
+      ' the larger of startSize/endSize: 20 * 0.7072
+      m.assertTrue(abs(bounds[0].x - (50 - 14.144)) < 0.01, `min x ${bounds[0].x}`)
+      m.assertTrue(abs(bounds[1].x - (150 + 14.144)) < 0.01, `max x ${bounds[1].x}`)
+      m.assertTrue(abs(bounds[0].y - (60 - 14.144)) < 0.01, `min y ${bounds[0].y}`)
+      m.assertTrue(abs(bounds[1].y - (80 + 14.144)) < 0.01, `max y ${bounds[1].y}`)
+    end function
+
+    @it("pads by a live particle's own size after the emitter's size shrinks")
+    function _()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 20, endSize: 20})
+      sceneObj = emitter.addToRenderer(m.renderer)
+      emitter.burst(1)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(50, 60, 0)
+      emitter.startSize = 2
+      emitter.endSize = 2
+      bounds = BGE.Math.getBounds(sceneObj.getBoundingPoints(m.renderer.camera))
+      m.assertTrue(abs(bounds[1].x - (50 + 14.144)) < 0.01, `max x ${bounds[1].x}`)
+    end function
+
+    @it("returns the 8 corners of the padded box")
+    function _()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100})
+      sceneObj = emitter.addToRenderer(m.renderer)
+      emitter.burst(3)
+      m.assertEqual(8, sceneObj.getBoundingPoints(m.renderer.camera).count())
+    end function
+
+    @it("includes the far end of a line particle")
+    function _()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Line, {lifetime: 100, startSize: 30, endSize: 30})
+      sceneObj = emitter.addToRenderer(m.renderer)
+      emitter.burst(1)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(50, 60, 0)
+      emitter.particles[0].velocity = BGE.Math.VectorOps.create(0, -5, 0)
+      bounds = BGE.Math.getBounds(sceneObj.getBoundingPoints(m.renderer.camera))
+      m.assertTrue(bounds[0].y <= 30 - 1, `min y ${bounds[0].y}`)
+      m.assertTrue(bounds[1].y >= 60 + 1, `max y ${bounds[1].y}`)
+    end function
+
+    @it("pads an image particle by its scaled diagonal")
+    function _()
+      bitmap = CreateObject("roBitmap", {width: 6, height: 8, alphaEnable: true})
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Image, {lifetime: 100, startSize: 2, endSize: 1})
+      emitter.image = bitmap
+      sceneObj = emitter.addToRenderer(m.renderer)
+      emitter.burst(1)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(100, 100, 0)
+      bounds = BGE.Math.getBounds(sceneObj.getBoundingPoints(m.renderer.camera))
+      ' sqr(6^2 + 8^2) * 2
+      m.assertTrue(abs(bounds[1].x - 120) < 0.01, `max x ${bounds[1].x}`)
+    end function
+
+    @it("pads by enough world units to cover the particle's pixels on a Camera3d")
+    function _()
+      camera = new BGE.Camera3d()
+      camera.fieldOfViewDegrees = 90
+      camera.position = BGE.Math.VectorOps.create(0, 0, 0)
+      camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      renderer = new BGE.Renderer(m.bitmap, m.game, camera)
+      renderer.setupCameraForFrame()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 20, endSize: 20})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(1)
+      particlePos = BGE.Math.VectorOps.create(0, 0, -10)
+      emitter.particles[0].position = particlePos
+      centre = camera.worldPointToCanvasPoint(particlePos)
+      minX = centre.x
+      maxX = centre.x
+      for each point in sceneObj.getBoundingPoints(camera)
+        canvasPoint = camera.worldPointToCanvasPoint(point)
+        if canvasPoint.x < minX
+          minX = canvasPoint.x
+        end if
+        if canvasPoint.x > maxX
+          maxX = canvasPoint.x
+        end if
+      end for
+      ' the rectangle draws 10 pixels each side of its centre
+      m.assertTrue(minX <= centre.x - 10, `min x ${minX} vs centre ${centre.x}`)
+      m.assertTrue(maxX >= centre.x + 10, `max x ${maxX} vs centre ${centre.x}`)
+    end function
   end class
 end namespace

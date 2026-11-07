@@ -535,7 +535,7 @@ A few things the renderer enforces, which are easy to trip over:
 - A standalone `SceneObject` with no owner registers itself with `renderer.markOccluder()`.
 - Occlusion is conservative: an object is only hidden when it is clearly behind the occluders,
   with a small safety margin, so a borderline object still draws. Screen-aligned fixed-size
-  objects, text and particles are never hidden.
+  objects and text are never hidden; a particle emitter is hidden only once every live particle is.
 - An occluder draws like anything else, cached bitmaps and coarse fills included. While it (or
   the camera) moves, the area it claims to cover shrinks by the largest error those shortcuts
   can make, so it rarely hides something it doesn't actually paint over (a non-convex model
@@ -1017,7 +1017,8 @@ The UI canvas is a separate renderer, so walls never hide UI.
   the floor as the camera pitches.
 
 `examples/rendererTest` has a `Grid Walls` demo (`--param demo=grid-walls`) with a tiled floor, a
-wall-hung alcove and a figure pacing behind a corner.
+wall-hung alcove, a figure pacing behind a corner and torch flames (`DrawableParticles`) in and out
+of view.
 
 ## Parallax layers (`DrawableParallaxLayer`)
 
