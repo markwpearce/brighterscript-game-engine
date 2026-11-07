@@ -3,6 +3,7 @@ import "../../../math/vector.bs"
 import "../../../utils/colors.bs"
 import "../../drawables/DrawableParticles.bs"
 import "../cameras/Camera.bs"
+import "../cameras/Camera3d.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
@@ -42,20 +43,95 @@ namespace BGE
     end function
 
     ' The base default checks only the emitter's own anchor (m.worldPosition), which is
-    ' wrong for an emitter whose particles have spread away from it. Checking the bounding
-    ' box of every live particle's position (plus the anchor) instead of every individual
-    ' particle keeps this a cheap 2-point frustum check regardless of live particle count -
-    ' consistent with how every other multi-point SceneObject (e.g. SceneObjectBillboard)
-    ' already checks corner/bounding points rather than a precise shape test. See #114.
-    protected override function getPositionsForFrustumCheck(drawMode as SceneObjectDrawMode) as BGE.Math.Vector[]
-      if m.drawable.particles.count() = 0
+    ' wrong for an emitter whose particles have spread away from it (#114). Returns the 8
+    ' corners of the box around every live particle (and line end), padded by the most any
+    ' particle draws beyond its position in pixels, so they bound everything performDraw()
+    ' draws - which lets grid walls and occluders hide or redraw over it (#463). Still a
+    ' fixed number of points to test, whatever the live particle count.
+    '
+    ' @param {Camera} cameraObj
+    ' @return {BGE.Math.Vector[]}
+    override function getBoundingPoints(cameraObj as Camera) as BGE.Math.Vector[]
+      particles = m.drawable.particles
+      if particles.count() = 0
         return [m.worldPosition]
       end if
-      positions = [m.worldPosition]
-      for each particle in m.drawable.particles
+      isLine = m.drawable.shape = BGE.ParticleShape.Line
+      positions = [] as BGE.Math.Vector[]
+      ' each particle keeps the sizes it spawned with, even if the emitter's change since
+      maxSize = 0.0
+      for each particle in particles
         positions.push(particle.position)
+        maxSize = BGE.Math.max(maxSize, BGE.Math.max(particle.startSize, particle.endSize))
+        if isLine
+          positions.push(m.getLineParticleEnd(particle, BGE.Math.lerp(particle.startSize, particle.endSize, particle.age / particle.lifetime)))
+        end if
       end for
-      return BGE.Math.getBounds(positions)
+      bounds = BGE.Math.getBounds(positions)
+      minPoint = bounds[0]
+      maxPoint = bounds[1]
+      minZ = minPoint.z ?? 0
+      maxZ = maxPoint.z ?? 0
+      pad = m.getCanvasRadius(maxSize) * m.getWorldUnitsPerPixel(cameraObj, minPoint, maxPoint)
+      x0 = minPoint.x - pad
+      x1 = maxPoint.x + pad
+      y0 = minPoint.y - pad
+      y1 = maxPoint.y + pad
+      z0 = minZ - pad
+      z1 = maxZ + pad
+      return [
+        BGE.Math.VectorOps.create(x0, y0, z0), BGE.Math.VectorOps.create(x1, y0, z0),
+        BGE.Math.VectorOps.create(x0, y1, z0), BGE.Math.VectorOps.create(x1, y1, z0),
+        BGE.Math.VectorOps.create(x0, y0, z1), BGE.Math.VectorOps.create(x1, y0, z1),
+        BGE.Math.VectorOps.create(x0, y1, z1), BGE.Math.VectorOps.create(x1, y1, z1)
+      ]
+    end function
+
+    ' Its bounding points cover every particle it draws (see getBoundingPoints()).
+    '
+    ' @return {boolean}
+    override function canBeOccluded() as boolean
+      return true
+    end function
+
+    ' The furthest, in pixels, a particle of `size` can draw from its projected position.
+    ' A line's length is in world units, so it's already in the bounds.
+    private function getCanvasRadius(size as float) as float
+      shape = m.drawable.shape
+      if shape = BGE.ParticleShape.Rectangle
+        ' half the diagonal of a centred square
+        return size * 0.7072
+      else if shape = BGE.ParticleShape.Image
+        image = m.drawable.image
+        if invalid = image
+          return 0
+        end if
+        width = image.GetWidth()
+        height = image.GetHeight()
+        frameRegions = m.drawable.getFrameRegions()
+        if invalid <> frameRegions and frameRegions.count() > 0
+          width = frameRegions[0].GetWidth()
+          height = frameRegions[0].GetHeight()
+        end if
+        ' a scaled image rotated about any point inside it stays within its diagonal
+        return sqr(width * width + height * height) * size
+      end if
+      return 1
+    end function
+
+    ' How many world units one pixel covers at the far side of the box, so padding by it
+    ' over-covers nearer particles rather than under-covering far ones.
+    private function getWorldUnitsPerPixel(cameraObj as Camera, minPoint as BGE.Math.Vector, maxPoint as BGE.Math.Vector) as float
+      if not cameraObj.isPerspective()
+        return 1.0
+      end if
+      camera3d = cameraObj as BGE.Camera3d
+      camPos = camera3d.position
+      ' the box corner furthest from the camera on each axis
+      dx = BGE.Math.max(abs(minPoint.x - camPos.x), abs(maxPoint.x - camPos.x))
+      dy = BGE.Math.max(abs(minPoint.y - camPos.y), abs(maxPoint.y - camPos.y))
+      dz = BGE.Math.max(abs((minPoint.z ?? 0) - (camPos.z ?? 0)), abs((maxPoint.z ?? 0) - (camPos.z ?? 0)))
+      return sqr(dx * dx + dy * dy + dz * dz) / camera3d.getFocalLength()
     end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -108,16 +184,20 @@ namespace BGE
     end function
 
     private function drawLineParticle(rendererObj as BGE.Renderer, particle as BGE.ParticleRecord, canvasPos as BGE.Math.Vector, length as float, rgba as integer) as boolean
-      direction = BGE.Math.VectorOps.create(1, 0)
-      if not BGE.Math.VectorOps.isZero(particle.velocity)
-        direction = BGE.Math.VectorOps.getNormalizedCopy(particle.velocity)
-      end if
-      endWorldPos = BGE.Math.VectorOps.add(particle.position, BGE.Math.VectorOps.scale(direction, length))
-      endCanvasPos = rendererObj.worldPointToCanvasPoint(endWorldPos)
+      endCanvasPos = rendererObj.worldPointToCanvasPoint(m.getLineParticleEnd(particle, length))
       if endCanvasPos = invalid
         return false
       end if
       return rendererObj.drawLine(canvasPos.x, canvasPos.y, endCanvasPos.x, endCanvasPos.y, rgba)
+    end function
+
+    ' A line particle runs `length` world units from its position along its velocity.
+    private function getLineParticleEnd(particle as BGE.ParticleRecord, length as float) as BGE.Math.Vector
+      direction = BGE.Math.VectorOps.create(1, 0)
+      if not BGE.Math.VectorOps.isZero(particle.velocity)
+        direction = BGE.Math.VectorOps.getNormalizedCopy(particle.velocity)
+      end if
+      return BGE.Math.VectorOps.add(particle.position, BGE.Math.VectorOps.scale(direction, length))
     end function
     ' Particles fade one by one in performDraw(), each by its own distance, rather than
     ' the whole emitter fading (or being culled) as one.
