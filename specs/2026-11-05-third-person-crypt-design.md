@@ -90,6 +90,25 @@ wall types behind a deep link (e.g. `walls=image|model`), compare them on the de
 use the faster one by default. Model walls still occlude but don't go in the static BSP,
 so check they sort right against the knight. This is example code, not an engine change.
 
+**Update 2026-11-06: grid walls.** The two wall decisions above are superseded. Main gained
+`BGE.DrawableGridWalls` (#445) for this maze, and the warp path was replaced by column drawing
+(#449-#454), so both were measured again on the Ultra (orbiting camera, `perf=1`, average fps):
+
+| Walls | Basic | Low | Medium | High | Ultra | Adaptive |
+|---|---|---|---|---|---|---|
+| image runs, up to 9 cells per quad | 23.3 | | 18.9 (min 14) | | 12.7 | |
+| model runs | | | 20.4 | | | |
+| image, one quad per 6 m cell | | | 10.9 | | | |
+| grid walls | 34.0 | 24.3 | 23.8 (min 23) | 16.9 (4 px) / 19.2 (6 px) | 14.7 | 19.6 (min 17) |
+
+Grid walls replace `CryptWallRun` (and the `walls`, `run` and `occlusion` deep links). They
+cost about the same as the long runs at Medium (~22 ms), but the cost doesn't depend on the
+number of walls, nothing swims, the frame rate is steady, and torchlight is sampled along the walls
+(`lightWrap` 0.5, since a torch lights its own wall edge-on). The presets jump from 8 px strips
+(Medium) to 4 px (High), doubling the walls' cost, so adaptive quality bounced between them
+(19.0 avg, min 13). The crypt overrides High to 6 px, and adaptive now settles at High.
+Known issue: torch flames (`DrawableParticles`) aren't hidden by grid walls.
+
 **Walking into walls.** The knight can't pass through walls or out of the maze. Use
 `BGE.SolidWorld.moveAndSlide()` (x/z mapped onto its 2D plane) built from the same grid,
 so sliding along a wall feels right.

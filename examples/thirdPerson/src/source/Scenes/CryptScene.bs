@@ -1,6 +1,5 @@
 import "../World.bs"
 import "../Entities/Torch.bs"
-import "../Entities/CryptWallRun.bs"
 import "../Entities/CryptProp.bs"
 import "../Entities/CryptDoorway.bs"
 import "../Crypt/CryptMap.bs"
@@ -12,24 +11,17 @@ import "ThirdPersonScene.bs"
 ' field for now.
 class CryptScene extends ThirdPersonScene
 
-  ' "image" or "model" walls (deep link `walls`) - see CryptWallRun
-  wallStyle as string = "image"
   respawnSeconds as float = 3
   ' World units per floor texel, as the field's grass
   floorTexelScale as float = 2
   ' How far up the camera may tilt (radians), so it stays below the wall tops
   maxCameraTilt as float = 0.45
-  ' Longest straight wall drawn as one quad, in cells (deep link `run`). Fewer quads draw
-  ' faster; longer ones swim more up close, since a quad's texture is warped as two triangles.
-  maxRunCells as integer = 9
   walls as CryptWalls
 
   private layout as CryptLayout
   private lights as BGE.Light[] = []
   private deadSeconds as float = 0
   private leaving as boolean = false
-  ' Wall textures tiled to each run length, by length in cells
-  private wallTextures as roAssociativeArray = {}
   private bitmapPaths as roAssociativeArray = {
     cryptFloor: "pkg:/sprites/crypt_floor.png",
     cryptWall: "pkg:/sprites/crypt_wall.png",
@@ -54,20 +46,13 @@ class CryptScene extends ThirdPersonScene
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    if args.walls = "model"
-      m.wallStyle = "model"
-    else
-      m.wallStyle = "image"
-    end if
     m.readCommonArgs(args)
-    ' Measuring: `occlusion=0` turns occlusion culling off
-    m.game.canvas.renderer.occlusionCullingEnabled = args.occlusion <> "0"
-    if args.run <> invalid
-      m.maxRunCells = args.run.toInt()
-    end if
     m.leaving = false
     m.deadSeconds = 0
     m.game.setBackgroundColor(&h000000FF)
+    ' The presets' 8 px (Medium) to 4 px (High) strips doubles the walls' cost, so adaptive
+    ' quality bounced between them; 6 px gives it a step in between
+    m.game.renderQuality.overridePreset(BGE.RenderQualityLevel.high, {gridWallStripWidth: 6, gridWallLightInterval: 3})
     m.layout = CryptMap.parse(CryptMap.layout())
 
     floorBmp = m.game.getBitmap("cryptFloor")
@@ -84,7 +69,7 @@ class CryptScene extends ThirdPersonScene
     m.game.addLight(ambient)
     m.lights = [ambient]
 
-    m.addWallRuns()
+    m.addWalls()
     for each cell in m.layout.cells
       m.addCellContents(cell)
     end for
@@ -102,80 +87,29 @@ class CryptScene extends ThirdPersonScene
     m.walls.track(m.knight)
   end sub
 
-  ' Every wall face, merged into straight runs of up to maxRunCells along each grid line
-  private sub addWallRuns()
-    for each side in CryptMap.sides()
-      alongRows = side = "n" or side = "s"
-      lineCount = m.layout.cols
-      cellCount = m.layout.rows
-      if alongRows
-        lineCount = m.layout.rows
-        cellCount = m.layout.cols
-      end if
-      delta = CryptMap.sideStep(side)
-      for line = 0 to lineCount - 1
-        runStart = -1
-        for i = 0 to cellCount
-          isFace = false
-          if i < cellCount
-            col = line
-            row = i
-            if alongRows
-              col = i
-              row = line
-            end if
-            isFace = CryptMap.isSolid(m.layout, col, row) and not CryptMap.isSolid(m.layout, col + delta[0], row + delta[1])
-          end if
-          if isFace and runStart < 0
-            runStart = i
-          end if
-          if runStart >= 0 and (not isFace or i - runStart = m.maxRunCells)
-            m.addWallRun(side, line, runStart, i - 1, alongRows)
-            runStart = -1
-            if isFace
-              runStart = i
-            end if
-          end if
-        end for
-      end for
+  ' Every wall, raycast from the same grid: one drawable however many walls there are
+  private sub addWalls()
+    tile = m.game.getBitmap("cryptWall")
+    ' The 2 m tile three times across a cell, so texels stay square
+    tilesPerCell = CryptMap.CELL_METRES / CryptMap.SEGMENT_METRES
+    bmp = CreateObject("roBitmap", {width: tile.GetWidth() * tilesPerCell, height: tile.GetHeight(), AlphaEnable: false})
+    for i = 0 to tilesPerCell - 1
+      bmp.DrawObject(i * tile.GetWidth(), 0, tile)
     end for
-  end sub
-
-  ' One run on `side` of the solid cells `first`..`last` along grid line `line`
-  private sub addWallRun(side as string, line as integer, first as integer, last as integer, alongRows as boolean)
-    if alongRows
-      a = CryptMap.cellCenter(m.layout, first, line)
-      b = CryptMap.cellCenter(m.layout, last, line)
-    else
-      a = CryptMap.cellCenter(m.layout, line, first)
-      b = CryptMap.cellCenter(m.layout, line, last)
-    end if
-    out = BGE.Math.VectorOps.scale(CryptMap.sideNormal(side), World.metres(CryptMap.CELL_METRES) / 2)
-    wallRun = new CryptWallRun(m.game)
-    m.game.addEntity(wallRun, {
-      x: (a.x + b.x) / 2 + out.x,
-      z: (a.z + b.z) / 2 + out.z,
-      side: side,
-      region: m.wallTexture(last - first + 1),
-      style: m.wallStyle
+    bmp.Finish()
+    region = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
+    size = World.metres(CryptMap.CELL_METRES)
+    map = new BGE.GridWallsMap(CryptMap.layout(), {
+      cellSize: size,
+      wallHeight: World.metres(CryptMap.WALL_METRES),
+      origin: BGE.Math.VectorOps.create(-m.layout.cols * size / 2, 0, -m.layout.rows * size / 2),
+      solid: {"#": "stone"}
     })
+    walls = new BGE.DrawableGridWalls(m, map, {stone: region}, {isShaded: true})
+    ' Torches hang just off a wall, so their own wall is lit edge-on; wrap lets it glow
+    walls.lightWrap = 0.5
+    m.addDrawable("Walls", walls)
   end sub
-
-  ' The wall texture tiled along `cells` cells, made once per length
-  private function wallTexture(cells as integer) as roRegion
-    key = cells.toStr()
-    if m.wallTextures[key] = invalid
-      tile = m.game.getBitmap("cryptWall")
-      tileWidth = tile.GetWidth()
-      tilesPerCell = CryptMap.CELL_METRES / CryptMap.SEGMENT_METRES
-      bmp = CreateObject("roBitmap", {width: tileWidth * tilesPerCell * cells, height: tile.GetHeight(), AlphaEnable: false})
-      for i = 0 to tilesPerCell * cells - 1
-        bmp.DrawObject(i * tileWidth, 0, tile)
-      end for
-      m.wallTextures[key] = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
-    end if
-    return m.wallTextures[key]
-  end function
 
   ' Torches, props and doorways for one floor cell
   private sub addCellContents(cell as CryptCell)
@@ -249,12 +183,10 @@ class CryptScene extends ThirdPersonScene
   end function
 
   override sub onDestroy()
-    m.game.canvas.renderer.occlusionCullingEnabled = true
     for each light in m.lights
       m.game.removeLight(light)
     end for
     m.lights = []
-    m.wallTextures = {}
     for each name in m.bitmapPaths
       m.game.unloadBitmap(name)
     end for
