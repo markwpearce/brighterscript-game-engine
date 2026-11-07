@@ -36,16 +36,6 @@ namespace BGE
     private faceClipRect as BGE.RendererHelpers.ClipRect = invalid
     private modelCanvasFaces as BGE.Model3dFace[] = []
 
-    ' Reused across every textured face's drawToTempBitmap call, every frame, to avoid
-    ' allocating a fresh 3-Vector array (and 3 fresh Vectors) per textured face per frame
-    ' just to add drawBitmapTriangleTo's missing offsetX/offsetY - mutated in place via
-    ' getOffsetTriangleBuffer() below, never reassigned.
-    private offsetTriangleBuffer as BGE.Math.Vector[] = [BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create(), BGE.Math.VectorOps.create()]
-
-    ' Per-face raster reuse (issue #163) - indexed by Model3dFace.faceIndex, which is
-    ' stable across frames even though modelCanvasFaces itself is re-filtered/re-sorted
-    ' every frame. See getFaceRasterCache()/drawFaceWithReuse() below.
-    private faceRasterCaches as BGE.RendererHelpers.FaceRasterCache[] = []
     ' The transform version as of the last draw, to tell whether the model has moved or turned since
     private lastDrawTransformVersion as integer = -1
 
@@ -53,11 +43,12 @@ namespace BGE
     ' change that didn't alter any face's color skip the redraw.
     private lastFaceShadedColors as integer[] = []
 
-    ' Whether every face drawn in the most recent drawToTempBitmap() call was a genuine
-    ' fresh redraw - reset true at the top of that call, flipped false the moment any
-    ' face instead reuses its own cached raster (drawFaceWithReuse()'s reuse branch).
-    ' See attemptTransformTempBitmap()'s gate on it.
+    ' Whether every face in the most recent drawToTempBitmap() call was drawn as it really
+    ' looks: false once a textured face is filled with its color instead (see
+    ' drawFilledFaceTo()). An impostor only captures, and a stretch only reuses, a full one.
     private lastDrawWasFullyFresh as boolean = true
+    ' Textured faces filled with their color instead this draw (see drawFilledFaceTo())
+    private colorFilledFacesThisDraw as integer = 0
     ' Whether a face drawn into the temp bitmap this draw left out its off-canvas part
     private facesClippedThisDraw as boolean = false
 
@@ -88,16 +79,12 @@ namespace BGE
       return false ' Assume model is static - interior parts do not change
     end function
 
-    ' For tests/telemetry only - how many consecutive frames the face at `faceIndex`
-    ' has reused its cached raster since its last real redraw (0 right after a redraw).
+    ' For tests/telemetry only - how many textured faces the last draw filled with their
+    ' shaded color, because they couldn't be drawn as texture columns.
     '
-    ' @param {integer} faceIndex
-    ' @return {integer} -1 if this face has never been drawn at all
-    function getFaceStaleFrameCount(faceIndex as integer) as integer
-      if faceIndex < 0 or faceIndex >= m.faceRasterCaches.count() or invalid = m.faceRasterCaches[faceIndex].bitmap
-        return -1
-      end if
-      return m.faceRasterCaches[faceIndex].staleFrameCount
+    ' @return {integer}
+    function getColorFilledFaceCount() as integer
+      return m.colorFilledFacesThisDraw
     end function
 
     ' For tests/telemetry only - the isShaded brightness (0-1, floored by
@@ -115,6 +102,7 @@ namespace BGE
 
 
     protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.colorFilledFacesThisDraw = 0
       someWorked = false
       for each face in m.modelCanvasFaces
         someWorked = m.drawFaceToCanvas(rendererObj, face, drawMode) or someWorked
@@ -130,10 +118,8 @@ namespace BGE
     ' this model's own internal order and can't represent this face being interleaved
     ' with a different object's primitives.
     '
-    ' A textured face (face.Texture <> invalid) draws via drawBitmapTriangle, warping
-    ' the texture's UV points onto this face's canvas points, tinted by the same
-    ' brightness-shaded color a flat face gets. Once the scratch pool is used up for the
-    ' frame, ScratchBitmapPool hands out one-off bitmaps, so many faces can't exhaust it.
+    ' A textured face draws as texture columns (see drawFilledFaceTo()), tinted by the same
+    ' brightness-shaded color a flat face gets.
     '
     ' @param {Renderer} rendererObj
     ' @param {Model3dFace} face
@@ -142,16 +128,7 @@ namespace BGE
     private function drawFaceToCanvas(rendererObj as BGE.Renderer, face as BGE.Model3dFace, drawMode as SceneObjectDrawMode) as boolean
       shadedColor = BGE.RendererHelpers.applyAlphaFade(face.shadedColor, m.distanceFadeAlpha)
       if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-        if face.Texture <> invalid and face.Texture.srcRegionWithId.region <> invalid
-          if m.areColumnsAllowed(rendererObj)
-            strips = rendererObj.drawTriangleColumns(m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), shadedColor)
-            if strips >= 0
-              return strips > 0
-            end if
-          end if
-          return rendererObj.drawBitmapTriangle(face.Texture.srcRegionWithId, face.Texture.points, face.vertices, shadedColor)
-        end if
-        return rendererObj.drawTriangle(face.vertices, 0, 0, shadedColor)
+        return m.drawFilledFaceTo(rendererObj, rendererObj.getDraw2d(), face, shadedColor, invalid, false)
       else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
         return rendererObj.drawTriangleOutline(face.vertices, shadedColor)
       end if
@@ -159,127 +136,33 @@ namespace BGE
     end function
 
 
-    ' Writes `vertices` (always exactly 3, one per triangle corner) offset by
-    ' (offsetX, offsetY) into the reused `offsetTriangleBuffer`, mutating its 3 Vectors in
-    ' place rather than allocating a fresh array/Vectors - see the field's own doc comment.
-    '
-    ' @param {BGE.Math.Vector[]} vertices
-    ' @param {float} offsetX
-    ' @param {float} offsetY
-    ' @return {BGE.Math.Vector[]}
-    private function getOffsetTriangleBuffer(vertices as BGE.Math.Vector[], offsetX as float, offsetY as float) as BGE.Math.Vector[]
-      for i = 0 to 2
-        m.offsetTriangleBuffer[i].x = vertices[i].x + offsetX
-        m.offsetTriangleBuffer[i].y = vertices[i].y + offsetY
-      end for
-      return m.offsetTriangleBuffer
-    end function
-
-    ' faceIndex is stable across frames (set once in updateCanvasPosition), but
-    ' modelCanvasFaces itself is rebuilt fresh every frame - this is where that index
-    ' actually becomes a persistent per-face cache slot, growing lazily to fit the
-    ' model's own face count.
-    '
-    ' @param {integer} faceIndex
-    ' @return {BGE.RendererHelpers.FaceRasterCache}
-    private function getFaceRasterCache(faceIndex as integer) as BGE.RendererHelpers.FaceRasterCache
-      if invalid = faceIndex or faceIndex < 0
-        ' No stable identity to key a cache slot by - draw fresh every time rather
-        ' than risk two different faces silently sharing one slot.
-        return new BGE.RendererHelpers.FaceRasterCache()
-      end if
-      while m.faceRasterCaches.count() <= faceIndex
-        m.faceRasterCaches.push(new BGE.RendererHelpers.FaceRasterCache())
-      end while
-      return m.faceRasterCaches[faceIndex]
-    end function
-
-    ' Draws one textured face onto `tempBitmap` with the triangle warp, reusing its own small
-    ' cached raster - unchanged content, repositioned to this frame's actual (always freshly,
-    ' correctly computed) position - for up to `maxStaleFrames` frames before doing a real
-    ' redraw (issue #163). This is what actually cuts the per-frame cost that #128's fix introduced:
-    ' a continuously-rotating textured model was paying the full drawBitmapTriangleTo
-    ' pipeline (multiple scratch-bitmap allocations and draws) for every visible face,
-    ' every single frame. Only the pixel CONTENT can go briefly stale here, never the
-    ' position, so there's no rotate/scale transform to get right - a stale frame just
-    ' shows this face's texture at its last-redrawn orientation, correctly placed.
+    ' Draws an oriented or solid face into `target`: a textured one as texture columns, cut
+    ' back to the near plane, or filled with `color` if it can't be (its texture has no UV
+    ' area, or this frame's column budget is spent), so a model isn't left with holes.
     '
     ' @param {BGE.Renderer} rendererObj
-    ' @param {ifDraw2d} tempBitmap the model's shared temp bitmap to draw onto
+    ' @param {ifDraw2d} target
     ' @param {BGE.Model3dFace} face
-    ' @param {float} modelOffsetX the model's own canvas-bounds top-left, negated (see drawToTempBitmap)
-    ' @param {float} modelOffsetY
-    ' @param {boolean} allowFastDraw whether the model is moving (see mayReuseFaceRaster())
-    ' @return {boolean} true if something was actually drawn
-    private function drawFaceWithReuse(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, face as BGE.Model3dFace, modelOffsetX as float, modelOffsetY as float, allowFastDraw as boolean) as boolean
-      bounds = BGE.Math.getBounds(face.vertices)
-      if bounds.count() < 2
-        return false
-      end if
-      faceOffsetX = modelOffsetX + bounds[0].x
-      faceOffsetY = modelOffsetY + bounds[0].y
-
-      ' Only keep the part on the canvas, plus enough margin to reuse it while it drifts
-      frame = rendererObj.camera.frameSize
-      margin = m.getFaceClipMargin(rendererObj)
-      clipX = 0
-      clipY = 0
-      right = bounds[1].x
-      bottom = bounds[1].y
-      if frame.x > 0 and frame.y > 0
-        clipX = fix(BGE.Math.Max(0, -margin.x - bounds[0].x))
-        clipY = fix(BGE.Math.Max(0, -margin.y - bounds[0].y))
-        right = BGE.Math.Min(right, frame.x + margin.x)
-        bottom = BGE.Math.Min(bottom, frame.y + margin.y)
-      end if
-      clipped = clipX > 0 or clipY > 0 or right < bounds[1].x or bottom < bounds[1].y
-      width = fix(right - bounds[0].x) + 1 - clipX
-      height = fix(bottom - bounds[0].y) + 1 - clipY
-      if width < 1 or height < 1
-        return false
-      end if
-
-      cache = m.getFaceRasterCache(face.faceIndex)
-
-      ' Reuse only if the cached bitmap holds all of this frame's on-canvas part - the drift
-      ' check alone doesn't bound the bounding box's growth.
-      holdsThisPart = cache.clipX <= clipX and cache.clipY <= clipY and cache.clipX + cache.clipWidth >= clipX + width and cache.clipY + cache.clipHeight >= clipY + height
-      ' relit, but unmoved and the same color, so the cached raster is exact, not stale
-      exact = m.lightingChangedThisDraw and invalid <> cache.bitmap and cache.color = face.shadedColor and m.isSameTriangle(face.vertices, cache.triangleAtCapture)
-      if invalid <> cache.bitmap and holdsThisPart and (exact or cache.staleFrameCount < m.drawable.maxStaleFrames) and not m.drawable.useImpostor and m.mayReuseFaceRaster(allowFastDraw) and not m.qualityChangedThisDraw and (not m.lightingChangedThisDraw or cache.color = face.shadedColor) and not m.hasFaceDriftedTooFar(face.vertices, cache.triangleAtCapture)
-        if not exact
-          cache.staleFrameCount++
-          m.lastDrawWasFullyFresh = false
+    ' @param {integer} color RGBA
+    ' @param {BGE.Math.Vector} origin where `target`'s (0,0) is on the canvas, or invalid for the canvas
+    ' @param {boolean} allowQuickDraw whether a color fill may be coarse (see Renderer.drawTriangleTo)
+    ' @return {boolean} true if something was drawn
+    private function drawFilledFaceTo(rendererObj as BGE.Renderer, target as ifDraw2d, face as BGE.Model3dFace, color as integer, origin as BGE.Math.Vector, allowQuickDraw as boolean) as boolean
+      if m.isTexturedFace(face)
+        strips = rendererObj.drawTriangleColumnsTo(target, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), color, origin)
+        if strips >= 0
+          return strips > 0
         end if
-        m.facesClippedThisDraw = m.facesClippedThisDraw or cache.clipped
-        return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + cache.clipX, faceOffsetY + cache.clipY, m.getCroppedFaceRegion(cache.bitmap, cache.clipWidth, cache.clipHeight))
+        m.colorFilledFacesThisDraw++
+        m.lastDrawWasFullyFresh = false
       end if
-
-      faceBitmap = BGE.RendererHelpers.growOrClearBitmap(cache.bitmap, width, height)
-      if invalid = faceBitmap
-        return false
+      offsetX = 0.0
+      offsetY = 0.0
+      if invalid <> origin
+        offsetX = -origin.x
+        offsetY = -origin.y
       end if
-
-      localOffsetX = -bounds[0].x - clipX
-      localOffsetY = -bounds[0].y - clipY
-      shadedColor = face.shadedColor
-      drawn = rendererObj.drawBitmapTriangleTo(faceBitmap, face.Texture.srcRegionWithId, face.Texture.points, m.getOffsetTriangleBuffer(face.vertices, localOffsetX, localOffsetY), shadedColor)
-
-      if not drawn
-        return false
-      end if
-
-      cache.bitmap = faceBitmap
-      cache.staleFrameCount = 0
-      cache.triangleAtCapture = BGE.Math.vectorArrayCopy(face.vertices)
-      cache.clipX = clipX
-      cache.clipY = clipY
-      cache.clipWidth = width
-      cache.clipHeight = height
-      cache.clipped = clipped
-      cache.color = shadedColor
-      m.facesClippedThisDraw = m.facesClippedThisDraw or clipped
-      return rendererObj.drawObjectTo(tempBitmap, faceOffsetX + clipX, faceOffsetY + clipY, m.getCroppedFaceRegion(faceBitmap, width, height))
+      return rendererObj.drawTriangleTo(target, face.vertices, offsetX, offsetY, color, allowQuickDraw)
     end function
 
     ' Whether `face` has a texture loaded to draw.
@@ -301,11 +184,6 @@ namespace BGE
       return false
     end function
 
-    ' Textured faces draw as columns with the renderer's drawModelFacesAsColumns.
-    protected override function areColumnsAllowed(rendererObj as BGE.Renderer) as boolean
-      return rendererObj.drawModelFacesAsColumns and rendererObj.camera.isPerspective()
-    end function
-
     ' While moving, a model draws straight to the canvas: textured faces as columns, solid
     ' ones as plain fills (#452). With an impostor, only while the model itself moves or
     ' turns, which no capture can follow; while just the camera moves, it draws into its
@@ -314,83 +192,13 @@ namespace BGE
       return (not m.drawable.useImpostor or m.transformVersion <> m.lastDrawTransformVersion) and m.isFlatQuadColumnMode(drawMode)
     end function
 
-    ' How far past each canvas edge a face image holds: 10% of the canvas, and at least the
-    ' whole-model stretch's reuse threshold, so zooming out while reusing doesn't show a gap.
+    ' How far past each canvas edge the temp bitmap holds: 10% of the canvas, and at least
+    ' the whole-model stretch's reuse threshold, so zooming out while reusing doesn't show a gap.
     private function getFaceClipMargin(rendererObj as BGE.Renderer) as BGE.Math.Vector
       frame = rendererObj.camera.frameSize
-      least = BGE.Math.Max(m.drawable.maxFaceDriftDistance, m.getTempBitmapThreshold(BGE.SceneObjectDrawMode.oriented))
+      least = m.getTempBitmapThreshold(BGE.SceneObjectDrawMode.oriented)
       return BGE.Math.VectorOps.create(BGE.Math.Max(least, frame.x * BGE.RendererHelpers.CANVAS_CLIP_MARGIN_FRACTION), BGE.Math.Max(least, frame.y * BGE.RendererHelpers.CANVAS_CLIP_MARGIN_FRACTION))
     end function
-
-    ' Whether a face may reuse its cached raster this draw. A fastShrink occluder only reuses
-    ' while moving, so a still one ends up exact and can claim its exact outline; an exact
-    ' occluder never reuses.
-    '
-    ' @param {boolean} moving whether the model moved relative to the camera
-    ' @return {boolean}
-    private function mayReuseFaceRaster(moving as boolean) as boolean
-      if not m.isOccluder
-        return true
-      end if
-      if m.occluderDrawPolicy = BGE.OccluderDrawPolicy.exact
-        return false
-      end if
-      return moving or m.occluderDrawPolicy <> BGE.OccluderDrawPolicy.fastShrink
-    end function
-
-    ' Crops `bitmap` (which may be larger than `width`x`height` due to grow-only reuse -
-    ' see RendererHelpers.growOrClearBitmap) down to this frame's actual face footprint,
-    ' so a blit never carries stale/blank capacity left over from a previous, larger
-    ' frame's use of the same cached bitmap.
-    '
-    ' @param {roBitmap} bitmap
-    ' @param {integer} width
-    ' @param {integer} height
-    ' @return {roRegion}
-    private function getCroppedFaceRegion(bitmap as roBitmap, width as integer, height as integer) as roRegion
-      return CreateObject("roRegion", bitmap, 0, 0, width, height)
-    end function
-
-    ' Whether `capturedVertices` are exactly `currentVertices`.
-    '
-    ' @param {BGE.Math.Vector[]} currentVertices
-    ' @param {BGE.Math.Vector[]} capturedVertices invalid if there is no cache yet
-    ' @return {boolean}
-    private function isSameTriangle(currentVertices as BGE.Math.Vector[], capturedVertices as BGE.Math.Vector[]) as boolean
-      if invalid = capturedVertices
-        return false
-      end if
-      for i = 0 to 2
-        if currentVertices[i].x <> capturedVertices[i].x or currentVertices[i].y <> capturedVertices[i].y
-          return false
-        end if
-      end for
-      return true
-    end function
-
-    ' Whether any of this face's 3 vertices has moved more than
-    ' DrawableModel.maxFaceDriftDistance (Manhattan distance) since `capturedVertices`
-    ' was rendered - the same measure (and, by default, the same magnitude) the base
-    ' class's own whole-object reuse check uses, just applied per vertex/per face
-    ' instead of to 4 whole-silhouette limit points.
-    '
-    ' @param {BGE.Math.Vector[]} currentVertices this frame's 3 canvas-space vertices
-    ' @param {BGE.Math.Vector[]} capturedVertices the cache's vertices as of its last real redraw, or invalid if there is no cache yet
-    ' @return {boolean}
-    private function hasFaceDriftedTooFar(currentVertices as BGE.Math.Vector[], capturedVertices as BGE.Math.Vector[]) as boolean
-      if invalid = capturedVertices
-        return true
-      end if
-      maxDistance = m.drawable.maxFaceDriftDistance
-      for i = 0 to 2
-        drift = BGE.Math.VectorOps.manhattanLength(BGE.Math.VectorOps.subtract(currentVertices[i], capturedVertices[i]))
-        if drift > maxDistance
-          return true
-        end if
-      end for
-      return false
-    end function
-
 
     protected override function drawToTempBitmap(rendererObj as BGE.Renderer, tempBitmap as ifDraw2d, canvasPointsTopLeftBound as BGE.Math.Vector, drawMode as SceneObjectDrawMode, allowFastDraw = false as boolean) as TempBitmapDrawResult
       if tempBitmap = invalid
@@ -404,30 +212,14 @@ namespace BGE
       someWorked = false
       offsetX = -canvasPointsTopLeftBound.x
       offsetY = -canvasPointsTopLeftBound.y
-      ' Tracked so attemptTransformTempBitmap() can refuse to whole-model-stretch a
-      ' temp bitmap that's itself a patchwork of some-fresh-some-reused per-face
-      ' content - see the field's own doc comment. Flipped false by drawFaceWithReuse()
-      ' the moment any face takes the reuse path this frame.
       m.lastDrawWasFullyFresh = true
+      m.colorFilledFacesThisDraw = 0
       m.facesClippedThisDraw = false
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
-          strips = -1
-          if m.columnsAllowed and m.isTexturedFace(face)
-            ' exact and cheap, so there's no face raster to keep
-            strips = rendererObj.drawTriangleColumnsTo(tempBitmap, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), face.shadedColor, canvasPointsTopLeftBound)
-            m.facesClippedThisDraw = m.facesClippedThisDraw or (strips >= 0 and m.isFaceOutsideClipRect(face))
-          end if
-          if strips >= 0
-            thisWorked = strips > 0
-          else if not m.isTexturedFace(face)
-            ' A plain fill is cheaper than drawing into a face raster and blitting it (#452)
-            thisWorked = rendererObj.drawTriangleTo(tempBitmap, face.vertices, offsetX, offsetY, face.shadedColor, allowFastDraw and not m.drawable.useImpostor)
-            m.facesClippedThisDraw = m.facesClippedThisDraw or m.isFaceOutsideClipRect(face)
-          else
-            thisWorked = m.drawFaceWithReuse(rendererObj, tempBitmap, face, offsetX, offsetY, allowFastDraw and not m.drawable.useImpostor)
-          end if
+          thisWorked = m.drawFilledFaceTo(rendererObj, tempBitmap, face, face.shadedColor, canvasPointsTopLeftBound, allowFastDraw and not m.drawable.useImpostor)
+          m.facesClippedThisDraw = m.facesClippedThisDraw or m.isFaceOutsideClipRect(face)
         else if drawMode = BGE.SceneObjectDrawMode.wireFrame or drawMode = BGE.SceneObjectDrawMode.wireFrameDrawBackFace
           ' Outlines are cheap already (no texture warp) - not worth caching, and a
           ' debug wireframe shouldn't lag a frame behind the model's real position.
@@ -622,8 +414,8 @@ namespace BGE
       return invalid
     end function
 
-    ' The temp bitmap's bounds: the model's canvas bounds clipped to the same margin around the
-    ' canvas that each face is clipped to (drawFaceWithReuse), so a model close to the camera
+    ' The temp bitmap's bounds: the model's canvas bounds clipped to a margin around the
+    ' canvas (see getFaceClipMargin()), so a model close to the camera
     ' doesn't allocate a bitmap many times the screen's size for pixels nothing draws into.
     protected override function getCanvasBounds() as BGE.Math.Vector[]
       bounds = m.modelCanvasBounds
@@ -741,7 +533,6 @@ namespace BGE
 
     protected override sub releaseCachedDrawings()
       super.releaseCachedDrawings()
-      m.faceRasterCaches = []
       m.impostorCapture = invalid
     end sub
 
@@ -952,9 +743,7 @@ namespace BGE
     ' still fits (the cause of issue #128's rotation glitch). A pure camera-distance zoom
     ' has no such risk (every face scales identically, no rotation), so this only accepts
     ' the base class's fit when both its rotation and its scaleX/scaleY are negligible, and
-    ' only when every face was freshly redrawn this frame (lastDrawWasFullyFresh) rather
-    ' than reused per-face (drawFaceWithReuse()) - stretching an already-patchwork bitmap
-    ' would compound each face's own staleness/drift. See #163.
+    ' only when every face was drawn as it looks (lastDrawWasFullyFresh).
     protected override function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       if m.drawable.useImpostor
         ' decided in updateCanvasPosition(), before the faces were (or weren't) projected
@@ -979,7 +768,7 @@ namespace BGE
     ' Restores the wider drift tolerance the base class's 16px default is too tight for -
     ' a model's whole-silhouette reuse (see attemptTransformTempBitmap() above) only ever
     ' fires for a pure zoom, so it can safely tolerate more drift than a single quad's
-    ' rotate+scale fit before falling back to per-face reuse (drawFaceWithReuse()).
+    ' rotate+scale fit.
     '
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {integer}
@@ -1124,15 +913,15 @@ namespace BGE
       return worldPanels
     end function
 
-    ' How far a moving model's draw may fall short of its exact faces: the larger of the
-    ' whole-model stretch threshold (when that may run) and a reused face raster's error,
-    ' plus any coarse fill - and never less than a skippable tiny face's reach.
+    ' How far a moving model's draw may fall short of its exact faces: the whole-model
+    ' stretch threshold (when that may run) plus any coarse fill - and never less than a
+    ' skippable tiny face's reach.
     '
     ' @param {Renderer} rendererObj
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {float}
     protected override function getOccluderInset(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as float
-      ' every approximation is only taken while moving (see drawFaceWithReuse())
+      ' every approximation is only taken while moving
       if not m.shrinksOccluderClaim() or not m.objMovedInRelationToCamera(rendererObj.camera)
         return 0.0
       end if
@@ -1140,11 +929,6 @@ namespace BGE
         return m.getImpostorOccluderInset(rendererObj, drawMode)
       end if
       inset = 0.0
-      if m.drawable.maxStaleFrames > 0
-        ' a reused raster sits at this frame's bounding box, so each vertex can be off by
-        ' its own drift plus the box corner's
-        inset = m.drawable.maxFaceDriftDistance * (1 + Sqr(2))
-      end if
       if m.mayReuseTransformedTempBitmap(drawMode)
         inset = BGE.Math.Max(inset, m.getTempBitmapThreshold(drawMode))
       end if
@@ -1162,7 +946,7 @@ namespace BGE
       return m.getImpostorAllowedError(rendererObj.qualitySettings.modelImpostorError, m.impostorLastDiagonal, drawMode) + 1
     end function
 
-    ' Also needs the cached bitmap to be every face freshly drawn - see attemptTransformTempBitmap().
+    ' Also needs every face in the cached bitmap drawn as it looks - see attemptTransformTempBitmap().
     '
     ' @param {SceneObjectDrawMode} drawMode
     ' @return {boolean}

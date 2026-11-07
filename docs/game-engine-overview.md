@@ -450,7 +450,7 @@ A few things fall out of this that matter in practice:
   reads from - prefer it over a raw `print` in your own game code so failures are visible
   on-screen, not just over telnet.
 - `examples/rendererTest` is a menu-driven suite of `Renderer` demos built *without* `Game`/`GameScene`
-  at all - useful for trying out a specific rendering capability (draw modes, triangle warping,
+  at all - useful for trying out a specific rendering capability (draw modes, texture columns,
   camera projection) in isolation before wiring it into a real game.
 
 ## Where to go next
