@@ -1,7 +1,9 @@
 ' Times BGE.DrawableWall (issue #467) against wall count: freestanding tiled walls at
 ' assorted angles round an orbiting camera, static and occluding, in phases of 4 to 64 walls.
 ' Each phase gets its own off-screen renderer and draws the same frames, one per update().
-' A live view of the largest count follows.
+' A live view of the largest count follows. Params turn wall features off to see what each
+' costs: shaded=0 occluder=0 static=0 tile=0 still=1 (camera still), and counts=4,32.
+' Stage times (Renderer.profileStages) are printed as STAGES lines.
 class WallsBenchmark extends RendererTest
 
   private wallCounts as integer[] = [4, 16, 32, 64]
@@ -16,8 +18,14 @@ class WallsBenchmark extends RendererTest
 
   private phaseIndex = 0
   private frameIndex = 0
-  private phaseMs as float[] = [0, 0, 0, 0]
-  private phaseDrawCalls as integer[] = [0, 0, 0, 0]
+  private phaseMs as float[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  private phaseDrawCalls as integer[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  private phaseStages = [] as roAssociativeArray[]
+  private shaded = true
+  private occluder = true
+  private isStatic = true
+  private tiled = true
+  private still = false
 
   private sceneRenderer as BGE.Renderer
   private sceneBitmap as roBitmap
@@ -32,6 +40,22 @@ class WallsBenchmark extends RendererTest
   override sub setup(renderer as BGE.Renderer)
     m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
     m.texture = m.createTexture()
+    params = m.launchParams
+    m.shaded = params.shaded <> "0"
+    m.occluder = params.occluder <> "0"
+    m.isStatic = params.static <> "0"
+    m.tiled = params.tile <> "0"
+    m.still = params.still = "1"
+    if invalid <> params.counts
+      m.wallCounts = []
+      for each count in params.counts.split(",")
+        m.wallCounts.push(count.toInt())
+      end for
+    end if
+    for i = 0 to m.wallCounts.count() - 1
+      m.phaseStages.push({})
+    end for
+    print `[Walls benchmark] shaded=${m.shaded} occluder=${m.occluder} static=${m.isStatic} tile=${m.tiled} still=${m.still}`
     m.startScene(m.wallCounts[0])
   end sub
 
@@ -51,11 +75,25 @@ class WallsBenchmark extends RendererTest
     if m.frameIndex >= m.warmupFrames
       m.phaseMs[m.phaseIndex] += ms
       m.phaseDrawCalls[m.phaseIndex] += m.sceneRenderer.getDrawCallsLastFrame()
+      stages = m.phaseStages[m.phaseIndex]
+      lastStages = m.sceneRenderer.getStageMsLastFrame()
+      for each name in lastStages
+        if invalid = stages[name]
+          stages[name] = 0
+        end if
+        stages[name] += lastStages[name]
+      end for
     end if
     m.frameIndex++
 
     if m.frameIndex >= m.warmupFrames + m.timedFrames
       print `[Walls benchmark] ${m.resultLine(m.phaseIndex)}`
+      stageLine = ""
+      stages = m.phaseStages[m.phaseIndex]
+      for each name in stages
+        stageLine += ` ${name}=${stages[name] / m.timedFrames}`
+      end for
+      print `[Walls benchmark] STAGES ${m.wallCounts[m.phaseIndex]}:${stageLine}`
       m.phaseIndex++
       m.frameIndex = 0
       m.sceneRenderer = invalid
@@ -73,6 +111,9 @@ class WallsBenchmark extends RendererTest
   ' Frame index (not dt) drives the camera so phases match.
   private sub renderFrame(frame as integer)
     angle = frame * 0.02
+    if m.still
+      angle = 0
+    end if
     m.camera.position = BGE.Math.VectorOps.create(sin(angle) * 150, 60, cos(angle) * 150)
     m.camera.setTarget(BGE.Math.VectorOps.create(sin(angle + 0.8) * 400, 50, cos(angle + 0.8) * 400))
     m.sceneRenderer.setupCameraForFrame()
@@ -83,6 +124,7 @@ class WallsBenchmark extends RendererTest
   private sub startScene(wallCount as integer)
     m.sceneBitmap = CreateObject("roBitmap", {width: m.surfaceWidth, height: m.surfaceHeight, alphaEnable: false})
     m.sceneRenderer = new BGE.Renderer(m.sceneBitmap)
+    m.sceneRenderer.profileStages = true
     m.camera = new BGE.Camera3d()
     m.sceneRenderer.setCamera(m.camera)
     region = CreateObject("roRegion", m.texture, 0, 0, 64, 64)
@@ -95,13 +137,23 @@ class WallsBenchmark extends RendererTest
       halfLength = 60 + (m.spread(i, 5.3) + 1) * 60
       dx = sin(heading) * halfLength
       dz = cos(heading) * halfLength
+      tileSize = 0.0
+      if m.tiled
+        tileSize = 48.0
+      end if
       wall = new BGE.DrawableWall(invalid, region, BGE.Math.VectorOps.create(center.x - dx, 0, center.z - dz), BGE.Math.VectorOps.create(center.x + dx, 0, center.z + dz), 0, 100 + (m.spread(i, 7.9) + 1) * 40, {
-        tileWidth: 48.0,
-        tileHeight: 48.0
+        tileWidth: tileSize,
+        tileHeight: tileSize,
+        isShaded: m.shaded,
+        isOccluder: m.occluder
       })
       sceneObj = wall.addToRenderer(m.sceneRenderer)
-      m.sceneRenderer.markStatic(sceneObj)
-      m.sceneRenderer.markOccluder(sceneObj)
+      if m.isStatic
+        m.sceneRenderer.markStatic(sceneObj)
+        if m.occluder
+          m.sceneRenderer.markOccluder(sceneObj)
+        end if
+      end if
     end for
   end sub
 
