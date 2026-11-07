@@ -75,6 +75,13 @@ namespace BGE
     private sortIndexMul as integer = 1
     private sortMaxDepthKey as integer = 0
     private sortScale as float = 1.0
+    ' Lit colors by wall face (keyed by lightFaceIndex()), each an array of lightBucketsPerFace
+    ' colors (invalid until lit), kept until the lights or the shading inputs change: with still
+    ' lights, a moving camera relights nothing.
+    private lightCache = {} as roAssociativeArray
+    private lightCacheGeometry as integer = -1
+    ' Buckets across a face its light is cached in, lit at their centres.
+    private lightBucketsPerFace as integer = 32
     ' Scratch vectors for shadeRay().
     private shadePoint as BGE.Math.Vector
     private shadeNormal as BGE.Math.Vector
@@ -149,7 +156,8 @@ namespace BGE
       return true
     end function
 
-    ' Computes ray `index`'s strip from the last updateView(), lit exactly at that ray.
+    ' Computes ray `index`'s strip from the last updateView(), lit as the walls draw it (from
+    ' its face's light cache, see shadeStrips()).
     '
     ' @param {integer} index ray index
     ' @param {GridWallStrip} out filled in
@@ -216,11 +224,19 @@ namespace BGE
       end if
       m.rendererObj = rendererObj
       camera = rendererObj.camera as Camera3d
+      profile = rendererObj.profileStages
+      lap = 0
+      if profile
+        lap = rendererObj.getProfileClockMs()
+      end if
       if m.castRequested or m.viewStamp = 0 or m.viewStripWidth <> m.getStripWidth(rendererObj) or camera.farDistanceChangedThisFrame() or m.viewGeometryVersion <> m.drawable.geometryVersion
         m.castRequested = false
         if not m.updateView(rendererObj)
           return false
         end if
+      end if
+      if profile
+        lap = m.lapStage(rendererObj, "gridWallsCast", lap)
       end if
       rayCount = m.view.rayCount
       m.raysLastFrame = rayCount
@@ -234,8 +250,17 @@ namespace BGE
         m.prepareSort(camera, rayCount)
         m.stripStamp = m.viewStamp
       end if
+      if profile
+        lap = m.lapStage(rendererObj, "gridWallsBuild", lap)
+      end if
       m.shadeStrips(rendererObj, rayCount, stripsChanged)
+      if profile
+        lap = m.lapStage(rendererObj, "gridWallsShade", lap)
+      end if
       m.stripsDrawnLastFrame = m.drawStrips(rendererObj, 0, rayCount - 1, 1.0e30)
+      if profile
+        m.lapStage(rendererObj, "gridWallsStrips", lap)
+      end if
       m.drawDebug(rendererObj, rayCount)
       return true
     end function
@@ -302,6 +327,13 @@ namespace BGE
       return count
     end function
 
+    ' Adds the time since `lap` to a renderer stage, and returns now.
+    private function lapStage(rendererObj as Renderer, name as string, lap as integer) as integer
+      now = rendererObj.getProfileClockMs()
+      rendererObj.addStageMs(name, now - lap)
+      return now
+    end function
+
     private function hasCamera3d(rendererObj as Renderer) as boolean
       if rendererObj.camera.name = "Camera3d"
         return true
@@ -335,6 +367,10 @@ namespace BGE
       base = d.getFillColorRGBA()
       if not stripsChanged and m.shadeStamp = m.stripStamp and not m.lightingChangedThisDraw and not m.qualityChangedThisDraw and base = m.shadeBase and d.isShaded = m.shadeShaded and d.ambientBrightness = m.shadeAmbient and d.lightWrap = m.shadeWrap
         return
+      end if
+      if m.lightingChangedThisDraw or base <> m.shadeBase or d.ambientBrightness <> m.shadeAmbient or d.lightWrap <> m.shadeWrap or m.lightCacheGeometry <> d.geometryVersion
+        m.lightCache = {}
+        m.lightCacheGeometry = d.geometryVersion
       end if
       m.shadeStamp = m.stripStamp
       m.shadeBase = base
@@ -421,8 +457,15 @@ namespace BGE
 
     ' The tint lit at ray i's hit, at mid-height - with the renderer's lights, or by how
     ' squarely the wall faces the camera when there are none (as SceneObjectBillboard does).
+    ' With lights, it's taken from the face's cached bucket (lit at its centre).
     private function shadeRay(i as integer, base as integer) as integer
       hit = m.view.getHit(i)
+      if m.rendererObj.hasLights()
+        face = m.lightFaceIndex(hit)
+        if face >= 0
+          return m.cachedShade(hit, face, base)
+        end if
+      end if
       map = m.drawable.map
       point = m.shadePoint
       point.x = hit.x
@@ -438,6 +481,63 @@ namespace BGE
       end if
       facing = getOutwardNormalFacingAmount(rendererObj, point, normal)
       return BGE.colorBrightness(base, BGE.Math.Max(facing, m.drawable.ambientBrightness))
+    end function
+
+    ' A unique index for the face hit, or -1 for a cell beyond the grid's one-cell border
+    ' (a camera outside the grid).
+    private function lightFaceIndex(hit as BGE.GridWallsHit) as integer
+      map = m.drawable.map
+      col = hit.col + 1
+      row = hit.row + 1
+      stride = map.colCount + 2
+      if col < 0 or row < 0 or col >= stride or row >= map.rowCount + 2
+        return -1
+      end if
+      side = 0
+      if hit.normalX < 0
+        side = 1
+      else if hit.normalZ > 0
+        side = 2
+      else if hit.normalZ < 0
+        side = 3
+      end if
+      return (row * stride + col) * 4 + side
+    end function
+
+    ' The hit's light from its face's cache, lighting its bucket first if it hasn't been.
+    private function cachedShade(hit as BGE.GridWallsHit, face as integer, base as integer) as integer
+      buckets = m.lightBucketsPerFace
+      key = face.toStr()
+      faceShades = m.lightCache[key]
+      if invalid = faceShades
+        faceShades = CreateObject("roArray", buckets, false)
+        for b = 0 to buckets - 1
+          faceShades.push(invalid)
+        end for
+        m.lightCache[key] = faceShades
+      end if
+      bucket = int(hit.u * buckets)
+      if bucket >= buckets
+        bucket = buckets - 1
+      end if
+      cached = faceShades[bucket]
+      if invalid <> cached
+        return cached
+      end if
+      map = m.drawable.map
+      ' u runs along right = (normalZ, -normalX)
+      along = ((bucket + 0.5) / buckets - hit.u) * map.cellSize
+      point = m.shadePoint
+      point.x = hit.x + hit.normalZ * along
+      point.y = map.origin.y + map.wallHeight * 0.5
+      point.z = hit.z - hit.normalX * along
+      normal = m.shadeNormal
+      normal.x = hit.normalX
+      normal.y = 0
+      normal.z = hit.normalZ
+      shade = BGE.Lighting.shadeColor(base, m.rendererObj.getPreparedLights(), point, normal, m.drawable.ambientBrightness, m.drawable.lightWrap)
+      faceShades[bucket] = shade
+      return shade
     end function
 
     ' With the draw_scene_object_normals debug value: a dot at every 8th strip's foot, and

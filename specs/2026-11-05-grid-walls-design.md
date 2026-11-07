@@ -8,7 +8,7 @@
 20 fps only because long quads, warped as two affine triangles, smear and swim up close
 (measurements in `specs/2026-11-05-third-person-crypt-design.md`'s branch history).
 
-The `rendererTest` demo `raycast-walls-benchmark` (branch `examples/third-person-crypt`)
+The `rendererTest` demo `raycast-walls-benchmark` (removed once grid walls replaced it; in git history)
 measured the Wolfenstein/Doom alternative on the same Ultra: one grid ray per screen strip,
 one `DrawScaledObject` of a one-texel-wide texture column per strip, tinted for light.
 At 4 px strips (320 rays) a frame took about 12 ms (5 ms casting, 6 ms drawing) and held

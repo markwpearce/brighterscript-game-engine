@@ -966,10 +966,17 @@ into one-pixel columns on first use. Swap them with `setTextures()`. `color`, `a
 ### Lights and the floor
 
 Set `isShaded: true` and the walls are lit by the renderer's lights like any other shaded
-drawable (see [Lighting](#lighting)). Light is sampled every `gridWallLightInterval` strips, so a
-flickering torch costs little. A change to lights alone relights the walls without casting the
-rays again. Pair the walls with a `DrawablePlane` floor (and optionally ceiling); the walls
-lean with the camera's pitch to stay planted on it, with no seam.
+drawable (see [Lighting](#lighting)). Light is sampled every `gridWallLightInterval` strips and
+interpolated between. Each wall face keeps its light (in 32 buckets across it) until a light, the
+color, `ambientBrightness` or `lightWrap` changes, so with still lights a moving camera relights
+nothing. A light that changes every frame (a flickering torch) relights every sample each frame,
+which costs a few milliseconds at Medium. A change to lights alone relights the walls without
+casting the rays again. Pair the walls with a `DrawablePlane` floor (and optionally ceiling); the
+walls lean with the camera's pitch to stay planted on it, with no seam.
+
+With `Renderer.profileStages` on, the walls report their parts as stages within `gridWalls`:
+`gridWallsCast`, `gridWallsBuild` (strip geometry), `gridWallsShade` and `gridWallsStrips` (the
+draw calls).
 
 ### Hiding what's behind a wall
 

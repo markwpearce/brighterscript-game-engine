@@ -1,0 +1,221 @@
+import "../World.bs"
+import "../Entities/Torch.bs"
+import "../Entities/CryptProp.bs"
+import "../Entities/CryptDoorway.bs"
+import "../Crypt/CryptMap.bs"
+import "../Crypt/CryptWalls.bs"
+import "../Crypt/CryptCameraBoom.bs"
+import "ThirdPersonScene.bs"
+
+' A torch-lit stone maze under the graveyard, laid out by CryptMap. Its exit leads to the
+' field for now.
+class CryptScene extends ThirdPersonScene
+
+  respawnSeconds as float = 3
+  ' World units per floor texel, as the field's grass
+  floorTexelScale as float = 2
+  ' How far up the camera may tilt (radians), so it stays below the wall tops
+  maxCameraTilt as float = 0.45
+  walls as CryptWalls
+
+  private layout as CryptLayout
+  private lights as BGE.Light[] = []
+  private deadSeconds as float = 0
+  private leaving as boolean = false
+  private bitmapPaths as roAssociativeArray = {
+    cryptFloor: "pkg:/sprites/crypt_floor.png",
+    cryptWall: "pkg:/sprites/crypt_wall.png",
+    cryptAlcove: "pkg:/sprites/crypt_alcove.png",
+    cryptRubble: "pkg:/sprites/crypt_rubble.png",
+    cryptBones: "pkg:/sprites/crypt_bones.png",
+    cryptAltar: "pkg:/sprites/crypt_altar.png"
+  }
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "CryptScene"
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    for each name in m.bitmapPaths
+      if m.game.Bitmaps[name] = invalid
+        loader.loadBitmap(name, m.bitmapPaths[name])
+      end if
+    end for
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.readCommonArgs(args)
+    m.leaving = false
+    m.deadSeconds = 0
+    m.game.setBackgroundColor(&h000000FF)
+    m.layout = CryptMap.parse(CryptMap.layout())
+
+    floorBmp = m.game.getBitmap("cryptFloor")
+    floorRegion = CreateObject("roRegion", floorBmp, 0, 0, floorBmp.GetWidth(), floorBmp.GetHeight())
+    floor = new BGE.DrawablePlane(m, floorRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.tiledImage,
+      scale: BGE.Math.VectorOps.create(m.floorTexelScale, m.floorTexelScale, 1)
+    })
+    floor.isShaded = true
+    m.addDrawable("Floor", floor)
+
+    ' Just enough cold light that unlit stone isn't pure black
+    ambient = new BGE.AmbientLight(&h8090B0, 0.12)
+    m.game.addLight(ambient)
+    m.lights = [ambient]
+
+    m.addWalls()
+    for each cell in m.layout.cells
+      m.addCellContents(cell)
+    end for
+
+    start = m.layout.startCell
+    if args.at <> invalid
+      ' Measuring: `at=<col>,<row>` starts in another floor cell
+      colRow = args.at.split(",")
+      start = {col: colRow[0].toInt(), row: colRow[1].toInt(), kind: "."} as CryptCell
+    end if
+    startCenter = CryptMap.cellCenter(m.layout, start.col, start.row)
+    m.addKnight(startCenter.x, startCenter.z, m.openHeading(start))
+    m.setUpCamera(World.metres(24), 0.5, m.maxCameraTilt)
+    m.walls = new CryptWalls(m.layout)
+    m.walls.track(m.knight)
+  end sub
+
+  ' Every wall, raycast from the same grid: one drawable however many walls there are
+  private sub addWalls()
+    tile = m.game.getBitmap("cryptWall")
+    ' The 2 m tile three times across a cell, so texels stay square
+    tilesPerCell = CryptMap.CELL_METRES / CryptMap.SEGMENT_METRES
+    bmp = CreateObject("roBitmap", {width: tile.GetWidth() * tilesPerCell, height: tile.GetHeight(), AlphaEnable: false})
+    for i = 0 to tilesPerCell - 1
+      bmp.DrawObject(i * tile.GetWidth(), 0, tile)
+    end for
+    bmp.Finish()
+    region = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
+    size = World.metres(CryptMap.CELL_METRES)
+    map = new BGE.GridWallsMap(CryptMap.layout(), {
+      cellSize: size,
+      wallHeight: World.metres(CryptMap.WALL_METRES),
+      origin: BGE.Math.VectorOps.create(-m.layout.cols * size / 2, 0, -m.layout.rows * size / 2),
+      solid: {"#": "stone"}
+    })
+    walls = new BGE.DrawableGridWalls(m, map, {stone: region}, {isShaded: true})
+    ' Torches hang just off a wall, so their own wall is lit edge-on; wrap lets it glow
+    walls.lightWrap = 0.5
+    m.addDrawable("Walls", walls)
+  end sub
+
+  ' Torches, props and doorways for one floor cell
+  private sub addCellContents(cell as CryptCell)
+    center = CryptMap.cellCenter(m.layout, cell.col, cell.row)
+    wallSides = CryptMap.wallSides(m.layout, cell.col, cell.row)
+    if cell.kind = "T" and wallSides.Count() > 0
+      m.addTorch(center, wallSides[0], FlameKind.fire)
+    else if cell.kind = "k" and wallSides.Count() > 0
+      spot = m.onWall(center, wallSides[0], World.metres(0.05))
+      prop = new CryptProp(m.game)
+      m.game.addEntity(prop, {x: spot.x, z: spot.z, bitmap: "cryptAlcove", turn: CryptMap.sideTurn(wallSides[0]) + BGE.Math.PI})
+    else if cell.kind = "A" and wallSides.Count() > 0
+      spot = m.onWall(center, wallSides[0], World.metres(1))
+      prop = new CryptProp(m.game)
+      m.game.addEntity(prop, {x: spot.x, z: spot.z, bitmap: "cryptAltar"})
+      m.addTorch(center, wallSides[0], FlameKind.spirit)
+      m.addDoorway(cell)
+    else if cell.kind = "r" or cell.kind = "b"
+      bitmap = "cryptRubble"
+      if cell.kind = "b"
+        bitmap = "cryptBones"
+      end if
+      ' Off to one side, out of the middle of the corridor
+      spot = center
+      if wallSides.Count() > 0
+        spot = m.onWall(center, wallSides[0], World.metres(0.8))
+      end if
+      prop = new CryptProp(m.game)
+      m.game.addEntity(prop, {x: spot.x, z: spot.z, bitmap: bitmap})
+    else if cell.kind = "E"
+      m.addDoorway(cell)
+    end if
+  end sub
+
+  ' A point `inset` in from the middle of a cell's wall on `side`
+  private function onWall(center as BGE.Math.Vector, side as string, inset as float) as BGE.Math.Vector
+    delta = CryptMap.sideStep(side)
+    reach = World.metres(CryptMap.CELL_METRES) / 2 - inset
+    return BGE.Math.VectorOps.create(center.x + delta[0] * reach, 0, center.z + delta[1] * reach)
+  end function
+
+  private sub addTorch(center as BGE.Math.Vector, side as string, kind as FlameKind)
+    spot = m.onWall(center, side, World.metres(0.2))
+    flame = new Torch(m.game)
+    m.game.addEntity(flame, {x: spot.x, y: World.metres(2.4), z: spot.z, kind: kind})
+  end sub
+
+  ' A doorway frame across the cell's way in (its first open side)
+  private sub addDoorway(cell as CryptCell)
+    side = m.firstOpenSide(cell)
+    center = CryptMap.cellCenter(m.layout, cell.col, cell.row)
+    spot = m.onWall(center, side, 0)
+    doorway = new CryptDoorway(m.game)
+    m.game.addEntity(doorway, {x: spot.x, z: spot.z, turn: CryptMap.sideTurn(side), width: World.metres(CryptMap.CELL_METRES)})
+  end sub
+
+  private function firstOpenSide(cell as CryptCell) as string
+    for each side in CryptMap.sides()
+      delta = CryptMap.sideStep(side)
+      if not CryptMap.isSolid(m.layout, cell.col + delta[0], cell.row + delta[1])
+        return side
+      end if
+    end for
+    return "n"
+  end function
+
+  ' The heading that looks out of a cell through its first open side
+  private function openHeading(cell as CryptCell) as float
+    delta = CryptMap.sideStep(m.firstOpenSide(cell))
+    return BGE.Math.headingOf(BGE.Math.VectorOps.create(delta[0], 0, delta[1]))
+  end function
+
+  override sub onDestroy()
+    for each light in m.lights
+      m.game.removeLight(light)
+    end for
+    m.lights = []
+    for each name in m.bitmapPaths
+      m.game.unloadBitmap(name)
+    end for
+  end sub
+
+  override sub onUpdate(dt as float)
+    m.director.viewHeading = m.cameraRig.heading
+    m.hud.update(dt, m.knight)
+    m.director.update(dt)
+    if not m.knight.isAlive()
+      m.deadSeconds += dt
+      if m.deadSeconds >= m.respawnSeconds
+        m.deadSeconds = 0
+        start = CryptMap.cellCenter(m.layout, m.layout.startCell.col, m.layout.startCell.row)
+        m.knight.respawn(start.x, start.z)
+        m.walls.track(m.knight)
+      end if
+      return
+    end if
+    here = CryptMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
+    if not m.leaving and here[0] = m.layout.exitCell.col and here[1] = m.layout.exitCell.row
+      m.leaving = m.game.changeSceneWithFade("FieldScene")
+    end if
+  end sub
+
+  ' Walls stop the camera by the grid, so they need no colliders
+  protected override function makeCameraBoom(args as roAssociativeArray) as BGE.CameraBoom
+    return new CryptCameraBoom(m.game, m.layout, args)
+  end function
+
+  protected override sub afterBodiesMoved(dt as float)
+    m.walls.resolve()
+  end sub
+
+end class
