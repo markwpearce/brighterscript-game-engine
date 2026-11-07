@@ -41,7 +41,7 @@ namespace BGE
     private centerY as float = 0.0
     private canvasWidth as float = 0.0
     private canvasHeight as float = 0.0
-    ' the current quad's top and foot edges: start and per-column step, camera space
+    ' the current quad's top and foot edges: start and per-texel step, camera space
     private tx0 as float = 0.0
     private ty0 as float = 0.0
     private tz0 as float = 0.0
@@ -61,6 +61,8 @@ namespace BGE
     private footX = [] as float[]
     private footY = [] as float[]
     private edgeOk = [] as boolean[]
+    ' the texel each column edge is at
+    private edgeTexels = [] as integer[]
     private channels = [] as float[]
 
     ' Starts a frame: resets the column budget and reads the column density.
@@ -173,6 +175,14 @@ namespace BGE
       if n < 1
         n = 1
       end if
+      ' columns are whole slabs a power of two texels wide, so their regions can be kept
+      stepLog2 = 0
+      stepSize = 1
+      while (texN + stepSize - 1) \ stepSize > n
+        stepSize = stepSize * 2
+        stepLog2++
+      end while
+      n = (texN + stepSize - 1) \ stepSize
       m.lastColumnCount = n
 
       m.grow(n + 1)
@@ -184,18 +194,28 @@ namespace BGE
       m.tx0 = corners[t0 * 3]
       m.ty0 = corners[t0 * 3 + 1]
       m.tz0 = corners[t0 * 3 + 2]
-      m.tdx = (corners[t1 * 3] - m.tx0) / n
-      m.tdy = (corners[t1 * 3 + 1] - m.ty0) / n
-      m.tdz = (corners[t1 * 3 + 2] - m.tz0) / n
+      ' steps are per texel, edge k at texel edgeTexel(k)
+      m.tdx = (corners[t1 * 3] - m.tx0) / texN
+      m.tdy = (corners[t1 * 3 + 1] - m.ty0) / texN
+      m.tdz = (corners[t1 * 3 + 2] - m.tz0) / texN
       m.fx0 = corners[f0 * 3]
       m.fy0 = corners[f0 * 3 + 1]
       m.fz0 = corners[f0 * 3 + 2]
-      m.fdx = (corners[f1 * 3] - m.fx0) / n
-      m.fdy = (corners[f1 * 3 + 1] - m.fy0) / n
-      m.fdz = (corners[f1 * 3 + 2] - m.fz0) / n
+      m.fdx = (corners[f1 * 3] - m.fx0) / texN
+      m.fdy = (corners[f1 * 3 + 1] - m.fy0) / texN
+      m.fdz = (corners[f1 * 3 + 2] - m.fz0) / texN
+      edgeTexels = m.edgeTexels
+      edgeTexels.Clear()
+      for k = 0 to n
+        texel = k * stepSize
+        if texel > texN
+          texel = texN
+        end if
+        edgeTexels.push(texel)
+      end for
       anyBehind = false
       for k = 0 to n
-        if not m.projectEdge(k, k)
+        if not m.projectEdge(k, edgeTexels[k])
           anyBehind = true
         end if
       end for
@@ -205,9 +225,9 @@ namespace BGE
         for k = 0 to n
           if not edgeOk[k]
             if k < n and edgeOk[k + 1]
-              m.projectEdge(k, m.nearCrossing(k, k + 1))
+              m.projectEdge(k, m.nearCrossing(edgeTexels[k], edgeTexels[k + 1]))
             else if k > 0 and edgeOk[k - 1]
-              m.projectEdge(k, m.nearCrossing(k, k - 1))
+              m.projectEdge(k, m.nearCrossing(edgeTexels[k], edgeTexels[k - 1]))
             end if
           end if
         end for
@@ -231,7 +251,13 @@ namespace BGE
         tinted = m.unpackCornerColors(colors, t0, t1, f0, f1)
       end if
 
-      texPerColumn = texN / n
+      ' whole slabs, unless they'd draw mirrored (see drawTriangleTo())
+      thin = reversed <> useRows
+      if useRows
+        slabs = texture.getRowSlabs(stepLog2)
+      else
+        slabs = texture.getColumnSlabs(stepLog2)
+      end if
       margin = 2.0
       maxX = m.canvasWidth + margin
       maxY = m.canvasHeight + margin
@@ -278,14 +304,28 @@ namespace BGE
           angle = BGE.Math.Atan2(sinA, cosA) * 57.2957795
         end if
         if tinted
-          color = m.columnColor((k + 0.5) / n)
+          color = m.columnColor((edgeTexels[k] + edgeTexels[k + 1]) * 0.5 / texN)
         end if
-        texel = int((k + 0.5) * texPerColumn)
+        texel = (edgeTexels[k] + edgeTexels[k + 1] - 1) \ 2
+        acrossTexels = 1
+        if not thin
+          acrossTexels = edgeTexels[k + 1] - edgeTexels[k]
+        end if
         if useRows
-          ' a row turned a quarter clockwise runs along foot -> top, its 1 texel thickness across
-          target.DrawTransformedObject(fx, fy, angle - 90, length / texLength, width, texture.getRow(texel), color)
+          ' a row turned a quarter clockwise runs along foot -> top, its thickness across
+          if thin
+            region = texture.getRow(texel)
+          else
+            region = slabs[k]
+          end if
+          target.DrawTransformedObject(fx, fy, angle - 90, length / texLength, width / acrossTexels, region, color)
         else
-          target.DrawTransformedObject(fx, fy, angle, width, length / texLength, texture.getColumn(texel), color)
+          if thin
+            region = texture.getColumn(texel)
+          else
+            region = slabs[k]
+          end if
+          target.DrawTransformedObject(fx, fy, angle, width / acrossTexels, length / texLength, region, color)
         end if
         drawn++
       end for
@@ -408,6 +448,8 @@ namespace BGE
         high = strips.highs[k]
         across = strips.starts[k]
         texLength = high - low
+        cropLow = -1
+        cropHigh = -1
         ' top (low along) and foot (high along) at the strip's near edge
         ax = bx + across * sx
         ay = by + across * sy
@@ -429,9 +471,10 @@ namespace BGE
             continue for
           end if
           if clipLow > low or clipHigh < high
-            region = cuts.getCroppedRegion(useRows, strips, k, int(clipLow), -int(-clipHigh))
             ' its whole texels fill the clipped length
-            texLength = region.GetWidth() + region.GetHeight() - 1
+            cropLow = int(clipLow)
+            cropHigh = -int(-clipHigh)
+            texLength = cropHigh - cropLow
             low = clipLow
             high = clipHigh
           end if
@@ -473,7 +516,8 @@ namespace BGE
         end if
 
         ' anchored at the far edge when seen from behind, as in drawTo()
-        if (nfx - fx) * (fy - ty) + (nfy - fy) * (tx - fx) < 0
+        reversed = (nfx - fx) * (fy - ty) + (nfy - fy) * (tx - fx) < 0
+        if reversed
           swap = fx
           fx = nfx
           nfx = swap
@@ -513,10 +557,23 @@ namespace BGE
         else
           angle = BGE.Math.Atan2(sinA, cosA) * 57.2957795
         end if
-        if useRows
-          target.DrawTransformedObject(fx, fy, angle - 90, length / texLength, drawWidth, region, color)
+        ' the whole slab, unless it would draw mirrored: a column's texels run away from its
+        ' anchor, a row's (turned a quarter) toward it
+        thin = reversed <> useRows
+        if cropLow >= 0
+          region = cuts.getCroppedRegion(useRows, strips, k, cropLow, cropHigh, thin)
+        else if thin
+          region = cuts.getThinRegion(useRows, strips, k)
+        end if
+        if thin
+          acrossTexels = 1
         else
-          target.DrawTransformedObject(fx, fy, angle, drawWidth, length / texLength, region, color)
+          acrossTexels = strips.ends[k] - strips.starts[k]
+        end if
+        if useRows
+          target.DrawTransformedObject(fx, fy, angle - 90, length / texLength, drawWidth / acrossTexels, region, color)
+        else
+          target.DrawTransformedObject(fx, fy, angle, drawWidth / acrossTexels, length / texLength, region, color)
         end if
         drawn++
       end for
@@ -592,7 +649,7 @@ namespace BGE
       return sqr((bx - ax) * (bx - ax) + (by - ay) * (by - ay))
     end function
 
-    ' Projects column edge k at position s (in columns) along the quad, clipping it to the near
+    ' Projects column edge k at position s (in texels) along the quad, clipping it to the near
     ' plane, which squeezes its column's texture into what's left (columns run along
     ' constant-ish depth, so this is rare). Sets edgeOk[k]: false if it's wholly behind.
     private function projectEdge(k as integer, s as float) as boolean
@@ -634,9 +691,9 @@ namespace BGE
       return true
     end function
 
-    ' Where, between edge `behind` (wholly behind the near plane) and edge `ahead`, the top
-    ' or foot first reaches it, in columns.
-    private function nearCrossing(behind as integer, ahead as integer) as float
+    ' Where, between an edge at texel `behind` (wholly behind the near plane) and one at
+    ' `ahead`, the top or foot first reaches it, in texels.
+    private function nearCrossing(behind as float, ahead as float) as float
       lo = behind
       hi = ahead
       if ahead < behind
@@ -644,7 +701,7 @@ namespace BGE
         hi = behind
       end if
       near = m.nearZ
-      best = ahead * 1.0
+      best = ahead
       if m.tdz <> 0
         s = (near - m.tz0) / m.tdz
         if s >= lo and s <= hi and abs(s - behind) < abs(best - behind)
