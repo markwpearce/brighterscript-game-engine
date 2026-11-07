@@ -136,10 +136,13 @@ is set, which is why they look the same as they always did.
 ### Texture columns for flat quads
 
 Images, sprites, text, circles and filled rectangles in the oriented and solid draw modes draw as
-**projected texture columns**: one `DrawTransformedObject` per 1-texel column of the texture, placed
-and sized in camera space, so the result is perspective correct with no scratch or temp bitmaps. On a
+**projected texture columns**: one `DrawTransformedObject` per column of the texture, placed and sized
+in camera space, so the result is perspective correct with no scratch or temp bitmaps. On a
 `Camera2d` the same columns are projected orthographically. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
 `quadMinPixelsPerColumn`), and a per-frame budget keeps the draw count under Roku's queue limit.
+Each column is a slab a power of two texels wide, drawn whole, so fewer columns don't drop texture
+detail. A quad seen mirrored (from behind) draws each column's middle texel alone instead, because a
+slab would be mirrored within its column and a negative scale can't be rotated on a real Roku.
 
 Columns go straight to the canvas only while the object moves relative to the camera. Once it's
 still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far

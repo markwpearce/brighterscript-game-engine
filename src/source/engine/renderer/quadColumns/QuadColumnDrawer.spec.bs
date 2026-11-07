@@ -42,6 +42,33 @@ namespace tests
       return [-100.0, 100.0, -400.0, 100.0, 100.0, -400.0, -100.0, -100.0, -200.0, 100.0, -100.0, -200.0]
     end function
 
+    ' 128x128 in red and blue bands 8 texels wide, across u (or v with `alongV`)
+    private function bandedTexture(alongV as boolean) as BGE.QuadColumnTexture
+      bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: true})
+      bmp.Clear(&hFF0000FF)
+      for i = 8 to 127 step 16
+        if alongV
+          bmp.DrawRect(0, i, 128, 8, &h0000FFFF)
+        else
+          bmp.DrawRect(i, 0, 8, 128, &h0000FFFF)
+        end if
+      end for
+      bmp.Finish()
+      return new BGE.QuadColumnTexture(CreateObject("roRegion", bmp, 0, 0, 128, 128), "bands")
+    end function
+
+    ' Draws the banded texture onto `quad` (clip space, an orthographic projection 256 x 144
+    ' px from (512, 288)) as slabs 16 texels wide, so each has a red and a blue band.
+    private sub drawBandedSlabs(quad as float[], alongV as boolean)
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.quadColumnsPerTexel = 1 / 16
+      settings.quadMinPixelsPerColumn = 1
+      m.drawer.beginFrame(settings)
+      m.drawer.setOrthographicProjection(640, 360, 1280, 720)
+      m.assertEqual(8, m.drawer.drawTo(m.target, quad, m.bandedTexture(alongV), [-1]))
+      m.assertEqual(alongV, m.drawer.lastUsedRows)
+    end sub
+
     private function pixel(x as integer, y as integer) as integer[]
       m.target.Finish()
       bytes = m.target.GetByteArray(x, y, 1, 1)
@@ -71,6 +98,25 @@ namespace tests
       m.assertEqual(19, row.GetY())
       m.assertEqual(32, row.GetWidth())
       m.assertEqual(1, row.GetHeight())
+    end function
+
+    @it("cuts power-of-two slabs, the last narrower")
+    function _()
+      bmp = CreateObject("roBitmap", {width: 64, height: 64})
+      texture = new BGE.QuadColumnTexture(CreateObject("roRegion", bmp, 8, 16, 20, 24), "t")
+      columns = texture.getColumnSlabs(3)
+      m.assertEqual(3, columns.count())
+      m.assertEqual(16, columns[1].GetX())
+      m.assertEqual(8, columns[1].GetWidth())
+      m.assertEqual(24, columns[1].GetHeight())
+      m.assertEqual(4, columns[2].GetWidth())
+      rows = texture.getRowSlabs(4)
+      m.assertEqual(2, rows.count())
+      m.assertEqual(32, rows[1].GetY())
+      m.assertEqual(8, rows[1].GetHeight())
+      m.assertEqual(20, rows[1].GetWidth())
+      ' kept
+      m.assertTrue(texture.getColumnSlabs(3)[0].GetWidth() = columns[0].GetWidth())
     end function
 
     @describe("drawing")
@@ -137,6 +183,36 @@ namespace tests
       m.assertNotEqual([0, 0, 0], m.pixel(100, 360))
     end function
 
+    @it("draws a column's whole slab, not just its middle texel")
+    function _()
+      ' depth changes along u, so columns; 2 px per texel across
+      m.drawBandedSlabs([-0.2, 0.2, -0.3, 0.2, 0.2, -0.7, -0.2, -0.2, -0.3, 0.2, -0.2, -0.7], false)
+      m.assertEqual([255, 0, 0], m.pixel(518, 350))
+      m.assertEqual([0, 0, 255], m.pixel(538, 350))
+    end function
+
+    @it("draws a row's whole slab")
+    function _()
+      ' depth changes along v, so rows; 1.125 px per texel down
+      m.drawBandedSlabs([-0.2, 0.2, -0.3, 0.2, 0.2, -0.3, -0.2, -0.2, -0.7, 0.2, -0.2, -0.7], true)
+      m.assertEqual([255, 0, 0], m.pixel(600, 291))
+      m.assertEqual([0, 0, 255], m.pixel(600, 302))
+    end function
+
+    @it("draws a mirrored column's middle texel, so it isn't mirrored within the column")
+    function _()
+      ' mirrored left to right: u 0 is at x 768; a mirrored slab would put blue here
+      m.drawBandedSlabs([0.2, 0.2, -0.3, -0.2, 0.2, -0.7, 0.2, -0.2, -0.3, -0.2, -0.2, -0.7], false)
+      m.assertEqual([255, 0, 0], m.pixel(762, 350))
+    end function
+
+    @it("draws a mirrored row's middle texel")
+    function _()
+      ' mirrored top to bottom: v 0 is at y 432
+      m.drawBandedSlabs([-0.2, -0.2, -0.3, 0.2, -0.2, -0.3, -0.2, 0.2, -0.7, 0.2, 0.2, -0.7], true)
+      m.assertEqual([255, 0, 0], m.pixel(600, 429))
+    end function
+
     @describe("column count")
 
     @it("takes the smaller of texels x columnsPerTexel and screen span / minPixelsPerColumn")
@@ -150,21 +226,23 @@ namespace tests
       m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.ultra))
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(128, m.drawer.lastColumnCount)
-      ' far away: 64 px across, so 64 / 4 + 1 at Medium
+      ' far away: 64 px across wants 64 / 4 + 1 at Medium, so slabs 8 texels wide
       m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
       far = m.facingQuad()
       for i = 2 to 11 step 3
         far[i] = -2000.0
       end for
       m.drawer.drawTo(m.target, far, m.texture, [-1])
-      m.assertEqual(17, m.drawer.lastColumnCount)
+      m.assertEqual(16, m.drawer.lastColumnCount)
     end function
 
     @it("stops at the per-frame budget until the next frame")
     function _()
       m.drawer.maxColumnsPerFrame = 100
       m.assertEqual(64, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
-      m.assertEqual(36, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
+      ' what's left takes wider slabs
+      m.assertEqual(32, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
+      m.assertEqual(4, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
       m.assertEqual(0, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
       m.assertEqual(100, m.drawer.columnsThisFrame)
       m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))

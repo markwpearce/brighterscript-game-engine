@@ -44,6 +44,36 @@ namespace tests
       return [-100.0, 100.0, -500.0, 100.0, 100.0, -500.0, -100.0, -100.0, -500.0]
     end function
 
+    ' 128x128 in red and blue bands 8 texels wide, across u (or v with `alongV`)
+    private function bandedTexture(alongV as boolean) as roRegion
+      bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: true})
+      bmp.Clear(&hFF0000FF)
+      for i = 8 to 127 step 16
+        if alongV
+          bmp.DrawRect(0, i, 128, 8, &h0000FFFF)
+        else
+          bmp.DrawRect(i, 0, 8, 128, &h0000FFFF)
+        end if
+      end for
+      bmp.Finish()
+      return CreateObject("roRegion", bmp, 0, 0, 128, 128)
+    end function
+
+    ' Draws the upper-left texture half, banded, onto `triangle` (clip space, an orthographic
+    ' projection 256 x 144 px from (512, 288)) as strips 16 texels wide, so each has a red and
+    ' a blue band.
+    private sub drawBandedStrips(triangle as float[], alongV as boolean)
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.quadColumnsPerTexel = 1 / 16
+      settings.quadMinPixelsPerColumn = 1
+      m.drawer.beginFrame(settings)
+      m.drawer.setOrthographicProjection(640, 360, 1280, 720)
+      cuts = new BGE.TriangleColumnCuts(m.bandedTexture(alongV), [BGE.Math.VectorOps.create(0, 0), BGE.Math.VectorOps.create(128, 0), BGE.Math.VectorOps.create(0, 128)])
+      m.assertTrue(m.drawer.drawTriangleTo(m.target, triangle, cuts, -1) > 0)
+      m.assertEqual(8, m.drawer.lastColumnCount)
+      m.assertEqual(alongV, m.drawer.lastUsedRows)
+    end sub
+
     private function pixel(x as integer, y as integer) as integer[]
       m.target.Finish()
       bytes = m.target.GetByteArray(x, y, 1, 1)
@@ -80,8 +110,13 @@ namespace tests
       m.assertEqual(4, strips.starts[1])
       m.assertEqual(8, strips.ends[1])
       m.assertEqual(124, strips.highs[1])
-      ' sampled from its middle texel
-      m.assertEqual(5, strips.regions[1].GetX())
+      ' drawn from the whole slab, or its middle texel when mirrored
+      m.assertEqual(4, strips.regions[1].GetX())
+      m.assertEqual(4, strips.regions[1].GetWidth())
+      thin = cuts.getThinRegion(false, strips, 1)
+      m.assertEqual(5, thin.GetX())
+      m.assertEqual(1, thin.GetWidth())
+      m.assertEqual(124, thin.GetHeight())
       rows = cuts.getStrips(true, 0)
       m.assertEqual(128, rows.starts.count())
       m.assertEqual(127, rows.highs[1])
@@ -159,6 +194,38 @@ namespace tests
       m.assertEqual([0, 0, 255], m.pixel(700, 300))
       m.assertEqual([0, 255, 0], m.pixel(520, 410))
       m.assertEqual([0, 0, 0], m.pixel(720, 420))
+    end function
+
+    @it("draws a wide strip's whole slab, not just its middle texel")
+    function _()
+      ' depth changes along u, so columns; 2 px per texel across
+      m.drawBandedStrips([-0.2, 0.2, -0.3, 0.2, 0.2, -0.7, -0.2, -0.2, -0.3], false)
+      m.assertEqual([255, 0, 0], m.pixel(518, 300))
+      m.assertEqual([0, 0, 255], m.pixel(538, 300))
+    end function
+
+    @it("draws a wide row's whole slab")
+    function _()
+      ' depth changes along v, so rows; 1.125 px per texel down
+      m.drawBandedStrips([-0.2, 0.2, -0.3, 0.2, 0.2, -0.3, -0.2, -0.2, -0.7], true)
+      m.assertEqual([255, 0, 0], m.pixel(520, 291))
+      m.assertEqual([0, 0, 255], m.pixel(520, 302))
+    end function
+
+    @it("keeps a mirrored strip's texels the right way round")
+    function _()
+      ' mirrored left to right: u 0 is at x 768
+      m.drawBandedStrips([0.2, 0.2, -0.3, -0.2, 0.2, -0.7, 0.2, -0.2, -0.3], false)
+      ' a mirrored slab would put blue here; its middle texel alone is red
+      m.assertEqual([255, 0, 0], m.pixel(762, 300))
+    end function
+
+    @it("keeps a mirrored row's texels the right way round")
+    function _()
+      ' mirrored top to bottom: v 0 is at y 432
+      m.drawBandedStrips([-0.2, -0.2, -0.3, 0.2, -0.2, -0.3, -0.2, 0.2, -0.7], true)
+      ' a mirrored slab would put blue here; its middle texel alone is red
+      m.assertEqual([255, 0, 0], m.pixel(520, 429))
     end function
 
     @it("sizes strips by render quality and screen span, in powers of two texels")
