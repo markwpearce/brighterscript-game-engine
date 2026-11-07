@@ -52,6 +52,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
 | `DrawableGridWalls`   | `SceneObjectGridWalls`   | The solid cells of a grid maze as raycast walls - one textured strip per few screen pixels (see below). |
+| `DrawableWall`        | `SceneObjectWall`        | A freestanding upright wall between two floor points, its texture stretched or tiled (see below). |
 | `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
 | `DrawableParticles`   | `SceneObjectParticle`    | A whole emitter's worth of simulated particles (lines, rectangles, or images), drawn through one `SceneObject` for the entire emitter (see below). |
 | _(billboard drawables, e.g. images used with `directToCamera`/`directScaled` draw modes)_ | `SceneObjectBillboard` | Always faces the camera regardless of its own rotation. |
@@ -1023,6 +1024,38 @@ The UI canvas is a separate renderer, so walls never hide UI.
 `examples/rendererTest` has a `Grid Walls` demo (`--param demo=grid-walls`) with a tiled floor, a
 wall-hung alcove, a figure pacing behind a corner and torch flames (`DrawableParticles`) in and out
 of view.
+
+## Freestanding walls (`DrawableWall`)
+
+`DrawableWall` is an upright textured quad between two floor points, from `bottom` to `top`,
+at any length and angle. It's for walls in an open scene; for a grid maze use
+`DrawableGridWalls`. Set `tileWidth`/`tileHeight` (world units per copy of the texture) to
+repeat the texture instead of stretching it once. Tiles start at the wall's start point and
+foot, so a partial tile is at the far end or the top.
+
+```brighterscript
+' in a static entity's onCreate()
+m.isStatic = true
+wall = new BGE.DrawableWall(m, brickRegion, BGE.Math.VectorOps.create(0, 0, 0), BGE.Math.VectorOps.create(400, 0, -200), 0, 120, {tileWidth: 64, tileHeight: 64})
+m.addDrawable("wall", wall)
+```
+
+Points are in the owner's space. Move a wall with `setEnds()` and change its tiling with
+`setTileSize()`, not by writing the fields. It's `orientedDrawBackFace`, `isOccluder` and
+`isShaded` by default; give the owner `isStatic = true` so it sorts through the static BSP and
+can occlude. It draws like an oriented image, as perspective-correct texture columns, each tile
+its own quad (`QuadColumnDrawer.drawTiledTo()`, also reachable through
+`Renderer.drawColumnTextureTo()`'s `repeatU`/`repeatV`). An untiled wall can still take the
+one-call rotated-rectangle fast path.
+
+Limits:
+
+- Cost grows with wall count: each wall is a sorted object with its own columns and temp
+  bitmap. rendererTest's `walls-benchmark` measured about 14 ms for 4 walls and 155 ms for 32 on
+  device. Watch texture memory on HD devices.
+- Hiding is whole-object (the span map) plus the painter's sort, with no per-strip hiding as
+  with grid walls, so walls that cross, or something standing in a gap, can sort wrong.
+- No collision.
 
 ## Parallax layers (`DrawableParallaxLayer`)
 
