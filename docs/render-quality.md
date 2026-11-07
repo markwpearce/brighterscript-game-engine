@@ -89,10 +89,11 @@ a little coarser (a fine stair-step along wall feet and tops).
 | Basic  | 16                   | 8                       |
 | Low    | 8                    | 4                       |
 | Medium | 8                    | 4                       |
-| High   | 4                    | 2                       |
+| High   | 6                    | 3                       |
 | Ultra  | 4                    | 2                       |
 
-Override them like any other field, e.g. `{gridWallStripWidth: 6}` at Medium.
+Override them like any other field, e.g. `{gridWallStripWidth: 6}` at Medium. Halving the strip
+width roughly doubles the walls' cost, which is why High sits at 6 between Medium's 8 and Ultra's 4.
 
 ## Scale your own content
 

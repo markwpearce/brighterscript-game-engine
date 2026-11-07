@@ -106,8 +106,14 @@ cost about the same as the long runs at Medium (~22 ms), but the cost doesn't de
 number of walls, nothing swims, the frame rate is steady, and torchlight is sampled along the walls
 (`lightWrap` 0.5, since a torch lights its own wall edge-on). The presets jump from 8 px strips
 (Medium) to 4 px (High), doubling the walls' cost, so adaptive quality bounced between them
-(19.0 avg, min 13). The crypt overrides High to 6 px, and adaptive now settles at High.
-Known issue: torch flames (`DrawableParticles`) aren't hidden by grid walls.
+(19.0 avg, min 13). High is now 6 px (#464), and adaptive settles at High.
+
+Profiling the walls (#464) showed the draw calls aren't the cost: at Medium, casting took
+5.3 ms, strip geometry 6.2, shading 6.6 and the draw calls 3.9. Rotated strips cost the same as
+upright ones (`grid-walls-strip-benchmark`: 320 strips in 3.6-3.9 ms either way). With each
+face's light cached, shading drops to 1.8 ms: Medium runs at 26.2 fps, High (6 px) at 23.3, and
+adaptive settles at High at 22.8 fps (min 21.9).
+Known issue: torch flames (`DrawableParticles`) aren't hidden by grid walls (#463).
 
 **Walking into walls.** The knight can't pass through walls or out of the maze. Use
 `BGE.SolidWorld.moveAndSlide()` (x/z mapped onto its 2D plane) built from the same grid,
