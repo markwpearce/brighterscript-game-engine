@@ -151,6 +151,7 @@ detail. A quad seen mirrored (from behind) would need each slab mirrored within 
 negative scale can't be rotated on a real Roku, so it draws slabs from a flipped copy of the texture
 instead, made once (one extra texture-sized bitmap per texture seen from behind). Text, whose bitmap
 is redrawn in place, gets no copy and draws each column's middle texel alone, with no error cap.
+Textured model faces mirror the same way, from one copy shared by every face using the texture.
 
 Columns go straight to the canvas only while the object moves relative to the camera. Once it's
 still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far
