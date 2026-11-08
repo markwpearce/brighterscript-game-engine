@@ -2,14 +2,15 @@ import "../../../math/math.bs"
 import "../../../math/vector.bs"
 import "../cameras/Camera3d.bs"
 import "../gridWalls/GridWallsSpan.bs"
+import "WallsBsp.bs"
 import "WallsHidingView.bs"
 import "WallSegment.bs"
 
 namespace BGE
 
   ' Works out which wall strips a BGE.DrawableWalls shows each frame, DOOM-style: no ray is
-  ' cast against the level. The segments in view are walked nearest first and projected onto
-  ' a fan of rays across the screen (as GridWallsView's), one strip per ray. Each ray keeps an
+  ' cast against the level. The segments in view are walked front to back (BGE.WallsBsp) and
+  ' projected onto a fan of rays across the screen (as GridWallsView's), one strip per ray. Each ray keeps an
   ' open window of elevation slopes, (height - eye) / forward depth, that nearer walls narrow:
   ' a wall on the floor closes it up to its top, one reaching above the screen closes it down
   ' to its foot. A closed ray costs nothing more, so cost follows screen coverage, and a short
@@ -20,9 +21,6 @@ namespace BGE
   '
   ' Pieces are recorded front to back (per ray: pieceNext from rayFirstPiece) and drawn back to
   ' front; a piece partly behind a nearer short wall is drawn whole and painted over.
-  ' Segments are ordered by their nearest point, not per ray: a long wall walked before a nearer
-  ' pillar in front of it closes the rays they share at its own depth, and the pillar is lost
-  ' there. A BSP would fix it.
   class WallsView extends BGE.WallsHidingView
 
     rayCount as integer = 0
@@ -68,6 +66,7 @@ namespace BGE
     segmentsVisited as integer = 0
 
     private segments as BGE.WallSegment[]
+    private bsp as BGE.WallsBsp
     ' The lowest foot of any segment: nothing further can show below a wall standing on it.
     private floorY as float = 0.0
     private rayLastPiece = [] as integer[]
@@ -80,6 +79,7 @@ namespace BGE
     private segBf = [] as float[]
     private segBs = [] as float[]
     private order = [] as integer[]
+    private allParts = [] as integer[]
     private focal as float = 1.0
     private halfWidth as float = 0.0
     private halfHeight as float = 0.0
@@ -106,6 +106,7 @@ namespace BGE
         end for
       end if
       m.floorY = lowest
+      m.bsp = new BGE.WallsBsp(segments)
     end sub
 
     ' Walks the segments for this frame. stripWidth is the screen width in pixels one ray covers.
@@ -222,12 +223,20 @@ namespace BGE
       end for
 
       drawDistance = camera.getCurrentDrawDistance()
-      mul = m.sortSegments(ox, oz, lfx, lfz, rx, rz, near, drawDistance)
+      m.cullParts(ox, oz, lfx, lfz, rx, rz, near, drawDistance)
       order = m.order
       m.segmentsInView = order.count()
 
-      ' walk them nearest first
+      ' walk them front to back
       segs = m.segments
+      bsp = m.bsp
+      partSegment = bsp.partSegment
+      partStart = bsp.partStart
+      partEnd = bsp.partEnd
+      partAx = bsp.partAx
+      partAz = bsp.partAz
+      partBx = bsp.partBx
+      partBz = bsp.partBz
       segFirst = m.segFirst
       segLast = m.segLast
       segAfs = m.segAf
@@ -266,13 +275,14 @@ namespace BGE
       pHigh = m.pieceSlopeHigh
       openRays = rayCount
       visited = 0
-      mask = mul - 1
-      for each key in order
+      for each n in order
         if openRays <= 0
           exit for
         end if
-        n = key and mask
-        seg = segs[n]
+        segIndex = partSegment[n]
+        seg = segs[segIndex]
+        u0 = partStart[n]
+        du = partEnd[n] - u0
         visited++
         af = segAfs[n]
         aS = segAss[n]
@@ -281,10 +291,10 @@ namespace BGE
         bottom = seg.bottom
         top = seg.top
         standsOnFloor = bottom <= floorY
-        ax = seg.ax
-        az = seg.az
-        ex = seg.bx - ax
-        ez = seg.bz - az
+        ax = partAx[n]
+        az = partAz[n]
+        ex = partBx[n] - ax
+        ez = partBz[n] - az
         first = segFirst[n]
 
         ' rays last..first, carrying the ray after's projection for the strip width
@@ -414,8 +424,8 @@ namespace BGE
                 m.growPieces(pc + rayCount)
                 cap = pSeg.count()
               end if
-              pSeg[pc] = n
-              pAlong[pc] = s
+              pSeg[pc] = segIndex
+              pAlong[pc] = u0 + s * du
               pDepth[pc] = fwd
               pX[pc] = fx
               pY[pc] = fy
@@ -539,29 +549,31 @@ namespace BGE
       return false
     end function
 
-    ' Sorts the segments facing the eye within the fan by their nearest point into `order`
-    ' (key = quantised distance * mul + index). Returns mul.
-    private function sortSegments(ox as float, oz as float, lfx as float, lfz as float, rx as float, rz as float, near as float, drawDistance as float) as integer
+    ' Lists into `order`, front to back, the parts facing the eye within the fan and draw
+    ' distance, with their ray range and ends in level-forward/right terms.
+    private sub cullParts(ox as float, oz as float, lfx as float, lfz as float, rx as float, rz as float, near as float, drawDistance as float)
       segs = m.segments
-      segCount = segs.count()
-      m.growSegments(segCount)
+      bsp = m.bsp
+      partSegment = bsp.partSegment
+      partAx = bsp.partAx
+      partAz = bsp.partAz
+      partBx = bsp.partBx
+      partBz = bsp.partBz
+      m.growSegments(partSegment.count())
+      all = m.allParts
+      all.Clear()
+      bsp.collect(ox, oz, all)
       order = m.order
       order.Clear()
-      mul = 2
-      while mul <= segCount
-        mul = mul * 2
-      end while
-      maxKey = int(2147483647 / mul) - 1
-      scale = maxKey / (drawDistance * 2 + 1)
       firstTan = m.firstTan
       tanStep = m.tanStep
       rayCount = m.rayCount
-      for n = 0 to segCount - 1
-        seg = segs[n]
-        dax = seg.ax - ox
-        daz = seg.az - oz
-        dbx = seg.bx - ox
-        dbz = seg.bz - oz
+      for each n in all
+        seg = segs[partSegment[n]]
+        dax = partAx[n] - ox
+        daz = partAz[n] - oz
+        dbx = partBx[n] - ox
+        dbz = partBz[n] - oz
         if not seg.twoSided and dax * seg.normalX + daz * seg.normalZ >= 0
           continue for
         end if
@@ -607,32 +619,9 @@ namespace BGE
         m.segFirst[n] = first
         m.segLast[n] = last
 
-        ' nearest point on the segment, in plan
-        ex = dbx - dax
-        ez = dbz - daz
-        lenSq = ex * ex + ez * ez
-        u = 0.0
-        if lenSq > 0
-          u = -(dax * ex + daz * ez) / lenSq
-          if u < 0
-            u = 0.0
-          else if u > 1
-            u = 1.0
-          end if
-        end if
-        px = dax + ex * u
-        pz = daz + ez * u
-        q = int(sqr(px * px + pz * pz) * scale)
-        if q > maxKey
-          q = maxKey
-        end if
-        order.push(q * mul + n)
+        order.push(n)
       end for
-      if order.count() > 1
-        order.Sort()
-      end if
-      return mul
-    end function
+    end sub
 
     private function forwardDepth(point as BGE.Math.Vector) as float
       lf = m.levelForward

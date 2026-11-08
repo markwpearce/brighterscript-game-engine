@@ -1,0 +1,236 @@
+import "WallSegment.bs"
+
+namespace BGE
+
+  ' A 2D BSP over wall segments in plan, built once, that lists them front to back from any
+  ' eye point (BGE.WallsView walks them in that order). A segment crossing another's line is
+  ' split into parts there; part k covers partStart[k]..partEnd[k] (0..1) of segment
+  ' partSegment[k], from (partAx, partAz) to (partBx, partBz).
+  class WallsBsp
+
+    partSegment = [] as integer[]
+    partStart = [] as float[]
+    partEnd = [] as float[]
+    partAx = [] as float[]
+    partAz = [] as float[]
+    partBx = [] as float[]
+    partBz = [] as float[]
+
+    ' Root node, or -1 with no segments
+    root as integer = -1
+    ' Per node: a point on its line and the line's normal, its front (the normal's side) and
+    ' back children (-1 for none) and its parts on the line (nodeParts[nodeFirst..+nodeCount])
+    nodeX = [] as float[]
+    nodeZ = [] as float[]
+    nodeNx = [] as float[]
+    nodeNz = [] as float[]
+    nodeFront = [] as integer[]
+    nodeBack = [] as integer[]
+    nodeFirst = [] as integer[]
+    nodeCount = [] as integer[]
+    nodeParts = [] as integer[]
+
+    ' World units within which a point counts as on a line
+    private epsilon as float = 0.01
+    private stack = [] as integer[]
+
+    sub new(segments as BGE.WallSegment[])
+      m.build(segments)
+    end sub
+
+    ' Appends every part index to `order`, nearest the eye first. Parts on lines through the
+    ' eye come out edge on, in any order.
+    sub collect(ox as float, oz as float, order as integer[])
+      stack = m.stack
+      stack.Clear()
+      if m.root < 0
+        return
+      end if
+      nodeX = m.nodeX
+      nodeZ = m.nodeZ
+      nodeNx = m.nodeNx
+      nodeNz = m.nodeNz
+      nodeFront = m.nodeFront
+      nodeBack = m.nodeBack
+      nodeFirst = m.nodeFirst
+      nodeCount = m.nodeCount
+      nodeParts = m.nodeParts
+      stack.push(m.root)
+      while stack.count() > 0
+        v = stack.pop()
+        if v >= 0
+          ' near side, then the node's own parts, then the far side: pushed in reverse
+          nearChild = nodeFront[v]
+          farChild = nodeBack[v]
+          if (ox - nodeX[v]) * nodeNx[v] + (oz - nodeZ[v]) * nodeNz[v] < 0
+            nearChild = nodeBack[v]
+            farChild = nodeFront[v]
+          end if
+          if farChild >= 0
+            stack.push(farChild)
+          end if
+          stack.push(-1 - v)
+          if nearChild >= 0
+            stack.push(nearChild)
+          end if
+        else
+          v = -1 - v
+          first = nodeFirst[v]
+          for k = first to first + nodeCount[v] - 1
+            order.push(nodeParts[k])
+          end for
+        end if
+      end while
+    end sub
+
+    private sub build(segments as BGE.WallSegment[])
+      all = [] as integer[]
+      for n = 0 to segments.count() - 1
+        seg = segments[n]
+        if seg.length > 0
+          all.push(m.addPart(n, 0.0, 1.0, seg.ax, seg.az, seg.bx, seg.bz))
+        end if
+      end for
+      if all.count() = 0
+        return
+      end if
+      m.root = m.newNode()
+      ' pending work: a node and the parts to place under it
+      pendingNode = [m.root] as integer[]
+      pendingParts = [all]
+      eps = m.epsilon
+      while pendingNode.count() > 0
+        v = pendingNode.pop()
+        parts = pendingParts.pop()
+        splitter = m.chooseSplitter(segments, parts)
+        seg = segments[m.partSegment[splitter]]
+        lx = m.partAx[splitter]
+        lz = m.partAz[splitter]
+        nx = seg.normalX
+        nz = seg.normalZ
+        m.nodeX[v] = lx
+        m.nodeZ[v] = lz
+        m.nodeNx[v] = nx
+        m.nodeNz[v] = nz
+        m.nodeFirst[v] = m.nodeParts.count()
+        front = [] as integer[]
+        back = [] as integer[]
+        for each p in parts
+          da = (m.partAx[p] - lx) * nx + (m.partAz[p] - lz) * nz
+          db = (m.partBx[p] - lx) * nx + (m.partBz[p] - lz) * nz
+          if abs(da) <= eps and abs(db) <= eps
+            m.nodeParts.push(p)
+          else if da >= -eps and db >= -eps
+            front.push(p)
+          else if da <= eps and db <= eps
+            back.push(p)
+          else
+            q = m.splitPart(p, da / (da - db))
+            if da > 0
+              front.push(p)
+              back.push(q)
+            else
+              back.push(p)
+              front.push(q)
+            end if
+          end if
+        end for
+        m.nodeCount[v] = m.nodeParts.count() - m.nodeFirst[v]
+        if front.count() > 0
+          child = m.newNode()
+          m.nodeFront[v] = child
+          pendingNode.push(child)
+          pendingParts.push(front)
+        end if
+        if back.count() > 0
+          child = m.newNode()
+          m.nodeBack[v] = child
+          pendingNode.push(child)
+          pendingParts.push(back)
+        end if
+      end while
+    end sub
+
+    ' Of up to 8 parts spread through the list, the one whose line splits fewest others,
+    ' then leaves the sides most even.
+    private function chooseSplitter(segments as BGE.WallSegment[], parts as integer[]) as integer
+      count = parts.count()
+      if count <= 2
+        return parts[0]
+      end if
+      eps = m.epsilon
+      stepBy = 1
+      if count > 8
+        stepBy = count \ 8
+      end if
+      best = parts[0]
+      bestScore = 2147483647
+      for c = 0 to count - 1 step stepBy
+        candidate = parts[c]
+        seg = segments[m.partSegment[candidate]]
+        lx = m.partAx[candidate]
+        lz = m.partAz[candidate]
+        nx = seg.normalX
+        nz = seg.normalZ
+        splits = 0
+        balance = 0
+        for each p in parts
+          da = (m.partAx[p] - lx) * nx + (m.partAz[p] - lz) * nz
+          db = (m.partBx[p] - lx) * nx + (m.partBz[p] - lz) * nz
+          if abs(da) <= eps and abs(db) <= eps
+            ' on the line
+          else if da >= -eps and db >= -eps
+            balance++
+          else if da <= eps and db <= eps
+            balance--
+          else
+            splits++
+          end if
+        end for
+        score = splits * 8 + abs(balance)
+        if score < bestScore
+          bestScore = score
+          best = candidate
+        end if
+      end for
+      return best
+    end function
+
+    ' Cuts part p at f (0..1 along it): p keeps the start, the returned new part the end.
+    private function splitPart(p as integer, f as float) as integer
+      mx = m.partAx[p] + (m.partBx[p] - m.partAx[p]) * f
+      mz = m.partAz[p] + (m.partBz[p] - m.partAz[p]) * f
+      mu = m.partStart[p] + (m.partEnd[p] - m.partStart[p]) * f
+      q = m.addPart(m.partSegment[p], mu, m.partEnd[p], mx, mz, m.partBx[p], m.partBz[p])
+      m.partEnd[p] = mu
+      m.partBx[p] = mx
+      m.partBz[p] = mz
+      return q
+    end function
+
+    private function addPart(n as integer, u0 as float, u1 as float, ax as float, az as float, bx as float, bz as float) as integer
+      m.partSegment.push(n)
+      m.partStart.push(u0)
+      m.partEnd.push(u1)
+      m.partAx.push(ax)
+      m.partAz.push(az)
+      m.partBx.push(bx)
+      m.partBz.push(bz)
+      return m.partSegment.count() - 1
+    end function
+
+    private function newNode() as integer
+      m.nodeX.push(0.0)
+      m.nodeZ.push(0.0)
+      m.nodeNx.push(0.0)
+      m.nodeNz.push(1.0)
+      m.nodeFront.push(-1)
+      m.nodeBack.push(-1)
+      m.nodeFirst.push(0)
+      m.nodeCount.push(0)
+      return m.nodeX.count() - 1
+    end function
+
+  end class
+
+end namespace

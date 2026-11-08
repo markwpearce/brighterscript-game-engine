@@ -1061,7 +1061,7 @@ a wall are drawn into one tall column texture, so a strip is always one draw. Re
 with `setSegments()` and textures with `setTextures()`.
 
 How it draws (`BGE.WallsView`): nothing is raycast. Each frame the camera moves, the segments
-facing the camera are walked nearest first and projected onto the same fan of rays as grid
+facing the camera are walked front to back (a 2D BSP) and projected onto the same fan of rays as grid
 walls, one strip per ray. Each ray keeps an open window of elevation, and nearer walls narrow
 it. A wall standing on the floor closes it up to its top, and one reaching above the screen
 closes it down to its foot. A closed ray costs nothing more, and the walk stops once every ray
@@ -1078,9 +1078,6 @@ Limits:
 
 - Needs a `Camera3d`; pitch about 15 degrees up to 35 down; roll is ignored. Wall tops aren't
   drawn, so keep the camera below them where it can look down on a wall.
-- Segments are ordered by their nearest point, not a BSP yet. A long wall whose nearest point
-  is closer than a pillar in front of it can be walked first and hide the pillar on the rays it
-  covers. Splitting long walls helps until the BSP lands.
 - Nothing may sit lower than the lowest wall foot: a wall standing on that floor closes the
   rays behind it.
 - No wall tops seen from above, floors per area or doors yet. No collision.
