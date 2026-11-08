@@ -173,15 +173,15 @@ in phase 4's 30 fps target. *(My call.)* If neither textured path passes, stop a
 
 ## Phases (one issue and PR each)
 
-1. **Floor benchmark** (`rendererTest`): a throwaway demo drawing textured floor/ceiling slices
+1. **Floor benchmark** (#474) (`rendererTest`): a throwaway demo drawing textured floor/ceiling slices
    at 3–6 heights through `wallStripWidth` strips, timing A, B and the baseline on the Ultra
    and an HD device.
-2. **Room level data + renderer**: the data and joining, the room walk, wall/step/lintel strips,
+2. **Room level data + renderer** (#475): the data and joining, the room walk, wall/step/lintel strips,
    floors and ceilings using phase 1's winner, and the room queries, with tests. A
    `rendererTest` demo of a two-storey test building.
-3. **Objects in rooms**: drawing room by room with objects, skipping unvisited rooms, with
+3. **Objects in rooms** (#476): drawing room by room with objects, skipping unvisited rooms, with
    tests and a demo with models and sprites behind door frames and upstairs.
-4. **`examples/firstPerson`**: a building of 2–3 storeys with a courtyard or street outside, first-person movement with wall
+4. **`examples/firstPerson`** (#477): a building of 2–3 storeys with a courtyard or street outside, first-person movement with wall
    sliding and floor snapping in game code, a weapon, a few enemies (sprites and/or models),
    lights, and a third-person toggle if it's cheap (`BGE.OrbitCamera`). Must hold ≥30 fps on
    the Ultra at Medium.
