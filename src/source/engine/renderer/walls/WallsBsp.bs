@@ -29,6 +29,14 @@ namespace BGE
     nodeFirst = [] as integer[]
     nodeCount = [] as integer[]
     nodeParts = [] as integer[]
+    ' Per node: the plan bounds of its parts and everything under it
+    nodeMinX = [] as float[]
+    nodeMinZ = [] as float[]
+    nodeMaxX = [] as float[]
+    nodeMaxZ = [] as float[]
+
+    ' How many segments it was built from
+    segmentCount as integer = 0
 
     ' World units within which a point counts as on a line
     private epsilon as float = 0.01
@@ -41,11 +49,27 @@ namespace BGE
     ' Appends every part index to `order`, nearest the eye first. Parts on lines through the
     ' eye come out edge on, in any order.
     sub collect(ox as float, oz as float, order as integer[])
+      m.walk(ox, oz, false, 0, 1, 1, 0, 0, 1, 0, 0, order)
+    end sub
+
+    ' As collect(), but skips subtrees whose bounds lie wholly nearer than `near` or at or past
+    ' `far` (forward depth along the level forward lfx, lfz), or wholly outside the tangents
+    ' minTan..maxTan (sideways along rx, rz over forward depth).
+    sub collectInView(ox as float, oz as float, lfx as float, lfz as float, rx as float, rz as float, near as float, far as float, minTan as float, maxTan as float, order as integer[])
+      ' left of the fan: s - minTan * f < 0; right of it: maxTan * f - s < 0
+      m.walk(ox, oz, true, lfx, lfz, rx - minTan * lfx, rz - minTan * lfz, maxTan * lfx - rx, maxTan * lfz - rz, near, far, order)
+    end sub
+
+    private sub walk(ox as float, oz as float, cull as boolean, fx as float, fz as float, lx as float, lz as float, hx as float, hz as float, near as float, far as float, order as integer[])
       stack = m.stack
       stack.Clear()
       if m.root < 0
         return
       end if
+      minXs = m.nodeMinX
+      minZs = m.nodeMinZ
+      maxXs = m.nodeMaxX
+      maxZs = m.nodeMaxZ
       nodeX = m.nodeX
       nodeZ = m.nodeZ
       nodeNx = m.nodeNx
@@ -58,7 +82,49 @@ namespace BGE
       stack.push(m.root)
       while stack.count() > 0
         v = stack.pop()
-        if v >= 0
+        inView = true
+        if v >= 0 and cull
+          ' each linear test's extreme over the box, at the corner its coefficients pick
+          x0 = minXs[v] - ox
+          x1 = maxXs[v] - ox
+          z0 = minZs[v] - oz
+          z1 = maxZs[v] - oz
+          fMax = fx * x0
+          fMin = fx * x1
+          if fx >= 0
+            fMax = fx * x1
+            fMin = fx * x0
+          end if
+          if fz >= 0
+            fMax += fz * z1
+            fMin += fz * z0
+          else
+            fMax += fz * z0
+            fMin += fz * z1
+          end if
+          gMax = lx * x0
+          if lx >= 0
+            gMax = lx * x1
+          end if
+          if lz >= 0
+            gMax += lz * z1
+          else
+            gMax += lz * z0
+          end if
+          hMax = hx * x0
+          if hx >= 0
+            hMax = hx * x1
+          end if
+          if hz >= 0
+            hMax += hz * z1
+          else
+            hMax += hz * z0
+          end if
+          inView = fMax >= near and fMin < far and gMax >= 0 and hMax >= 0
+        end if
+        if not inView
+          ' the whole subtree is out of view
+        else if v >= 0
           ' near side, then the node's own parts, then the far side: pushed in reverse
           nearChild = nodeFront[v]
           farChild = nodeBack[v]
@@ -84,6 +150,7 @@ namespace BGE
     end sub
 
     private sub build(segments as BGE.WallSegment[])
+      m.segmentCount = segments.count()
       all = [] as integer[]
       for n = 0 to segments.count() - 1
         seg = segments[n]
@@ -149,6 +216,57 @@ namespace BGE
           pendingParts.push(back)
         end if
       end while
+      m.computeBounds()
+    end sub
+
+    ' Children are made after their parents, so a backward pass sees them first.
+    private sub computeBounds()
+      for v = m.nodeX.count() - 1 to 0 step -1
+        minX = 1.0e30
+        minZ = 1.0e30
+        maxX = -1.0e30
+        maxZ = -1.0e30
+        first = m.nodeFirst[v]
+        for k = first to first + m.nodeCount[v] - 1
+          p = m.nodeParts[k]
+          for each x in [m.partAx[p], m.partBx[p]]
+            if x < minX
+              minX = x
+            end if
+            if x > maxX
+              maxX = x
+            end if
+          end for
+          for each z in [m.partAz[p], m.partBz[p]]
+            if z < minZ
+              minZ = z
+            end if
+            if z > maxZ
+              maxZ = z
+            end if
+          end for
+        end for
+        for each child in [m.nodeFront[v], m.nodeBack[v]]
+          if child >= 0
+            if m.nodeMinX[child] < minX
+              minX = m.nodeMinX[child]
+            end if
+            if m.nodeMinZ[child] < minZ
+              minZ = m.nodeMinZ[child]
+            end if
+            if m.nodeMaxX[child] > maxX
+              maxX = m.nodeMaxX[child]
+            end if
+            if m.nodeMaxZ[child] > maxZ
+              maxZ = m.nodeMaxZ[child]
+            end if
+          end if
+        end for
+        m.nodeMinX[v] = minX
+        m.nodeMinZ[v] = minZ
+        m.nodeMaxX[v] = maxX
+        m.nodeMaxZ[v] = maxZ
+      end for
     end sub
 
     ' Of up to 8 parts spread through the list, the one whose line splits fewest others,
@@ -228,6 +346,10 @@ namespace BGE
       m.nodeBack.push(-1)
       m.nodeFirst.push(0)
       m.nodeCount.push(0)
+      m.nodeMinX.push(0.0)
+      m.nodeMinZ.push(0.0)
+      m.nodeMaxX.push(0.0)
+      m.nodeMaxZ.push(0.0)
       return m.nodeX.count() - 1
     end function
 

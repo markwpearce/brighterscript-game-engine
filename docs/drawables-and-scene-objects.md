@@ -963,12 +963,14 @@ walls.addToRenderer(renderer)
 Segments are in world space. Each texture is one copy as tiled on a wall: `tileWidth` world
 units across, and `tileHeight` up (rounded so a whole number of copies fits). Copies stacked up
 a wall are drawn into one tall column texture (at most `maxColumnHeight` pixels; taller walls
-stretch fewer copies), so a strip is always one draw. Replace walls with `setSegments()` and
-textures with `setTextures()`. `color`, `alpha` and `flash()` work as on other drawables.
+stretch fewer copies), so a strip is always one draw. Replace walls with `setSegments()` (also
+after changing them in place) and textures with `setTextures()`. `color`, `alpha` and `flash()` work as on other drawables.
 
 How it draws (`BGE.WallsView`): nothing is raycast. The segments go into a 2D BSP when set
-(`BGE.WallsBsp`; walls that cross are split where they meet). Each frame the camera moves,
-the segments facing the camera are walked front to back and projected onto a fan of rays across
+(`BGE.WallsBsp`; walls that cross are split where they meet). That happens in the constructor
+and `setSegments()`, not while drawing, so for a big level set the walls while loading. Each
+frame the camera moves, the BSP is walked front to back, skipping branches wholly behind the
+camera, outside the view or past the draw distance, and the segments facing the camera and projected onto a fan of rays across
 the screen, one strip per ray, `wallStripWidth` pixels apart (see
 [Render quality](/render-quality)). Each ray keeps an open window of elevation, and nearer walls
 narrow it. A wall standing on the floor closes it up to its top, and one reaching above the
@@ -1004,7 +1006,8 @@ floor height. Anything outside the grid counts as solid, so an unclosed map stil
 (they use `outsideTexture`, defaulting to the first legend entry). A legend key is one
 character, and since the legend is an associative array, characters differing only by case
 (`"a"`/`"A"`) collide. Each texture is an `roRegion` one cell wide and one wall height tall.
-To change the maze, set `walls.map` (or change it) and call `invalidateGeometry()`.
+To change the maze, pass the new map to `walls.setMap()`, or call it again with `walls.map`
+after changing that map in place. Unless you set `hideTolerance`, it follows the map's cell size.
 
 ### Lights
 
@@ -1034,7 +1037,7 @@ shapes built on them (`drawWorldCircle`, `drawWorldArc`) already skip anything b
 For other overlays ask the renderer:
 
 ```brighterscript
-if not renderer.isBehindGridWalls(enemy.position)
+if not renderer.isBehindWalls(enemy.position)
   ' draw the marker
 end if
 ```
