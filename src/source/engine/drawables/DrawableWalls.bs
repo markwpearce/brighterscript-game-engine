@@ -1,0 +1,137 @@
+import "../GameEntity.bs"
+import "../renderer/Renderer.bs"
+import "../renderer/sceneObjects/SceneObject.bs"
+import "../renderer/sceneObjects/SceneObjectWalls.bs"
+import "../renderer/walls/WallSegment.bs"
+import "Drawable.bs"
+
+namespace BGE
+
+  ' A level's walls: upright segments at any angle, each with its own foot and top height, in
+  ' world space (see BGE.createWallSegment()). Drawn on a `Camera3d` as leaning texture-column
+  ' strips, `gridWallStripWidth` pixels apart (see `BGE.RenderQualitySettings`), in the
+  ' renderer's walls stage, after planes and before the sorted objects; one walls drawable per
+  ' renderer (grid walls included).
+  '
+  ' Cost follows how much of the screen walls cover, not how many there are. Short walls let
+  ' taller ones behind show, and sprites, models and `drawWorld*` overlays behind walls are
+  ' hidden as they are by grid walls. Camera must stay below the tallest walls' tops; pitch
+  ' about 15 degrees up to 35 down; roll is ignored. No collision.
+  '
+  ' `isShaded` lights each wall along its length; `color`/`alpha` tint them, and `flash()` works
+  ' as for other drawables.
+  '
+  ' @example
+  ' segments = [
+  '   BGE.createWallSegment({x: 0, z: 0}, {x: 512, z: 0}, 0, 128, "stone", {tileWidth: 64, tileHeight: 128})
+  '   BGE.createWallSegment({x: 512, z: 0}, {x: 512, z: 512}, 0, 32, "stone", {tileWidth: 64, tileHeight: 32, twoSided: true})
+  ' ]
+  ' walls = new BGE.DrawableWalls(m, segments, {stone: stoneRegion}, {isShaded: true})
+  ' m.addDrawable("walls", walls)
+  class DrawableWalls extends BGE.Drawable
+
+    ' The walls. Call setSegments() to replace them.
+    segments as BGE.WallSegment[]
+
+    ' Texture name to an `roRegion`: one copy of the texture as tiled on a wall. Change with
+    ' setTextures().
+    textures as roAssociativeArray
+
+    ' How much nearer than an object a wall must be to hide it, in world units of depth.
+    hideTolerance as float = 8.0
+
+    ' World units of wall length each lit color is shared along.
+    lightBucketLength as float = 64.0
+
+    ' "name x tileCount" to 1px column regions, built on first use.
+    private columnsByKey as roAssociativeArray
+
+    ' @param {BGE.GameEntity} owner
+    ' @param {BGE.WallSegment[]} segments
+    ' @param {roAssociativeArray} textures texture name to `roRegion`
+    ' @param {object} [args={}] Drawable fields, e.g. `{isShaded: true}`
+    sub new(owner as BGE.GameEntity, segments as BGE.WallSegment[], textures as roAssociativeArray, args = {} as object)
+      super(owner, args)
+      ' bs:disable-next-line: 1140
+      m.append(args)
+      m.segments = segments
+      m.textures = textures
+      m.columnsByKey = {}
+    end sub
+
+    ' Replaces the walls.
+    '
+    ' @param {BGE.WallSegment[]} segments
+    sub setSegments(segments as BGE.WallSegment[])
+      m.segments = segments
+      m.invalidateGeometry()
+    end sub
+
+    ' Replaces the wall textures.
+    '
+    ' @param {roAssociativeArray} textures texture name to `roRegion`
+    sub setTextures(textures as roAssociativeArray)
+      m.textures = textures
+      m.columnsByKey = {}
+      m.invalidateGeometry()
+    end sub
+
+    ' A texture's 1px-wide column regions, left to right, `tileCount` copies tall and
+    ' pre-translated so the foot is at the draw point. Invalid if there's no such texture.
+    '
+    ' @param {string} name texture name
+    ' @param {integer} tileCount copies stacked up the wall
+    ' @return {dynamic} roRegion[] or invalid
+    function getColumns(name as string, tileCount as integer) as dynamic
+      key = name + "x" + tileCount.toStr()
+      columns = m.columnsByKey[key]
+      if invalid = columns
+        columns = m.buildColumns(m.textures[name], tileCount)
+        m.columnsByKey[key] = columns
+      end if
+      if columns.count() = 0
+        return invalid
+      end if
+      return columns
+    end function
+
+    override function addToRenderer(rendererObj as Renderer) as BGE.SceneObject
+      sceneObj = new SceneObjectWalls(m.getSceneObjectName("walls"), m)
+      return m.addSceneObjectToRenderer(sceneObj, rendererObj)
+    end function
+
+    ' Empty for a missing texture, so a miss is cached too. Stacked copies are drawn into one
+    ' bitmap so a wall of several is one draw per strip.
+    private function buildColumns(region as dynamic, tileCount as integer) as roRegion[]
+      columns = [] as roRegion[]
+      if invalid = region
+        return columns
+      end if
+      texture = region as roRegion
+      width = texture.GetWidth()
+      tileHeight = texture.GetHeight()
+      bitmap = texture.GetBitmap()
+      x = texture.GetX()
+      y = texture.GetY()
+      if tileCount > 1
+        stacked = CreateObject("roBitmap", {width: width, height: tileHeight * tileCount, alphaEnable: false})
+        for t = 0 to tileCount - 1
+          stacked.DrawObject(0, t * tileHeight, texture)
+        end for
+        stacked.Finish()
+        bitmap = stacked
+        x = 0
+        y = 0
+      end if
+      height = tileHeight * tileCount
+      for c = 0 to width - 1
+        column = CreateObject("roRegion", bitmap, x + c, y, 1, height)
+        column.SetPreTranslation(0, -height)
+        columns.push(column)
+      end for
+      return columns
+    end function
+
+  end class
+
+end namespace

@@ -27,6 +27,8 @@ import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
 import "sceneObjects/SceneObject.bs"
 import "sceneObjects/SceneObjectGridWalls.bs"
+import "sceneObjects/SceneObjectWalls.bs"
+import "walls/WallsHidingView.bs"
 import "quadColumns/QuadColumnDrawer.bs"
 import "quadColumns/QuadColumnTexture.bs"
 import "quadColumns/TriangleColumnCuts.bs"
@@ -610,16 +612,16 @@ namespace BGE
 
       m.syncOccluderFlag(sceneObj)
 
-      if sceneObj.type = SceneObjectType.GridWalls
+      if sceneObj.type = SceneObjectType.GridWalls or sceneObj.type = SceneObjectType.Walls
         if invalid = m.gridWallsObject
           m.gridWallsObject = sceneObj
         else
-          sceneObj.drawable.log("Drawable '" + sceneObj.drawable.name + "' is a second grid walls object on this renderer - only one is supported, so it will not draw", BGE.Debug.LogLevel.warning)
+          sceneObj.drawable.log("Drawable '" + sceneObj.drawable.name + "' is a second walls object on this renderer - only one is supported, so it will not draw", BGE.Debug.LogLevel.warning)
         end if
       end if
     end sub
 
-    ' The grid walls scene object drawn this frame (a BGE.SceneObjectGridWalls), or invalid
+    ' The walls scene object drawn this frame (a BGE.SceneObjectGridWalls or BGE.SceneObjectWalls), or invalid
     ' if none drew - e.g. none is registered, it's disabled, or the camera is a Camera2d.
     '
     ' @return {dynamic}
@@ -637,8 +639,7 @@ namespace BGE
       if invalid = m.activeGridWalls
         return false
       end if
-      walls = m.activeGridWalls as BGE.SceneObjectGridWalls
-      return walls.view.isPointHidden(point)
+      return m.activeWallsView().isPointHidden(point)
     end function
 
     ' Registers or unregisters an owned scene object as an occluder when its Drawable's
@@ -1143,7 +1144,6 @@ namespace BGE
       ' unlike the span map, culled objects are tested too, so one turning into view behind a
       ' wall doesn't draw through it for a frame; markSkippedOccluded() releases the latch
       if invalid <> m.activeGridWalls and sceneObj.distanceFadeAlpha > 0
-        walls = m.activeGridWalls as BGE.SceneObjectGridWalls
         ' only a type whose points bound what it draws may be skipped whole
         canSkip = sceneObj.canBeOccluded()
         if canSkip
@@ -1153,15 +1153,17 @@ namespace BGE
         end if
         span = m.wallSpan
         if invalid <> points
-          view = walls.view
+          view = m.activeWallsView()
           if view.findSpan(points, span)
             limit = span.nearestDistance - view.hideTolerance
             anyHidden = false
             allHidden = true
+            ' hidden where the ray closed nearer; partly where any wall is nearer
             for i = span.firstRay to span.lastRay
-              if view.getDepth(i) < limit
+              if view.getNearestDepth(i) < limit
                 anyHidden = true
-              else
+              end if
+              if view.getDepth(i) >= limit
                 allHidden = false
               end if
               if anyHidden and not allHidden
@@ -1198,17 +1200,22 @@ namespace BGE
     ' Redraws the wall strips that hide part of the span (nearer than its nearest point by
     ' more than hideTolerance), one ray wider each side.
     private sub redrawWallsOver(span as BGE.GridWallsSpan)
-      walls = m.activeGridWalls as BGE.SceneObjectGridWalls
+      view = m.activeWallsView()
       firstRay = span.firstRay - 1
       if firstRay < 0
         firstRay = 0
       end if
       lastRay = span.lastRay + 1
-      if lastRay > walls.view.rayCount - 1
-        lastRay = walls.view.rayCount - 1
+      if lastRay > view.rayCount - 1
+        lastRay = view.rayCount - 1
       end if
-      walls.redrawStrips(m, firstRay, lastRay, span.nearestDistance - walls.view.hideTolerance)
+      m.activeGridWalls.redrawStrips(m, firstRay, lastRay, span.nearestDistance - view.hideTolerance)
     end sub
+
+    ' The active walls' view (grid or segment walls); only valid while activeGridWalls is set.
+    private function activeWallsView() as BGE.WallsHidingView
+      return m.activeGridWalls.view
+    end function
 
     ' Draws one scene object, adding its time to its type's "draw<type>" stage.
     private sub drawAndTime(sceneObj as SceneObject)
@@ -1240,8 +1247,9 @@ namespace BGE
 
     ' Milliseconds each stage of the last render() took, by name, while profileStages is
     ' on: "update", "occlusion" (of which "occlusionBuild" rebuilt the span map), "sort"
-    ' (overlap clusters and the depth sort), "skybox", "planes", "gridWalls" (of which
-    ' "gridWallsCast", "gridWallsBuild", "gridWallsShade" and "gridWallsStrips"), "objects"
+    ' (overlap clusters and the depth sort), "skybox", "planes", "gridWalls" (either kind of walls;
+    ' grid walls' "gridWallsCast", "gridWallsBuild", "gridWallsShade" and "gridWallsStrips", or
+    ' segment walls' "wallsWalk", "wallsShade" and "wallsStrips"), "objects"
     ' (everything else, including the static geometry walk), "clusters" and "finish", plus
     ' "draw<type>" for each SceneObjectType drawn (e.g. "drawModel", "drawBillboard") - those
     ' are part of "objects". Readings are whole milliseconds, so average them over many frames.

@@ -1,4 +1,4 @@
-' Spike for #468: SegmentWallRenderer (walls as 2D segments with their own heights) at
+' BGE.DrawableWalls (walls as segments with their own heights, #468) at
 ' thirdPerson's scale (32 units per metre), on a tiled floor with the grid-walls demo's lights.
 ' The camera turns and sweeps its pitch from 15 degrees up to 35 degrees down over 8 s.
 '
@@ -32,7 +32,7 @@ class SegmentWallsTest extends RendererTest
   private camera as BGE.Camera3d
   private previousCamera as BGE.Camera
   private previousQuality as BGE.RenderQualitySettings
-  private walls as SegmentWallRenderer
+  private walls as BGE.SceneObjectWalls
   private engineWalls as BGE.SceneObjectGridWalls
   private font as roFont
   private mapName = "hall"
@@ -90,7 +90,7 @@ class SegmentWallsTest extends RendererTest
     ' the 2 x 4 m crypt wall tile
     tile = CreateObject("roBitmap", "pkg:/sprites/crypt_wall.png")
     tileRegion = CreateObject("roRegion", tile, 0, 0, tile.GetWidth(), tile.GetHeight())
-    textures = {stone: tileRegion}
+    textures = {stone: tileRegion} as roAssociativeArray
 
     cell = m.cellMetres * m.metre
     if m.mapName = "grid"
@@ -100,13 +100,13 @@ class SegmentWallsTest extends RendererTest
       if params.walls = "engine"
         m.addEngineGridWalls(renderer, tile, cell)
       else
-        m.walls = new SegmentWallRenderer(m.gridSegments(cell), textures)
+        m.addWalls(renderer, m.gridMap(tile, cell).toSegments(), {stone: m.cellRegion(tile)})
       end if
     else
       m.eye = BGE.Math.VectorOps.create(24 * m.metre, 1.8 * m.metre, 34 * m.metre)
       renderer.addLight(new BGE.AmbientLight(&h8090B0, 0.3))
       renderer.addLight(new BGE.PointLight(BGE.Math.VectorOps.create(24 * m.metre, 3 * m.metre, 26 * m.metre), 16 * m.metre, &hFFB060, 1.2))
-      m.walls = new SegmentWallRenderer(m.hallSegments(), textures)
+      m.addWalls(renderer, m.hallSegments(), textures)
     end if
 
     m.applyLaunchParams()
@@ -114,105 +114,42 @@ class SegmentWallsTest extends RendererTest
     m.updateCamera()
   end sub
 
-  ' The grid-walls demo's maze drawn by the engine's grid walls, three tiles to a cell.
+  private sub addWalls(renderer as BGE.Renderer, segments as BGE.WallSegment[], textures as roAssociativeArray)
+    drawable = new BGE.DrawableWalls(invalid, segments, textures, {isShaded: true})
+    m.walls = drawable.addToRenderer(renderer) as BGE.SceneObjectWalls
+  end sub
+
+  ' The grid-walls demo's maze drawn by the engine's grid walls, to compare.
   private sub addEngineGridWalls(renderer as BGE.Renderer, tile as roBitmap, cell as float)
+    drawable = new BGE.DrawableGridWalls(invalid, m.gridMap(tile, cell), {stone: m.cellRegion(tile)}, {isShaded: true})
+    m.engineWalls = drawable.addToRenderer(renderer) as BGE.SceneObjectGridWalls
+  end sub
+
+  private function gridMap(tile as roBitmap, cell as float) as BGE.GridWallsMap
+    return new BGE.GridWallsMap(m.gridRows, {
+      cellSize: cell,
+      wallHeight: 4 * m.metre,
+      origin: BGE.Math.VectorOps.create(0, 0, 0),
+      solid: {"#": "stone"}
+    })
+  end function
+
+  ' Three 2 m tiles across, one 6 m cell
+  private function cellRegion(tile as roBitmap) as roRegion
     tilesPerCell = 3
     wallBmp = CreateObject("roBitmap", {width: tile.GetWidth() * tilesPerCell, height: tile.GetHeight(), alphaEnable: false})
     for i = 0 to tilesPerCell - 1
       wallBmp.DrawObject(i * tile.GetWidth(), 0, tile)
     end for
     wallBmp.Finish()
-    wallRegion = CreateObject("roRegion", wallBmp, 0, 0, wallBmp.GetWidth(), wallBmp.GetHeight())
-    map = new BGE.GridWallsMap(m.gridRows, {
-      cellSize: cell,
-      wallHeight: 4 * m.metre,
-      origin: BGE.Math.VectorOps.create(0, 0, 0),
-      solid: {"#": "stone"}
-    })
-    drawable = new BGE.DrawableGridWalls(invalid, map, {stone: wallRegion}, {isShaded: true})
-    m.engineWalls = drawable.addToRenderer(renderer) as BGE.SceneObjectGridWalls
-  end sub
-
-  ' Every solid/open cell edge of gridRows, merged into runs, facing the open side.
-  private function gridSegments(cell as float) as WallSegment[]
-    segs = [] as WallSegment[]
-    rows = m.gridRows
-    rowCount = rows.count()
-    colCount = len(rows[0])
-    height = 4 * m.metre
-    tileWidth = 2 * m.metre
-    ' faces along x (normal -z or +z), one line per row boundary
-    for r = 0 to rowCount
-      for each dir in [-1, 1]
-        runStart = -1
-        for c = 0 to colCount
-          face = false
-          if c < colCount
-            ' dir -1: solid cell r with open r - 1 (face at z = r, normal -z)
-            ' dir 1: solid cell r - 1 with open r (face at z = r, normal +z)
-            if dir < 0
-              face = m.isSolid(r, c) and not m.isSolid(r - 1, c)
-            else
-              face = m.isSolid(r - 1, c) and not m.isSolid(r, c)
-            end if
-          end if
-          if face and runStart < 0
-            runStart = c
-          else if not face and runStart >= 0
-            z = r * cell
-            if dir < 0
-              segs.push(createWallSegment(runStart * cell, z, c * cell, z, 0, height, "stone", tileWidth, height, false))
-            else
-              segs.push(createWallSegment(c * cell, z, runStart * cell, z, 0, height, "stone", tileWidth, height, false))
-            end if
-            runStart = -1
-          end if
-        end for
-      end for
-    end for
-    ' faces along z (normal -x or +x), one line per column boundary
-    for c = 0 to colCount
-      for each dir in [-1, 1]
-        runStart = -1
-        for r = 0 to rowCount
-          face = false
-          if r < rowCount
-            if dir < 0
-              face = m.isSolid(r, c) and not m.isSolid(r, c - 1)
-            else
-              face = m.isSolid(r, c - 1) and not m.isSolid(r, c)
-            end if
-          end if
-          if face and runStart < 0
-            runStart = r
-          else if not face and runStart >= 0
-            x = c * cell
-            if dir < 0
-              segs.push(createWallSegment(x, r * cell, x, runStart * cell, 0, height, "stone", tileWidth, height, false))
-            else
-              segs.push(createWallSegment(x, runStart * cell, x, r * cell, 0, height, "stone", tileWidth, height, false))
-            end if
-            runStart = -1
-          end if
-        end for
-      end for
-    end for
-    return segs
-  end function
-
-  private function isSolid(r as integer, c as integer) as boolean
-    rows = m.gridRows
-    if r < 0 or r >= rows.count() or c < 0 or c >= len(rows[r])
-      return true
-    end if
-    return mid(rows[r], c + 1, 1) = "#"
+    return CreateObject("roRegion", wallBmp, 0, 0, wallBmp.GetWidth(), wallBmp.GetHeight())
   end function
 
   ' A 48 m hall: 8 m outer walls, pillars, a tower, a room with a doorway, low and
   ' mid-height walls (some at angles) the camera sees over.
-  private function hallSegments() as WallSegment[]
+  private function hallSegments() as BGE.WallSegment[]
     u = m.metre
-    segs = [] as WallSegment[]
+    segs = [] as BGE.WallSegment[]
     tw = 2 * u
     th = 4 * u
     ' outer walls, facing in
@@ -244,22 +181,24 @@ class SegmentWallsTest extends RendererTest
   end function
 
   ' A wall between two floor points in metres, height in metres.
-  private sub addWall(segs as WallSegment[], ax as float, az as float, bx as float, bz as float, heightMetres as float, twoSided as boolean)
+  private sub addWall(segs as BGE.WallSegment[], ax as float, az as float, bx as float, bz as float, heightMetres as float, twoSided as boolean)
     u = m.metre
-    segs.push(createWallSegment(ax * u, az * u, bx * u, bz * u, 0, heightMetres * u, "stone", 2 * u, 4 * u, twoSided))
+    segs.push(BGE.createWallSegment(BGE.Math.VectorOps.create(ax * u, 0, az * u), BGE.Math.VectorOps.create(bx * u, 0, bz * u), 0, heightMetres * u, "stone", {tileWidth: 2 * u, tileHeight: 4 * u, twoSided: twoSided}))
   end sub
 
   ' Four one-sided walls round a rectangle, facing in or out.
-  private sub addBox(segs as WallSegment[], x0 as float, z0 as float, x1 as float, z1 as float, bottom as float, top as float, tw as float, th as float, facingIn as boolean)
+  private sub addBox(segs as BGE.WallSegment[], x0 as float, z0 as float, x1 as float, z1 as float, bottom as float, top as float, tw as float, th as float, facingIn as boolean)
     corners = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]
     for i = 0 to 3
       a = corners[i]
       b = corners[(i + 1) mod 4]
       ' a -> b runs clockwise seen from above (+y, -z forward), so its left faces out
+      pa = BGE.Math.VectorOps.create(a[0], 0, a[1])
+      pb = BGE.Math.VectorOps.create(b[0], 0, b[1])
       if facingIn
-        segs.push(createWallSegment(b[0], b[1], a[0], a[1], bottom, top, "stone", tw, th, false))
+        segs.push(BGE.createWallSegment(pb, pa, bottom, top, "stone", {tileWidth: tw, tileHeight: th}))
       else
-        segs.push(createWallSegment(a[0], a[1], b[0], b[1], bottom, top, "stone", tw, th, false))
+        segs.push(BGE.createWallSegment(pa, pb, bottom, top, "stone", {tileWidth: tw, tileHeight: th}))
       end if
     end for
   end sub
@@ -330,9 +269,9 @@ class SegmentWallsTest extends RendererTest
     frames = m.windowFrames
     fps = frames / m.windowSeconds
     frameMs = m.windowSeconds * 1000 / frames
-    kind = "segments"
+    kind = "walls"
     if invalid <> m.engineWalls
-      kind = "engine"
+      kind = "gridWalls"
     end if
     levelName = BGE.getRenderQualityLevelName(m.level)
     stats = `cast=${m.format(m.windowCastMs / frames)} draw=${m.format(m.windowDrawMs / frames)} render=${m.format(m.windowRenderMs / frames)} draws=${cint(m.windowDraws / frames)} pieces=${cint(m.windowPieces / frames)} inView=${cint(m.windowInView / frames)} visited=${cint(m.windowVisited / frames)}`
@@ -350,27 +289,17 @@ class SegmentWallsTest extends RendererTest
     m.renderTimer.Mark()
     renderer.render()
     m.windowRenderMs += m.renderTimer.TotalMilliseconds()
-    stripWidth = renderer.qualitySettings.gridWallStripWidth
+    stages = renderer.getStageMsLastFrame()
     if invalid <> m.walls
-      m.walls.render(renderer, m.camera, stripWidth)
-      m.windowCastMs += m.walls.castMs
-      m.windowDrawMs += m.walls.drawMs
-      m.windowDraws += m.walls.draws
-      m.windowPieces += m.walls.pieces
-      m.windowVisited += m.walls.segmentsVisited
-      m.windowInView += m.walls.segmentsInView
+      m.windowCastMs += m.stageMs(stages, ["wallsWalk", "wallsShade"])
+      m.windowDrawMs += m.stageMs(stages, ["wallsStrips"])
+      m.windowDraws += m.walls.stripsDrawnLastFrame
+      m.windowPieces += m.walls.view.pieceCount
+      m.windowVisited += m.walls.view.segmentsVisited
+      m.windowInView += m.walls.view.segmentsInView
     else
-      stages = renderer.getStageMsLastFrame()
-      cast = 0
-      for each name in ["gridWallsCast", "gridWallsBuild", "gridWallsShade"]
-        if invalid <> stages[name]
-          cast += stages[name]
-        end if
-      end for
-      m.windowCastMs += cast
-      if invalid <> stages.gridWallsStrips
-        m.windowDrawMs += stages.gridWallsStrips
-      end if
+      m.windowCastMs += m.stageMs(stages, ["gridWallsCast", "gridWallsBuild", "gridWallsShade"])
+      m.windowDrawMs += m.stageMs(stages, ["gridWallsStrips"])
       m.windowDraws += m.engineWalls.stripsDrawnLastFrame
       m.windowPieces += m.engineWalls.raysLastFrame
     end if
@@ -382,6 +311,16 @@ class SegmentWallsTest extends RendererTest
     renderer.drawText(m.reportLine, x, y, BGE.Colors.Yellow, m.font)
     renderer.drawText("up/down: quality   OK: hold pitch   left/right: pitch   *: hold turn", x, y + 26, BGE.Colors.Gray, m.font)
   end sub
+
+  private function stageMs(stages as roAssociativeArray, names as string[]) as integer
+    total = 0
+    for each name in names
+      if invalid <> stages[name]
+        total += stages[name]
+      end if
+    end for
+    return total
+  end function
 
   override sub onInput(buttonName as string)
     if buttonName = "up" and m.level < BGE.RenderQualityLevel.ultra

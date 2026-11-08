@@ -1,0 +1,148 @@
+import "WallSegment.bs"
+import "WallsView.bs"
+import "../cameras/Camera3d.bs"
+import "../gridWalls/GridWallsView.bs"
+import "../../../math/vector.bs"
+
+namespace tests
+
+  ' The eye 50 up at the origin looking down -z, 90 degrees across a 1280 x 720 frame.
+  @suite("BGE.WallsView")
+  class WallsViewTests extends rooibos.BaseTestSuite
+
+    private camera as BGE.Camera3d
+
+    protected override sub beforeEach()
+      m.camera = new BGE.Camera3d()
+      m.camera.setFrameSize(1280, 720)
+      m.camera.fieldOfViewDegrees = 90
+      m.camera.maxDrawDistance = 2000
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.camera.drawDistanceFadeFraction = 0
+      m.camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      m.camera.computeWorldToCameraMatrix()
+    end sub
+
+    ' A wall across the view at z, facing the eye (+z).
+    private function across(z as float, top as float, twoSided = false as boolean) as BGE.WallSegment
+      return BGE.createWallSegment(BGE.Math.VectorOps.create(1000, 0, z), BGE.Math.VectorOps.create(-1000, 0, z), 0, top, "stone", {twoSided: twoSided})
+    end function
+
+    private function update(segments as BGE.WallSegment[]) as BGE.WallsView
+      view = new BGE.WallsView(segments)
+      m.assertTrue(view.update(m.camera, 8))
+      return view
+    end function
+
+    private sub assertNear(expected as float, actual as float, tolerance = 0.01 as float)
+      m.assertTrue(abs(expected - actual) <= tolerance, `expected ${expected} but got ${actual}`)
+    end sub
+
+    @describe("WallsView.update")
+
+    @it("closes every ray at a wall taller than the view")
+    function _()
+      view = m.update([m.across(-300, 1000)])
+      mid = int(view.rayCount / 2)
+      m.assertNear(300, view.getDepth(mid))
+      m.assertNear(300, view.getNearestDepth(mid))
+      m.assertTrue(view.pieceCount > 0)
+      m.assertTrue(view.rayFirstPiece[mid] >= 0)
+      m.assertEqual(1, view.segmentsVisited)
+    end function
+
+    @it("skips a one-sided wall facing away")
+    function _()
+      wall = BGE.createWallSegment(BGE.Math.VectorOps.create(-1000, 0, -300), BGE.Math.VectorOps.create(1000, 0, -300), 0, 1000, "stone")
+      view = m.update([wall])
+      m.assertEqual(0, view.pieceCount)
+      m.assertEqual(0, view.segmentsInView)
+    end function
+
+    @it("draws a taller wall behind a short one and closes there")
+    function _()
+      view = m.update([m.across(-300, 1000), m.across(-100, 20, true)])
+      mid = int(view.rayCount / 2)
+      m.assertNear(100, view.getNearestDepth(mid))
+      m.assertNear(300, view.getDepth(mid))
+      k = view.rayFirstPiece[mid]
+      m.assertNear(100, view.pieceDepth[k])
+      k = view.pieceNext[k]
+      m.assertTrue(k >= 0)
+      m.assertNear(300, view.pieceDepth[k])
+    end function
+
+    @it("stops walking once every ray is closed")
+    function _()
+      view = m.update([m.across(-100, 1000), m.across(-300, 1000), m.across(-500, 1000)])
+      m.assertEqual(3, view.segmentsInView)
+      m.assertEqual(1, view.segmentsVisited)
+    end function
+
+    @it("orders by distance whatever the list order")
+    function _()
+      view = m.update([m.across(-500, 1000), m.across(-100, 1000)])
+      mid = int(view.rayCount / 2)
+      m.assertNear(100, view.getDepth(mid))
+    end function
+
+    @describe("WallsView.isPointHidden")
+
+    @it("hides a point behind a tall wall")
+    function _()
+      view = m.update([m.across(-300, 1000)])
+      m.assertTrue(view.isPointHidden(BGE.Math.VectorOps.create(0, 30, -400)))
+      m.assertFalse(view.isPointHidden(BGE.Math.VectorOps.create(0, 30, -200)))
+    end function
+
+    @it("hides only what a short wall covers")
+    function _()
+      view = m.update([m.across(-300, 1000), m.across(-100, 20, true)])
+      ' low behind it: the sight line passes below the wall's top
+      m.assertTrue(view.isPointHidden(BGE.Math.VectorOps.create(0, 0, -120)))
+      ' further on the floor: the sight line clears the top (25 up at the wall)
+      m.assertFalse(view.isPointHidden(BGE.Math.VectorOps.create(0, 0, -200)))
+      m.assertFalse(view.isPointHidden(BGE.Math.VectorOps.create(0, 40, -150)))
+    end function
+
+    @it("doesn't hide a point within the tolerance of the wall")
+    function _()
+      view = m.update([m.across(-300, 1000)])
+      m.assertFalse(view.isPointHidden(BGE.Math.VectorOps.create(0, 30, -305)))
+    end function
+
+    @describe("WallsView.findSpan")
+
+    @it("spans the rays of points, nearest depth first")
+    function _()
+      view = m.update([m.across(-300, 1000)])
+      span = {valid: false, firstRay: 0, lastRay: 0, nearestDistance: 0.0} as BGE.GridWallsSpan
+      m.assertTrue(view.findSpan([BGE.Math.VectorOps.create(-10, 0, -200), BGE.Math.VectorOps.create(10, 0, -250)], span))
+      m.assertTrue(span.firstRay < span.lastRay)
+      m.assertNear(200, span.nearestDistance)
+      m.assertFalse(span.anyAboveWalls)
+    end function
+
+    @it("is invalid for a point behind the eye")
+    function _()
+      view = m.update([m.across(-300, 1000)])
+      span = {valid: false, firstRay: 0, lastRay: 0, nearestDistance: 0.0} as BGE.GridWallsSpan
+      m.assertFalse(view.findSpan([BGE.Math.VectorOps.create(0, 0, 10)], span))
+    end function
+
+    @describe("BGE.createWallSegment")
+
+    @it("faces the left of start to end and rounds the tile count")
+    function _()
+      wall = BGE.createWallSegment(BGE.Math.VectorOps.create(0, 0, 0), BGE.Math.VectorOps.create(10, 0, 0), 0, 100, "stone", {tileWidth: 5, tileHeight: 40})
+      m.assertNear(0, wall.normalX)
+      m.assertNear(-1, wall.normalZ)
+      m.assertNear(10, wall.length)
+      m.assertEqual(3, wall.tileCount)
+      m.assertFalse(wall.twoSided)
+    end function
+
+  end class
+
+end namespace
