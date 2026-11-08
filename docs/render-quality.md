@@ -77,23 +77,21 @@ game.renderQuality.overridePreset(BGE.RenderQualityLevel.medium, {planeSliceCoun
 Fields you don't name keep the engine's values. See `BGE.RenderQualitySettings`
 for every field.
 
-## Grid walls
+## Walls
 
-A [`DrawableGridWalls`](/drawables-and-scene-objects) maze (or `DrawableWalls`, which uses only
-the strip width) draws one strip per
-`gridWallStripWidth` pixels and samples lights every `gridWallLightInterval` strips,
-so these two settings set its cost. Wider strips and a longer interval are cheaper and
-a little coarser (a fine stair-step along wall feet and tops).
+[`DrawableWalls`](/drawables-and-scene-objects) (and `DrawableGridWalls`) draws one strip per
+`wallStripWidth` pixels, so that setting sets its cost. Wider strips are cheaper and a little
+coarser (a fine stair-step along wall feet and tops).
 
-| Level  | `gridWallStripWidth` | `gridWallLightInterval` |
-| ------ | -------------------- | ----------------------- |
-| Basic  | 16                   | 8                       |
-| Low    | 8                    | 4                       |
-| Medium | 8                    | 4                       |
-| High   | 6                    | 3                       |
-| Ultra  | 4                    | 2                       |
+| Level  | `wallStripWidth` |
+| ------ | ---------------- |
+| Basic  | 16               |
+| Low    | 8                |
+| Medium | 8                |
+| High   | 6                |
+| Ultra  | 4                |
 
-Override them like any other field, e.g. `{gridWallStripWidth: 6}` at Medium. Halving the strip
+Override it like any other field, e.g. `{wallStripWidth: 6}` at Medium. Halving the strip
 width roughly doubles the walls' cost, which is why High sits at 6 between Medium's 8 and Ultra's 4.
 
 ## Scale your own content
