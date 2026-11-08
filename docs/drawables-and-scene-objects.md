@@ -1076,10 +1076,13 @@ grid walls on the same maze.
 
 Limits:
 
-- Needs a `Camera3d` below the tallest walls' tops; pitch about 15 degrees up to 35 down; roll
-  is ignored.
-- Segments are ordered by their nearest point, which can misorder walls that overlap in
-  depth from some angles.
+- Needs a `Camera3d`; pitch about 15 degrees up to 35 down; roll is ignored. Wall tops aren't
+  drawn, so keep the camera below them where it can look down on a wall.
+- Segments are ordered by their nearest point, not a BSP yet. A long wall whose nearest point
+  is closer than a pillar in front of it can be walked first and hide the pillar on the rays it
+  covers. Splitting long walls helps until the BSP lands.
+- Nothing may sit lower than the lowest wall foot: a wall standing on that floor closes the
+  rays behind it.
 - No wall tops seen from above, floors per area or doors yet. No collision.
 
 ## Freestanding walls (`DrawableWall`)
