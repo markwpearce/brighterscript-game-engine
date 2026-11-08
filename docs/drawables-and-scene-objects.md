@@ -147,8 +147,10 @@ caps the columns at as many as keep that error under its pixel count. A quad at 
 many. Ultra turns the cap off. It isn't applied to quads with per-corner tints, whose colour blends
 per column.
 Each column is a slab a power of two texels wide, drawn whole, so fewer columns don't drop texture
-detail. A quad seen mirrored (from behind) draws each column's middle texel alone instead, because a
-slab would be mirrored within its column and a negative scale can't be rotated on a real Roku.
+detail. A quad seen mirrored (from behind) would need each slab mirrored within its column, and a
+negative scale can't be rotated on a real Roku, so it draws slabs from a flipped copy of the texture
+instead, made once (one extra texture-sized bitmap per texture seen from behind). Text, whose bitmap
+is redrawn in place, gets no copy and draws each column's middle texel alone, with no error cap.
 
 Columns go straight to the canvas only while the object moves relative to the camera. Once it's
 still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far
