@@ -30,6 +30,8 @@ in a building of 2–3 storeys.
   rooms may overlap in plan. A stairwell is a tall room touching the ground-floor hall at
   ground height and the upstairs landing at upstairs height (Build engine style). There are no
   holes in floors or ceilings.
+- **Some outdoors.** A room can have **sky** instead of a ceiling: a courtyard, a street, a
+  rooftop. Windows and doors can look out into it.
 - **Textured floors and ceilings**, benchmarked on device before anything is built on them.
 - Models and sprites **belong to a room** and are skipped when their room isn't visited.
   They are drawn correctly against nearer walls (a model half behind a door frame is cut off by
@@ -39,7 +41,9 @@ in a building of 2–3 storeys.
 - Read-only queries for game code: which room a point is in, and that room's floor and ceiling
   heights.
 - `examples/firstPerson`: a playable slice, holding **≥30 fps on the Roku Ultra at Medium**
-  render quality (about what the crypt demo gets today).
+  render quality (about what the crypt demo gets today). On an HD device it must run without
+  running out of texture memory or dropping draws; there's no frame-rate target there. *(My
+  call; the HD question wasn't answered.)*
 
 ## Non-goals
 
@@ -92,6 +96,12 @@ A level is a list of rooms. Each room has:
 - `wallTexture`, `floorTexture`, `ceilingTexture`: names into a textures AA, plus tiling sizes as
   `WallSegmentOptions` has.
 
+- `sky`: true for an outdoor room. Its `ceiling` is then the height of the walls around it (a
+  courtyard's surrounding facade), and its ceiling slices aren't drawn, so a skybox behind
+  shows through. An outdoor room is otherwise an ordinary room, so a window is just a narrowed
+  opening into one, and the building's outside walls are the lintels drawn above the openings
+  on the courtyard's edges.
+
 A concave space is several convex rooms sharing open edges. That costs nothing, because a shared
 edge with matching heights is just an opening. Requiring convex rooms means a room's own walls
 never hide each other, so no sorting is needed inside a room.
@@ -133,7 +143,7 @@ visited this frame aren't drawn at all.
 
 Drawables with no room (particles, `drawWorld*` overlays, a projectile between rooms) draw
 after the rooms in the existing sorted pass, hidden per ray as `DrawableWalls` hides objects
-today. One level drawable per renderer: a room level can't be mixed with `DrawableWalls` or
+today. A skybox draws first, as today. One level drawable per renderer: a room level can't be mixed with `DrawableWalls` or
 `DrawableGridWalls`, so their stages and the crypt/grid-walls paths stay untouched. *(My call.)*
 
 Lights are not tied to rooms: they light everything as today, so nothing blinks when a room
@@ -171,7 +181,7 @@ in phase 4's 30 fps target. *(My call.)* If neither textured path passes, stop a
    `rendererTest` demo of a two-storey test building.
 3. **Objects in rooms**: drawing room by room with objects, skipping unvisited rooms, with
    tests and a demo with models and sprites behind door frames and upstairs.
-4. **`examples/firstPerson`**: a building of 2–3 storeys, first-person movement with wall
+4. **`examples/firstPerson`**: a building of 2–3 storeys with a courtyard or street outside, first-person movement with wall
    sliding and floor snapping in game code, a weapon, a few enemies (sprites and/or models),
    lights, and a third-person toggle if it's cheap (`BGE.OrbitCamera`). Must hold ≥30 fps on
    the Ultra at Medium.
