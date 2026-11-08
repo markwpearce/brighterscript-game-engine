@@ -1,11 +1,13 @@
 import "../../../math/math.bs"
+import "QuadColumnTexture.bs"
 
 namespace BGE
 
   ' One set of strips cut across a texture triangle: strip k covers texels `starts[k]` to
   ' `ends[k]` across, and `lows[k]` to `highs[k]` along, drawn from `regions[k]`, its whole
-  ' slab (invalid if the triangle misses it). `thinRegions[k]` is its middle texel alone, cut
-  ' on first use, for a strip drawn mirrored (see TriangleColumnCuts.getThinRegion()).
+  ' slab (invalid if the triangle misses it). For a strip drawn mirrored, cut on first use:
+  ' `mirroredRegions[k]` is the slab from a flipped copy, `thinRegions[k]` its middle texel
+  ' (see TriangleColumnCuts.getMirroredRegion()).
   class TriangleColumnStrips
     starts = [] as integer[]
     ends = [] as integer[]
@@ -13,6 +15,7 @@ namespace BGE
     highs = [] as integer[]
     regions = [] as roRegion[]
     thinRegions = [] as roRegion[]
+    mirroredRegions = [] as roRegion[]
   end class
 
   ' A textured triangle's texture columns and rows for `BGE.QuadColumnDrawer.drawTriangleTo()`,
@@ -36,6 +39,10 @@ namespace BGE
     maxU as integer = 0
     minV as integer = 0
     maxV as integer = 0
+
+    ' The whole texture, shared by every face using it, whose flipped copies mirrored strips
+    ' are cut from. Without one they draw their middle texel alone.
+    mirrorSource as BGE.QuadColumnTexture = invalid
 
     private bitmap as roBitmap = invalid
     private regionX as integer = 0
@@ -99,24 +106,36 @@ namespace BGE
       return strips
     end function
 
-    ' Strip `k` of `strips` as its middle texel alone, for a strip drawn mirrored: a whole
-    ' slab would be mirrored within the strip, and a negative scale can't be rotated.
+    ' Strip `k` of `strips` for a strip drawn mirrored: a negative scale can't be rotated, so
+    ' it's cut from the flipped copy of `mirrorSource`, or is the middle texel alone without one.
     '
     ' @param {boolean} useRows
     ' @param {BGE.TriangleColumnStrips} strips from getStrips(useRows, ...)
     ' @param {integer} k
     ' @return {roRegion}
-    function getThinRegion(useRows as boolean, strips as BGE.TriangleColumnStrips, k as integer) as roRegion
-      while strips.thinRegions.count() <= k
-        strips.thinRegions.push(invalid)
+    function getMirroredRegion(useRows as boolean, strips as BGE.TriangleColumnStrips, k as integer) as roRegion
+      mirrored = m.getMirroredTexture(useRows)
+      regions = strips.thinRegions
+      if invalid <> mirrored
+        regions = strips.mirroredRegions
+      end if
+      while regions.count() <= k
+        regions.push(invalid)
       end while
-      region = strips.thinRegions[k]
+      region = regions[k]
       if invalid = region
-        middle = (strips.starts[k] + strips.ends[k] - 1) \ 2
-        region = m.makeStripRegion(useRows, middle, middle + 1, strips.lows[k], strips.highs[k])
-        strips.thinRegions[k] = region
+        region = m.makeMirroredRegion(useRows, mirrored, strips.starts[k], strips.ends[k], strips.lows[k], strips.highs[k])
+        regions[k] = region
       end if
       return region
+    end function
+
+    ' Whether mirrored strips draw whole slabs (texels across), not just their middle texel.
+    '
+    ' @param {boolean} useRows
+    ' @return {boolean}
+    function canMirror(useRows as boolean) as boolean
+      return invalid <> m.getMirroredTexture(useRows)
     end function
 
     ' Strip `k` of `strips` with only the texels from `low` to `high` along, for a strip cut
@@ -127,22 +146,19 @@ namespace BGE
     ' @param {integer} k
     ' @param {integer} low
     ' @param {integer} high
-    ' @param {boolean} [thin=false] just the strip's middle texel (see getThinRegion())
+    ' @param {boolean} [mirrored=false] for a strip drawn mirrored (see getMirroredRegion())
     ' @return {roRegion}
-    function getCroppedRegion(useRows as boolean, strips as BGE.TriangleColumnStrips, k as integer, low as integer, high as integer, thin = false as boolean) as roRegion
+    function getCroppedRegion(useRows as boolean, strips as BGE.TriangleColumnStrips, k as integer, low as integer, high as integer, mirrored = false as boolean) as roRegion
       alongSize = m.regionHeight
       if useRows
         alongSize = m.regionWidth
       end if
       low = m.clampTexel(low, alongSize)
       high = m.clampEdge(high, low, alongSize)
-      first = strips.starts[k]
-      last = strips.ends[k]
-      if thin
-        first = (first + last - 1) \ 2
-        last = first + 1
+      if mirrored
+        return m.makeMirroredRegion(useRows, m.getMirroredTexture(useRows), strips.starts[k], strips.ends[k], low, high)
       end if
-      return m.makeStripRegion(useRows, first, last, low, high)
+      return m.makeStripRegion(useRows, strips.starts[k], strips.ends[k], low, high)
     end function
 
     ' How many strips `stepSize` texels wide cross the triangle.
@@ -198,14 +214,42 @@ namespace BGE
       return strips
     end function
 
-    ' Texels `first` to `last` across, from `low` to `high` along.
-    private function makeStripRegion(useRows as boolean, first as integer, last as integer, low as integer, high as integer) as roRegion
+    private function getMirroredTexture(useRows as boolean) as BGE.QuadColumnTexture
+      source = m.mirrorSource
+      if invalid = source or not source.canMirror
+        return invalid
+      end if
+      return source.getMirrored(useRows)
+    end function
+
+    ' A mirrored strip: from `mirrored` (flipped across, so texel t is at size - 1 - t there),
+    ' or the middle texel of this texture if it's invalid.
+    private function makeMirroredRegion(useRows as boolean, mirrored as BGE.QuadColumnTexture, first as integer, last as integer, low as integer, high as integer) as roRegion
+      if invalid = mirrored
+        middle = (first + last - 1) \ 2
+        return m.makeStripRegion(useRows, middle, middle + 1, low, high)
+      end if
+      size = m.regionWidth
+      if useRows
+        size = m.regionHeight
+      end if
+      return m.makeStripRegion(useRows, size - last, size - first, low, high, mirrored.getBitmap(), 0, 0)
+    end function
+
+    ' Texels `first` to `last` across, from `low` to `high` along: of this texture, or of
+    ' `bitmap` with the texture at (`x`, `y`).
+    private function makeStripRegion(useRows as boolean, first as integer, last as integer, low as integer, high as integer, bitmap = invalid as roBitmap, x = -1 as integer, y = -1 as integer) as roRegion
+      if invalid = bitmap
+        bitmap = m.bitmap
+        x = m.regionX
+        y = m.regionY
+      end if
       across = last - first
       if useRows
-        region = CreateObject("roRegion", m.bitmap, m.regionX + low, m.regionY + first, high - low, across)
+        region = CreateObject("roRegion", bitmap, x + low, y + first, high - low, across)
         region.SetPreTranslation(-(high - low), -across)
       else
-        region = CreateObject("roRegion", m.bitmap, m.regionX + first, m.regionY + low, across, high - low)
+        region = CreateObject("roRegion", bitmap, x + first, y + low, across, high - low)
         region.SetPreTranslation(0, -(high - low))
       end if
       return region
