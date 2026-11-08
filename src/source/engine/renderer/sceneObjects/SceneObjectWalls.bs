@@ -1,0 +1,378 @@
+import "../../../math/vector.bs"
+import "../../drawables/DrawableWalls.bs"
+import "../cameras/Camera3d.bs"
+import "../lighting/Lighting.bs"
+import "../walls/WallSegment.bs"
+import "../walls/WallsView.bs"
+import "../Renderer.bs"
+import "../RendererHelpers.bs"
+import "SceneObject.bs"
+
+namespace BGE
+
+  ' Draws a DrawableWalls: walks its WallsView each time the camera changes, then draws the
+  ' visible strips far to near.
+  class SceneObjectWalls extends SceneObject
+
+    drawable as DrawableWalls
+
+    ' This frame's strips and the depth windows that hide things behind walls.
+    view as BGE.WallsView
+
+    ' Rays in the fan and strips drawn by the last draw.
+    raysLastFrame as integer = 0
+    stripsDrawnLastFrame as integer = 0
+
+    private rendererObj as Renderer
+    private warnedCamera2d as boolean = false
+    private castRequested as boolean = true
+    ' Bumped on each view update; the shade cache keys off it.
+    private viewStamp as integer = 0
+    private viewStripWidth as integer = -1
+    private viewGeometryVersion as integer = -1
+    private shadeStamp as integer = -1
+    private shadeBase as integer = 0
+    private shadeShaded as boolean = false
+    private shadeAmbient as float = -1.0
+    private shadeWrap as float = -1.0
+    ' Per piece, packed RGBA with light and distance fade
+    private pieceRgba = [] as integer[]
+    ' Per segment, its columns (invalid for a missing texture)
+    private segmentColumns = [] as dynamic[]
+    ' Lit colors per segment and side ("index*2+side"), one per light bucket along it, kept
+    ' until the lights or the shading inputs change
+    private lightCache = {} as roAssociativeArray
+    private redrawOrder = [] as integer[]
+    private shadePoint as BGE.Math.Vector
+    private shadeNormal as BGE.Math.Vector
+
+    sub new(name as string, drawableObj as DrawableWalls)
+      super(name, drawableObj, BGE.SceneObjectType.Walls)
+      ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
+      m.drawable = drawableObj
+      m.view = new BGE.WallsView(drawableObj.segments)
+      m.viewGeometryVersion = drawableObj.geometryVersion
+      m.shadePoint = BGE.Math.VectorOps.create(0, 0, 0)
+      m.shadeNormal = BGE.Math.VectorOps.create(0, 0, 0)
+    end sub
+
+    override function drawsInFixedStage() as boolean
+      return true
+    end function
+
+    ' The walls are drawn in their own stage, never interleaved.
+    override function participatesInOverlapDetection() as boolean
+      return false
+    end function
+
+    ' Strips fade one by one instead.
+    override function participatesInDistanceFade() as boolean
+      return false
+    end function
+
+    override function isEligibleForStaticBsp() as boolean
+      return false
+    end function
+
+    protected override function isPotentiallyOnScreen(cameraObj as Camera) as boolean
+      return true
+    end function
+
+    ' Only requests a walk, so performDraw() walks at most once per draw - and not at all when
+    ' only the lights changed.
+    protected override function findCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      camera = rendererObj.camera
+      if m.lastFrameWasCulled or not m.hasValidCanvasPosition or m.isFirstFrameSinceEnabled or m.objMovedInRelationToCamera(camera) or m.geometryChanged() or m.projectionChanged(camera) or m.drawModeChanged(drawMode)
+        m.castRequested = true
+      end if
+      return true
+    end function
+
+    ' Walks the view for rendererObj's camera now. The renderer does this each frame the
+    ' camera changes; call it yourself only in tests.
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {boolean} false with a Camera2d, or a camera looking straight up or down
+    function updateView(rendererObj as Renderer) as boolean
+      m.rendererObj = rendererObj
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      d = m.drawable
+      if m.viewGeometryVersion <> d.geometryVersion
+        m.view.setSegments(d.segments)
+        m.segmentColumns = []
+        m.lightCache = {}
+        m.viewGeometryVersion = d.geometryVersion
+      end if
+      m.view.hideTolerance = d.hideTolerance
+      m.viewStripWidth = m.getStripWidth(rendererObj)
+      if not m.view.update(rendererObj.camera as Camera3d, m.viewStripWidth)
+        return false
+      end if
+      m.viewStamp++
+      return true
+    end function
+
+    ' Draws again, far to near, the strips drawn this frame on rays firstRay..lastRay nearer
+    ' than nearerThan - to put walls back over something drawn after them.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {integer} firstRay
+    ' @param {integer} lastRay
+    ' @param {float} nearerThan forward depth
+    sub redrawStrips(rendererObj as Renderer, firstRay as integer, lastRay as integer, nearerThan as float)
+      view = m.view
+      if firstRay < 0
+        firstRay = 0
+      end if
+      if lastRay > view.rayCount - 1
+        lastRay = view.rayCount - 1
+      end if
+      order = m.redrawOrder
+      depths = view.pieceDepth
+      nexts = view.pieceNext
+      for i = firstRay to lastRay
+        order.Clear()
+        k = view.rayFirstPiece[i]
+        while k >= 0 and depths[k] < nearerThan
+          order.push(k)
+          k = nexts[k]
+        end while
+        for n = order.count() - 1 to 0 step -1
+          m.drawPiece(rendererObj, order[n])
+        end for
+      end for
+      order.Clear()
+    end sub
+
+    protected override function performDraw(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      m.rendererObj = rendererObj
+      ' read every frame: hiding uses it whether or not the walls are walked again
+      m.view.hideTolerance = m.drawable.hideTolerance
+      camera = rendererObj.camera as Camera3d
+      profile = rendererObj.profileStages
+      lap = 0
+      if profile
+        lap = rendererObj.getProfileClockMs()
+      end if
+      if m.castRequested or m.viewStamp = 0 or m.viewStripWidth <> m.getStripWidth(rendererObj) or camera.farDistanceChangedThisFrame() or m.viewGeometryVersion <> m.drawable.geometryVersion
+        m.castRequested = false
+        if not m.updateView(rendererObj)
+          return false
+        end if
+      end if
+      if profile
+        lap = m.lapStage(rendererObj, "wallsWalk", lap)
+      end if
+      m.raysLastFrame = m.view.rayCount
+      m.shadePieces(rendererObj, camera)
+      if profile
+        lap = m.lapStage(rendererObj, "wallsShade", lap)
+      end if
+      m.stripsDrawnLastFrame = m.drawPieces(rendererObj)
+      if profile
+        m.lapStage(rendererObj, "wallsStrips", lap)
+      end if
+      return true
+    end function
+
+    ' Draws every piece, far to near; returns how many drew.
+    private function drawPieces(rendererObj as Renderer) as integer
+      view = m.view
+      segs = m.drawable.segments
+      columnsBySeg = m.segmentColumns
+      pSeg = view.pieceSegment
+      pAlong = view.pieceAlong
+      pX = view.pieceX
+      pY = view.pieceY
+      pWidth = view.pieceWidth
+      pLength = view.pieceLength
+      pAngle = view.pieceAngle
+      rgbas = m.pieceRgba
+      drawn = 0
+      for k = view.pieceCount - 1 to 0 step -1
+        n = pSeg[k]
+        columns = columnsBySeg[n]
+        if invalid <> columns
+          seg = segs[n]
+          columnCount = columns.count()
+          u = pAlong[k]
+          if seg.tileWidth > 0
+            along = u * seg.length / seg.tileWidth
+            u = along - int(along)
+          end if
+          ci = int(u * columnCount)
+          if ci >= columnCount
+            ci = columnCount - 1
+          end if
+          column = columns[ci]
+          rendererObj.drawTransformedObject(pX[k], pY[k], pWidth[k], pLength[k] / column.GetHeight(), pAngle[k], column, rgbas[k])
+          drawn++
+        end if
+      end for
+      return drawn
+    end function
+
+    ' Draws piece k (see drawPieces()).
+    private sub drawPiece(rendererObj as Renderer, k as integer)
+      view = m.view
+      columns = m.segmentColumns[view.pieceSegment[k]]
+      if invalid = columns
+        return
+      end if
+      seg = m.drawable.segments[view.pieceSegment[k]]
+      columnCount = columns.count()
+      u = view.pieceAlong[k]
+      if seg.tileWidth > 0
+        along = u * seg.length / seg.tileWidth
+        u = along - int(along)
+      end if
+      ci = int(u * columnCount)
+      if ci >= columnCount
+        ci = columnCount - 1
+      end if
+      column = columns[ci]
+      rendererObj.drawTransformedObject(view.pieceX[k], view.pieceY[k], view.pieceWidth[k], view.pieceLength[k] / column.GetHeight(), view.pieceAngle[k], column, m.pieceRgba[k])
+    end sub
+
+    ' Sets each piece's rgba: the tint, lit from its segment's light cache, then faded.
+    private sub shadePieces(rendererObj as Renderer, camera as Camera3d)
+      d = m.drawable
+      view = m.view
+      base = d.getFillColorRGBA()
+      if m.shadeStamp = m.viewStamp and not m.lightingChangedThisDraw and not m.qualityChangedThisDraw and base = m.shadeBase and d.isShaded = m.shadeShaded and d.ambientBrightness = m.shadeAmbient and d.lightWrap = m.shadeWrap
+        return
+      end if
+      ' with no lights, shading follows the camera, so it's only cached within a frame
+      if m.lightingChangedThisDraw or base <> m.shadeBase or d.isShaded <> m.shadeShaded or d.ambientBrightness <> m.shadeAmbient or d.lightWrap <> m.shadeWrap or not rendererObj.hasLights()
+        m.lightCache = {}
+      end if
+      m.shadeStamp = m.viewStamp
+      m.shadeBase = base
+      m.shadeShaded = d.isShaded
+      m.shadeAmbient = d.ambientBrightness
+      m.shadeWrap = d.lightWrap
+
+      segs = d.segments
+      columns = m.segmentColumns
+      for i = columns.count() to segs.count() - 1
+        columns.push(d.getColumns(segs[i].texture, segs[i].tileCount))
+      end for
+
+      far = camera.getCurrentDrawDistance()
+      fraction = camera.drawDistanceFadeFraction
+      if fraction > 1
+        fraction = 1.0
+      end if
+      bandStart = far * (1 - fraction)
+      fades = fraction > 0
+      rgbas = m.pieceRgba
+      for k = rgbas.count() to view.pieceCount - 1
+        rgbas.push(base)
+      end for
+      pSeg = view.pieceSegment
+      pAlong = view.pieceAlong
+      pDepth = view.pieceDepth
+      shaded = d.isShaded
+      lastSegment = -1
+      shades = invalid
+      lastBucket = 0
+      for k = 0 to view.pieceCount - 1
+        shade = base
+        if shaded
+          n = pSeg[k]
+          if n <> lastSegment
+            shades = m.segmentShades(rendererObj, n, base)
+            lastSegment = n
+            lastBucket = shades.count() - 1
+          end if
+          shade = shades[int(pAlong[k] * lastBucket + 0.5)]
+        end if
+        depth = pDepth[k]
+        if fades and depth > bandStart
+          shade = BGE.RendererHelpers.applyAlphaFade(shade, (far - depth) / (far - bandStart))
+        end if
+        rgbas[k] = shade
+      end for
+    end sub
+
+    ' Lit colors along segment n for the side the eye is on, from the cache.
+    private function segmentShades(rendererObj as Renderer, n as integer, base as integer) as integer[]
+      d = m.drawable
+      seg = d.segments[n]
+      nx = seg.normalX
+      nz = seg.normalZ
+      side = 0
+      if (m.view.originX - seg.ax) * nx + (m.view.originZ - seg.az) * nz < 0
+        side = 1
+        nx = -nx
+        nz = -nz
+      end if
+      key = (n * 2 + side).toStr()
+      shades = m.lightCache[key]
+      if invalid <> shades
+        return shades
+      end if
+      bucketLength = d.lightBucketLength
+      if bucketLength <= 0
+        bucketLength = seg.length + 1
+      end if
+      buckets = int(seg.length / bucketLength) + 1
+      shades = [] as integer[]
+      normal = m.shadeNormal
+      normal.x = nx
+      normal.y = 0
+      normal.z = nz
+      point = m.shadePoint
+      hasLights = rendererObj.hasLights()
+      for b = 0 to buckets
+        f = b / buckets
+        point.x = seg.ax + (seg.bx - seg.ax) * f
+        point.y = (seg.bottom + seg.top) * 0.5
+        point.z = seg.az + (seg.bz - seg.az) * f
+        if hasLights
+          shades.push(BGE.Lighting.shadeColor(base, rendererObj.getPreparedLights(), point, normal, d.ambientBrightness, d.lightWrap))
+        else
+          facing = getOutwardNormalFacingAmount(rendererObj, point, normal)
+          shades.push(BGE.colorBrightness(base, BGE.Math.Max(facing, d.ambientBrightness)))
+        end if
+      end for
+      m.lightCache[key] = shades
+      return shades
+    end function
+
+    private function lapStage(rendererObj as Renderer, name as string, lap as integer) as integer
+      now = rendererObj.getProfileClockMs()
+      rendererObj.addStageMs(name, now - lap)
+      return now
+    end function
+
+    private function hasCamera3d(rendererObj as Renderer) as boolean
+      if rendererObj.camera.name = "Camera3d"
+        return true
+      end if
+      if not m.warnedCamera2d
+        m.warnedCamera2d = true
+        m.drawable.log("Drawable '" + m.drawable.name + "' (walls) needs a Camera3d - it draws nothing with a " + rendererObj.camera.name, BGE.Debug.LogLevel.warning)
+      end if
+      return false
+    end function
+
+    private function getStripWidth(rendererObj as Renderer) as integer
+      width = rendererObj.qualitySettings.gridWallStripWidth
+      if width < 1
+        width = 1
+      end if
+      return width
+    end function
+
+  end class
+
+end namespace

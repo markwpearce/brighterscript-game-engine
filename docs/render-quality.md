@@ -79,7 +79,8 @@ for every field.
 
 ## Grid walls
 
-A [`DrawableGridWalls`](/drawables-and-scene-objects) maze draws one strip per
+A [`DrawableGridWalls`](/drawables-and-scene-objects) maze (or `DrawableWalls`, which uses only
+the strip width) draws one strip per
 `gridWallStripWidth` pixels and samples lights every `gridWallLightInterval` strips,
 so these two settings set its cost. Wider strips and a longer interval are cheaper and
 a little coarser (a fine stair-step along wall feet and tops).

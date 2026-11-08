@@ -1,0 +1,733 @@
+import "../../../math/math.bs"
+import "../../../math/vector.bs"
+import "../cameras/Camera3d.bs"
+import "../gridWalls/GridWallsSpan.bs"
+import "WallsHidingView.bs"
+import "WallSegment.bs"
+
+namespace BGE
+
+  ' Works out which wall strips a BGE.DrawableWalls shows each frame, DOOM-style: no ray is
+  ' cast against the level. The segments in view are walked nearest first and projected onto
+  ' a fan of rays across the screen (as GridWallsView's), one strip per ray. Each ray keeps an
+  ' open window of elevation slopes, (height - eye) / forward depth, that nearer walls narrow:
+  ' a wall on the floor closes it up to its top, one reaching above the screen closes it down
+  ' to its foot. A closed ray costs nothing more, so cost follows screen coverage, and a short
+  ' wall leaves taller ones behind it showing.
+  '
+  ' Every wall point on one ray's bearing lies in one vertical plane through the eye, which
+  ' projects to one screen line, so the window is exact at any pitch.
+  '
+  ' Pieces are recorded front to back (per ray: pieceNext from rayFirstPiece) and drawn back to
+  ' front; a piece partly behind a nearer short wall is drawn whole and painted over.
+  ' Segments are ordered by their nearest point, not per ray: a long wall walked before a nearer
+  ' pillar in front of it closes the rays they share at its own depth, and the pillar is lost
+  ' there. A BSP would fix it.
+  class WallsView extends BGE.WallsHidingView
+
+    rayCount as integer = 0
+    firstTan as float = 0
+    tanStep as float = 1
+    levelForward as BGE.Math.Vector = BGE.Math.VectorOps.create(0, 0, -1)
+    levelRight as BGE.Math.Vector = BGE.Math.VectorOps.create(1, 0, 0)
+    originX as float = 0
+    originY as float = 0
+    originZ as float = 0
+    ' How much nearer than a point a wall must be to hide it, in forward depth (strips round
+    ' to the nearest ray, so a point flush with a receding wall can land on a nearer strip).
+    hideTolerance as float = 8.0
+
+    ' Pieces of the last update(), grown and never shrunk; meaningful below pieceCount.
+    pieceCount as integer = 0
+    pieceSegment = [] as integer[]
+    ' 0..1 along the segment
+    pieceAlong = [] as float[]
+    ' Forward depth (along levelForward)
+    pieceDepth = [] as float[]
+    ' The strip's foot on the canvas, its foot-to-top length, width and lean (radians)
+    pieceX = [] as float[]
+    pieceY = [] as float[]
+    pieceLength = [] as float[]
+    pieceWidth = [] as float[]
+    pieceAngle = [] as float[]
+    pieceRay = [] as integer[]
+    ' The ray's next piece further away, or -1
+    pieceNext = [] as integer[]
+    ' The wall's elevation slopes at the piece, foot and top
+    pieceSlopeLow = [] as float[]
+    pieceSlopeHigh = [] as float[]
+
+    ' Per ray: the nearest piece (-1 for none), the forward depth its window closed at and the
+    ' nearest wall's depth (1e30 if none)
+    rayFirstPiece = [] as integer[]
+    rayCloseDepth = [] as float[]
+    rayNearestDepth = [] as float[]
+
+    ' Segments the last update() found in view, and walked before every ray closed.
+    segmentsInView as integer = 0
+    segmentsVisited as integer = 0
+
+    private segments as BGE.WallSegment[]
+    ' The lowest foot of any segment: nothing further can show below a wall standing on it.
+    private floorY as float = 0.0
+    private rayLastPiece = [] as integer[]
+    private rayLow = [] as float[]
+    private rayHigh = [] as float[]
+    private segFirst = [] as integer[]
+    private segLast = [] as integer[]
+    private segAf = [] as float[]
+    private segAs = [] as float[]
+    private segBf = [] as float[]
+    private segBs = [] as float[]
+    private order = [] as integer[]
+    private focal as float = 1.0
+    private halfWidth as float = 0.0
+    private halfHeight as float = 0.0
+    private limit as float = -0.01
+    private clipFootX as float = 0.0
+    private clipFootY as float = 0.0
+    private clipTopX as float = 0.0
+    private clipTopY as float = 0.0
+
+    sub new(segments as BGE.WallSegment[])
+      super()
+      m.setSegments(segments)
+    end sub
+
+    sub setSegments(segments as BGE.WallSegment[])
+      m.segments = segments
+      lowest = 0.0
+      if segments.count() > 0
+        lowest = 1.0e30
+        for each seg in segments
+          if seg.bottom < lowest
+            lowest = seg.bottom
+          end if
+        end for
+      end if
+      m.floorY = lowest
+    end sub
+
+    ' Walks the segments for this frame. stripWidth is the screen width in pixels one ray covers.
+    ' Returns false (rayCount 0) if the camera looks too close to straight up or down.
+    '
+    ' @param {BGE.Camera3d} camera
+    ' @param {integer} stripWidth
+    ' @return {boolean}
+    function update(camera as BGE.Camera3d, stripWidth as integer) as boolean
+      m.pieceCount = 0
+      m.segmentsInView = 0
+      m.segmentsVisited = 0
+      orient = camera.orientation
+      cosPitch = sqr(orient.x * orient.x + orient.z * orient.z)
+      if cosPitch < 0.02
+        m.rayCount = 0
+        return false
+      end if
+      if invalid = camera.worldToCamera
+        camera.computeWorldToCameraMatrix()
+      end if
+      mat = camera.worldToCamera
+      m0 = mat[0]
+      m1 = mat[1]
+      m2 = mat[2]
+      m3 = mat[3]
+      eye = camera.position
+      ox = eye.x
+      oy = eye.y
+      oz = eye.z
+      m.originX = ox
+      m.originY = oy
+      m.originZ = oz
+      lfx = orient.x / cosPitch
+      lfz = orient.z / cosPitch
+      m.levelForward = BGE.Math.VectorOps.create(lfx, 0, lfz)
+      right = camera.getLevelRightVector()
+      rx = right.x
+      rz = right.z
+      m.levelRight = BGE.Math.VectorOps.create(rx, 0, rz)
+      up = camera.getLevelUpVector()
+      focal = camera.getFocalLength()
+      hw = camera.frameSize.x * 0.5
+      hh = camera.frameSize.y * 0.5
+      m.focal = focal
+      m.halfWidth = hw
+      m.halfHeight = hh
+      near = 1.0
+      limit = -near * 0.01
+      m.limit = limit
+
+      ' the fan, as GridWallsView.update()
+      minTan = 1.0e30
+      maxTan = -1.0e30
+      for each sx in [-1, 1]
+        for each sy in [-1, 1]
+          cx = orient.x * focal + rx * hw * sx + up.x * hh * sy
+          cz = orient.z * focal + rz * hw * sx + up.z * hh * sy
+          fwd = cx * lfx + cz * lfz
+          if fwd < focal * 0.01
+            fwd = focal * 0.01
+          end if
+          t = (cx * rx + cz * rz) / fwd
+          if t < minTan
+            minTan = t
+          end if
+          if t > maxTan
+            maxTan = t
+          end if
+        end for
+      end for
+      tanStep = stripWidth * cosPitch / focal
+      firstTan = minTan - tanStep
+      rayCount = int((maxTan + tanStep - firstTan) / tanStep) + 1
+      maxRays = int(4 * camera.frameSize.x / stripWidth + 0.999)
+      if rayCount > maxRays
+        tanStep = (maxTan - minTan) / (maxRays - 3)
+        firstTan = minTan - tanStep
+        rayCount = maxRays
+      end if
+      m.rayCount = rayCount
+      m.firstTan = firstTan
+      m.tanStep = tanStep
+      m.growRays(rayCount)
+
+      ' each ray's window: nothing yet below, the screen's top edge above
+      low = m.rayLow
+      high = m.rayHigh
+      firstPiece = m.rayFirstPiece
+      lastPiece = m.rayLastPiece
+      closeDepth = m.rayCloseDepth
+      nearestDepth = m.rayNearestDepth
+      c1y = m1[1]
+      c1z = m1[2]
+      den = focal * c1y + hh * c1z
+      for i = 0 to rayCount - 1
+        firstPiece[i] = -1
+        lastPiece[i] = -1
+        closeDepth[i] = 1.0e30
+        nearestDepth[i] = 1.0e30
+        low[i] = -1.0e30
+        high[i] = 1.0e30
+        if abs(den) > 1.0e-9
+          t = firstTan + i * tanStep
+          dx = lfx + rx * t
+          dz = lfz + rz * t
+          c0y = dx * m0[1] + dz * m2[1]
+          c0z = dx * m0[2] + dz * m2[2]
+          e = (-hh * c0z - focal * c0y) / den
+          if c0z + e * c1z < 0
+            high[i] = e + 0.001
+          end if
+        end if
+      end for
+
+      drawDistance = camera.getCurrentDrawDistance()
+      mul = m.sortSegments(ox, oz, lfx, lfz, rx, rz, near, drawDistance)
+      order = m.order
+      m.segmentsInView = order.count()
+
+      ' walk them nearest first
+      segs = m.segments
+      segFirst = m.segFirst
+      segLast = m.segLast
+      segAfs = m.segAf
+      segAss = m.segAs
+      segBfs = m.segBf
+      segBss = m.segBs
+      a00 = m0[0]
+      a01 = m0[1]
+      a02 = m0[2]
+      a10 = m1[0]
+      a11 = m1[1]
+      a12 = m1[2]
+      a20 = m2[0]
+      a21 = m2[1]
+      a22 = m2[2]
+      t30 = m3[0]
+      t31 = m3[1]
+      t32 = m3[2]
+      canvasWidth = hw * 2
+      canvasHeight = hh * 2
+      floorY = m.floorY
+      m.growPieces(rayCount * 2)
+      cap = m.pieceSegment.count()
+      pc = 0
+      pSeg = m.pieceSegment
+      pAlong = m.pieceAlong
+      pDepth = m.pieceDepth
+      pX = m.pieceX
+      pY = m.pieceY
+      pLength = m.pieceLength
+      pWidth = m.pieceWidth
+      pAngle = m.pieceAngle
+      pRay = m.pieceRay
+      pNext = m.pieceNext
+      pLow = m.pieceSlopeLow
+      pHigh = m.pieceSlopeHigh
+      openRays = rayCount
+      visited = 0
+      mask = mul - 1
+      for each key in order
+        if openRays <= 0
+          exit for
+        end if
+        n = key and mask
+        seg = segs[n]
+        visited++
+        af = segAfs[n]
+        aS = segAss[n]
+        dF = segBfs[n] - af
+        dS = segBss[n] - aS
+        bottom = seg.bottom
+        top = seg.top
+        standsOnFloor = bottom <= floorY
+        ax = seg.ax
+        az = seg.az
+        ex = seg.bx - ax
+        ez = seg.bz - az
+        first = segFirst[n]
+
+        ' rays last..first, carrying the ray after's projection for the strip width
+        nOk = false
+        nfx = 0.0
+        nfy = 0.0
+        ntx = 0.0
+        nty = 0.0
+        startRay = segLast[n] + 1
+        for i = startRay to first step -1
+          t = firstTan + i * tanStep
+          d = dS - t * dF
+          s = 0.0
+          if abs(d) > 1.0e-9
+            s = (t * af - aS) / d
+          end if
+          if s < 0
+            s = 0.0
+          else if s > 1
+            s = 1.0
+          end if
+          fwd = af + s * dF
+          hx = ax + ex * s
+          hz = az + ez * s
+          bcx = hx * a00 + hz * a20 + t30
+          bcy = hx * a01 + hz * a21 + t31
+          bcz = hx * a02 + hz * a22 + t32
+          cxF = bcx + bottom * a10
+          cyF = bcy + bottom * a11
+          czF = bcz + bottom * a12
+          cxT = bcx + top * a10
+          cyT = bcy + top * a11
+          czT = bcz + top * a12
+          ok = false
+          fx = 0.0
+          fy = 0.0
+          tx = 0.0
+          ty = 0.0
+          if czF <= limit and czT <= limit
+            fx = hw + focal * cxF / -czF
+            fy = hh - focal * cyF / -czF
+            tx = hw + focal * cxT / -czT
+            ty = hh - focal * cyT / -czT
+            ok = true
+          else if m.clipSegment(cxF, cyF, czF, cxT, cyT, czT)
+            fx = m.clipFootX
+            fy = m.clipFootY
+            tx = m.clipTopX
+            ty = m.clipTopY
+            ok = true
+          end if
+          jOk = nOk
+          jfx = nfx
+          jfy = nfy
+          jtx = ntx
+          jty = nty
+          nOk = ok
+          nfx = fx
+          nfy = fy
+          ntx = tx
+          nty = ty
+          if i = startRay or not ok or fwd < near or fwd >= drawDistance
+            continue for
+          end if
+          rLow = low[i]
+          rHigh = high[i]
+          if rLow >= rHigh
+            continue for
+          end if
+          eB = (bottom - oy) / fwd
+          eT = (top - oy) / fwd
+          if eT <= rLow or eB >= rHigh
+            continue for
+          end if
+          if fwd < nearestDepth[i]
+            nearestDepth[i] = fwd
+          end if
+
+          ddx = tx - fx
+          ddy = ty - fy
+          length = sqr(ddx * ddx + ddy * ddy)
+          if length >= 0.5
+            sinA = -ddx / length
+            cosA = -ddy / length
+            ' across to the next ray's foot or top, whichever is further, plus a pixel
+            width = stripWidth + 0.0
+            if jOk
+              reach = (jfx - fx) * cosA - (jfy - fy) * sinA
+              topReach = (jtx - tx) * cosA - (jty - ty) * sinA
+              if topReach > reach
+                reach = topReach
+              end if
+              width = reach + 1
+              if width < 1
+                width = 1.0
+              end if
+            end if
+            ' skip a strip wholly off the canvas (the fan reaches past it when pitched)
+            wx = width * cosA
+            wy = -width * sinA
+            minX = fx
+            maxX = fx
+            if tx < minX
+              minX = tx
+            else if tx > maxX
+              maxX = tx
+            end if
+            if wx < 0
+              minX += wx
+            else
+              maxX += wx
+            end if
+            minY = fy
+            maxY = fy
+            if ty < minY
+              minY = ty
+            else if ty > maxY
+              maxY = ty
+            end if
+            if wy < 0
+              minY += wy
+            else
+              maxY += wy
+            end if
+            if maxX >= 0 and maxY >= 0 and minX <= canvasWidth and minY <= canvasHeight
+              if pc >= cap
+                m.growPieces(pc + rayCount)
+                cap = pSeg.count()
+              end if
+              pSeg[pc] = n
+              pAlong[pc] = s
+              pDepth[pc] = fwd
+              pX[pc] = fx
+              pY[pc] = fy
+              pLength[pc] = length
+              pWidth[pc] = width
+              if cosA > 0
+                pAngle[pc] = Atn(sinA / cosA)
+              else
+                pAngle[pc] = BGE.Math.Atan2(sinA, cosA)
+              end if
+              pRay[pc] = i
+              pNext[pc] = -1
+              pLow[pc] = eB
+              pHigh[pc] = eT
+              if lastPiece[i] < 0
+                firstPiece[i] = pc
+              else
+                pNext[lastPiece[i]] = pc
+              end if
+              lastPiece[i] = pc
+              pc++
+            end if
+          end if
+
+          ' a wall covering an end of the window closes that end up to its far edge
+          if eB <= rLow or standsOnFloor
+            if eT > rLow
+              rLow = eT
+            end if
+          end if
+          if eT >= rHigh and eB < rHigh
+            rHigh = eB
+          end if
+          low[i] = rLow
+          high[i] = rHigh
+          if rLow >= rHigh
+            closeDepth[i] = fwd
+            openRays--
+          end if
+        end for
+      end for
+      m.pieceCount = pc
+      m.segmentsVisited = visited
+      return true
+    end function
+
+    ' The forward depth at which ray i's view closed (a wall covers all of it from there on),
+    ' or 1e30. Valid for i in 0..rayCount-1 (unchecked).
+    override function getDepth(i as integer) as float
+      return m.rayCloseDepth[i]
+    end function
+
+    ' The forward depth of the nearest wall on ray i, or 1e30.
+    override function getNearestDepth(i as integer) as float
+      return m.rayNearestDepth[i]
+    end function
+
+    ' Fills `out` with the rays covering a set of world points. Invalid if empty or any point
+    ' is level with or behind the camera horizontally.
+    '
+    ' @param {BGE.Math.Vector[]} points
+    ' @param {BGE.GridWallsSpan} out the span to fill
+    ' @return {boolean} out.valid
+    override function findSpan(points as BGE.Math.Vector[], out as BGE.GridWallsSpan) as boolean
+      out.valid = false
+      out.anyAboveWalls = false
+      if points.count() = 0 or m.rayCount = 0
+        return false
+      end if
+      first = m.rayCount
+      last = -1
+      nearest = 1.0e30
+      for each point in points
+        fwd = m.forwardDepth(point)
+        if fwd <= 0
+          return false
+        end if
+        i = m.rayIndexFor(point, fwd)
+        if i < first
+          first = i
+        end if
+        if i > last
+          last = i
+        end if
+        if fwd < nearest
+          nearest = fwd
+        end if
+      end for
+      out.valid = true
+      out.firstRay = first
+      out.lastRay = last
+      out.nearestDistance = nearest
+      return true
+    end function
+
+    ' True when a wall nearer than the point (by more than hideTolerance) covers it.
+    '
+    ' @param {BGE.Math.Vector} point
+    ' @return {boolean}
+    override function isPointHidden(point as BGE.Math.Vector) as boolean
+      if m.rayCount = 0
+        return false
+      end if
+      fwd = m.forwardDepth(point)
+      if fwd <= 0
+        return false
+      end if
+      i = m.rayIndexFor(point, fwd)
+      limit = fwd - m.hideTolerance
+      if m.rayCloseDepth[i] < limit
+        return true
+      end if
+      e = ((point.y ?? 0) - m.originY) / fwd
+      k = m.rayFirstPiece[i]
+      while k >= 0 and m.pieceDepth[k] < limit
+        if e >= m.pieceSlopeLow[k] and e <= m.pieceSlopeHigh[k]
+          return true
+        end if
+        k = m.pieceNext[k]
+      end while
+      return false
+    end function
+
+    ' Sorts the segments facing the eye within the fan by their nearest point into `order`
+    ' (key = quantised distance * mul + index). Returns mul.
+    private function sortSegments(ox as float, oz as float, lfx as float, lfz as float, rx as float, rz as float, near as float, drawDistance as float) as integer
+      segs = m.segments
+      segCount = segs.count()
+      m.growSegments(segCount)
+      order = m.order
+      order.Clear()
+      mul = 2
+      while mul <= segCount
+        mul = mul * 2
+      end while
+      maxKey = int(2147483647 / mul) - 1
+      scale = maxKey / (drawDistance * 2 + 1)
+      firstTan = m.firstTan
+      tanStep = m.tanStep
+      rayCount = m.rayCount
+      for n = 0 to segCount - 1
+        seg = segs[n]
+        dax = seg.ax - ox
+        daz = seg.az - oz
+        dbx = seg.bx - ox
+        dbz = seg.bz - oz
+        if not seg.twoSided and dax * seg.normalX + daz * seg.normalZ >= 0
+          continue for
+        end if
+        af = dax * lfx + daz * lfz
+        aS = dax * rx + daz * rz
+        bf = dbx * lfx + dbz * lfz
+        bS = dbx * rx + dbz * rz
+        if (af < near and bf < near) or (af >= drawDistance and bf >= drawDistance)
+          continue for
+        end if
+        m.segAf[n] = af
+        m.segAs[n] = aS
+        m.segBf[n] = bf
+        m.segBs[n] = bS
+        ' the tangent range of the part in front of the near distance
+        if af < near
+          u = (near - af) / (bf - af)
+          aS = aS + (bS - aS) * u
+          af = near
+        else if bf < near
+          u = (near - af) / (bf - af)
+          bS = aS + (bS - aS) * u
+          bf = near
+        end if
+        ta = aS / af
+        tb = bS / bf
+        if ta > tb
+          tmp = ta
+          ta = tb
+          tb = tmp
+        end if
+        first = int((ta - firstTan) / tanStep)
+        last = int((tb - firstTan) / tanStep)
+        if last < 0 or first >= rayCount
+          continue for
+        end if
+        if first < 0
+          first = 0
+        end if
+        if last > rayCount - 1
+          last = rayCount - 1
+        end if
+        m.segFirst[n] = first
+        m.segLast[n] = last
+
+        ' nearest point on the segment, in plan
+        ex = dbx - dax
+        ez = dbz - daz
+        lenSq = ex * ex + ez * ez
+        u = 0.0
+        if lenSq > 0
+          u = -(dax * ex + daz * ez) / lenSq
+          if u < 0
+            u = 0.0
+          else if u > 1
+            u = 1.0
+          end if
+        end if
+        px = dax + ex * u
+        pz = daz + ez * u
+        q = int(sqr(px * px + pz * pz) * scale)
+        if q > maxKey
+          q = maxKey
+        end if
+        order.push(q * mul + n)
+      end for
+      if order.count() > 1
+        order.Sort()
+      end if
+      return mul
+    end function
+
+    private function forwardDepth(point as BGE.Math.Vector) as float
+      lf = m.levelForward
+      return (point.x - m.originX) * lf.x + ((point.z ?? 0) - m.originZ) * lf.z
+    end function
+
+    private function rayIndexFor(point as BGE.Math.Vector, fwd as float) as integer
+      lr = m.levelRight
+      t = ((point.x - m.originX) * lr.x + ((point.z ?? 0) - m.originZ) * lr.z) / fwd
+      ' strip i covers tangents firstTan + i * tanStep up to the next ray
+      i = int((t - m.firstTan) / m.tanStep)
+      if i < 0
+        return 0
+      end if
+      if i >= m.rayCount
+        return m.rayCount - 1
+      end if
+      return i
+    end function
+
+    ' As GridWallStripBuilder.clipSegment(): clips an end behind the camera and extends the
+    ' visible part's screen line to where that end would map linearly.
+    private function clipSegment(cx0 as float, cy0 as float, cz0 as float, cx1 as float, cy1 as float, cz1 as float) as boolean
+      limit = m.limit
+      if cz0 > limit and cz1 > limit
+        return false
+      end if
+      startT = 0.0
+      endT = 1.0
+      if cz0 > limit
+        startT = (limit - cz0) / (cz1 - cz0)
+      else if cz1 > limit
+        endT = (limit - cz0) / (cz1 - cz0)
+      end if
+      visible = endT - startT
+      if visible < 0.001
+        return false
+      end if
+      focal = m.focal
+      ax = cx0 + (cx1 - cx0) * startT
+      ay = cy0 + (cy1 - cy0) * startT
+      az = cz0 + (cz1 - cz0) * startT
+      bx = cx0 + (cx1 - cx0) * endT
+      by = cy0 + (cy1 - cy0) * endT
+      bz = cz0 + (cz1 - cz0) * endT
+      sax = m.halfWidth + focal * ax / -az
+      say = m.halfHeight - focal * ay / -az
+      sbx = m.halfWidth + focal * bx / -bz
+      sby = m.halfHeight - focal * by / -bz
+      m.clipFootX = sax - (sbx - sax) * startT / visible
+      m.clipFootY = say - (sby - say) * startT / visible
+      m.clipTopX = sax + (sbx - sax) * (1 - startT) / visible
+      m.clipTopY = say + (sby - say) * (1 - startT) / visible
+      return true
+    end function
+
+    private sub growRays(count as integer)
+      for i = m.rayLow.count() to count - 1
+        m.rayLow.push(0.0)
+        m.rayHigh.push(0.0)
+        m.rayFirstPiece.push(-1)
+        m.rayLastPiece.push(-1)
+        m.rayCloseDepth.push(1.0e30)
+        m.rayNearestDepth.push(1.0e30)
+      end for
+    end sub
+
+    private sub growSegments(count as integer)
+      for i = m.segFirst.count() to count - 1
+        m.segFirst.push(0)
+        m.segLast.push(0)
+        m.segAf.push(0.0)
+        m.segAs.push(0.0)
+        m.segBf.push(0.0)
+        m.segBs.push(0.0)
+      end for
+    end sub
+
+    private sub growPieces(count as integer)
+      for i = m.pieceSegment.count() to count - 1
+        m.pieceSegment.push(0)
+        m.pieceAlong.push(0.0)
+        m.pieceDepth.push(0.0)
+        m.pieceX.push(0.0)
+        m.pieceY.push(0.0)
+        m.pieceLength.push(0.0)
+        m.pieceWidth.push(1.0)
+        m.pieceAngle.push(0.0)
+        m.pieceRay.push(0)
+        m.pieceNext.push(-1)
+        m.pieceSlopeLow.push(0.0)
+        m.pieceSlopeHigh.push(0.0)
+      end for
+    end sub
+
+  end class
+
+end namespace

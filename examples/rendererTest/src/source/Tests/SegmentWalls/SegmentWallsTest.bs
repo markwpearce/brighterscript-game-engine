@@ -1,0 +1,357 @@
+' BGE.DrawableWalls (walls as segments with their own heights, #468) at
+' thirdPerson's scale (32 units per metre), on a tiled floor with the grid-walls demo's lights.
+' The camera turns and sweeps its pitch from 15 degrees up to 35 degrees down over 8 s.
+'
+' Launch params: map=grid (the grid-walls demo's maze, as merged segments) or map=hall (a few
+' dozen segments in a mix of heights; default), walls=engine (map=grid only: draw it with
+' BGE.DrawableGridWalls instead, to compare), level=0..4, pitch=<degrees> (holds it),
+' heading=<degrees>, turn=0. Prints a timing line every 2 s.
+'
+' up/down: quality level, OK: hold pitch, left/right: pitch -/+ 5 degrees, *: hold turn.
+class SegmentWallsTest extends RendererTest
+
+  private metre = 32.0
+  private cellMetres = 6.0
+  private gridRows as string[] = [
+    "#########"
+    "#A.T#b..#"
+    "###.#.#.#"
+    "#k..T.#.#"
+    "#.###.#.#"
+    "#...#..T#"
+    "#.#.###T#"
+    "#T#...S.#"
+    "#E#######"
+  ]
+  private pitchUp = 15.0
+  private pitchDown = -35.0
+  private sweepSeconds = 8.0
+  private turnRate = 0.25
+
+  private rendererRef as BGE.Renderer
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private previousQuality as BGE.RenderQualitySettings
+  private walls as BGE.SceneObjectWalls
+  private engineWalls as BGE.SceneObjectGridWalls
+  private font as roFont
+  private mapName = "hall"
+
+  private level as BGE.RenderQualityLevel = BGE.RenderQualityLevel.medium
+  private heading = 0.0
+  private pitch = 0.0
+  private sweepTime = 0.0
+  private sweepPaused = false
+  private turnPaused = false
+  private eye as BGE.Math.Vector
+
+  private reportSeconds = 2.0
+  private windowSeconds = 0.0
+  private windowFrames = 0
+  private windowCastMs = 0
+  private windowDrawMs = 0
+  private windowRenderMs = 0
+  private windowDraws = 0
+  private windowPieces = 0
+  private windowVisited = 0
+  private windowInView = 0
+  private reportLine = "measuring..."
+  private renderTimer as roTimespan
+
+  sub new()
+    super("Segment Walls")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.renderTimer = CreateObject("roTimespan")
+    params = m.launchParams
+    if params.map = "grid"
+      m.mapName = "grid"
+    end if
+
+    m.camera = new BGE.Camera3d()
+    m.camera.maxDrawDistance = 24 * m.metre
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+    m.previousQuality = renderer.qualitySettings
+    renderer.profileStages = true
+
+    floorBmp = CreateObject("roBitmap", "pkg:/sprites/crypt_floor.png")
+    floorRegion = CreateObject("roRegion", floorBmp, 0, 0, floorBmp.GetWidth(), floorBmp.GetHeight())
+    floor = new BGE.DrawablePlane(invalid, floorRegion, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.tiledImage,
+      scale: BGE.Math.VectorOps.create(2, 2, 1),
+      isShaded: true
+    })
+    floor.addToRenderer(renderer)
+
+    ' the 2 x 4 m crypt wall tile
+    tile = CreateObject("roBitmap", "pkg:/sprites/crypt_wall.png")
+    tileRegion = CreateObject("roRegion", tile, 0, 0, tile.GetWidth(), tile.GetHeight())
+    textures = {stone: tileRegion} as roAssociativeArray
+
+    cell = m.cellMetres * m.metre
+    if m.mapName = "grid"
+      m.eye = BGE.Math.VectorOps.create(5.5 * cell, 1.8 * m.metre, 5.5 * cell)
+      renderer.addLight(new BGE.AmbientLight(&h8090B0, 0.3))
+      renderer.addLight(new BGE.PointLight(BGE.Math.VectorOps.create(6.5 * cell, 2.4 * m.metre, 5.5 * cell), 12 * m.metre, &hFFB060, 1.2))
+      if params.walls = "engine"
+        m.addEngineGridWalls(renderer, tile, cell)
+      else
+        m.addWalls(renderer, m.gridMap(tile, cell).toSegments(), {stone: m.cellRegion(tile)})
+      end if
+    else
+      m.eye = BGE.Math.VectorOps.create(24 * m.metre, 1.8 * m.metre, 34 * m.metre)
+      renderer.addLight(new BGE.AmbientLight(&h8090B0, 0.3))
+      renderer.addLight(new BGE.PointLight(BGE.Math.VectorOps.create(24 * m.metre, 3 * m.metre, 26 * m.metre), 16 * m.metre, &hFFB060, 1.2))
+      m.addWalls(renderer, m.hallSegments(), textures)
+    end if
+
+    m.applyLaunchParams()
+    m.applyQuality()
+    m.updateCamera()
+  end sub
+
+  private sub addWalls(renderer as BGE.Renderer, segments as BGE.WallSegment[], textures as roAssociativeArray)
+    drawable = new BGE.DrawableWalls(invalid, segments, textures, {isShaded: true})
+    m.walls = drawable.addToRenderer(renderer) as BGE.SceneObjectWalls
+  end sub
+
+  ' The grid-walls demo's maze drawn by the engine's grid walls, to compare.
+  private sub addEngineGridWalls(renderer as BGE.Renderer, tile as roBitmap, cell as float)
+    drawable = new BGE.DrawableGridWalls(invalid, m.gridMap(tile, cell), {stone: m.cellRegion(tile)}, {isShaded: true})
+    m.engineWalls = drawable.addToRenderer(renderer) as BGE.SceneObjectGridWalls
+  end sub
+
+  private function gridMap(tile as roBitmap, cell as float) as BGE.GridWallsMap
+    return new BGE.GridWallsMap(m.gridRows, {
+      cellSize: cell,
+      wallHeight: 4 * m.metre,
+      origin: BGE.Math.VectorOps.create(0, 0, 0),
+      solid: {"#": "stone"}
+    })
+  end function
+
+  ' Three 2 m tiles across, one 6 m cell
+  private function cellRegion(tile as roBitmap) as roRegion
+    tilesPerCell = 3
+    wallBmp = CreateObject("roBitmap", {width: tile.GetWidth() * tilesPerCell, height: tile.GetHeight(), alphaEnable: false})
+    for i = 0 to tilesPerCell - 1
+      wallBmp.DrawObject(i * tile.GetWidth(), 0, tile)
+    end for
+    wallBmp.Finish()
+    return CreateObject("roRegion", wallBmp, 0, 0, wallBmp.GetWidth(), wallBmp.GetHeight())
+  end function
+
+  ' A 48 m hall: 8 m outer walls, pillars, a tower, a room with a doorway, low and
+  ' mid-height walls (some at angles) the camera sees over.
+  private function hallSegments() as BGE.WallSegment[]
+    u = m.metre
+    segs = [] as BGE.WallSegment[]
+    tw = 2 * u
+    th = 4 * u
+    ' outer walls, facing in
+    size = 48 * u
+    m.addBox(segs, 0, 0, size, size, 0, 8 * u, tw, th, true)
+    ' four 1.5 m pillars, 6 m tall
+    for each p in [[14, 14], [34, 14], [14, 24], [34, 24]]
+      m.addBox(segs, p[0] * u, p[1] * u, (p[0] + 1.5) * u, (p[1] + 1.5) * u, 0, 6 * u, tw, th, false)
+    end for
+    ' a 12 m tower
+    m.addBox(segs, 22 * u, 4 * u, 26 * u, 8 * u, 0, 12 * u, tw, th, false)
+    ' a room with a doorway in its south wall (two-sided)
+    m.addWall(segs, 4, 4, 12, 4, 4, true)
+    m.addWall(segs, 12, 4, 12, 12, 4, true)
+    m.addWall(segs, 12, 12, 9, 12, 4, true)
+    m.addWall(segs, 7, 12, 4, 12, 4, true)
+    m.addWall(segs, 4, 12, 4, 4, 4, true)
+    ' low walls, 1 m
+    m.addWall(segs, 18, 30, 30, 30, 1, true)
+    m.addWall(segs, 30, 30, 30, 36, 1, true)
+    m.addWall(segs, 8, 20, 8, 32, 1, true)
+    ' mid-height walls at angles, 2.5 m
+    m.addWall(segs, 36, 30, 42, 36, 2.5, true)
+    m.addWall(segs, 38, 18, 44, 12, 2.5, true)
+    m.addWall(segs, 4, 40, 12, 44, 2.5, true)
+    m.addWall(segs, 16, 40, 22, 38, 2.5, true)
+    m.addWall(segs, 26, 38, 32, 42, 2.5, true)
+    return segs
+  end function
+
+  ' A wall between two floor points in metres, height in metres.
+  private sub addWall(segs as BGE.WallSegment[], ax as float, az as float, bx as float, bz as float, heightMetres as float, twoSided as boolean)
+    u = m.metre
+    segs.push(BGE.createWallSegment(BGE.Math.VectorOps.create(ax * u, 0, az * u), BGE.Math.VectorOps.create(bx * u, 0, bz * u), 0, heightMetres * u, "stone", {tileWidth: 2 * u, tileHeight: 4 * u, twoSided: twoSided}))
+  end sub
+
+  ' Four one-sided walls round a rectangle, facing in or out.
+  private sub addBox(segs as BGE.WallSegment[], x0 as float, z0 as float, x1 as float, z1 as float, bottom as float, top as float, tw as float, th as float, facingIn as boolean)
+    corners = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]
+    for i = 0 to 3
+      a = corners[i]
+      b = corners[(i + 1) mod 4]
+      ' a -> b runs clockwise seen from above (+y, -z forward), so its left faces out
+      pa = BGE.Math.VectorOps.create(a[0], 0, a[1])
+      pb = BGE.Math.VectorOps.create(b[0], 0, b[1])
+      if facingIn
+        segs.push(BGE.createWallSegment(pb, pa, bottom, top, "stone", {tileWidth: tw, tileHeight: th}))
+      else
+        segs.push(BGE.createWallSegment(pa, pb, bottom, top, "stone", {tileWidth: tw, tileHeight: th}))
+      end if
+    end for
+  end sub
+
+  private sub applyLaunchParams()
+    params = m.launchParams
+    if invalid <> params.level
+      m.level = BGE.clampRenderQualityLevel(val(params.level))
+    end if
+    if invalid <> params.pitch
+      m.pitch = val(params.pitch)
+      m.sweepPaused = true
+    end if
+    if invalid <> params.heading
+      m.heading = val(params.heading) * BGE.Math.PI / 180
+    end if
+    if params.turn = "0"
+      m.turnPaused = true
+    end if
+  end sub
+
+  private sub applyQuality()
+    m.rendererRef.setQualitySettings(BGE.getRenderQualityPreset(m.level))
+    m.resetWindow()
+  end sub
+
+  private sub resetWindow()
+    m.windowSeconds = 0
+    m.windowFrames = 0
+    m.windowCastMs = 0
+    m.windowDrawMs = 0
+    m.windowRenderMs = 0
+    m.windowDraws = 0
+    m.windowPieces = 0
+    m.windowVisited = 0
+    m.windowInView = 0
+  end sub
+
+  ' Heading 0 faces -z; pitch is in degrees, up positive.
+  private sub updateCamera()
+    p = m.pitch * BGE.Math.PI / 180
+    direction = BGE.Math.VectorOps.create(-sin(m.heading) * cos(p), sin(p), -cos(m.heading) * cos(p))
+    m.camera.position = BGE.Math.VectorOps.create(m.eye.x, m.eye.y, m.eye.z)
+    m.camera.setTarget(BGE.Math.VectorOps.add(m.eye, direction))
+  end sub
+
+  override sub update(dt as float)
+    if not m.turnPaused
+      m.heading += dt * m.turnRate
+    end if
+    if not m.sweepPaused
+      m.sweepTime += dt
+      period = 2 * m.sweepSeconds
+      phase = (m.sweepTime - int(m.sweepTime / period) * period) / m.sweepSeconds
+      if phase > 1
+        phase = 2 - phase
+      end if
+      m.pitch = m.pitchUp + (m.pitchDown - m.pitchUp) * phase
+    end if
+    m.updateCamera()
+    m.windowSeconds += dt
+    if m.windowSeconds >= m.reportSeconds and m.windowFrames > 0
+      m.reportTiming()
+    end if
+  end sub
+
+  private sub reportTiming()
+    frames = m.windowFrames
+    fps = frames / m.windowSeconds
+    frameMs = m.windowSeconds * 1000 / frames
+    kind = "walls"
+    if invalid <> m.engineWalls
+      kind = "gridWalls"
+    end if
+    levelName = BGE.getRenderQualityLevelName(m.level)
+    stats = `cast=${m.format(m.windowCastMs / frames)} draw=${m.format(m.windowDrawMs / frames)} render=${m.format(m.windowRenderMs / frames)} draws=${cint(m.windowDraws / frames)} pieces=${cint(m.windowPieces / frames)} inView=${cint(m.windowInView / frames)} visited=${cint(m.windowVisited / frames)}`
+    m.reportLine = `${levelName} pitch ${m.format(m.pitch)}: ${m.format(fps)} fps, ${m.format(frameMs)} ms  ${stats}`
+    print `[segment-walls] map=${m.mapName} walls=${kind} level=${levelName} pitch=${m.format(m.pitch)} turning=${not m.turnPaused} fps=${m.format(fps)} frameMs=${m.format(frameMs)} ${stats}`
+    m.resetWindow()
+  end sub
+
+  private function format(value as float) as string
+    return Str(cint(value * 10) / 10.0).trim()
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    m.renderTimer.Mark()
+    renderer.render()
+    m.windowRenderMs += m.renderTimer.TotalMilliseconds()
+    stages = renderer.getStageMsLastFrame()
+    if invalid <> m.walls
+      m.windowCastMs += m.stageMs(stages, ["wallsWalk", "wallsShade"])
+      m.windowDrawMs += m.stageMs(stages, ["wallsStrips"])
+      m.windowDraws += m.walls.stripsDrawnLastFrame
+      m.windowPieces += m.walls.view.pieceCount
+      m.windowVisited += m.walls.view.segmentsVisited
+      m.windowInView += m.walls.view.segmentsInView
+    else
+      m.windowCastMs += m.stageMs(stages, ["gridWallsCast", "gridWallsBuild", "gridWallsShade"])
+      m.windowDrawMs += m.stageMs(stages, ["gridWallsStrips"])
+      m.windowDraws += m.engineWalls.stripsDrawnLastFrame
+      m.windowPieces += m.engineWalls.raysLastFrame
+    end if
+    m.windowFrames++
+
+    x = 140
+    y = 80
+    renderer.drawRectangle(x - 10, y - 4, 1010, 58, &h000000A0)
+    renderer.drawText(m.reportLine, x, y, BGE.Colors.Yellow, m.font)
+    renderer.drawText("up/down: quality   OK: hold pitch   left/right: pitch   *: hold turn", x, y + 26, BGE.Colors.Gray, m.font)
+  end sub
+
+  private function stageMs(stages as roAssociativeArray, names as string[]) as integer
+    total = 0
+    for each name in names
+      if invalid <> stages[name]
+        total += stages[name]
+      end if
+    end for
+    return total
+  end function
+
+  override sub onInput(buttonName as string)
+    if buttonName = "up" and m.level < BGE.RenderQualityLevel.ultra
+      m.level = (m.level + 1) as BGE.RenderQualityLevel
+      m.applyQuality()
+    else if buttonName = "down" and m.level > BGE.RenderQualityLevel.basic
+      m.level = (m.level - 1) as BGE.RenderQualityLevel
+      m.applyQuality()
+    else if buttonName = "OK"
+      m.sweepPaused = not m.sweepPaused
+    else if buttonName = "options"
+      m.turnPaused = not m.turnPaused
+    else if buttonName = "left" or buttonName = "right"
+      m.sweepPaused = true
+      if buttonName = "left"
+        m.pitch = BGE.Math.Clamp(m.pitch - 5, m.pitchDown, m.pitchUp)
+      else
+        m.pitch = BGE.Math.Clamp(m.pitch + 5, m.pitchDown, m.pitchUp)
+      end if
+      m.resetWindow()
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.clearLights()
+    renderer.profileStages = false
+    renderer.setQualitySettings(m.previousQuality)
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class

@@ -52,6 +52,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
 | `DrawableGridWalls`   | `SceneObjectGridWalls`   | The solid cells of a grid maze as raycast walls - one textured strip per few screen pixels (see below). |
+| `DrawableWalls`       | `SceneObjectWalls`       | A level's walls as segments at any angle with their own heights, drawn as strips like grid walls (see below). |
 | `DrawableWall`        | `SceneObjectWall`        | A freestanding upright wall between two floor points, its texture stretched or tiled (see below). |
 | `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
 | `DrawableParticles`   | `SceneObjectParticle`    | A whole emitter's worth of simulated particles (lines, rectangles, or images), drawn through one `SceneObject` for the entire emitter (see below). |
@@ -1032,6 +1033,57 @@ The UI canvas is a separate renderer, so walls never hide UI.
 `examples/rendererTest` has a `Grid Walls` demo (`--param demo=grid-walls`) with a tiled floor, a
 wall-hung alcove, a figure pacing behind a corner and torch flames (`DrawableParticles`) in and out
 of view.
+
+## Level walls (`DrawableWalls`)
+
+`DrawableWalls` draws a level's walls the way grid walls do, one leaning texture strip per few
+screen pixels, but the walls are segments: two floor points, a foot and a top height, at any
+angle and length. Use it for any 3D level, with walls short or tall; a grid maze converts with
+`GridWallsMap.toSegments()`.
+
+```brighterscript
+segments = [
+  ' a 4-unit-high wall facing -z (one-sided walls face the left of start -> end, seen from above)
+  BGE.createWallSegment(BGE.Math.VectorOps.create(0, 0, 0), BGE.Math.VectorOps.create(512, 0, 0), 0, 128, "stone", {tileWidth: 64, tileHeight: 128})
+  ' a low wall seen from both sides
+  BGE.createWallSegment(BGE.Math.VectorOps.create(100, 0, -200), BGE.Math.VectorOps.create(300, 0, -260), 0, 32, "stone", {tileWidth: 64, tileHeight: 32, twoSided: true})
+]
+walls = new BGE.DrawableWalls(invalid, segments, {stone: stoneRegion}, {isShaded: true})
+walls.addToRenderer(renderer)
+
+' or a grid maze
+walls = new BGE.DrawableWalls(invalid, map.toSegments(), {stone: cellRegion}, {isShaded: true})
+```
+
+Segments are in world space. Each texture is one copy as tiled on a wall: `tileWidth` world
+units across, and `tileHeight` up (rounded so a whole number of copies fits). Copies stacked up
+a wall are drawn into one tall column texture, so a strip is always one draw. Replace walls
+with `setSegments()` and textures with `setTextures()`.
+
+How it draws (`BGE.WallsView`): nothing is raycast. Each frame the camera moves, the segments
+facing the camera are walked nearest first and projected onto the same fan of rays as grid
+walls, one strip per ray. Each ray keeps an open window of elevation, and nearer walls narrow
+it. A wall standing on the floor closes it up to its top, and one reaching above the screen
+closes it down to its foot. A closed ray costs nothing more, and the walk stops once every ray
+is closed. So cost follows screen coverage, not the wall count, and a short wall lets taller
+walls behind it show. Strips draw far to near. With a still camera the walk is reused.
+
+It draws in the walls stage, takes `gridWallStripWidth` from the render quality, and hides
+objects and `drawWorld*` overlays behind it as grid walls do (`Renderer.isBehindGridWalls()`).
+Something behind a short wall is hidden only where the wall covers it. One walls drawable per
+renderer, grid walls included. On rendererTest's `segment-walls` demo it's 20-45% faster than
+grid walls on the same maze.
+
+Limits:
+
+- Needs a `Camera3d`; pitch about 15 degrees up to 35 down; roll is ignored. Wall tops aren't
+  drawn, so keep the camera below them where it can look down on a wall.
+- Segments are ordered by their nearest point, not a BSP yet. A long wall whose nearest point
+  is closer than a pillar in front of it can be walked first and hide the pillar on the rays it
+  covers. Splitting long walls helps until the BSP lands.
+- Nothing may sit lower than the lowest wall foot: a wall standing on that floor closes the
+  rays behind it.
+- No wall tops seen from above, floors per area or doors yet. No collision.
 
 ## Freestanding walls (`DrawableWall`)
 
