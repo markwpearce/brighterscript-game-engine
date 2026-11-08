@@ -13,6 +13,9 @@ namespace BGE
     y as integer = 0
     width as integer = 0
     height as integer = 0
+    ' Whether columns seen from behind may draw from a flipped copy (see getMirrored()).
+    ' Turn off for a bitmap redrawn in place, which the copy wouldn't follow.
+    canMirror as boolean = true
 
     private bitmap as roBitmap = invalid
     private columns = [] as roRegion[]
@@ -20,6 +23,15 @@ namespace BGE
     ' by log2 of the slab width, then slab index
     private columnSlabs = [] as roRegion[][]
     private rowSlabs = [] as roRegion[][]
+    ' partial-tile textures by rect (see getPart()), and ranges by kind and texels
+    private parts as roAssociativeArray = {}
+    private ranges as roAssociativeArray = {}
+    private mirroredColumns as BGE.QuadColumnTexture = invalid
+    private mirroredRows as BGE.QuadColumnTexture = invalid
+    ' for a part (see getPart()): the texture it's part of, and its place there
+    private parent as BGE.QuadColumnTexture = invalid
+    private partU as integer = 0
+    private partV as integer = 0
 
     ' @param {roRegion} region the texture
     ' @param {string} id
@@ -75,6 +87,11 @@ namespace BGE
       return row
     end function
 
+    ' @return {roBitmap} the bitmap the texture is in, at (x, y)
+    function getBitmap() as roBitmap
+      return m.bitmap
+    end function
+
     ' Columns `stepLog2` (log2 of their width) texels wide, from u = 0; the last may be
     ' narrower. Anchored like getColumn().
     '
@@ -91,6 +108,132 @@ namespace BGE
     ' @return {roRegion[]}
     function getRowSlabs(stepLog2 as integer) as roRegion[]
       return m.getSlabs(true, stepLog2)
+    end function
+
+    ' A texture of part of this one, for a partial tile (see QuadColumnDrawer.drawTiledTo()).
+    ' Kept, so its cuts are too.
+    '
+    ' @param {integer} u left texel
+    ' @param {integer} v top texel
+    ' @param {integer} width
+    ' @param {integer} height
+    ' @return {BGE.QuadColumnTexture}
+    function getPart(u as integer, v as integer, width as integer, height as integer) as BGE.QuadColumnTexture
+      key = `${u},${v},${width},${height}`
+      part = m.parts[key]
+      if invalid = part
+        region = CreateObject("roRegion", m.bitmap, m.x + u, m.y + v, width, height)
+        part = new BGE.QuadColumnTexture(region, `${m.id}#${key}`)
+        part.canMirror = m.canMirror
+        part.setParent(m, u, v)
+        m.parts[key] = part
+      end if
+      return part
+    end function
+
+    ' Columns (or with `useRows`, rows) `first` to `first + count - 1` as one region, anchored
+    ' like a slab: for a slab cut short by a partial repeat. Kept.
+    '
+    ' @param {boolean} useRows
+    ' @param {integer} first
+    ' @param {integer} count
+    ' @return {roRegion}
+    function getRange(useRows as boolean, first as integer, count as integer) as roRegion
+      key = `${useRows},${first},${count}`
+      range = m.ranges[key]
+      if invalid = range
+        if useRows
+          range = CreateObject("roRegion", m.bitmap, m.x, m.y + first, m.width, count)
+          range.SetPreTranslation(-m.width, -count)
+        else
+          range = CreateObject("roRegion", m.bitmap, m.x + first, m.y, count, m.height)
+          range.SetPreTranslation(0, -m.height)
+        end if
+        m.ranges[key] = range
+      end if
+      return range
+    end function
+
+    ' A copy flipped left to right (or with `useRows`, top to bottom), made on first use and
+    ' kept: its slabs draw unmirrored where this one's would have to be mirrored, which Roku
+    ' can't do rotated. Texel u (or v) here is `width - 1 - u` there.
+    '
+    ' @param {boolean} useRows
+    ' @return {BGE.QuadColumnTexture}
+    function getMirrored(useRows as boolean) as BGE.QuadColumnTexture
+      if useRows
+        mirrored = m.mirroredRows
+      else
+        mirrored = m.mirroredColumns
+      end if
+      if invalid <> mirrored
+        return mirrored
+      end if
+      if invalid <> m.parent
+        mirrored = m.getMirroredPart(useRows)
+      else
+        mirrored = m.createMirrored(useRows)
+      end if
+      if invalid = mirrored
+        m.canMirror = false
+      else if useRows
+        m.mirroredRows = mirrored
+      else
+        m.mirroredColumns = mirrored
+      end if
+      return mirrored
+    end function
+
+    ' Makes this a part of `parent` at texel (`u`, `v`), so it mirrors from the parent's copy.
+    '
+    ' @param {object} parent a BGE.QuadColumnTexture
+    ' @param {integer} u
+    ' @param {integer} v
+    sub setParent(parent as object, u as integer, v as integer)
+      m.parent = parent
+      m.partU = u
+      m.partV = v
+    end sub
+
+    ' A part's flipped copy, cut from where the part lands in its parent's
+    private function getMirroredPart(useRows as boolean) as BGE.QuadColumnTexture
+      whole = m.parent.getMirrored(useRows)
+      if invalid = whole
+        return invalid
+      end if
+      x = whole.x + m.parent.width - m.partU - m.width
+      y = whole.y + m.partV
+      if useRows
+        x = whole.x + m.partU
+        y = whole.y + m.parent.height - m.partV - m.height
+      end if
+      suffix = "flipX"
+      if useRows
+        suffix = "flipY"
+      end if
+      return new BGE.QuadColumnTexture(CreateObject("roRegion", whole.getBitmap(), x, y, m.width, m.height), `${m.id}#${suffix}`)
+    end function
+
+    private function createMirrored(useRows as boolean) as BGE.QuadColumnTexture
+      ' no blending, so alpha copies as is
+      bitmap = CreateObject("roBitmap", {width: m.width, height: m.height, alphaEnable: false})
+      if invalid = bitmap
+        return invalid
+      end if
+      bitmap.Clear(0)
+      if useRows
+        ' a negative scaleY isn't reliable on device, so copy row by row
+        for v = 0 to m.height - 1
+          bitmap.DrawObject(0, m.height - 1 - v, CreateObject("roRegion", m.bitmap, m.x, m.y + v, m.width, 1))
+        end for
+      else
+        bitmap.DrawScaledObject(m.width, 0, -1, 1, CreateObject("roRegion", m.bitmap, m.x, m.y, m.width, m.height))
+      end if
+      suffix = "flipX"
+      if useRows
+        suffix = "flipY"
+      end if
+      return new BGE.QuadColumnTexture(CreateObject("roRegion", bitmap, 0, 0, m.width, m.height), `${m.id}#${suffix}`)
     end function
 
     private function getSlabs(useRows as boolean, stepLog2 as integer) as roRegion[]

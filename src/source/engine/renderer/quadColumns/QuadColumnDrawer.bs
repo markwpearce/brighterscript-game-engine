@@ -32,6 +32,7 @@ namespace BGE
 
     private columnsPerTexel as float = 0.5
     private minPixelsPerColumn as float = 4.0
+    private maxAffineError as float = 0.0
     private focal as float = 1.0
     ' orthographic: screen x = centerX + scaleX * x, screen y = centerY - scaleY * y
     private ortho as boolean = false
@@ -61,8 +62,13 @@ namespace BGE
     private footX = [] as float[]
     private footY = [] as float[]
     private edgeOk = [] as boolean[]
-    ' the texel each column edge is at
+    ' each column edge's texel across the quad (counting repeats), and each column's first
+    ' texel in the texture
     private edgeTexels = [] as integer[]
+    private columnTexels = [] as integer[]
+    ' a band's corners and tints (see drawTiledTo())
+    private bandCorners = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] as float[]
+    private bandColors = [] as integer[]
     private channels = [] as float[]
 
     ' Starts a frame: resets the column budget and reads the column density.
@@ -72,6 +78,7 @@ namespace BGE
       m.columnsThisFrame = 0
       m.columnsPerTexel = settings.quadColumnsPerTexel
       m.minPixelsPerColumn = settings.quadMinPixelsPerColumn
+      m.maxAffineError = settings.quadMaxAffineErrorPixels
     end sub
 
     ' Sets the projection: screen x = centerX + focal * x / -z, screen y = centerY - focal * y / -z.
@@ -127,6 +134,118 @@ namespace BGE
     '   order, blended across the columns (e.g. lighting)
     ' @return {integer} how many columns were drawn
     function drawTo(target as ifDraw2D, corners as float[], texture as BGE.QuadColumnTexture, colors as integer[]) as integer
+      return m.drawWrapped(target, corners, texture, colors, 1.0, m.prefersRows(corners), false)
+    end function
+
+    ' drawTo(), repeating the texture `repeatU` times across and `repeatV` times down instead
+    ' of stretching it once. Tiles start at the texture's left and bottom edges (a wall's
+    ' foot), so a partial tile is on the right or top. Columns wrap the texture across them
+    ' in one pass; along their length the quad is drawn in bands, one per repeat.
+    '
+    ' @param {ifDraw2D} target an roBitmap or roScreen
+    ' @param {float[]} corners as drawTo()
+    ' @param {BGE.QuadColumnTexture} texture
+    ' @param {integer[]} colors as drawTo()
+    ' @param {float} repeatU times the texture repeats across (u)
+    ' @param {float} repeatV times the texture repeats down (v)
+    ' @return {integer} how many columns were drawn
+    function drawTiledTo(target as ifDraw2D, corners as float[], texture as BGE.QuadColumnTexture, colors as integer[], repeatU as float, repeatV as float) as integer
+      m.lastColumnCount = 0
+      if repeatU <= 0 or repeatV <= 0
+        return 0
+      end if
+      useRows = m.prefersRows(corners)
+      across = repeatU
+      along = repeatV
+      if useRows
+        across = repeatV
+        along = repeatU
+      end if
+      ' rows wrap from the foot, so a partial tile is on top
+      if along > 0.999 and along < 1.001
+        return m.drawWrapped(target, corners, texture, colors, across, useRows, useRows)
+      end if
+      tinted = colors.count() >= 4
+      bandCorners = m.bandCorners
+      bandColors = m.bandColors
+      bandColors.Clear()
+      bandColors.push(colors[0])
+      if tinted
+        bandColors.push(colors[0])
+        bandColors.push(colors[0])
+        bandColors.push(colors[0])
+      end if
+      bands = int(along + 0.999)
+      drawn = 0
+      columns = 0
+      for b = 0 to bands - 1
+        ' quad fractions: across (0 = left) and down (0 = top)
+        left = 0.0
+        right = 1.0
+        top = 0.0
+        foot = 1.0
+        part = 1.0
+        if useRows
+          ' bands across from the left
+          left = b / along
+          right = (b + 1) / along
+          if right > 1
+            part = (1 - left) * along
+            right = 1
+          end if
+        else
+          ' bands up from the foot
+          foot = 1 - b / along
+          top = 1 - (b + 1) / along
+          if top < 0
+            part = foot * along
+            top = 0
+          end if
+        end if
+        m.lerpCorners(corners, left, top, bandCorners, 0)
+        m.lerpCorners(corners, right, top, bandCorners, 3)
+        m.lerpCorners(corners, left, foot, bandCorners, 6)
+        m.lerpCorners(corners, right, foot, bandCorners, 9)
+        if tinted
+          bandColors[0] = m.lerpColor(colors, left, top)
+          bandColors[1] = m.lerpColor(colors, right, top)
+          bandColors[2] = m.lerpColor(colors, left, foot)
+          bandColors[3] = m.lerpColor(colors, right, foot)
+        end if
+        bandTexture = texture
+        if part < 0.999
+          if useRows
+            width = int(texture.width * part + 0.5)
+            if width < 1
+              width = 1
+            end if
+            bandTexture = texture.getPart(0, 0, width, texture.height)
+          else
+            height = int(texture.height * part + 0.5)
+            if height < 1
+              height = 1
+            end if
+            bandTexture = texture.getPart(0, texture.height - height, texture.width, height)
+          end if
+        end if
+        drawn += m.drawWrapped(target, bandCorners, bandTexture, bandColors, across, useRows, useRows)
+        columns += m.lastColumnCount
+      end for
+      m.lastColumnCount = columns
+      return drawn
+    end function
+
+    ' Whether columns should be texture rows: depth changes least along v.
+    private function prefersRows(corners as float[]) as boolean
+      du = abs(corners[5] - corners[2]) + abs(corners[11] - corners[8])
+      dv = abs(corners[8] - corners[2]) + abs(corners[11] - corners[5])
+      return du < dv
+    end function
+
+    ' Draws the quad as columns (texture rows if `useRows`), the texture repeated `repeat`
+    ' times across them. With `alignEnd`, the last repeat ends on the quad's far edge, so a
+    ' partial one is at the start.
+    private function drawWrapped(target as ifDraw2D, corners as float[], texture as BGE.QuadColumnTexture, colors as integer[], repeat as float, useRows as boolean, alignEnd as boolean) as integer
       m.lastColumnCount = 0
       budget = m.maxColumnsPerFrame - m.columnsThisFrame
       if budget <= 0
@@ -138,9 +257,6 @@ namespace BGE
       end if
 
       ' corners the column tops run between (texture top / left edge), then their feet
-      du = abs(corners[5] - corners[2]) + abs(corners[11] - corners[8])
-      dv = abs(corners[8] - corners[2]) + abs(corners[11] - corners[5])
-      useRows = du < dv
       if useRows
         t0 = 0
         t1 = 2
@@ -157,32 +273,84 @@ namespace BGE
         texLength = texture.height
       end if
       m.lastUsedRows = useRows
+      ' texels across the quad, counting repeats
+      total = int(texN * repeat + 0.5)
+      if total < 1
+        total = 1
+      end if
+      tiles = (total + texN - 1) \ texN
+      phase = 0
+      if alignEnd
+        phase = tiles * texN - total
+      end if
 
-      n = int(texN * m.columnsPerTexel + 0.999)
+      m.tx0 = corners[t0 * 3]
+      m.ty0 = corners[t0 * 3 + 1]
+      m.tz0 = corners[t0 * 3 + 2]
+      ' steps are per texel across the quad
+      m.tdx = (corners[t1 * 3] - m.tx0) / total
+      m.tdy = (corners[t1 * 3 + 1] - m.ty0) / total
+      m.tdz = (corners[t1 * 3 + 2] - m.tz0) / total
+      m.fx0 = corners[f0 * 3]
+      m.fy0 = corners[f0 * 3 + 1]
+      m.fz0 = corners[f0 * 3 + 2]
+      m.fdx = (corners[f1 * 3] - m.fx0) / total
+      m.fdy = (corners[f1 * 3 + 1] - m.fy0) / total
+      m.fdz = (corners[f1 * 3 + 2] - m.fz0) / total
+
+      tinted = colors.count() >= 4
+      n = int(total * m.columnsPerTexel + 0.999)
       extent = m.screenExtent(corners, t0, t1, f0, f1)
       if extent >= 0
         byPixels = int(extent / m.minPixelsPerColumn) + 1
         if byPixels < n
           n = byPixels
         end if
-      end if
-      if n > texN
-        n = texN
+        ' a slab is drawn affine, so only depth change across the quad needs more of them;
+        ' not when columns are drawn thin, a texel each (seen from behind with no flipped copy)
+        if m.maxAffineError > 0 and not tinted and (not m.drawsThin(useRows, total) or (texture.canMirror and invalid <> texture.getMirrored(useRows)))
+          byError = int(sqr(m.affineError(corners, t0, t1, f0, f1) / m.maxAffineError) + 0.999)
+          if byError < n
+            n = byError
+          end if
+        end if
       end if
       if n > budget
         n = budget
       end if
-      if n < 1
-        n = 1
+      ' a slab can't span two repeats
+      if n < tiles
+        n = tiles
       end if
       ' columns are whole slabs a power of two texels wide, so their regions can be kept
       stepLog2 = 0
       stepSize = 1
-      while (texN + stepSize - 1) \ stepSize > n
+      while stepSize < texN and tiles * ((texN + stepSize - 1) \ stepSize) > n
         stepSize = stepSize * 2
         stepLog2++
       end while
-      n = (texN + stepSize - 1) \ stepSize
+      ' column edges in texels across the quad, cut at slab and repeat boundaries
+      edgeTexels = m.edgeTexels
+      edgeTexels.Clear()
+      columnTexels = m.columnTexels
+      columnTexels.Clear()
+      edgeTexels.push(0)
+      position = 0
+      while position < total
+        texel = (position + phase) mod texN
+        slabEnd = (texel \ stepSize + 1) * stepSize
+        if slabEnd > texN
+          slabEnd = texN
+        end if
+        nextPosition = position + slabEnd - texel
+        if nextPosition > total
+          nextPosition = total
+        end if
+        columnTexels.push(texel)
+        edgeTexels.push(nextPosition)
+        position = nextPosition
+      end while
+      n = columnTexels.count()
       m.lastColumnCount = n
 
       m.grow(n + 1)
@@ -191,28 +359,6 @@ namespace BGE
       footX = m.footX
       footY = m.footY
       edgeOk = m.edgeOk
-      m.tx0 = corners[t0 * 3]
-      m.ty0 = corners[t0 * 3 + 1]
-      m.tz0 = corners[t0 * 3 + 2]
-      ' steps are per texel, edge k at texel edgeTexel(k)
-      m.tdx = (corners[t1 * 3] - m.tx0) / texN
-      m.tdy = (corners[t1 * 3 + 1] - m.ty0) / texN
-      m.tdz = (corners[t1 * 3 + 2] - m.tz0) / texN
-      m.fx0 = corners[f0 * 3]
-      m.fy0 = corners[f0 * 3 + 1]
-      m.fz0 = corners[f0 * 3 + 2]
-      m.fdx = (corners[f1 * 3] - m.fx0) / texN
-      m.fdy = (corners[f1 * 3 + 1] - m.fy0) / texN
-      m.fdz = (corners[f1 * 3 + 2] - m.fz0) / texN
-      edgeTexels = m.edgeTexels
-      edgeTexels.Clear()
-      for k = 0 to n
-        texel = k * stepSize
-        if texel > texN
-          texel = texN
-        end if
-        edgeTexels.push(texel)
-      end for
       anyBehind = false
       for k = 0 to n
         if not m.projectEdge(k, edgeTexels[k])
@@ -238,23 +384,28 @@ namespace BGE
       reversed = false
       for k = 0 to n - 1
         if edgeOk[k] and edgeOk[k + 1]
-          dx = topX[k] - footX[k]
-          dy = topY[k] - footY[k]
-          reversed = (footX[k + 1] - footX[k]) * -dy + (footY[k + 1] - footY[k]) * dx < 0
+          reversed = m.edgesReversed(k)
           exit for
         end if
       end for
 
-      tinted = colors.count() >= 4
       color = colors[0]
       if tinted
         tinted = m.unpackCornerColors(colors, t0, t1, f0, f1)
       end if
 
-      ' whole slabs, unless they'd draw mirrored (see drawTriangleTo())
-      thin = reversed <> useRows
+      ' whole slabs, unless they'd draw mirrored (see drawTriangleTo()): then from a flipped
+      ' copy, or a texel at a time if the texture can't have one
+      mirrored = invalid
+      thin = false
+      if reversed <> useRows
+        if texture.canMirror
+          mirrored = texture.getMirrored(useRows)
+        end if
+        thin = invalid = mirrored
+      end if
       slabs = []
-      if not thin
+      if not thin and invalid = mirrored
         if useRows
           slabs = texture.getRowSlabs(stepLog2)
         else
@@ -266,6 +417,9 @@ namespace BGE
       maxY = m.canvasHeight + margin
       drawn = 0
       for k = 0 to n - 1
+        if drawn >= budget
+          exit for
+        end if
         if not edgeOk[k] or not edgeOk[k + 1]
           continue for
         end if
@@ -307,33 +461,107 @@ namespace BGE
           angle = BGE.Math.Atan2(sinA, cosA) * 57.2957795
         end if
         if tinted
-          color = m.columnColor((edgeTexels[k] + edgeTexels[k + 1]) * 0.5 / texN)
+          color = m.columnColor((edgeTexels[k] + edgeTexels[k + 1]) * 0.5 / total)
         end if
-        texel = (edgeTexels[k] + edgeTexels[k + 1] - 1) \ 2
-        acrossTexels = 1
-        if not thin
-          acrossTexels = edgeTexels[k + 1] - edgeTexels[k]
+        first = columnTexels[k]
+        acrossTexels = edgeTexels[k + 1] - edgeTexels[k]
+        if thin
+          texel = first + (acrossTexels - 1) \ 2
+          acrossTexels = 1
+          if useRows
+            region = texture.getRow(texel)
+          else
+            region = texture.getColumn(texel)
+          end if
+        else if invalid <> mirrored
+          region = mirrored.getRange(useRows, texN - first - acrossTexels, acrossTexels)
+        else if first mod stepSize = 0 and (acrossTexels = stepSize or first + acrossTexels = texN)
+          region = slabs[first \ stepSize]
+        else
+          ' cut short by a partial repeat
+          region = texture.getRange(useRows, first, acrossTexels)
         end if
         if useRows
           ' a row turned a quarter clockwise runs along foot -> top, its thickness across
-          if thin
-            region = texture.getRow(texel)
-          else
-            region = slabs[k]
-          end if
           target.DrawTransformedObject(fx, fy, angle - 90, length / texLength, width / acrossTexels, region, color)
         else
-          if thin
-            region = texture.getColumn(texel)
-          else
-            region = slabs[k]
-          end if
           target.DrawTransformedObject(fx, fy, angle, width / acrossTexels, length / texLength, region, color)
         end if
         drawn++
       end for
       m.columnsThisFrame += drawn
       return drawn
+    end function
+
+    ' Whether the quad's columns will be drawn thin (see drawWrapped()), judged from its outer
+    ' edges. Only called with every corner in front of the camera.
+    private function drawsThin(useRows as boolean, total as integer) as boolean
+      m.grow(2)
+      m.projectEdge(0, 0)
+      m.projectEdge(1, total)
+      return m.edgesReversed(0) <> useRows
+    end function
+
+    ' Whether projected edge k + 1 is left of edge k's foot -> top, so the quad is seen from
+    ' behind and its columns are anchored at their far edge.
+    private function edgesReversed(k as integer) as boolean
+      dx = m.topX[k] - m.footX[k]
+      dy = m.topY[k] - m.footY[k]
+      return (m.footX[k + 1] - m.footX[k]) * -dy + (m.footY[k + 1] - m.footY[k]) * dx < 0
+    end function
+
+    ' The most, in pixels, an affine slab across the quad's top or foot edge strays from
+    ' perspective, at its middle. 0 with an orthographic projection.
+    private function affineError(corners as float[], t0 as integer, t1 as integer, f0 as integer, f1 as integer) as float
+      if m.ortho
+        return 0
+      end if
+      topError = m.edgeAffineError(corners, t0, t1)
+      footError = m.edgeAffineError(corners, f0, f1)
+      if footError > topError
+        return footError
+      end if
+      return topError
+    end function
+
+    private function edgeAffineError(corners as float[], a as integer, b as integer) as float
+      focal = m.focal
+      za = corners[a * 3 + 2]
+      zb = corners[b * 3 + 2]
+      dx = focal * (corners[a * 3] / za - corners[b * 3] / zb)
+      dy = focal * (corners[a * 3 + 1] / za - corners[b * 3 + 1] / zb)
+      wa = -1 / za
+      wb = -1 / zb
+      return sqr(dx * dx + dy * dy) * abs(wa - wb) / (2 * (wa + wb))
+    end function
+
+    ' Writes the camera-space point a fraction `u` across and `v` down the quad `corners`
+    ' into `out` at `index`.
+    private sub lerpCorners(corners as float[], u as float, v as float, out as float[], index as integer)
+      for c = 0 to 2
+        top = corners[c] + (corners[3 + c] - corners[c]) * u
+        foot = corners[6 + c] + (corners[9 + c] - corners[6 + c]) * u
+        out[index + c] = top + (foot - top) * v
+      end for
+    end sub
+
+    ' The RGBA tint a fraction `u` across and `v` down a quad with corner tints `colors`.
+    private function lerpColor(colors as integer[], u as float, v as float) as integer
+      color = 0
+      for shift = 24 to 0 step -8
+        tl = (colors[0] >> shift) and &hFF
+        tr = (colors[1] >> shift) and &hFF
+        bl = (colors[2] >> shift) and &hFF
+        br = (colors[3] >> shift) and &hFF
+        top = tl + (tr - tl) * u
+        foot = bl + (br - bl) * u
+        value = int(top + (foot - top) * v + 0.5)
+        if value > 255
+          value = 255
+        end if
+        color = (color << 8) or value
+      end for
+      return color
     end function
 
     ' Draws a textured triangle (a model face) into `target` as strips cut to the triangle
@@ -431,6 +659,7 @@ namespace BGE
       end while
       strips = cuts.getStrips(useRows, stepLog2)
       m.lastColumnCount = strips.starts.count()
+      canMirror = cuts.canMirror(useRows)
 
       focal = m.focal
       ortho = m.ortho
@@ -560,15 +789,15 @@ namespace BGE
         else
           angle = BGE.Math.Atan2(sinA, cosA) * 57.2957795
         end if
-        ' the whole slab, unless it would draw mirrored: a column's texels run away from its
-        ' anchor, a row's (turned a quarter) toward it
-        thin = reversed <> useRows
+        ' the whole slab, unless it would draw mirrored (a column's texels run away from its
+        ' anchor, a row's, turned a quarter, toward it): then from a flipped copy, or thin
+        mirrored = reversed <> useRows
         if cropLow >= 0
-          region = cuts.getCroppedRegion(useRows, strips, k, cropLow, cropHigh, thin)
-        else if thin
-          region = cuts.getThinRegion(useRows, strips, k)
+          region = cuts.getCroppedRegion(useRows, strips, k, cropLow, cropHigh, mirrored)
+        else if mirrored
+          region = cuts.getMirroredRegion(useRows, strips, k)
         end if
-        if thin
+        if mirrored and not canMirror
           acrossTexels = 1
         else
           acrossTexels = strips.ends[k] - strips.starts[k]

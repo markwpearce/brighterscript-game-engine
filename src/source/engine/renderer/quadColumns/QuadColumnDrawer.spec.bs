@@ -11,14 +11,29 @@ namespace tests
     private drawer as BGE.QuadColumnDrawer
     private texture as BGE.QuadColumnTexture
     private target as roBitmap
+    private bandsCanMirror = true
 
     protected override sub beforeEach()
+      m.bandsCanMirror = true
       m.drawer = new BGE.QuadColumnDrawer()
       m.drawer.setProjection(640, 1280, 720)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.medium))
       m.texture = new BGE.QuadColumnTexture(m.quadrantTexture(), "quadrants")
       m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
       m.target.Clear(&h000000FF)
+    end sub
+
+    ' A preset with no perspective-error cap, so column counts come from density alone
+    private function dense(level as BGE.RenderQualityLevel) as BGE.RenderQualitySettings
+      settings = BGE.getRenderQualityPreset(level)
+      settings.quadMaxAffineErrorPixels = 0
+      return settings
+    end function
+
+    private sub capError(pixels as float)
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.quadMaxAffineErrorPixels = pixels
+      m.drawer.beginFrame(settings)
     end sub
 
     ' 128x128: top-left red, top-right blue, bottom-left green, bottom-right white
@@ -54,13 +69,15 @@ namespace tests
         end if
       end for
       bmp.Finish()
-      return new BGE.QuadColumnTexture(CreateObject("roRegion", bmp, 0, 0, 128, 128), "bands")
+      texture = new BGE.QuadColumnTexture(CreateObject("roRegion", bmp, 0, 0, 128, 128), "bands")
+      texture.canMirror = m.bandsCanMirror
+      return texture
     end function
 
     ' Draws the banded texture onto `quad` (clip space, an orthographic projection 256 x 144
     ' px from (512, 288)) as slabs 16 texels wide, so each has a red and a blue band.
     private sub drawBandedSlabs(quad as float[], alongV as boolean)
-      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings = m.dense(BGE.RenderQualityLevel.medium)
       settings.quadColumnsPerTexel = 1 / 16
       settings.quadMinPixelsPerColumn = 1
       m.drawer.beginFrame(settings)
@@ -177,7 +194,7 @@ namespace tests
       ' a wall on the left running from behind the camera to depth 3100: at Basic its 32
       ' columns are 100 units apart, so the one from depth 0 to 100 (cut at the near plane,
       ' depth 10) covers x -3200..256 on screen
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.basic))
       quad = [-60.0, 50.0, 100.0, -60.0, 50.0, -3100.0, -60.0, -50.0, 100.0, -60.0, -50.0, -3100.0]
       m.drawer.drawTo(m.target, quad, m.texture, [-1])
       m.assertNotEqual([0, 0, 0], m.pixel(100, 360))
@@ -199,18 +216,53 @@ namespace tests
       m.assertEqual([0, 0, 255], m.pixel(600, 302))
     end function
 
-    @it("draws a mirrored column's middle texel, so it isn't mirrored within the column")
+    @it("draws a mirrored column's whole slab from a flipped copy")
     function _()
-      ' mirrored left to right: u 0 is at x 768; a mirrored slab would put blue here
+      ' mirrored left to right: u 0 is at x 768, the first blue band (u 8-15) at 738-752
       m.drawBandedSlabs([0.2, 0.2, -0.3, -0.2, 0.2, -0.7, 0.2, -0.2, -0.3, -0.2, -0.2, -0.7], false)
       m.assertEqual([255, 0, 0], m.pixel(762, 350))
+      m.assertEqual([0, 0, 255], m.pixel(745, 350))
     end function
 
-    @it("draws a mirrored row's middle texel")
+    @it("draws a mirrored row's whole slab from a flipped copy")
     function _()
-      ' mirrored top to bottom: v 0 is at y 432
+      ' mirrored top to bottom: v 0 is at y 432, the first blue band at 414-423
       m.drawBandedSlabs([-0.2, -0.2, -0.3, 0.2, -0.2, -0.3, -0.2, 0.2, -0.7, 0.2, 0.2, -0.7], true)
       m.assertEqual([255, 0, 0], m.pixel(600, 429))
+      m.assertEqual([0, 0, 255], m.pixel(600, 418))
+    end function
+
+    @it("draws a mirrored column's middle texel when the texture can't be mirrored")
+    function _()
+      m.bandsCanMirror = false
+      m.drawBandedSlabs([0.2, 0.2, -0.3, -0.2, 0.2, -0.7, 0.2, -0.2, -0.3, -0.2, -0.2, -0.7], false)
+      ' a mirrored slab would put blue here
+      m.assertEqual([255, 0, 0], m.pixel(762, 350))
+      m.assertEqual([255, 0, 0], m.pixel(745, 350))
+    end function
+
+    @it("keeps its flipped copies")
+    function _()
+      columns = m.texture.getMirrored(false)
+      m.assertEqual("quadrants#flipX", columns.id)
+      m.assertEqual(128, columns.width)
+      m.assertEqual(columns.id, m.texture.getMirrored(false).id)
+      m.assertEqual("quadrants#flipY", m.texture.getMirrored(true).id)
+    end function
+
+    @it("cuts a part's flipped copies from its texture's")
+    function _()
+      part = m.texture.getPart(16, 8, 32, 64)
+      columns = part.getMirrored(false)
+      ' flipped left to right, u 16-47 lands at 80-111
+      m.assertEqual(80, columns.x)
+      m.assertEqual(8, columns.y)
+      m.assertEqual(32, columns.width)
+      m.assertEqual(64, columns.height)
+      ' top to bottom, v 8-71 lands at 56-119
+      rows = part.getMirrored(true)
+      m.assertEqual(16, rows.x)
+      m.assertEqual(56, rows.y)
     end function
 
     @describe("column count")
@@ -220,14 +272,14 @@ namespace tests
       ' 128 texels; 256 px across
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(64, m.drawer.lastColumnCount)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.basic))
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(32, m.drawer.lastColumnCount)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.ultra))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.ultra))
       m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
       m.assertEqual(128, m.drawer.lastColumnCount)
       ' far away: 64 px across wants 64 / 4 + 1 at Medium, so slabs 8 texels wide
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.medium))
       far = m.facingQuad()
       for i = 2 to 11 step 3
         far[i] = -2000.0
@@ -245,7 +297,7 @@ namespace tests
       m.assertEqual(4, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
       m.assertEqual(0, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
       m.assertEqual(100, m.drawer.columnsThisFrame)
-      m.drawer.beginFrame(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium))
+      m.drawer.beginFrame(m.dense(BGE.RenderQualityLevel.medium))
       m.assertEqual(64, m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1]))
     end function
 
@@ -258,6 +310,135 @@ namespace tests
       ' x 1152..1408 on screen: only about the first half is on the 1280 canvas
       drawn = m.drawer.drawTo(m.target, quad, m.texture, [-1])
       m.assertTrue(drawn > 28 and drawn < 40, `drawn ${drawn}`)
+    end function
+
+    @describe("drawTiledTo")
+
+    @it("repeats the texture across instead of stretching it")
+    function _()
+      drawn = m.drawer.drawTiledTo(m.target, m.facingQuad(), m.texture, [-1], 2, 1)
+      m.assertTrue(drawn > 0)
+      ' 512..768 across: two copies, each red then blue on top
+      m.assertEqual([255, 0, 0], m.pixel(544, 300))
+      m.assertEqual([0, 0, 255], m.pixel(608, 300))
+      m.assertEqual([255, 0, 0], m.pixel(672, 300))
+      m.assertEqual([0, 0, 255], m.pixel(736, 300))
+    end function
+
+    @it("cuts a partial last tile across from the texture's left")
+    function _()
+      m.drawer.drawTiledTo(m.target, m.facingQuad(), m.texture, [-1], 1.5, 1)
+      ' the last third is the texture's left half: red
+      m.assertEqual([255, 0, 0], m.pixel(740, 300))
+      m.assertEqual([0, 0, 255], m.pixel(640, 300))
+    end function
+
+    @it("tiles down from the foot, the partial tile on top")
+    function _()
+      m.drawer.drawTiledTo(m.target, m.facingQuad(), m.texture, [-1], 1, 1.5)
+      ' 232..488 down: the top third is the texture's bottom half (green, white)
+      m.assertEqual([0, 255, 0], m.pixel(544, 250))
+      m.assertEqual([255, 255, 255], m.pixel(736, 250))
+      ' below it, a whole copy
+      m.assertEqual([255, 0, 0], m.pixel(544, 340))
+      m.assertEqual([255, 255, 255], m.pixel(736, 460))
+    end function
+
+    @it("blends corner tints across the tiles")
+    function _()
+      m.drawer.drawTiledTo(m.target, m.facingQuad(), m.whiteTexture(), [&hFF0000FF, &h0000FFFF, &hFF0000FF, &h0000FFFF], 2, 1)
+      left = m.pixel(520, 360)
+      right = m.pixel(760, 360)
+      m.assertTrue(left[0] > 200 and left[2] < 60)
+      m.assertTrue(right[2] > 200 and right[0] < 60)
+    end function
+
+    @it("draws once with no repeat")
+    function _()
+      m.drawer.drawTiledTo(m.target, m.facingQuad(), m.texture, [-1], 1, 1)
+      m.assertQuadrants(310, 410)
+    end function
+
+    @it("keeps partial-tile textures")
+    function _()
+      part = m.texture.getPart(0, 64, 32, 64)
+      m.assertEqual(32, part.width)
+      m.assertEqual(64, part.height)
+      m.assertEqual(64, part.y)
+      m.assertEqual(part.id, m.texture.getPart(0, 64, 32, 64).id)
+    end function
+
+    @describe("perspective error cap")
+
+    @it("draws a quad at constant depth as one slab")
+    function _()
+      m.capError(1)
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [-1])
+      m.assertEqual(1, m.drawer.lastColumnCount)
+      m.assertQuadrants(310, 410)
+    end function
+
+    @it("gives a quad more columns the more its depth changes, and fewer for a looser cap")
+    function _()
+      m.capError(1)
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      tight = m.drawer.lastColumnCount
+      m.capError(8)
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      loose = m.drawer.lastColumnCount
+      m.capError(0)
+      m.drawer.drawTo(m.target, m.leaningQuad(), m.texture, [-1])
+      uncapped = m.drawer.lastColumnCount
+      m.assertTrue(tight > 1)
+      m.assertTrue(loose < tight)
+      m.assertTrue(tight <= uncapped)
+    end function
+
+    @it("is applied to mirrored columns, drawn from a flipped copy")
+    function _()
+      ' the leaning quad mirrored left to right
+      quad = [100.0, 100.0, -400.0, -100.0, 100.0, -400.0, 100.0, -100.0, -200.0, -100.0, -100.0, -200.0]
+      m.capError(8)
+      m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      capped = m.drawer.lastColumnCount
+      m.capError(0)
+      m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      m.assertTrue(capped < m.drawer.lastColumnCount)
+    end function
+
+    @it("isn't applied when columns draw thin, a texel each")
+    function _()
+      ' the leaning quad mirrored left to right, with no flipped copy to draw slabs from
+      quad = [100.0, 100.0, -400.0, -100.0, 100.0, -400.0, 100.0, -100.0, -200.0, -100.0, -100.0, -200.0]
+      m.texture.canMirror = false
+      m.capError(8)
+      m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      capped = m.drawer.lastColumnCount
+      m.capError(0)
+      m.drawer.drawTo(m.target, quad, m.texture, [-1])
+      m.assertEqual(m.drawer.lastColumnCount, capped)
+      m.assertTrue(capped > 8)
+    end function
+
+    @it("still draws a slab per repeat")
+    function _()
+      m.capError(1)
+      m.drawer.drawTiledTo(m.target, m.facingQuad(), m.texture, [-1], 3, 1)
+      m.assertEqual(3, m.drawer.lastColumnCount)
+    end function
+
+    @it("isn't applied to corner tints, which blend per column")
+    function _()
+      m.capError(1)
+      m.drawer.drawTo(m.target, m.facingQuad(), m.texture, [&hFF0000FF, &h0000FFFF, &hFF0000FF, &h0000FFFF])
+      m.assertTrue(m.drawer.lastColumnCount > 1)
+    end function
+
+    private function whiteTexture() as BGE.QuadColumnTexture
+      bmp = CreateObject("roBitmap", {width: 32, height: 32, alphaEnable: true})
+      bmp.Clear(&hFFFFFFFF)
+      bmp.Finish()
+      return new BGE.QuadColumnTexture(CreateObject("roRegion", bmp, 0, 0, 32, 32), "white")
     end function
 
   end class

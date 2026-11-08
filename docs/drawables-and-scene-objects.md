@@ -52,6 +52,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
 | `DrawableGridWalls`   | `SceneObjectGridWalls`   | The solid cells of a grid maze as raycast walls - one textured strip per few screen pixels (see below). |
+| `DrawableWall`        | `SceneObjectWall`        | A freestanding upright wall between two floor points, its texture stretched or tiled (see below). |
 | `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
 | `DrawableParticles`   | `SceneObjectParticle`    | A whole emitter's worth of simulated particles (lines, rectangles, or images), drawn through one `SceneObject` for the entire emitter (see below). |
 | _(billboard drawables, e.g. images used with `directToCamera`/`directScaled` draw modes)_ | `SceneObjectBillboard` | Always faces the camera regardless of its own rotation. |
@@ -140,9 +141,17 @@ Images, sprites, text, circles and filled rectangles in the oriented and solid d
 in camera space, so the result is perspective correct with no scratch or temp bitmaps. On a
 `Camera2d` the same columns are projected orthographically. How many columns a quad gets comes from render quality (`quadColumnsPerTexel`,
 `quadMinPixelsPerColumn`), and a per-frame budget keeps the draw count under Roku's queue limit.
+A slab is drawn affine, so it's only wrong where depth changes across it: `quadMaxAffineErrorPixels`
+caps the columns at as many as keep that error under its pixel count. A quad at near constant depth
+(facing the camera, or any quad on a `Camera2d`) then draws as one slab; a wall seen edge on gets
+many. Ultra turns the cap off. It isn't applied to quads with per-corner tints, whose colour blends
+per column.
 Each column is a slab a power of two texels wide, drawn whole, so fewer columns don't drop texture
-detail. A quad seen mirrored (from behind) draws each column's middle texel alone instead, because a
-slab would be mirrored within its column and a negative scale can't be rotated on a real Roku.
+detail. A quad seen mirrored (from behind) would need each slab mirrored within its column, and a
+negative scale can't be rotated on a real Roku, so it draws slabs from a flipped copy of the texture
+instead, made once (one extra texture-sized bitmap per texture seen from behind). Text, whose bitmap
+is redrawn in place, gets no copy and draws each column's middle texel alone, with no error cap.
+Textured model faces mirror the same way, from one copy shared by every face using the texture.
 
 Columns go straight to the canvas only while the object moves relative to the camera. Once it's
 still, its columns are drawn once into its temp bitmap and that is blitted, since one blit is far
@@ -1023,6 +1032,39 @@ The UI canvas is a separate renderer, so walls never hide UI.
 `examples/rendererTest` has a `Grid Walls` demo (`--param demo=grid-walls`) with a tiled floor, a
 wall-hung alcove, a figure pacing behind a corner and torch flames (`DrawableParticles`) in and out
 of view.
+
+## Freestanding walls (`DrawableWall`)
+
+`DrawableWall` is an upright textured quad between two floor points, from `bottom` to `top`,
+at any length and angle. It's for walls in an open scene; for a grid maze use
+`DrawableGridWalls`. Set `tileWidth`/`tileHeight` (world units per copy of the texture) to
+repeat the texture instead of stretching it once. Tiles start at the wall's start point and
+foot, so a partial tile is at the far end or the top.
+
+```brighterscript
+' in a static entity's onCreate()
+m.isStatic = true
+wall = new BGE.DrawableWall(m, brickRegion, BGE.Math.VectorOps.create(0, 0, 0), BGE.Math.VectorOps.create(400, 0, -200), 0, 120, {tileWidth: 64, tileHeight: 64})
+m.addDrawable("wall", wall)
+```
+
+Points are in the owner's space. Move a wall with `setEnds()` and change its tiling with
+`setTileSize()`, not by writing the fields. It's `orientedDrawBackFace`, `isOccluder` and
+`isShaded` by default; give the owner `isStatic = true` so it sorts through the static BSP and
+can occlude. It draws like an oriented image, as perspective-correct texture columns:
+one pass of columns that wrap the texture, in a band per repeat along their length
+(`QuadColumnDrawer.drawTiledTo()`, also reachable through `Renderer.drawColumnTextureTo()`'s
+`repeatU`/`repeatV`). A column can't span two repeats, so a wall gets at least one per tile. An untiled wall can still take the
+one-call rotated-rectangle fast path.
+
+Limits:
+
+- Cost grows with wall count: each wall is a sorted object with its own columns and temp
+  bitmap, and every visible wall redraws its columns each frame the camera moves. Measure with
+  rendererTest's `walls-benchmark`. Watch texture memory on HD devices.
+- Hiding is whole-object (the span map) plus the painter's sort, with no per-strip hiding as
+  with grid walls, so walls that cross, or something standing in a gap, can sort wrong.
+- No collision.
 
 ## Parallax layers (`DrawableParallaxLayer`)
 

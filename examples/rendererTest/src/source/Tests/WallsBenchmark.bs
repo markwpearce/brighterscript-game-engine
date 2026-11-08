@@ -1,0 +1,206 @@
+' Times BGE.DrawableWall (issue #467) against wall count: freestanding tiled walls at
+' assorted angles round an orbiting camera, static and occluding, in phases of 4 to 64 walls.
+' Each phase gets its own off-screen renderer and draws the same frames, one per update().
+' A live view of the largest count follows. Params turn wall features off to see what each
+' costs: shaded=0 occluder=0 static=0 tile=0 still=1 (camera still), and counts=4,32.
+' Stage times (Renderer.profileStages) are printed as STAGES lines.
+class WallsBenchmark extends RendererTest
+
+  private wallCounts as integer[] = [4, 16, 32, 64]
+  private warmupFrames = 5
+  private timedFrames = 60
+  private surfaceWidth = 1280
+  private surfaceHeight = 720
+  private safeX = 140
+  private lineHeight = 26
+  private font as roFont
+  private texture as roBitmap
+
+  private phaseIndex = 0
+  private frameIndex = 0
+  private phaseMs as float[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  private phaseDrawCalls as integer[] = [0, 0, 0, 0, 0, 0, 0, 0]
+  private phaseStages = [] as roAssociativeArray[]
+  private shaded = true
+  private occluder = true
+  private isStatic = true
+  private tiled = true
+  private still = false
+
+  private sceneRenderer as BGE.Renderer
+  private sceneBitmap as roBitmap
+  private camera as BGE.Camera3d
+  private isLive = false
+  private liveFrame = 0
+
+  sub new()
+    super("Walls Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.texture = m.createTexture()
+    params = m.launchParams
+    m.shaded = params.shaded <> "0"
+    m.occluder = params.occluder <> "0"
+    m.isStatic = params.static <> "0"
+    m.tiled = params.tile <> "0"
+    m.still = params.still = "1"
+    if invalid <> params.counts
+      m.wallCounts = []
+      for each count in params.counts.split(",")
+        m.wallCounts.push(count.toInt())
+      end for
+    end if
+    for i = 0 to m.wallCounts.count() - 1
+      m.phaseStages.push({})
+    end for
+    print `[Walls benchmark] shaded=${m.shaded} occluder=${m.occluder} static=${m.isStatic} tile=${m.tiled} still=${m.still}`
+    m.startScene(m.wallCounts[0])
+  end sub
+
+  override sub update(dt as float)
+    if m.sceneRenderer = invalid
+      return
+    end if
+    if m.isLive
+      m.renderFrame(m.liveFrame)
+      m.liveFrame++
+      return
+    end if
+
+    timer = CreateObject("roTimespan")
+    m.renderFrame(m.frameIndex)
+    ms = timer.TotalMilliseconds()
+    if m.frameIndex >= m.warmupFrames
+      m.phaseMs[m.phaseIndex] += ms
+      m.phaseDrawCalls[m.phaseIndex] += m.sceneRenderer.getDrawCallsLastFrame()
+      stages = m.phaseStages[m.phaseIndex]
+      lastStages = m.sceneRenderer.getStageMsLastFrame()
+      for each name in lastStages
+        if invalid = stages[name]
+          stages[name] = 0
+        end if
+        stages[name] += lastStages[name]
+      end for
+    end if
+    m.frameIndex++
+
+    if m.frameIndex >= m.warmupFrames + m.timedFrames
+      print `[Walls benchmark] ${m.resultLine(m.phaseIndex)}`
+      stageLine = ""
+      stages = m.phaseStages[m.phaseIndex]
+      for each name in stages
+        stageLine += ` ${name}=${stages[name] / m.timedFrames}`
+      end for
+      print `[Walls benchmark] STAGES ${m.wallCounts[m.phaseIndex]}:${stageLine}`
+      m.phaseIndex++
+      m.frameIndex = 0
+      m.sceneRenderer = invalid
+      m.sceneBitmap = invalid
+      RunGarbageCollector()
+      if m.phaseIndex < m.wallCounts.count()
+        m.startScene(m.wallCounts[m.phaseIndex])
+      else
+        m.isLive = true
+        m.startScene(m.wallCounts[m.wallCounts.count() - 1])
+      end if
+    end if
+  end sub
+
+  ' Frame index (not dt) drives the camera so phases match.
+  private sub renderFrame(frame as integer)
+    angle = frame * 0.02
+    if m.still
+      angle = 0
+    end if
+    m.camera.position = BGE.Math.VectorOps.create(sin(angle) * 150, 60, cos(angle) * 150)
+    m.camera.setTarget(BGE.Math.VectorOps.create(sin(angle + 0.8) * 400, 50, cos(angle + 0.8) * 400))
+    m.sceneRenderer.setupCameraForFrame()
+    m.sceneRenderer.resetDrawCallCounter()
+    m.sceneRenderer.render()
+  end sub
+
+  private sub startScene(wallCount as integer)
+    m.sceneBitmap = CreateObject("roBitmap", {width: m.surfaceWidth, height: m.surfaceHeight, alphaEnable: false})
+    m.sceneRenderer = new BGE.Renderer(m.sceneBitmap)
+    m.sceneRenderer.profileStages = true
+    m.camera = new BGE.Camera3d()
+    m.sceneRenderer.setCamera(m.camera)
+    region = CreateObject("roRegion", m.texture, 0, 0, 64, 64)
+    ' a ring of walls 250-650 out, at fixed pseudo-random angles so every phase matches
+    for i = 0 to wallCount - 1
+      around = i * 6.2832 / wallCount
+      distance = 450 + m.spread(i, 1.7) * 200
+      center = BGE.Math.VectorOps.create(sin(around) * distance, 0, cos(around) * distance)
+      heading = around + 1.5708 + m.spread(i, 3.1) * 0.6
+      halfLength = 60 + (m.spread(i, 5.3) + 1) * 60
+      dx = sin(heading) * halfLength
+      dz = cos(heading) * halfLength
+      tileSize = 0.0
+      if m.tiled
+        tileSize = 48.0
+      end if
+      wall = new BGE.DrawableWall(invalid, region, BGE.Math.VectorOps.create(center.x - dx, 0, center.z - dz), BGE.Math.VectorOps.create(center.x + dx, 0, center.z + dz), 0, 100 + (m.spread(i, 7.9) + 1) * 40, {
+        tileWidth: tileSize,
+        tileHeight: tileSize,
+        isShaded: m.shaded,
+        isOccluder: m.occluder
+      })
+      sceneObj = wall.addToRenderer(m.sceneRenderer)
+      if m.isStatic
+        m.sceneRenderer.markStatic(sceneObj)
+        if m.occluder
+          m.sceneRenderer.markOccluder(sceneObj)
+        end if
+      end if
+    end for
+  end sub
+
+  ' Deterministic value in [-1, 1].
+  private function spread(index as integer, factor as float) as float
+    return sin((index + 1) * factor * 12.9898)
+  end function
+
+  ' 64x64 bricks
+  private function createTexture() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: false})
+    bmp.Clear(&h8A4A32FF)
+    for row = 0 to 3
+      y = row * 16
+      bmp.DrawRect(0, y, 64, 2, &hD8CDB8FF)
+      offset = (row mod 2) * 16
+      for x = offset to 63 step 32
+        bmp.DrawRect(x, y, 2, 16, &hD8CDB8FF)
+      end for
+    end for
+    bmp.Finish()
+    return bmp
+  end function
+
+  private function resultLine(index as integer) as string
+    frames = m.timedFrames
+    return `${m.wallCounts[index]} walls: ${m.phaseMs[index] / frames} ms/frame, ${m.phaseDrawCalls[index] / frames} draw calls`
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    if m.isLive and m.sceneBitmap <> invalid
+      renderer.drawObject(0, 0, m.sceneBitmap)
+    end if
+    ' y=80 clears main.bs's title header (see QuadFillBenchmark.bs).
+    y = 80
+    for i = 0 to m.wallCounts.count() - 1
+      if i < m.phaseIndex
+        line = m.resultLine(i)
+      else if i = m.phaseIndex
+        line = `${m.wallCounts[i]} walls: running (${m.frameIndex}/${m.warmupFrames + m.timedFrames})`
+      else
+        line = `${m.wallCounts[i]} walls: waiting`
+      end if
+      renderer.drawRectangle(m.safeX - 10, y - 2, 1000, m.lineHeight - 2, &h000000C0)
+      renderer.drawText(line, m.safeX, y, BGE.Colors.White, m.font)
+      y += m.lineHeight
+    end for
+  end sub
+
+end class
