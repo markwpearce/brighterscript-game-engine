@@ -50,6 +50,7 @@ class FloorsBenchmark extends RendererTest
   private camera as BGE.Camera3d
   private previousCamera as BGE.Camera
   private previousQuality as BGE.RenderQualitySettings
+  private previousProfileStages as boolean = false
   private walls as BGE.SceneObjectWalls = invalid
   private wallTextures as roAssociativeArray
   ' an empty view, for the ray fan the walls use this frame
@@ -82,6 +83,7 @@ class FloorsBenchmark extends RendererTest
   ' far to near, floors then ceilings
   private drawOrder = [] as integer[]
 
+  private startHeading = 0.5
   private heading = 0.5
   private pitch = 0.0
   private motionTime = 0.0
@@ -156,6 +158,7 @@ class FloorsBenchmark extends RendererTest
     m.previousCamera = renderer.camera
     renderer.setCamera(m.camera)
     m.previousQuality = renderer.qualitySettings
+    m.previousProfileStages = renderer.profileStages
     renderer.profileStages = true
 
     wallBmp = CreateObject("roBitmap", "pkg:/sprites/crypt_wall.png")
@@ -168,10 +171,10 @@ class FloorsBenchmark extends RendererTest
 
     params = m.launchParams
     if invalid <> params.method
-      m.methodIndex = params.method.toInt() mod m.methodNames.count()
+      m.methodIndex = m.wrapIndex(params.method.toInt(), m.methodNames.count())
     end if
     if invalid <> params.motion
-      m.motionIndex = params.motion.toInt() mod m.motionNames.count()
+      m.motionIndex = m.wrapIndex(params.motion.toInt(), m.motionNames.count())
     end if
     if invalid <> params.rings
       m.ringCount = BGE.Math.Clamp(params.rings.toInt(), 2, 5)
@@ -191,8 +194,10 @@ class FloorsBenchmark extends RendererTest
         for each motion in m.indexList(params.motions, 0, m.motionNames.count() - 1)
           for each rings in m.indexList(params.ringCounts, 2, 5)
             steps = [m.rowStep]
-            if method = 2
-              steps = m.indexList(params.rowSteps, 2, 4)
+            if method = 2 and invalid <> params.rowSteps
+              steps = m.indexList(params.rowSteps, 1, 8)
+            else if method = 2
+              steps = m.indexList(invalid, 2, 4)
             end if
             for each rowStep in steps
               m.sweepCases.push([method, motion, rings, rowStep])
@@ -228,7 +233,34 @@ class FloorsBenchmark extends RendererTest
     m.motionIndex = item[1]
     m.ringCount = item[2]
     m.rowStep = item[3]
+    m.resetMotion()
+    m.freeUnusedHeightBitmaps()
+  end sub
+
+  ' i mod count, never negative (BrightScript's mod keeps the sign).
+  private function wrapIndex(i as integer, count as integer) as integer
+    return ((i mod count) + count) mod count
+  end function
+
+  ' Every case starts from the same view.
+  private sub resetMotion()
     m.motionTime = 0
+    m.heading = m.startHeading
+  end sub
+
+  ' Method 1's bitmaps hold texture memory the other methods shouldn't run with.
+  private sub freeUnusedHeightBitmaps()
+    if m.methodIndex = 1
+      return
+    end if
+    m.freeHeightBitmaps()
+  end sub
+
+  private sub freeHeightBitmaps()
+    for h = 0 to m.heightBitmaps.count() - 1
+      m.heightBitmaps[h] = invalid
+      m.heightCursors[h] = invalid
+    end for
   end sub
 
   ' wooden planks
@@ -302,6 +334,8 @@ class FloorsBenchmark extends RendererTest
     end if
     drawable = new BGE.DrawableWalls(invalid, segs, m.wallTextures, {})
     m.walls = drawable.addToRenderer(m.rendererRef) as BGE.SceneObjectWalls
+    ' height indices mean different heights now
+    m.freeHeightBitmaps()
     m.resetSample()
   end sub
 
@@ -779,7 +813,14 @@ class FloorsBenchmark extends RendererTest
       src = top.cursor
       k = top.pxPerUnit
       halfW = top.halfWidth
+      topDepth = top.depth
       dh = m.heightY[h] - m.oy
+      ' clear the height's rows, so no band leaves an earlier frame's pixels behind
+      clearTop = Int(m.heightTop[h])
+      clearBottom = -Int(-m.heightBottom[h])
+      if clearBottom > clearTop
+        bmp.DrawRect(0, clearTop, Int(width), clearBottom - clearTop, &h000000FF)
+      end if
 
       ' the height's rows as depths, split into bands of equal far/near ratio
       fA = m.depthAt(dh, m.slopeAtY(m.heightTop[h]))
@@ -800,20 +841,21 @@ class FloorsBenchmark extends RendererTest
           em = dh / fm
           pxL = k * (m.tangentAtX(0, em) * fm + halfW)
           pxR = k * (m.tangentAtX(width, em) * fm + halfW)
-          pyNear = k * (farDepth - f0)
-          pyFar = k * (farDepth - f1)
+          pyNear = k * (topDepth - f0)
+          pyFar = k * (topDepth - f1)
           sx = Int(pxL)
           sy = Int(pyFar)
           ' a texel past the near edge covers rounding seams
           if pxR - pxL > 0.01 and pyNear - pyFar > 0.01 and src.moveTo(sx, sy, -Int(-pxR) - sx, -Int(-pyNear) - sy + 1)
             scaleX = width / (pxR - pxL)
             scaleY = Abs(yNear - yFar) / (pyNear - pyFar)
-            destX = (sx - pxL) * scaleX
+            ' from where moveTo() left the region, which it clips to the bitmap
+            destX = (src.x - pxL) * scaleX
             if dh < 0
-              bmp.DrawScaledObject(destX, yFar + (sy - pyFar) * scaleY, scaleX, scaleY, src.region)
+              bmp.DrawScaledObject(destX, yFar + (src.y - pyFar) * scaleY, scaleX, scaleY, src.region)
             else
               ' a ceiling's far edge is its bottom: mirrored, drawn up from there
-              bmp.DrawScaledObject(destX, yFar - (sy - pyFar) * scaleY, scaleX, -scaleY, src.region)
+              bmp.DrawScaledObject(destX, yFar - (src.y - pyFar) * scaleY, scaleX, -scaleY, src.region)
             end if
             m.floorDraws++
           end if
@@ -1023,6 +1065,7 @@ class FloorsBenchmark extends RendererTest
       dh = m.heightY[h] - m.oy
       k = top.pxPerUnit
       halfW = top.halfWidth
+      topDepth = top.depth
       cursor = top.cursor
       region = cursor.region
       cx = cursor.x
@@ -1053,7 +1096,7 @@ class FloorsBenchmark extends RendererTest
         end if
         sx = Int(pxa)
         sw = -Int(-pxb) - sx
-        sy = Int(k * (farDepth - f))
+        sy = Int(k * (topDepth - f))
         if sx < 0
           sw += sx
           sx = 0
@@ -1184,10 +1227,11 @@ class FloorsBenchmark extends RendererTest
         delta = m.methodNames.count() - 1
       end if
       m.methodIndex = (m.methodIndex + delta) mod m.methodNames.count()
+      m.freeUnusedHeightBitmaps()
       m.resetSample()
     else if buttonName = "OK"
       m.motionIndex = (m.motionIndex + 1) mod m.motionNames.count()
-      m.motionTime = 0
+      m.resetMotion()
       m.resetSample()
     else if buttonName = "left" and m.ringCount > 2
       m.ringCount--
@@ -1202,9 +1246,8 @@ class FloorsBenchmark extends RendererTest
     for each sceneObj in renderer.getSceneObjectsCopy()
       renderer.removeSceneObject(sceneObj)
     end for
-    m.heightBitmaps.Clear()
-    m.heightCursors.Clear()
-    renderer.profileStages = false
+    m.freeHeightBitmaps()
+    renderer.profileStages = m.previousProfileStages
     renderer.setQualitySettings(m.previousQuality)
     renderer.setCamera(m.previousCamera)
   end sub
