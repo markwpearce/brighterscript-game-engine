@@ -11,6 +11,9 @@ order: 12
 grid of open and blocked cells, runs A* across it, and smooths the result into
 a short list of waypoints.
 
+`examples/navigation` shows it working: four agents chase a flag through a
+maze with doors, re-planning when the doors open or close.
+
 ## Building the grid
 
 Build the grid once the world's solids are in, at scene load:
@@ -23,8 +26,11 @@ m.nav = new BGE.NavGrid(m.solidWorld, {cellSize: 16, agentRadius: 10})
   path that keeps the agent's centre in open cells keeps its body clear of
   walls. Use the radius of the mover's feet box (or collider).
 - `cellSize` trades accuracy for cost. A gap is only found if a whole open
-  cell fits through it once the solids have grown, so keep cells about the
-  agent's diameter or smaller.
+  cell fits through it once the solids have grown. To be sure of that, a gap
+  must be at least `2 * agentRadius + 2 * cellSize` wide, or
+  `2 * agentRadius + cellSize` when the walls line up with the cell edges. So
+  a 40-unit doorway with walls on cell edges takes `agentRadius: 10` with
+  10-unit cells, but not `agentRadius: 13` with 20-unit cells.
 - By default the grid covers every solid in the world. Pass `minX`, `minY`,
   `width` and `height` to cover a different area.
 
