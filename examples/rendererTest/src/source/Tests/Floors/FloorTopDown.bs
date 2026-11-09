@@ -1,0 +1,134 @@
+' A tiled floor texture seen from above and turned with the camera: x runs along the level
+' right vector, y along level forward with the far edge at the top, pxPerUnit pixels per
+' world unit. It doesn't depend on height, so every floor or ceiling with this texture reads
+' from it: one screen row of a level floor is one row here.
+class FloorTopDown
+
+  bmp as roBitmap = invalid
+  cursor as RegionCursor = invalid
+  pxPerUnit as float = 1
+  ' world units either side of the camera, and ahead of it
+  halfWidth as float = 0
+  depth as float = 0
+  ' sheet draws in the last rebuild, and whether this frame's build() rebuilt
+  drawsLastBuild as integer = 0
+  rebuilt as boolean = false
+
+  private sheetRegion as roRegion
+  ' world units one sheet covers (a whole number of tiles)
+  private sheetUnits as float = 1
+  private texelUnits as float = 1
+  private lastOx as float = 1.0e30
+  private lastOz as float = 1.0e30
+  private lastLfx as float = 0
+  private lastLfz as float = 0
+
+  ' @param {roBitmap} tile square tile
+  ' @param {float} texelUnits world units per texel
+  sub new(tile as roBitmap, texelUnits as float)
+    m.texelUnits = texelUnits
+    tileSize = tile.GetWidth()
+    tiles = 512 \ tileSize
+    if tiles < 1
+      tiles = 1
+    end if
+    side = tiles * tileSize
+    sheet = CreateObject("roBitmap", {width: side, height: side, alphaEnable: false})
+    for row = 0 to tiles - 1
+      for col = 0 to tiles - 1
+        sheet.DrawObject(col * tileSize, row * tileSize, tile)
+      end for
+    end for
+    sheet.Finish()
+    m.sheetRegion = CreateObject("roRegion", sheet, 0, 0, side, side)
+    m.sheetUnits = side * texelUnits
+  end sub
+
+  ' (Re)allocates the bitmap for a view reaching depth ahead and halfWidth to each side,
+  ' within maxPixels. False if it couldn't be allocated.
+  function allocate(depth as float, halfWidth as float, maxPixels as float) as boolean
+    if invalid <> m.bmp and depth = m.depth and halfWidth = m.halfWidth
+      return true
+    end if
+    m.bmp = invalid
+    m.cursor = invalid
+    k = Sqr(maxPixels / (2 * halfWidth * depth))
+    if k > 1
+      k = 1.0
+    end if
+    m.pxPerUnit = k
+    m.depth = depth
+    m.halfWidth = halfWidth
+    m.lastOx = 1.0e30
+    m.bmp = CreateObject("roBitmap", {width: Int(2 * halfWidth * k) + 1, height: Int(depth * k) + 1, alphaEnable: false})
+    if invalid = m.bmp
+      print "FLOORS couldn't allocate a top-down bitmap"
+      return false
+    end if
+    m.cursor = new RegionCursor(m.bmp)
+    return true
+  end function
+
+  ' Redraws the bitmap for an eye at ox, oz facing level forward lfx, lfz, unless that's
+  ' what it already shows.
+  sub build(ox as float, oz as float, lfx as float, lfz as float)
+    m.rebuilt = false
+    if ox = m.lastOx and oz = m.lastOz and lfx = m.lastLfx and lfz = m.lastLfz
+      return
+    end if
+    m.lastOx = ox
+    m.lastOz = oz
+    m.lastLfx = lfx
+    m.lastLfz = lfz
+    m.rebuilt = true
+    rx = -lfz
+    rz = lfx
+    k = m.pxPerUnit
+    halfW = m.halfWidth
+    farDepth = m.depth
+    size = m.sheetUnits
+    ' texel x (world +x) lands along (rx, -lfx) on the bitmap, texel y (world +z) along
+    ' (rz, -lfz): DrawTransformedObject's counter-clockwise turn by atan2(rz, rx)
+    thetaDeg = BGE.Math.RadiansToDegrees(BGE.Math.atan2(rz, rx))
+    scale = k * m.texelUnits
+
+    ' sheets over the plan bounds of the view's wedge
+    minX = ox
+    maxX = ox
+    minZ = oz
+    maxZ = oz
+    for each side in [-1, 1]
+      px = ox + lfx * farDepth + rx * halfW * side
+      pz = oz + lfz * farDepth + rz * halfW * side
+      minX = BGE.Math.Min(minX, px)
+      maxX = BGE.Math.Max(maxX, px)
+      minZ = BGE.Math.Min(minZ, pz)
+      maxZ = BGE.Math.Max(maxZ, pz)
+    end for
+    radius = size * 0.7072
+    m.bmp.Clear(&h000000FF)
+    draws = 0
+    gx0 = Int(minX / size)
+    gz0 = Int(minZ / size)
+    for gx = gx0 to Int(maxX / size)
+      for gz = gz0 to Int(maxZ / size)
+        cx = (gx + 0.5) * size - ox
+        cz = (gz + 0.5) * size - oz
+        f = cx * lfx + cz * lfz
+        u = cx * rx + cz * rz
+        if f < -radius or f > farDepth + radius or Abs(u) > halfW * BGE.Math.Max(f, 0) / farDepth + radius * 1.5
+          continue for
+        end if
+        ' where the sheet's top left corner lands
+        wx = gx * size - ox
+        wz = gz * size - oz
+        u0 = wx * rx + wz * rz
+        f0 = wx * lfx + wz * lfz
+        m.bmp.DrawTransformedObject(k * (u0 + halfW), k * (farDepth - f0), thetaDeg, scale, scale, m.sheetRegion)
+        draws++
+      end for
+    end for
+    m.drawsLastBuild = draws
+  end sub
+
+end class

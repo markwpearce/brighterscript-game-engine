@@ -1,0 +1,1212 @@
+' Textured floors and ceilings for room levels (#474), timed three ways under real walls.
+' A hub room ringed by raised alcoves: each ring steps the floor up and the ceiling down, so
+' rings + 1 floor heights and as many ceiling heights show at once, walled by a
+' BGE.DrawableWalls (risers, lintels and an outer wall). A walker on the walls' own ray fan
+' finds each ray's floor and ceiling slices between them, drawn before the walls by method:
+'   0 flat:   one shaded rectangle per slice (the baseline)
+'   1 planes: each visible height warped into its own screen-sized bitmap in plane-style
+'             bands (planeSliceCount), then each slice copied out of it
+'   2 rows:   DOOM row spans: a floor row is all one depth, so each run of rays on a row is
+'             one scaled row of the texture, every `rows` pixels
+' Both textured methods read one camera-aligned top-down bitmap per texture.
+'
+' On a Roku Ultra at Medium, rows every 4 px took 10-17 ms against 67-72 ms for planes, and
+' no method reached 40 fps: turning, the walls alone took 37-76 ms (see the room-levels spec).
+'
+' Launch params: method=0-2, motion=0-3 (still, turn, drive, look), rings=2-5, rows=1-8,
+' level=0-4 (default Medium), pitch=<degrees>. Each case logs a FLOORS line with its
+' average frame interval and where the time went; sweep=1 runs every case by itself, or
+' those in the comma lists methods=, motions=, ringCounts=, rowSteps= (rows only applies
+' to method 2).
+' up/down: method, OK: motion, left/right: rings.
+class FloorsBenchmark extends RendererTest
+
+  ' frames to settle after a change, then frames to average
+  private warmupFrames as integer = 30
+  private sampleFrames as integer = 120
+  private frameCount as integer = 0
+  private sampleMs as float = 0
+  private sampleWalkMs as float = 0
+  private sampleFloorMs as float = 0
+  private sampleRenderMs as float = 0
+  private sampleFloorDraws as integer = 0
+  private sampleWallDraws as integer = 0
+  private sampleSlices as integer = 0
+  private sampleHeights as integer = 0
+  private sampleTopDownDraws as integer = 0
+  ' the walls' own stages (Renderer.profileStages)
+  private sampleWallWalkMs as float = 0
+  private sampleWallShadeMs as float = 0
+  private sampleWallStripMs as float = 0
+  private frameClock = CreateObject("roTimespan")
+  private stageClock = CreateObject("roTimespan")
+  private reportLine = "measuring..."
+  private font as roFont
+  private sweeping as boolean = false
+  private sweepIndex as integer = 0
+  private sweepCases = [] as integer[][]
+
+  private rendererRef as BGE.Renderer
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private previousQuality as BGE.RenderQualitySettings
+  private walls as BGE.SceneObjectWalls = invalid
+  private wallTextures as roAssociativeArray
+  ' an empty view, for the ray fan the walls use this frame
+  private fan as BGE.WallsView
+  private floorTop as FloorTopDown
+  private ceilingTop as FloorTopDown
+
+  private methodIndex as integer = 0
+  private motionIndex as integer = 1
+  private ringCount as integer = 3
+  private rowStep as integer = 2
+  private level as BGE.RenderQualityLevel = BGE.RenderQualityLevel.medium
+  private methodNames = ["flat", "planes", "rows"]
+  private motionNames = ["still", "turn", "drive", "look"]
+
+  ' the level: a square hub, then rings, each a step up and a lintel down
+  private hubHalf = 192.0
+  private ringWidth = 128.0
+  private floorStep = 12.0
+  private hubCeiling = 256.0
+  private ceilingStep = 24.0
+  private eyeHeight = 100.0
+  ' per region (hub, rings): its outer half size, floor and ceiling
+  private halfSizes = [] as float[]
+  private floors = [] as float[]
+  private ceilings = [] as float[]
+  ' heights 0..rings are the floors, rings+1.. the ceilings
+  private heightY = [] as float[]
+  private heightCount as integer = 0
+  ' far to near, floors then ceilings
+  private drawOrder = [] as integer[]
+
+  private heading = 0.5
+  private pitch = 0.0
+  private motionTime = 0.0
+  private still = BGE.Math.VectorOps.create(40, 0, 60)
+
+  ' this frame's slices, front to back per ray; meaningful below sliceCount
+  private sliceCount as integer = 0
+  private sliceRay = [] as integer[]
+  private sliceHeight = [] as integer[]
+  ' elevation slopes, (height - eye) / forward depth, at the bottom and top
+  private sliceLow = [] as float[]
+  private sliceHigh = [] as float[]
+  ' canvas rows at the top and bottom
+  private sliceTop = [] as float[]
+  private sliceBottom = [] as float[]
+  private sliceDepth = [] as float[]
+  ' the next slice at the same height, -1 for none
+  private sliceNext = [] as integer[]
+  ' per height: first and last slice (-1 for none), and its canvas rows
+  private heightFirst = [] as integer[]
+  private heightLast = [] as integer[]
+  private heightTop = [] as float[]
+  private heightBottom = [] as float[]
+  private visibleHeights as integer = 0
+  private floorDraws as integer = 0
+
+  ' this frame's projection, worked out by walk(): canvas centre, focal length, the view y
+  ' and z of level forward (pFy, pFz) and up (pUy, pUz), and view x of forward, tangent and up
+  private pHw as float = 640
+  private pHh as float = 360
+  private pFocal as float = 640
+  private pFy as float = 0
+  private pFz as float = -1
+  private pUy as float = 1
+  private pUz as float = 0
+  private pXf as float = 0
+  private pXt as float = 1
+  private pXu as float = 0
+  private oy as float = 0
+  private drawDistance as float = 1000
+
+  ' method 1's screen-sized bitmap per height
+  private heightBitmaps = [] as object
+  private heightCursors = [] as object
+  private allocationFailures as integer = 0
+  ' method 2's span start ray per row, per-row and per-ray projection terms, and the spans
+  ' listed for one height (row, first ray, ray after the last)
+  private spanStart = [] as integer[]
+  private rowE = [] as float[]
+  private rowInvZ = [] as float[]
+  private rowXu = [] as float[]
+  private rayT = [] as float[]
+  private rayX = [] as float[]
+  private spanRow = [] as integer[]
+  private spanA = [] as integer[]
+  private spanB = [] as integer[]
+  ' depth shades: grey tints for textures, and flat colours
+  private tints = [] as integer[]
+  private floorColors = [] as integer[]
+  private ceilingColors = [] as integer[]
+  private shadeLevels as integer = 16
+
+  sub new()
+    super("Floors (U/D method, OK motion, L/R rings)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.camera = new BGE.Camera3d()
+    m.camera.maxDrawDistance = 1400
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+    m.previousQuality = renderer.qualitySettings
+    renderer.profileStages = true
+
+    wallBmp = CreateObject("roBitmap", "pkg:/sprites/crypt_wall.png")
+    m.wallTextures = {stone: CreateObject("roRegion", wallBmp, 0, 0, wallBmp.GetWidth(), wallBmp.GetHeight())}
+    m.fan = new BGE.WallsView([] as BGE.WallSegment[], new BGE.WallsBsp([] as BGE.WallSegment[]))
+    m.floorTop = new FloorTopDown(CreateObject("roBitmap", "pkg:/sprites/crypt_floor.png"), 2)
+    m.ceilingTop = new FloorTopDown(m.createCeilingTile(), 2)
+    m.buildShades()
+    m.growSlices(0)
+
+    params = m.launchParams
+    if invalid <> params.method
+      m.methodIndex = params.method.toInt() mod m.methodNames.count()
+    end if
+    if invalid <> params.motion
+      m.motionIndex = params.motion.toInt() mod m.motionNames.count()
+    end if
+    if invalid <> params.rings
+      m.ringCount = BGE.Math.Clamp(params.rings.toInt(), 2, 5)
+    end if
+    if invalid <> params.rows
+      m.rowStep = BGE.Math.Clamp(params.rows.toInt(), 1, 8)
+    end if
+    if invalid <> params.level
+      m.level = BGE.clampRenderQualityLevel(val(params.level))
+    end if
+    if invalid <> params.pitch
+      m.pitch = val(params.pitch)
+    end if
+    m.sweeping = params.sweep = "1"
+    if m.sweeping
+      for each method in m.indexList(params.methods, 0, m.methodNames.count() - 1)
+        for each motion in m.indexList(params.motions, 0, m.motionNames.count() - 1)
+          for each rings in m.indexList(params.ringCounts, 2, 5)
+            steps = [m.rowStep]
+            if method = 2
+              steps = m.indexList(params.rowSteps, 2, 4)
+            end if
+            for each rowStep in steps
+              m.sweepCases.push([method, motion, rings, rowStep])
+            end for
+          end for
+        end for
+      end for
+      m.applySweepCase()
+    end if
+    renderer.setQualitySettings(BGE.getRenderQualityPreset(m.level))
+    m.buildLevel()
+    m.updateCamera(0)
+  end sub
+
+  ' A comma list of integers, or every one from first to last.
+  private function indexList(text as dynamic, first as integer, last as integer) as integer[]
+    list = [] as integer[]
+    if invalid = text or text = ""
+      for i = first to last
+        list.push(i)
+      end for
+      return list
+    end if
+    for each item in text.split(",")
+      list.push(BGE.Math.Clamp(item.toInt(), first, last))
+    end for
+    return list
+  end function
+
+  private sub applySweepCase()
+    item = m.sweepCases[m.sweepIndex]
+    m.methodIndex = item[0]
+    m.motionIndex = item[1]
+    m.ringCount = item[2]
+    m.rowStep = item[3]
+    m.motionTime = 0
+  end sub
+
+  ' wooden planks
+  private function createCeilingTile() as roBitmap
+    n = 64
+    bmp = CreateObject("roBitmap", {width: n, height: n, alphaEnable: false})
+    bmp.Clear(&h6B4A2FFF)
+    for i = 0 to 3
+      bmp.DrawRect(0, i * 16, n, 1, &h3A2716FF)
+      bmp.DrawRect(((i * 23) mod n), i * 16, 1, 16, &h3A2716FF)
+      bmp.DrawRect(0, i * 16 + 6, n, 2, &h7A5838FF)
+    end for
+    bmp.Finish()
+    return bmp
+  end function
+
+  private sub buildShades()
+    for i = 0 to m.shadeLevels - 1
+      light = 1 - 0.7 * i / (m.shadeLevels - 1)
+      v = Int(255 * light)
+      m.tints.push((v << 24) or (v << 16) or (v << 8) or &hFF)
+      m.floorColors.push(m.scaleColor(&h6A5A48, light))
+      m.ceilingColors.push(m.scaleColor(&h5A4632, light))
+    end for
+  end sub
+
+  private function scaleColor(rgb as integer, light as float) as integer
+    r = Int(((rgb >> 16) and &hFF) * light)
+    g = Int(((rgb >> 8) and &hFF) * light)
+    b = Int((rgb and &hFF) * light)
+    return (r << 24) or (g << 16) or (b << 8) or &hFF
+  end function
+
+  ' The rings' heights and walls for ringCount.
+  private sub buildLevel()
+    n = m.ringCount
+    m.halfSizes.Clear()
+    m.floors.Clear()
+    m.ceilings.Clear()
+    for k = 0 to n
+      m.halfSizes.push(m.hubHalf + k * m.ringWidth)
+      m.floors.push(k * m.floorStep)
+      m.ceilings.push(m.hubCeiling - k * m.ceilingStep)
+    end for
+    m.heightY.Clear()
+    m.drawOrder.Clear()
+    for k = 0 to n
+      m.heightY.push(m.floors[k])
+    end for
+    for k = 0 to n
+      m.heightY.push(m.ceilings[k])
+    end for
+    m.heightCount = m.heightY.count()
+    for k = n to 0 step -1
+      m.drawOrder.push(k)
+    end for
+    for k = n to 0 step -1
+      m.drawOrder.push(n + 1 + k)
+    end for
+
+    segs = [] as BGE.WallSegment[]
+    for k = 1 to n
+      half = m.halfSizes[k - 1]
+      m.addBox(segs, half, m.floors[k - 1], m.floors[k])
+      m.addBox(segs, half, m.ceilings[k], m.ceilings[k - 1])
+    end for
+    m.addBox(segs, m.halfSizes[n], m.floors[n], m.ceilings[n])
+
+    if invalid <> m.walls
+      m.rendererRef.removeSceneObject(m.walls)
+    end if
+    drawable = new BGE.DrawableWalls(invalid, segs, m.wallTextures, {})
+    m.walls = drawable.addToRenderer(m.rendererRef) as BGE.SceneObjectWalls
+    m.resetSample()
+  end sub
+
+  ' Four walls facing in round a square about the origin.
+  private sub addBox(segs as BGE.WallSegment[], half as float, bottom as float, top as float)
+    corners = [[-half, -half], [half, -half], [half, half], [-half, half]]
+    for i = 0 to 3
+      a = corners[i]
+      b = corners[(i + 1) mod 4]
+      segs.push(BGE.createWallSegment(BGE.Math.VectorOps.create(b[0], 0, b[1]), BGE.Math.VectorOps.create(a[0], 0, a[1]), bottom, top, "stone", {tileWidth: 64, tileHeight: 128}))
+    end for
+  end sub
+
+  ' Heading 0 faces -z; pitch is in degrees, up positive.
+  private sub updateCamera(dt as float)
+    m.motionTime += dt
+    eye = BGE.Math.VectorOps.create(m.still.x, m.eyeHeight, m.still.z)
+    if m.motionIndex = 1 or m.motionIndex = 3
+      m.heading += 0.4 * dt
+    else if m.motionIndex = 2
+      ' a circle inside the hub, looking along it
+      angle = m.motionTime * 0.5
+      eye.x = 96 * cos(angle)
+      eye.z = 96 * sin(angle)
+      m.heading = BGE.Math.PI - angle
+    end if
+    pitch = m.pitch
+    if m.motionIndex = 3
+      phase = m.motionTime / 8
+      phase = (phase - Int(phase / 2) * 2)
+      if phase > 1
+        phase = 2 - phase
+      end if
+      pitch = 15 - 50 * phase
+    end if
+    p = pitch * BGE.Math.PI / 180
+    direction = BGE.Math.VectorOps.create(-sin(m.heading) * cos(p), sin(p), -cos(m.heading) * cos(p))
+    m.camera.position = eye
+    m.camera.setTarget(BGE.Math.VectorOps.add(eye, direction))
+  end sub
+
+  override sub update(dt as float)
+    m.updateCamera(dt)
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    m.stageClock.Mark()
+    hasView = m.walk(renderer)
+    walkMs = m.stageClock.TotalMilliseconds()
+    m.stageClock.Mark()
+    m.floorDraws = 0
+    topDownDraws = 0
+    if hasView
+      if m.methodIndex = 0
+        m.drawFlat(renderer)
+      else
+        topDownDraws = m.buildTopDowns()
+        if m.methodIndex = 1
+          m.drawPlanes(renderer)
+        else
+          m.drawRows(renderer)
+        end if
+      end if
+    end if
+    floorMs = m.stageClock.TotalMilliseconds()
+    drawsBefore = renderer.getDrawCallsLastFrame()
+    m.stageClock.Mark()
+    renderer.render()
+    renderMs = m.stageClock.TotalMilliseconds()
+    stages = renderer.getStageMsLastFrame()
+    m.sampleWallWalkMs += m.stageMs(stages, "wallsWalk")
+    m.sampleWallShadeMs += m.stageMs(stages, "wallsShade")
+    m.sampleWallStripMs += m.stageMs(stages, "wallsStrips")
+    m.sampleFrame(walkMs, floorMs, renderMs, renderer.getDrawCallsLastFrame() - drawsBefore, topDownDraws)
+
+    x = 140
+    y = 80
+    renderer.drawRectangle(x - 10, y - 4, 1010, 58, &h000000A0)
+    renderer.drawText(`${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]} | rings ${m.ringCount} | rows ${m.rowStep} | ${BGE.getRenderQualityLevelName(m.level)}`, x, y, BGE.Colors.White, m.font)
+    renderer.drawText(m.reportLine, x, y + 26, BGE.Colors.Yellow, m.font)
+  end sub
+
+  private function stageMs(stages as roAssociativeArray, name as string) as float
+    if invalid = stages[name]
+      return 0
+    end if
+    return stages[name]
+  end function
+
+  ' Finds this frame's floor and ceiling slices on the walls' ray fan. The camera must be in
+  ' the hub: every ray then crosses each ring outward once, through a step up and a lintel
+  ' down, until the outer wall.
+  private function walk(renderer as BGE.Renderer) as boolean
+    m.sliceCount = 0
+    for h = 0 to m.heightCount - 1
+      m.heightFirst[h] = -1
+      m.heightLast[h] = -1
+      m.heightTop[h] = 1.0e30
+      m.heightBottom[h] = -1.0e30
+    end for
+    m.visibleHeights = 0
+    camera = m.camera
+    stripWidth = renderer.qualitySettings.wallStripWidth
+    if stripWidth < 1
+      stripWidth = 1
+    end if
+    if not m.fan.update(camera, stripWidth)
+      return false
+    end if
+    mat = camera.worldToCamera
+    m0 = mat[0]
+    m1 = mat[1]
+    m2 = mat[2]
+    lf = m.fan.levelForward
+    lr = m.fan.levelRight
+    lfx = lf.x
+    lfz = lf.z
+    rx = lr.x
+    rz = lr.z
+    focal = camera.getFocalLength()
+    hw = camera.frameSize.x * 0.5
+    hh = camera.frameSize.y * 0.5
+    ' level right has no view y or z without roll, so a slope's canvas row is the same on
+    ' every ray
+    fy = lfx * m0[1] + lfz * m2[1]
+    fz = lfx * m0[2] + lfz * m2[2]
+    uy = m1[1]
+    uz = m1[2]
+    m.pHw = hw
+    m.pHh = hh
+    m.pFocal = focal
+    m.pFy = fy
+    m.pFz = fz
+    m.pUy = uy
+    m.pUz = uz
+    m.pXf = lfx * m0[0] + lfz * m2[0]
+    m.pXt = rx * m0[0] + rz * m2[0]
+    m.pXu = m1[0]
+    oy = camera.position.y
+    m.oy = oy
+    ox = camera.position.x
+    oz = camera.position.z
+    farDepth = camera.getCurrentDrawDistance()
+    m.drawDistance = farDepth
+
+    ' the canvas's bottom and top edges as slopes
+    low0 = -1.0e30
+    high0 = 1.0e30
+    e = m.slopeAtY(hh * 2)
+    if fz + e * uz < 0
+      low0 = e
+    end if
+    e = m.slopeAtY(0)
+    if fz + e * uz < 0
+      high0 = e
+    end if
+
+    n = m.ringCount
+    halfSizes = m.halfSizes
+    floors = m.floors
+    ceilings = m.ceilings
+    firstTan = m.fan.firstTan
+    tanStep = m.fan.tanStep
+    near = 1.0
+    rayCount = m.fan.rayCount
+    m.growSlices(rayCount * 4)
+    cap = m.sliceRay.count()
+    sRay = m.sliceRay
+    sHeight = m.sliceHeight
+    sLow = m.sliceLow
+    sHigh = m.sliceHigh
+    topRows = m.sliceTop
+    bottomRows = m.sliceBottom
+    sDepth = m.sliceDepth
+    sNext = m.sliceNext
+    hFirst = m.heightFirst
+    hLast = m.heightLast
+    hTop = m.heightTop
+    hBottom = m.heightBottom
+    canvasHeight = hh * 2
+    ' floors and ceilings relative to the eye
+    floorDy = [] as float[]
+    ceilingDy = [] as float[]
+    for k = 0 to n
+      floorDy.push(floors[k] - oy)
+      ceilingDy.push(ceilings[k] - oy)
+    end for
+    sc = 0
+    for i = 0 to rayCount - 1
+      t = firstTan + i * tanStep
+      dx = lfx + rx * t
+      dz = lfz + rz * t
+      low = low0
+      high = high0
+      dPrev = near
+      for k = 0 to n
+        ' forward depth to region k's outer square
+        s = halfSizes[k]
+        dNext = 1.0e30
+        if dx > 1.0e-6
+          dNext = (s - ox) / dx
+        else if dx < -1.0e-6
+          dNext = (-s - ox) / dx
+        end if
+        if dz > 1.0e-6
+          d = (s - oz) / dz
+          if d < dNext
+            dNext = d
+          end if
+        else if dz < -1.0e-6
+          d = (-s - oz) / dz
+          if d < dNext
+            dNext = d
+          end if
+        end if
+        last = k = n
+        if dNext >= farDepth
+          dNext = farDepth
+          last = true
+        end if
+        if dNext > dPrev
+          if sc + 2 > cap
+            m.growSlices(sc + rayCount * 2)
+            cap = sRay.count()
+          end if
+          ' floor, from its near edge up to its far edge, then ceiling from its far edge
+          ' up to its near edge
+          for side = 0 to 1
+            if side = 0
+              dy = floorDy[k]
+              eFar = dy / dNext
+              lo = dy / dPrev
+              hi = eFar
+              height = k
+            else
+              dy = ceilingDy[k]
+              eFar = dy / dNext
+              lo = eFar
+              hi = dy / dPrev
+              height = n + 1 + k
+            end if
+            if lo < low
+              lo = low
+            end if
+            if hi > high
+              hi = high
+            end if
+            if lo < hi
+              ' canvas rows of the top and bottom (inlined screenY())
+              z = fz + hi * uz
+              if z > -0.0001
+                top = 0.0
+              else
+                top = hh - focal * (fy + hi * uy) / -z
+                if top < 0
+                  top = 0.0
+                else if top > canvasHeight
+                  top = canvasHeight
+                end if
+              end if
+              z = fz + lo * uz
+              if z > -0.0001
+                bottom = canvasHeight
+              else
+                bottom = hh - focal * (fy + lo * uy) / -z
+                if bottom < 0
+                  bottom = 0.0
+                else if bottom > canvasHeight
+                  bottom = canvasHeight
+                end if
+              end if
+              sRay[sc] = i
+              sHeight[sc] = height
+              sLow[sc] = lo
+              sHigh[sc] = hi
+              topRows[sc] = top
+              bottomRows[sc] = bottom
+              sDepth[sc] = (dPrev + dNext) * 0.5
+              sNext[sc] = -1
+              prev = hLast[height]
+              if prev < 0
+                hFirst[height] = sc
+              else
+                sNext[prev] = sc
+              end if
+              hLast[height] = sc
+              if top < hTop[height]
+                hTop[height] = top
+              end if
+              if bottom > hBottom[height]
+                hBottom[height] = bottom
+              end if
+              sc++
+            end if
+            if side = 0
+              if eFar > low
+                low = eFar
+              end if
+            else if eFar < high
+              high = eFar
+            end if
+          end for
+        end if
+        if last or low >= high
+          exit for
+        end if
+        ' the next ring's step up and lintel down
+        e = floorDy[k + 1] / dNext
+        if e > low
+          low = e
+        end if
+        e = ceilingDy[k + 1] / dNext
+        if e < high
+          high = e
+        end if
+        if low >= high
+          exit for
+        end if
+        dPrev = dNext
+      end for
+    end for
+    m.sliceCount = sc
+    for h = 0 to m.heightCount - 1
+      if hFirst[h] >= 0
+        m.visibleHeights++
+      end if
+    end for
+    return true
+  end function
+
+  ' The canvas row of a slope on any ray, clamped to the canvas.
+  private function screenY(e as float) as float
+    z = m.pFz + e * m.pUz
+    if z > -0.0001
+      if e < 0
+        return m.pHh * 2
+      end if
+      return 0.0
+    end if
+    y = m.pHh - m.pFocal * (m.pFy + e * m.pUy) / -z
+    if y < 0
+      return 0.0
+    else if y > m.pHh * 2
+      return m.pHh * 2
+    end if
+    return y
+  end function
+
+  ' The slope a canvas row shows.
+  private function slopeAtY(y as float) as float
+    a = m.pHh - y
+    den = a * m.pUz + m.pFocal * m.pUy
+    if Abs(den) < 1.0e-9
+      return 0.0
+    end if
+    return (-a * m.pFz - m.pFocal * m.pFy) / den
+  end function
+
+  ' The canvas column of tangent t at slope e.
+  private function screenX(t as float, e as float) as float
+    return m.pHw + m.pFocal * (m.pXf + t * m.pXt + e * m.pXu) / -(m.pFz + e * m.pUz)
+  end function
+
+  ' The tangent at canvas column x and slope e.
+  private function tangentAtX(x as float, e as float) as float
+    return ((x - m.pHw) * -(m.pFz + e * m.pUz) / m.pFocal - m.pXf - e * m.pXu) / m.pXt
+  end function
+
+  private function shadeIndex(depth as float) as integer
+    i = Int(depth / m.drawDistance * m.shadeLevels)
+    if i >= m.shadeLevels
+      return m.shadeLevels - 1
+    end if
+    return i
+  end function
+
+  private function isCeiling(height as integer) as boolean
+    return height > m.ringCount
+  end function
+
+  private function topDownFor(height as integer) as FloorTopDown
+    if m.isCeiling(height)
+      return m.ceilingTop
+    end if
+    return m.floorTop
+  end function
+
+  ' Brings the top-down bitmaps up to date for this frame's eye. Returns their draws.
+  private function buildTopDowns() as integer
+    farDepth = m.drawDistance
+    ' wide enough for the fan at any pitch
+    halfWidth = farDepth * BGE.Math.Max(Abs(m.fan.firstTan), Abs(m.fan.firstTan + m.fan.rayCount * m.fan.tanStep))
+    halfWidth = Int(halfWidth / 64 + 1) * 64
+    maxPixels = BGE.getPlanePrePerspectiveMaxPixels()
+    lf = m.fan.levelForward
+    draws = 0
+    hasFloor = false
+    hasCeiling = false
+    for h = 0 to m.heightCount - 1
+      if m.heightFirst[h] >= 0
+        if m.isCeiling(h)
+          hasCeiling = true
+        else
+          hasFloor = true
+        end if
+      end if
+    end for
+    tops = [] as FloorTopDown[]
+    if hasFloor
+      tops.push(m.floorTop)
+    end if
+    if hasCeiling
+      tops.push(m.ceilingTop)
+    end if
+    for each top in tops
+      if top.allocate(farDepth, halfWidth, maxPixels)
+        top.build(m.camera.position.x, m.camera.position.z, lf.x, lf.z)
+        if top.rebuilt
+          draws += top.drawsLastBuild
+        end if
+      end if
+    end for
+    return draws
+  end function
+
+  ' 0: a shaded rectangle per slice.
+  private sub drawFlat(renderer as BGE.Renderer)
+    screen = renderer.getDraw2d()
+    firstTan = m.fan.firstTan
+    tanStep = m.fan.tanStep
+    for each h in m.drawOrder
+      colors = m.floorColors
+      if m.isCeiling(h)
+        colors = m.ceilingColors
+      end if
+      s = m.heightFirst[h]
+      while s >= 0
+        i = m.sliceRay[s]
+        e = (m.sliceLow[s] + m.sliceHigh[s]) * 0.5
+        x0 = Int(m.screenX(firstTan + i * tanStep, e))
+        x1 = -Int(-m.screenX(firstTan + (i + 1) * tanStep, e))
+        y0 = Int(m.sliceTop[s])
+        y1 = -Int(-m.sliceBottom[s])
+        if x1 > x0 and y1 > y0
+          screen.DrawRect(x0, y0, x1 - x0, y1 - y0, colors[m.shadeIndex(m.sliceDepth[s])])
+          m.floorDraws++
+        end if
+        s = m.sliceNext[s]
+      end while
+    end for
+  end sub
+
+  ' 1: each height warped into its own screen-sized bitmap, then a copy per slice.
+  private sub drawPlanes(renderer as BGE.Renderer)
+    screen = renderer.getDraw2d()
+    width = m.pHw * 2
+    bands = renderer.qualitySettings.planeSliceCount
+    firstTan = m.fan.firstTan
+    tanStep = m.fan.tanStep
+    farDepth = m.drawDistance
+    for each h in m.drawOrder
+      if m.heightFirst[h] < 0
+        continue for
+      end if
+      top = m.topDownFor(h)
+      if invalid = top.bmp
+        continue for
+      end if
+      cursor = m.heightCursor(h)
+      if invalid = cursor
+        continue for
+      end if
+      bmp = m.heightBitmaps[h] as roBitmap
+      src = top.cursor
+      k = top.pxPerUnit
+      halfW = top.halfWidth
+      dh = m.heightY[h] - m.oy
+
+      ' the height's rows as depths, split into bands of equal far/near ratio
+      fA = m.depthAt(dh, m.slopeAtY(m.heightTop[h]))
+      fB = m.depthAt(dh, m.slopeAtY(m.heightBottom[h]))
+      fNear = BGE.Math.Max(1, BGE.Math.Min(fA, fB))
+      fFar = BGE.Math.Min(farDepth, BGE.Math.Max(fA, fB))
+      if fFar > fNear
+        ratio = (fFar / fNear) ^ (1 / bands)
+        f0 = fNear
+        for b = 1 to bands
+          f1 = f0 * ratio
+          if b = bands
+            f1 = fFar
+          end if
+          yNear = m.screenY(dh / f0)
+          yFar = m.screenY(dh / f1)
+          fm = (f0 + f1) * 0.5
+          em = dh / fm
+          pxL = k * (m.tangentAtX(0, em) * fm + halfW)
+          pxR = k * (m.tangentAtX(width, em) * fm + halfW)
+          pyNear = k * (farDepth - f0)
+          pyFar = k * (farDepth - f1)
+          sx = Int(pxL)
+          sy = Int(pyFar)
+          ' a texel past the near edge covers rounding seams
+          if pxR - pxL > 0.01 and pyNear - pyFar > 0.01 and src.moveTo(sx, sy, -Int(-pxR) - sx, -Int(-pyNear) - sy + 1)
+            scaleX = width / (pxR - pxL)
+            scaleY = Abs(yNear - yFar) / (pyNear - pyFar)
+            destX = (sx - pxL) * scaleX
+            if dh < 0
+              bmp.DrawScaledObject(destX, yFar + (sy - pyFar) * scaleY, scaleX, scaleY, src.region)
+            else
+              ' a ceiling's far edge is its bottom: mirrored, drawn up from there
+              bmp.DrawScaledObject(destX, yFar - (sy - pyFar) * scaleY, scaleX, -scaleY, src.region)
+            end if
+            m.floorDraws++
+          end if
+          f0 = f1
+        end for
+      end if
+
+      s = m.heightFirst[h]
+      while s >= 0
+        i = m.sliceRay[s]
+        t0 = firstTan + i * tanStep
+        t1 = t0 + tanStep
+        eLo = m.sliceLow[s]
+        eHi = m.sliceHigh[s]
+        xa = m.screenX(t0, eLo)
+        xb = m.screenX(t0, eHi)
+        minX = BGE.Math.Min(xa, xb)
+        xa = m.screenX(t1, eLo)
+        xb = m.screenX(t1, eHi)
+        maxX = BGE.Math.Max(xa, xb)
+        x0 = Int(minX)
+        y0 = Int(m.sliceTop[s])
+        if cursor.moveTo(x0, y0, -Int(-maxX) - x0, -Int(-m.sliceBottom[s]) - y0)
+          (screen as dynamic).DrawObject(x0, y0, cursor.region, m.tints[m.shadeIndex(m.sliceDepth[s])])
+          m.floorDraws++
+        end if
+        s = m.sliceNext[s]
+      end while
+    end for
+  end sub
+
+  private function depthAt(dh as float, e as float) as float
+    if e * dh <= 0
+      return m.drawDistance
+    end if
+    return dh / e
+  end function
+
+  ' Method 1's bitmap for a height, allocated on first use; invalid if that failed.
+  private function heightCursor(h as integer) as RegionCursor
+    if invalid <> m.heightCursors[h]
+      return m.heightCursors[h]
+    end if
+    bmp = CreateObject("roBitmap", {width: Int(m.pHw * 2), height: Int(m.pHh * 2), alphaEnable: false})
+    if invalid = bmp
+      m.allocationFailures++
+      return invalid
+    end if
+    m.heightBitmaps[h] = bmp
+    m.heightCursors[h] = new RegionCursor(bmp)
+    return m.heightCursors[h]
+  end function
+
+  ' 2: row spans. Each height's slices are columns of rows rowStep pixels tall; runs of rays
+  ' sharing a row open and close as the columns change (DOOM's R_MakeSpans), and each run
+  ' is one scaled texel row. Spans are listed first, then drawn in one tight loop.
+  private sub drawRows(renderer as BGE.Renderer)
+    screen = renderer.getDraw2d()
+    rowStep = m.rowStep
+    rows = Int(m.pHh * 2 / rowStep) + 2
+    starts = m.spanStart
+    rowE = m.rowE
+    rowInvZ = m.rowInvZ
+    rowXu = m.rowXu
+    while starts.count() < rows
+      starts.push(0)
+      rowE.push(0.0)
+      rowInvZ.push(0.0)
+      rowXu.push(0.0)
+    end while
+    hw = m.pHw
+    hh = m.pHh
+    focal = m.pFocal
+    fy = m.pFy
+    fz = m.pFz
+    uy = m.pUy
+    uz = m.pUz
+    xu = m.pXu
+    ' per row: the slope at its centre, focal / view depth there, and up's share of view x
+    for r = 0 to rows - 1
+      a = hh - (r * rowStep + rowStep * 0.5)
+      den = a * uz + focal * uy
+      e = 0.0
+      if Abs(den) > 1.0e-9
+        e = (-a * fz - focal * fy) / den
+      end if
+      rowE[r] = e
+      z = -(fz + e * uz)
+      if z < 0.0001
+        rowInvZ[r] = 0.0
+      else
+        rowInvZ[r] = focal / z
+      end if
+      rowXu[r] = e * xu
+    end for
+    ' per ray edge: its tangent, and the tangent's share of view x
+    rayCount = m.fan.rayCount
+    rayT = m.rayT
+    rayX = m.rayX
+    while rayT.count() <= rayCount
+      rayT.push(0.0)
+      rayX.push(0.0)
+    end while
+    firstTan = m.fan.firstTan
+    tanStep = m.fan.tanStep
+    xf = m.pXf
+    xt = m.pXt
+    for i = 0 to rayCount
+      t = firstTan + i * tanStep
+      rayT[i] = t
+      rayX[i] = xf + t * xt
+    end for
+
+    sRay = m.sliceRay
+    topRows = m.sliceTop
+    bottomRows = m.sliceBottom
+    sNext = m.sliceNext
+    spanRow = m.spanRow
+    spanA = m.spanA
+    spanB = m.spanB
+    tints = m.tints
+    levels = m.shadeLevels
+    farDepth = m.drawDistance
+    shadeScale = levels / farDepth
+    draws = 0
+    for each h in m.drawOrder
+      if m.heightFirst[h] < 0
+        continue for
+      end if
+      top = m.topDownFor(h)
+      if invalid = top.bmp
+        continue for
+      end if
+
+      ' list the spans
+      spanRow.Clear()
+      spanA.Clear()
+      spanB.Clear()
+      pt = 0
+      pb = 0
+      prevRay = -2
+      s = m.heightFirst[h]
+      while true
+        if s >= 0
+          i = sRay[s]
+          ct = Int(topRows[s] / rowStep)
+          cb = -Int(-bottomRows[s] / rowStep)
+        else
+          i = prevRay + 1
+          ct = 0
+          cb = 0
+        end if
+        if i > prevRay + 1 and pb > pt
+          ' a gap: everything open ends at the ray after the last one
+          for r = pt to pb - 1
+            spanRow.push(r)
+            spanA.push(starts[r])
+            spanB.push(prevRay + 1)
+          end for
+          pt = 0
+          pb = 0
+        end if
+        ' rows that ended at this ray
+        last = pb
+        if ct < last
+          last = ct
+        end if
+        for r = pt to last - 1
+          spanRow.push(r)
+          spanA.push(starts[r])
+          spanB.push(i)
+        end for
+        first = pt
+        if cb > first
+          first = cb
+        end if
+        for r = first to pb - 1
+          spanRow.push(r)
+          spanA.push(starts[r])
+          spanB.push(i)
+        end for
+        ' rows that start at it
+        last = cb
+        if pt < last
+          last = pt
+        end if
+        for r = ct to last - 1
+          starts[r] = i
+        end for
+        first = ct
+        if pb > first
+          first = pb
+        end if
+        for r = first to cb - 1
+          starts[r] = i
+        end for
+        pt = ct
+        pb = cb
+        prevRay = i
+        if s < 0
+          exit while
+        end if
+        s = sNext[s]
+      end while
+
+      ' draw them, moving the region by hand (RegionCursor.moveTo() inlined)
+      dh = m.heightY[h] - m.oy
+      k = top.pxPerUnit
+      halfW = top.halfWidth
+      cursor = top.cursor
+      region = cursor.region
+      cx = cursor.x
+      cy = cursor.y
+      cw = cursor.w
+      ch = cursor.h
+      maxW = cursor.maxW
+      maxH = cursor.maxH
+      for j = 0 to spanRow.count() - 1
+        r = spanRow[j]
+        e = rowE[r]
+        invZ = rowInvZ[r]
+        if e * dh <= 0 or invZ = 0
+          continue for
+        end if
+        f = dh / e
+        if f > farDepth or f < 1
+          continue for
+        end if
+        a = spanA[j]
+        b = spanB[j]
+        ta = rayT[a]
+        tb = rayT[b]
+        pxa = k * (ta * f + halfW)
+        pxb = k * (tb * f + halfW)
+        if pxb - pxa < 0.01
+          continue for
+        end if
+        sx = Int(pxa)
+        sw = -Int(-pxb) - sx
+        sy = Int(k * (farDepth - f))
+        if sx < 0
+          sw += sx
+          sx = 0
+        end if
+        if sx + sw > maxW
+          sw = maxW - sx
+        end if
+        if sy < 0
+          sy = 0
+        else if sy >= maxH
+          sy = maxH - 1
+        end if
+        if sw < 1
+          continue for
+        end if
+        region.Offset(sx - cx, sy - cy, sw - cw, 1 - ch)
+        cx = sx
+        cy = sy
+        cw = sw
+        ch = 1
+        xa = hw + (rayX[a] + rowXu[r]) * invZ
+        xb = hw + (rayX[b] + rowXu[r]) * invZ
+        scaleX = (xb - xa) / (pxb - pxa)
+        si = Int(f * shadeScale)
+        if si >= levels
+          si = levels - 1
+        end if
+        screen.DrawScaledObject(xa + (sx - pxa) * scaleX, r * rowStep, scaleX, rowStep, region, tints[si])
+        draws++
+      end for
+      cursor.x = cx
+      cursor.y = cy
+      cursor.w = cw
+      cursor.h = ch
+    end for
+    m.floorDraws += draws
+  end sub
+
+  private sub growSlices(count as integer)
+    for i = m.sliceRay.count() to count - 1
+      m.sliceRay.push(0)
+      m.sliceHeight.push(0)
+      m.sliceLow.push(0.0)
+      m.sliceHigh.push(0.0)
+      m.sliceTop.push(0.0)
+      m.sliceBottom.push(0.0)
+      m.sliceDepth.push(0.0)
+      m.sliceNext.push(-1)
+    end for
+    for i = m.heightFirst.count() to 11
+      m.heightFirst.push(-1)
+      m.heightLast.push(-1)
+      m.heightTop.push(0.0)
+      m.heightBottom.push(0.0)
+      m.heightBitmaps.push(invalid)
+      m.heightCursors.push(invalid)
+    end for
+  end sub
+
+  ' Averages the frame interval (everything, swap included) and logs it once per case.
+  private sub sampleFrame(walkMs as float, floorMs as float, renderMs as float, wallDraws as integer, topDownDraws as integer)
+    elapsed = m.frameClock.TotalMilliseconds()
+    m.frameClock.Mark()
+    m.frameCount++
+    if m.frameCount <= m.warmupFrames
+      return
+    end if
+    m.sampleMs += elapsed
+    m.sampleWalkMs += walkMs
+    m.sampleFloorMs += floorMs
+    m.sampleRenderMs += renderMs
+    m.sampleFloorDraws += m.floorDraws
+    m.sampleWallDraws += wallDraws
+    m.sampleSlices += m.sliceCount
+    m.sampleHeights += m.visibleHeights
+    m.sampleTopDownDraws += topDownDraws
+    if m.frameCount < m.warmupFrames + m.sampleFrames
+      return
+    end if
+    n = m.sampleFrames
+    frameMs = m.sampleMs / n
+    stats = `${m.format(frameMs)} ms (${m.format(1000 / frameMs)} fps) | walk ${m.format(m.sampleWalkMs / n)} | floors ${m.format(m.sampleFloorMs / n)} | render ${m.format(m.sampleRenderMs / n)} (walls walk ${m.format(m.sampleWallWalkMs / n)} shade ${m.format(m.sampleWallShadeMs / n)} strips ${m.format(m.sampleWallStripMs / n)}) | floor draws ${m.sampleFloorDraws \ n} | wall draws ${m.sampleWallDraws \ n} | top-down draws ${m.sampleTopDownDraws \ n} | slices ${m.sampleSlices \ n} | heights ${m.format(m.sampleHeights / n)}`
+    if m.allocationFailures > 0
+      stats += ` | ${m.allocationFailures} bitmap allocations failed`
+    end if
+    m.reportLine = stats
+    print `FLOORS ${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]} | rings ${m.ringCount} | rows ${m.rowStep} | ${BGE.getRenderQualityLevelName(m.level)} | ${stats}`
+    m.resetSample()
+    if m.sweeping
+      m.sweepIndex++
+      if m.sweepIndex >= m.sweepCases.count()
+        print "FLOORS done"
+        m.sweeping = false
+        return
+      end if
+      rings = m.ringCount
+      m.applySweepCase()
+      if rings <> m.ringCount
+        m.buildLevel()
+      end if
+    end if
+  end sub
+
+  private sub resetSample()
+    m.frameCount = 0
+    m.sampleMs = 0
+    m.sampleWalkMs = 0
+    m.sampleFloorMs = 0
+    m.sampleRenderMs = 0
+    m.sampleFloorDraws = 0
+    m.sampleWallDraws = 0
+    m.sampleSlices = 0
+    m.sampleHeights = 0
+    m.sampleTopDownDraws = 0
+    m.sampleWallWalkMs = 0
+    m.sampleWallShadeMs = 0
+    m.sampleWallStripMs = 0
+  end sub
+
+  private function format(value as float) as string
+    return Str(cint(value * 10) / 10.0).trim()
+  end function
+
+  override sub onInput(buttonName as string)
+    if buttonName = "up" or buttonName = "down"
+      delta = 1
+      if buttonName = "up"
+        delta = m.methodNames.count() - 1
+      end if
+      m.methodIndex = (m.methodIndex + delta) mod m.methodNames.count()
+      m.resetSample()
+    else if buttonName = "OK"
+      m.motionIndex = (m.motionIndex + 1) mod m.motionNames.count()
+      m.motionTime = 0
+      m.resetSample()
+    else if buttonName = "left" and m.ringCount > 2
+      m.ringCount--
+      m.buildLevel()
+    else if buttonName = "right" and m.ringCount < 5
+      m.ringCount++
+      m.buildLevel()
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    m.heightBitmaps.Clear()
+    m.heightCursors.Clear()
+    renderer.profileStages = false
+    renderer.setQualitySettings(m.previousQuality)
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class

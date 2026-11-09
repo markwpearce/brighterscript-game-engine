@@ -171,6 +171,29 @@ The winner, possibly per quality level, becomes the floor path. The benchmark sc
 and floors together; it passes at **≥40 fps on the Ultra at Medium**, leaving room for objects
 in phase 4's 30 fps target. *(My call.)* If neither textured path passes, stop and bring the numbers back before phase 2.
 
+#### Phase 1 results (#474, Roku Ultra, Medium)
+
+`rendererTest`'s `floors-benchmark`: a hub ringed by raised alcoves (a step and a lintel per
+ring) on `DrawableWalls`, with floor/ceiling slices on the walls' ray fan. Both textured
+paths read one camera-aligned top-down bitmap per texture (heights share it), rebuilt in
+~15 draws when the camera moves.
+
+- **B (row spans) wins:** 10-17 ms with rows every 4 px (DOOM's `R_MakeSpans` over each
+  height's slices, one scaled texel row per span), cheaper than the flat baseline once many
+  slices share a row. Textures line up with the wall strips and don't swim. Every 2 px costs
+  3-9 ms more.
+- **A is out:** 67-72 ms of floors at 4 rings, and a 3.7 MB screen-sized bitmap per height.
+- **Nothing passes 40 fps, mostly because of the walls.** Turning, `DrawableWalls` alone takes
+  37 ms (2 rings, ~4 pieces per ray) to 76 ms (4 rings, ~9): its walk 29-53 ms, strips
+  19-39 ms. Wall speed-ups come before phase 2.
+- The demo walks every ray twice (walls, then floors), 12-20 ms for its own walk; phase 2's
+  room walk finds wall pieces and floor slices in one pass.
+- Not measured on an HD device yet.
+
+For phase 2, the row step belongs in `BGE.RenderQualitySettings` (e.g. 6/4/4/3/2 px, Medium
+at the measured 4), as may the top-down bitmap's texel budget, which the demo takes from the
+device tier like a ground plane.
+
 ## Phases (one issue and PR each)
 
 1. **Floor benchmark** (#474) (`rendererTest`): a throwaway demo drawing textured floor/ceiling slices
