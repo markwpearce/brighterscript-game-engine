@@ -1,0 +1,168 @@
+import "pkg:/source/engine/navigation/NavGrid.bs"
+
+' Walks to the flag: straight at it while it's in sight, otherwise along a path from the
+' scene's NavGrid, re-planned when the flag moves. Each search gets a small slice of every
+' frame, so several agents searching at once don't drop frames. position is its centre.
+class Agent extends BGE.GameEntity
+
+  radius = 10.0
+  speed = 150.0
+  colorRGB = &hFFFFFF
+  ' Last finished search, for the HUD
+  lastStatus = "-"
+  lastExpanded = 0
+  lastFrames = 0
+  ' "path", "direct" or "here"
+  mode = "here"
+
+  private nav as BGE.NavGrid
+  private world as BGE.SolidWorld
+  private flagEntity as BGE.GameEntity
+  ' Line of sight to the flag, checked a few times a second rather than every frame
+  private canSeeFlag = false
+  private sightCheckIn = 0.0
+  private search as dynamic = invalid
+  private searchFrames = 0
+  private waypoints as BGE.NavPoint[]
+  private nextWaypoint = 0
+  private repathIn = 0.0
+  private pathGoal as BGE.NavPoint
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Agent"
+    m.waypoints = []
+    m.pathGoal = {x: -9999.0, y: -9999.0}
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.position.x = args.x
+    m.position.y = args.y
+    m.colorRGB = args.color
+    m.nav = args.nav
+    m.world = args.world
+    m.flagEntity = args.flag
+    m.repathIn = args.delay
+    r = m.radius
+    m.addCircle("body", r, {color: m.colorRGB, outlineRGBA: &hFFFFFF, offset: BGE.Math.VectorOps.create(-r, r)})
+  end sub
+
+  ' Drops the current path and searches again next frame, e.g. after a door changed
+  sub forceRepath()
+    if m.search <> invalid
+      m.search.cancel()
+      m.search = invalid
+    end if
+    m.repathIn = 0
+    m.sightCheckIn = 0
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    scene = m.game.currentScene as MainScene
+    goalX = m.flagEntity.position.x
+    goalY = m.flagEntity.position.y
+
+    m.updateSearch(scene, goalX, goalY, deltaTime)
+
+    ' Close enough: stop
+    dx = goalX - m.position.x
+    dy = goalY - m.position.y
+    if dx * dx + dy * dy < 45 * 45
+      m.mode = "here"
+      return
+    end if
+
+    m.sightCheckIn -= deltaTime
+    if m.sightCheckIn <= 0
+      m.sightCheckIn = 0.1
+      m.canSeeFlag = m.nav.hasLineOfSight(m.position.x, m.position.y, goalX, goalY)
+    end if
+    if m.canSeeFlag
+      m.mode = "direct"
+      m.moveToward(goalX, goalY, deltaTime)
+      return
+    end if
+
+    m.mode = "path"
+    if m.nextWaypoint < m.waypoints.count()
+      target = m.waypoints[m.nextWaypoint]
+      tx = target.x - m.position.x
+      ty = target.y - m.position.y
+      if tx * tx + ty * ty < 6 * 6
+        m.nextWaypoint++
+      else
+        m.moveToward(target.x, target.y, deltaTime)
+      end if
+    end if
+  end sub
+
+  private sub updateSearch(scene as MainScene, goalX as float, goalY as float, deltaTime as float)
+    if m.search = invalid
+      m.repathIn -= deltaTime
+      movedX = goalX - m.pathGoal.x
+      movedY = goalY - m.pathGoal.y
+      goalMoved = movedX * movedX + movedY * movedY > 20 * 20
+      ' Re-plan soon after the flag moves; otherwise only now and then, in case the agent was
+      ' pushed off its path
+      if m.repathIn <= 0 or (goalMoved and m.repathIn < 2.75)
+        options = {smooth: scene.smoothPaths} as BGE.NavSearchOptions
+        m.search = m.nav.startSearch(m.position.x, m.position.y, goalX, goalY, options)
+        m.pathGoal = {x: goalX, y: goalY}
+        m.searchFrames = 0
+        m.repathIn = 3.0
+      end if
+    end if
+    if m.search <> invalid
+      m.searchFrames++
+      search = m.search as BGE.NavPathSearch
+      if search.step(2)
+        m.lastStatus = search.status
+        m.lastExpanded = search.expandedCells
+        m.lastFrames = m.searchFrames
+        if search.status <> BGE.NavPathStatus.failed
+          m.waypoints = search.path
+          ' path[0] is where we started, so head for the next one. But if we're in a blocked
+          ' cell (pushed against a wall), path[0] is the open cell nearest us: go there first.
+          m.nextWaypoint = 1
+          if not m.nav.isWalkable(m.position.x, m.position.y)
+            m.nextWaypoint = 0
+          end if
+        end if
+        m.search = invalid
+      end if
+    end if
+  end sub
+
+  private sub moveToward(x as float, y as float, deltaTime as float)
+    dx = x - m.position.x
+    dy = y - m.position.y
+    distance = Sqr(dx * dx + dy * dy)
+    if distance < 0.001
+      return
+    end if
+    stepLength = BGE.Math.Min(distance, m.speed * deltaTime)
+    r = m.radius
+    feet = {x: m.position.x - r, y: m.position.y - r, w: r * 2, h: r * 2}
+    result = m.world.moveAndSlide(feet, dx / distance * stepLength, dy / distance * stepLength)
+    m.position.x = result.x + r
+    m.position.y = result.y + r
+  end sub
+
+  override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+    scene = m.game.currentScene as MainScene
+    if not scene.showPaths or m.mode <> "path"
+      return
+    end if
+    points = [BGE.Math.VectorOps.create(m.position.x, m.position.y, 0)]
+    for i = m.nextWaypoint to m.waypoints.count() - 1
+      points.push(BGE.Math.VectorOps.create(m.waypoints[i].x, m.waypoints[i].y, 0))
+    end for
+    rgba = (m.colorRGB << 8) or &hFF
+    gameRenderer.drawWorldPolyline(points, rgba)
+    for i = 1 to points.count() - 1
+      canvasPoint = gameRenderer.worldPointToCanvasPoint(points[i])
+      gameRenderer.drawRectangle(canvasPoint.x - 3, canvasPoint.y - 3, 6, 6, rgba)
+    end for
+  end sub
+
+end class

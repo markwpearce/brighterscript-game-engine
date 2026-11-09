@@ -1,0 +1,539 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/engine/navigation/NavTypes.bs"
+import "pkg:/source/engine/navigation/NavPathSearch.bs"
+
+namespace BGE
+
+  ' A coarse grid of walkable and blocked cells built from a `BGE.SolidWorld`, for finding paths
+  ' around its solids with A*.
+  '
+  ' Each solid is grown by `agentRadius` and every cell it overlaps is blocked, so a path that
+  ' keeps the agent's centre in open cells keeps its body clear of the solids. Paths are smoothed
+  ' with line-of-sight checks across the cells, so they don't zig-zag along the grid.
+  '
+  ' The grid works in the `SolidWorld`'s own 2D coordinates. For a top-down game that's world
+  ' x/y; for a 3D ground plane, store world z as the `SolidWorld`'s y and read each waypoint's
+  ' `y` as z.
+  '
+  ' @example
+  ' nav = new BGE.NavGrid(world, {cellSize: 16, agentRadius: 10})
+  ' path = nav.findPath(enemy.position.x, enemy.position.y, player.position.x, player.position.y)
+  ' ' path[0] is the start, path[path.count() - 1] the goal; [] if there's no way there
+  class NavGrid
+
+    ' Width and height of each cell
+    cellSize as float = 32
+    ' How far solids are grown before they block cells: the agent's radius
+    agentRadius as float = 0
+    ' Bottom-left corner of the grid
+    minX as float = 0
+    minY as float = 0
+    ' Grid size in cells
+    cols as integer = 0
+    rows as integer = 0
+    ' Finished searches leave their per-cell arrays (about 3 entries per cell) for later searches
+    ' to reuse; the grid keeps at most this many sets. Lower it for a big map.
+    maxPooledSearches as integer = 4
+
+    ' Per cell: bit 1 = blocked by a solid, bit 2 = blocked by setCellBlocked(), bit 4 = the
+    ' border. A ring of border cells pads the grid, so searches can read neighbours unchecked.
+    ' Cell (col, row) is at (row + 1) * stride + col + 1.
+    private cells as roByteArray = invalid
+    private stride as integer = 2
+    private world as BGE.SolidWorld
+    ' Search state left by finished searches, for the next ones to reuse
+    private freeStates as BGE.NavSearchState[]
+
+    ' Builds the grid. Every cell is tested once, so build it at scene load (in a `LoadTask` if
+    ' the map is big) rather than mid-game.
+    '
+    ' @param {BGE.SolidWorld} world - the solids to path around. The grid keeps it, for `rebuild()`
+    ' @param {BGE.NavGridOptions} [options={}] - `cellSize` (default 32), `agentRadius` (default 0),
+    '   and the area to cover (`minX`, `minY`, `width`, `height`; default: every solid, plus
+    '   `agentRadius` and one cell round the outside)
+    sub new(world as BGE.SolidWorld, options = {} as BGE.NavGridOptions)
+      if options = invalid
+        options = {}
+      end if
+      m.world = world
+      m.freeStates = []
+      if options.DoesExist("cellSize") and options.cellSize > 0
+        m.cellSize = options.cellSize
+      end if
+      if options.DoesExist("agentRadius") and options.agentRadius > 0
+        m.agentRadius = options.agentRadius
+      end if
+
+      if options.DoesExist("width") and options.DoesExist("height")
+        minX = 0.0
+        minY = 0.0
+        if options.DoesExist("minX")
+          minX = options.minX
+        end if
+        if options.DoesExist("minY")
+          minY = options.minY
+        end if
+        maxX = minX + options.width
+        maxY = minY + options.height
+      else
+        solids = world.getSolids()
+        if solids.count() = 0
+          minX = 0.0
+          minY = 0.0
+          maxX = 0.0
+          maxY = 0.0
+        else
+          minX = solids[0].x
+          minY = solids[0].y
+          maxX = solids[0].x + solids[0].w
+          maxY = solids[0].y + solids[0].h
+          for each solid in solids
+            minX = m.minFloat(minX, solid.x)
+            minY = m.minFloat(minY, solid.y)
+            maxX = m.maxFloat(maxX, solid.x + solid.w)
+            maxY = m.maxFloat(maxY, solid.y + solid.h)
+          end for
+          ' Leave room to walk round the outside of the outermost solids
+          margin = m.agentRadius + m.cellSize
+          minX -= margin
+          minY -= margin
+          maxX += margin
+          maxY += margin
+        end if
+      end if
+      m.minX = minX
+      m.minY = minY
+      m.cols = m.ceil((maxX - minX) / m.cellSize)
+      m.rows = m.ceil((maxY - minY) / m.cellSize)
+      m.stride = m.cols + 2
+      m.rebuild()
+    end sub
+
+    ' Rebuilds every cell from the world's solids. Cells blocked with `setCellBlocked()` stay blocked.
+    sub rebuild()
+      stride = m.stride
+      count = stride * (m.rows + 2)
+      if m.cells = invalid
+        m.cells = CreateObject("roByteArray")
+        ' Writing the last byte sizes the array, zero-filled.
+        m.cells[count - 1] = 0
+        for col = 0 to stride - 1
+          m.cells[col] = 4
+          m.cells[count - 1 - col] = 4
+        end for
+        for row = 1 to m.rows
+          m.cells[row * stride] = 4
+          m.cells[row * stride + stride - 1] = 4
+        end for
+      else
+        for index = 0 to count - 1
+          m.cells[index] = m.cells[index] and 6
+        end for
+      end if
+      for each solid in m.world.getSolids()
+        m.markSolid(solid, 0, 0, m.cols - 1, m.rows - 1)
+      end for
+    end sub
+
+    ' Rebuilds the cells in one area from the world's solids, e.g. after a door's solid was
+    ' removed. Cheaper than `rebuild()` for a small area.
+    '
+    ' @param {float} x - bottom-left x of the area that changed
+    ' @param {float} y - bottom-left y
+    ' @param {float} w
+    ' @param {float} h
+    sub rebuildArea(x as float, y as float, w as float, h as float)
+      ' A solid's growth by agentRadius reaches this far past it, so widen the area that changed.
+      r = m.agentRadius
+      col0 = m.maxInt(0, m.colAt(x - r))
+      row0 = m.maxInt(0, m.rowAt(y - r))
+      col1 = m.minInt(m.cols - 1, m.ceil((x + w + r - m.minX) / m.cellSize) - 1)
+      row1 = m.minInt(m.rows - 1, m.ceil((y + h + r - m.minY) / m.cellSize) - 1)
+      if col1 < col0 or row1 < row0
+        return
+      end if
+      for row = row0 to row1
+        for col = col0 to col1
+          index = (row + 1) * m.stride + col + 1
+          m.cells[index] = m.cells[index] and 2
+        end for
+      end for
+      ' Every solid that could block a cell in that range
+      areaX = m.minX + col0 * m.cellSize - r
+      areaY = m.minY + row0 * m.cellSize - r
+      areaW = (col1 - col0 + 1) * m.cellSize + r * 2
+      areaH = (row1 - row0 + 1) * m.cellSize + r * 2
+      for each solid in m.world.getSolidsInArea(areaX, areaY, areaW, areaH)
+        m.markSolid(solid, col0, row0, col1, row1)
+      end for
+    end sub
+
+    ' Blocks or unblocks one cell by hand, on top of the solids: e.g. from a map layout image, or
+    ' to keep agents off a hazard they could walk through. `rebuild()` keeps these.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @param {boolean} blocked
+    sub setCellBlocked(col as integer, row as integer, blocked as boolean)
+      if not m.isInGrid(col, row)
+        return
+      end if
+      index = (row + 1) * m.stride + col + 1
+      if blocked
+        m.cells[index] = m.cells[index] or 2
+      else
+        m.cells[index] = m.cells[index] and 1
+      end if
+    end sub
+
+    ' Whether a cell is blocked. Cells outside the grid count as blocked.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {boolean}
+    function isCellBlocked(col as integer, row as integer) as boolean
+      if not m.isInGrid(col, row)
+        return true
+      end if
+      return m.cells[(row + 1) * m.stride + col + 1] <> 0
+    end function
+
+    ' Whether a point is in an open cell.
+    '
+    ' @param {float} x
+    ' @param {float} y
+    ' @return {boolean}
+    function isWalkable(x as float, y as float) as boolean
+      return not m.isCellBlocked(m.colAt(x), m.rowAt(y))
+    end function
+
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {boolean} true if the cell is inside the grid
+    function isInGrid(col as integer, row as integer) as boolean
+      return col >= 0 and row >= 0 and col < m.cols and row < m.rows
+    end function
+
+    ' @param {float} x
+    ' @return {integer} the column containing x (may be outside the grid)
+    function colAt(x as float) as integer
+      return Int((x - m.minX) / m.cellSize)
+    end function
+
+    ' @param {float} y
+    ' @return {integer} the row containing y (may be outside the grid)
+    function rowAt(y as float) as integer
+      return Int((y - m.minY) / m.cellSize)
+    end function
+
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {BGE.NavPoint} the centre of a cell
+    function cellCenter(col as integer, row as integer) as BGE.NavPoint
+      return {x: m.minX + (col + 0.5) * m.cellSize, y: m.minY + (row + 0.5) * m.cellSize}
+    end function
+
+    ' Whether a straight line between two points crosses only open cells. A line through a
+    ' cell corner needs both cells beside the corner open, as paths can't cut corners either.
+    '
+    ' @param {float} x0
+    ' @param {float} y0
+    ' @param {float} x1
+    ' @param {float} y1
+    ' @return {boolean}
+    function hasLineOfSight(x0 as float, y0 as float, x1 as float, y1 as float) as boolean
+      gx0 = (x0 - m.minX) / m.cellSize
+      gy0 = (y0 - m.minY) / m.cellSize
+      gx1 = (x1 - m.minX) / m.cellSize
+      gy1 = (y1 - m.minY) / m.cellSize
+      col = Int(gx0)
+      row = Int(gy0)
+      endCol = Int(gx1)
+      endRow = Int(gy1)
+      if m.isCellBlocked(col, row)
+        return false
+      end if
+      ' Each step moves at most one cell, so from an in-grid start every cell read below is in
+      ' the grid or its border: no bounds checks needed.
+      cells = m.cells
+      stride = m.stride
+      index = (row + 1) * stride + col + 1
+
+      ' Walk the cells the line crosses (Amanatides & Woo). tMax is how far along the line
+      ' (0..1) the next column/row edge is; tDelta how far one whole cell is.
+      noEdge = 1000000.0
+      dx = gx1 - gx0
+      dy = gy1 - gy0
+      stepX = 0
+      tMaxX = noEdge
+      tDeltaX = noEdge
+      if dx > 0
+        stepX = 1
+        tMaxX = (col + 1 - gx0) / dx
+        tDeltaX = 1 / dx
+      else if dx < 0
+        stepX = -1
+        tMaxX = (gx0 - col) / -dx
+        tDeltaX = -1 / dx
+      end if
+      stepIndexY = 0
+      tMaxY = noEdge
+      tDeltaY = noEdge
+      if dy > 0
+        stepIndexY = stride
+        tMaxY = (row + 1 - gy0) / dy
+        tDeltaY = 1 / dy
+      else if dy < 0
+        stepIndexY = -stride
+        tMaxY = (gy0 - row) / -dy
+        tDeltaY = -1 / dy
+      end if
+
+      ' Each step moves one cell nearer the end (two through a corner), so this bounds the walk.
+      remaining = Abs(endCol - col) + Abs(endRow - row)
+      while remaining > 0
+        if Abs(tMaxX - tMaxY) < 0.000001
+          if cells[index + stepX] <> 0 or cells[index + stepIndexY] <> 0
+            return false
+          end if
+          index += stepX + stepIndexY
+          tMaxX += tDeltaX
+          tMaxY += tDeltaY
+          remaining -= 2
+        else if tMaxX < tMaxY
+          index += stepX
+          tMaxX += tDeltaX
+          remaining--
+        else
+          index += stepIndexY
+          tMaxY += tDeltaY
+          remaining--
+        end if
+        if cells[index] <> 0
+          return false
+        end if
+      end while
+      return true
+    end function
+
+    ' The open cell nearest a point, searching outwards ring by ring. A point outside the grid
+    ' only finds a cell if the grid's edge is within `maxRings` cells of it.
+    '
+    ' @param {float} x
+    ' @param {float} y
+    ' @param {integer} [maxRings=8] - how many cells out to look
+    ' @return {dynamic} a `BGE.NavCell`, or invalid if there's no open cell that close
+    function findNearestOpenCell(x as float, y as float, maxRings = 8 as integer) as dynamic
+      if m.cols = 0 or m.rows = 0
+        return invalid
+      end if
+      col = m.colAt(x)
+      row = m.rowAt(y)
+      ' Rings round a point far off the grid would never reach it
+      if col < -maxRings or row < -maxRings or col >= m.cols + maxRings or row >= m.rows + maxRings
+        return invalid
+      end if
+      if not m.isCellBlocked(col, row)
+        return {col: col, row: row}
+      end if
+      for ring = 1 to maxRings
+        best = invalid
+        bestDistance = 0.0
+        for r = row - ring to row + ring
+          for c = col - ring to col + ring
+            onRing = Abs(r - row) = ring or Abs(c - col) = ring
+            if onRing and not m.isCellBlocked(c, r)
+              center = m.cellCenter(c, r)
+              distance = (center.x - x) * (center.x - x) + (center.y - y) * (center.y - y)
+              if best = invalid or distance < bestDistance
+                best = {col: c, row: r}
+                bestDistance = distance
+              end if
+            end if
+          end for
+        end for
+        if best <> invalid
+          return best
+        end if
+      end for
+      return invalid
+    end function
+
+    ' Finds a path in one go. Fine for short paths or small grids; for long searches use
+    ' `startSearch()` and spread the work over frames, so the watchdog doesn't kill the channel.
+    '
+    ' @param {float} fromX
+    ' @param {float} fromY
+    ' @param {float} toX
+    ' @param {float} toY
+    ' @param {BGE.NavSearchOptions} [options={}]
+    ' @return {BGE.NavPoint[]} waypoints from start to goal (or towards it, for a partial path);
+    '   [] if there's no path
+    function findPath(fromX as float, fromY as float, toX as float, toY as float, options = {} as BGE.NavSearchOptions) as BGE.NavPoint[]
+      search = m.startSearch(fromX, fromY, toX, toY, options)
+      while not search.step(1000000)
+      end while
+      return search.path
+    end function
+
+    ' Starts a path search to run a little at a time: call `step(budgetMs)` each frame until it
+    ' returns true, then read `status` and `path`. Several searches can run at once, but each
+    ' reads the grid as it is, so finish or restart them after changing it.
+    '
+    ' @param {float} fromX
+    ' @param {float} fromY
+    ' @param {float} toX
+    ' @param {float} toY
+    ' @param {BGE.NavSearchOptions} [options={}]
+    ' @return {BGE.NavPathSearch}
+    function startSearch(fromX as float, fromY as float, toX as float, toY as float, options = {} as BGE.NavSearchOptions) as BGE.NavPathSearch
+      return new BGE.NavPathSearch(m, fromX, fromY, toX, toY, options)
+    end function
+
+    ' Removes waypoints that can be skipped: drops points in the middle of a straight run, then
+    ' keeps the first and last, and each point after which the line from the last kept point
+    ' would be blocked.
+    '
+    ' @param {BGE.NavPoint[]} points
+    ' @return {BGE.NavPoint[]}
+    function smoothPath(points as BGE.NavPoint[]) as BGE.NavPoint[]
+      count = points.count()
+      if count <= 2
+        return points
+      end if
+      ' Straight runs need no line-of-sight checks, and a long path is mostly straight runs.
+      turns = [points[0]]
+      for i = 1 to count - 2
+        a = points[i - 1]
+        b = points[i]
+        c = points[i + 1]
+        cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+        if Abs(cross) > 0.0001
+          turns.push(b)
+        end if
+      end for
+      turns.push(points[count - 1])
+      if turns.count() <= 2
+        return turns
+      end if
+
+      smoothed = [turns[0]]
+      anchor = turns[0]
+      for i = 2 to turns.count() - 1
+        target = turns[i]
+        if not m.hasLineOfSight(anchor.x, anchor.y, target.x, target.y)
+          anchor = turns[i - 1]
+          smoothed.push(anchor)
+        end if
+      end for
+      smoothed.push(turns[turns.count() - 1])
+      return smoothed
+    end function
+
+    ' Frees the search memory the grid keeps for reuse (see `maxPooledSearches`), e.g. after a
+    ' burst of searches on a big map. Searches still running are unaffected.
+    sub releaseSearchMemory()
+      m.freeStates = []
+    end sub
+
+    '****BEGIN - For Internal Use****
+
+    ' For internal use by NavPathSearch: the padded cell array and its row length
+    function getPaddedCells() as roByteArray
+      return m.cells
+    end function
+
+    function getPaddedStride() as integer
+      return m.stride
+    end function
+
+    ' For internal use by NavPathSearch: state for a new search, reused from a finished one if
+    ' there is one. Each set is about 3 entries per cell.
+    function acquireSearchState() as BGE.NavSearchState
+      if m.freeStates.count() > 0
+        state = m.freeStates.pop()
+        state.stamp += 2
+        ' Marks from older searches are all below the stamp; start again before it overflows
+        if state.stamp > 1000000000
+          mark = state.mark
+          for i = 0 to mark.count() - 1
+            mark[i] = 0
+          end for
+          state.stamp = 1
+        end if
+        return state
+      end if
+      count = m.cells.count()
+      gCost = CreateObject("roArray", count, false)
+      parentOf = CreateObject("roArray", count, false)
+      mark = CreateObject("roArray", count, false)
+      for i = 0 to count - 1
+        gCost.push(0.0)
+        parentOf.push(-1)
+        mark.push(0)
+      end for
+      return {gCost: gCost, parentOf: parentOf, mark: mark, stamp: 1, heapCells: [], heapF: []}
+    end function
+
+    sub releaseSearchState(state as BGE.NavSearchState)
+      if m.freeStates.count() >= m.maxPooledSearches
+        return
+      end if
+      state.heapCells.clear()
+      state.heapF.clear()
+      m.freeStates.push(state)
+    end sub
+
+    '****END - For Internal Use****
+
+    ' Blocks every cell (in the given column/row range) that the solid, grown by agentRadius, overlaps.
+    private sub markSolid(solid as BGE.SolidWorldSolid, col0 as integer, row0 as integer, col1 as integer, row1 as integer)
+      r = m.agentRadius
+      ' Cells strictly overlapping the grown solid: start before its far edge, end after its near edge.
+      c0 = m.maxInt(col0, m.colAt(solid.x - r))
+      r0 = m.maxInt(row0, m.rowAt(solid.y - r))
+      c1 = m.minInt(col1, m.ceil((solid.x + solid.w + r - m.minX) / m.cellSize) - 1)
+      r1 = m.minInt(row1, m.ceil((solid.y + solid.h + r - m.minY) / m.cellSize) - 1)
+      for row = r0 to r1
+        for col = c0 to c1
+          index = (row + 1) * m.stride + col + 1
+          m.cells[index] = m.cells[index] or 1
+        end for
+      end for
+    end sub
+
+    private function ceil(value as float) as integer
+      return -Int(-value)
+    end function
+
+    private function minInt(a as integer, b as integer) as integer
+      if a < b
+        return a
+      end if
+      return b
+    end function
+
+    private function maxInt(a as integer, b as integer) as integer
+      if a > b
+        return a
+      end if
+      return b
+    end function
+
+    private function minFloat(a as float, b as float) as float
+      if a < b
+        return a
+      end if
+      return b
+    end function
+
+    private function maxFloat(a as float, b as float) as float
+      if a > b
+        return a
+      end if
+      return b
+    end function
+
+  end class
+
+end namespace

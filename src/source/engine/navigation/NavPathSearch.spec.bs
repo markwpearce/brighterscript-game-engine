@@ -1,0 +1,255 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+import "pkg:/source/engine/navigation/NavPathSearch.bs"
+
+namespace tests
+  @suite("BGE.NavPathSearch")
+  class NavPathSearchTests extends rooibos.BaseTestSuite
+
+    private world as BGE.SolidWorld
+
+    protected override function beforeEach()
+      m.world = new BGE.SolidWorld()
+    end function
+
+    ' A 10x10-cell grid of 10-unit cells covering (0,0)-(100,100)
+    private function makeGrid() as BGE.NavGrid
+      return new BGE.NavGrid(m.world, {cellSize: 10, minX: 0, minY: 0, width: 100, height: 100})
+    end function
+
+    private sub assertPoint(point as BGE.NavPoint, x as float, y as float, label as string)
+      m.assertTrue(Abs(point.x - x) < 0.01 and Abs(point.y - y) < 0.01, label + ": expected " + x.toStr() + "," + y.toStr() + " but got " + point.x.toStr() + "," + point.y.toStr())
+    end sub
+
+    ' Every leg of the path crosses only open cells
+    private sub assertPathClear(grid as BGE.NavGrid, path as BGE.NavPoint[])
+      for i = 1 to path.count() - 1
+        m.assertTrue(grid.hasLineOfSight(path[i - 1].x, path[i - 1].y, path[i].x, path[i].y), "leg " + i.toStr() + " is blocked")
+      end for
+    end sub
+
+    @describe("open ground")
+
+    @it("goes straight to the goal")
+    function _()
+      grid = m.makeGrid()
+      path = grid.findPath(5, 5, 93, 71)
+      m.assertEqual(path.count(), 2)
+      m.assertPoint(path[0], 5, 5, "start")
+      m.assertPoint(path[1], 93, 71, "goal")
+    end function
+
+    @it("returns the start and goal when they share a cell")
+    function _()
+      grid = m.makeGrid()
+      search = grid.startSearch(41, 41, 48, 47)
+      m.assertTrue(search.step(10))
+      m.assertEqual(search.status, "found")
+      m.assertEqual(search.path.count(), 2)
+      m.assertPoint(search.path[1], 48, 47, "goal")
+    end function
+
+    @describe("blocked paths")
+
+    @it("goes around a wall")
+    function _()
+      m.world.addSolid(40, 0, 10, 80)
+      grid = m.makeGrid()
+      search = grid.startSearch(20, 20, 80, 20)
+      search.step(1000)
+      m.assertEqual(search.status, "found")
+      path = search.path
+      m.assertTrue(path.count() >= 3, "expected a corner, got " + path.count().toStr() + " points")
+      m.assertPoint(path[0], 20, 20, "start")
+      m.assertPoint(path[path.count() - 1], 80, 20, "goal")
+      m.assertPathClear(grid, path)
+      passedOver = false
+      for each point in path
+        if point.y > 80
+          passedOver = true
+        end if
+      end for
+      m.assertTrue(passedOver, "the path should pass over the wall's end")
+    end function
+
+    @it("doesn't cut a corner diagonally")
+    function _()
+      grid = m.makeGrid()
+      grid.setCellBlocked(5, 4, true)
+      grid.setCellBlocked(4, 5, true)
+      path = grid.findPath(45, 45, 55, 55, {smooth: false})
+      m.assertTrue(path.count() > 2, "expected a detour, got " + path.count().toStr() + " points")
+      m.assertPathClear(grid, path)
+    end function
+
+    @it("smoothing leaves fewer waypoints than the raw grid path")
+    function _()
+      m.world.addSolid(40, 0, 10, 80)
+      grid = m.makeGrid()
+      raw = grid.findPath(5, 5, 95, 5, {smooth: false})
+      smoothed = grid.findPath(5, 5, 95, 5)
+      m.assertTrue(smoothed.count() < raw.count(), "smoothed " + smoothed.count().toStr() + " vs raw " + raw.count().toStr())
+      m.assertPathClear(grid, raw)
+      m.assertPathClear(grid, smoothed)
+    end function
+
+    @describe("unreachable goals")
+
+    @it("returns a partial path towards an unreachable goal")
+    function _()
+      m.world.addSolid(40, 0, 10, 100)
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 50, 95, 50)
+      search.step(1000)
+      m.assertEqual(search.status, "partial")
+      last = search.path[search.path.count() - 1]
+      m.assertPoint(last, 35, 55, "nearest reachable cell")
+      m.assertPathClear(grid, search.path)
+    end function
+
+    @it("returns just the start when it's already the nearest cell to the goal")
+    function _()
+      ' Everything right of the first column is solid, so the goal is buried and unreachable
+      m.world.addSolid(10, 0, 90, 100)
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 55, 95, 55)
+      search.step(1000)
+      m.assertEqual(search.status, "partial")
+      m.assertEqual(search.path.count(), 1)
+      m.assertPoint(search.path[0], 5, 55, "start")
+    end function
+
+    @it("fails instead when partial paths are off")
+    function _()
+      m.world.addSolid(40, 0, 10, 100)
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 50, 95, 50, {allowPartial: false})
+      search.step(1000)
+      m.assertEqual(search.status, "failed")
+      m.assertEqual(search.path.count(), 0)
+      m.assertEqual(grid.findPath(5, 50, 95, 50, {allowPartial: false}).count(), 0)
+    end function
+
+    @it("gives up after maxExpandedCells")
+    function _()
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 5, 95, 95, {maxExpandedCells: 3})
+      search.step(1000)
+      m.assertEqual(search.status, "partial")
+      m.assertEqual(search.expandedCells, 3)
+      m.assertTrue(search.path[search.path.count() - 1].x < 95)
+    end function
+
+    @describe("start or goal inside a solid")
+
+    @it("starts from the nearest open cell when the start is blocked")
+    function _()
+      m.world.addSolid(0, 0, 20, 100)
+      grid = m.makeGrid()
+      search = grid.startSearch(18, 52, 80, 50)
+      search.step(1000)
+      m.assertEqual(search.status, "found")
+      m.assertPoint(search.path[0], 25, 55, "start")
+      m.assertPoint(search.path[search.path.count() - 1], 80, 50, "goal")
+    end function
+
+    @it("ends at the nearest open cell when the goal is blocked")
+    function _()
+      m.world.addSolid(60, 40, 30, 20)
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 50, 63, 52)
+      search.step(1000)
+      m.assertEqual(search.status, "found")
+      m.assertPoint(search.path[search.path.count() - 1], 55, 55, "goal")
+      m.assertPathClear(grid, search.path)
+    end function
+
+    @it("fails when the start is buried deeper than snapRings")
+    function _()
+      m.world.addSolid(0, 0, 60, 100)
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 50, 90, 50, {snapRings: 2})
+      m.assertTrue(search.step(1000))
+      m.assertEqual(search.status, "failed")
+      m.assertEqual(search.path.count(), 0)
+    end function
+
+    @describe("spreading over frames")
+
+    @it("stops when the budget is used and finishes on later steps")
+    function _()
+      grid = new BGE.NavGrid(m.world, {cellSize: 1, minX: 0, minY: 0, width: 200, height: 100})
+      grid.setCellBlocked(100, 50, true)
+      search = grid.startSearch(0.5, 50.5, 199.5, 50.5)
+      m.assertFalse(search.step(0))
+      m.assertEqual(search.status, "searching")
+      m.assertTrue(search.expandedCells > 0)
+      steps = 1
+      while not search.step(0) and steps < 1000
+        steps++
+      end while
+      m.assertTrue(steps > 1, "expected several steps")
+      m.assertEqual(search.status, "found")
+      m.assertPoint(search.path[search.path.count() - 1], 199.5, 50.5, "goal")
+    end function
+
+    @it("cancel stops the search with no path")
+    function _()
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 5, 95, 95)
+      search.cancel()
+      m.assertTrue(search.step(1000))
+      m.assertEqual(search.status, "failed")
+      m.assertEqual(search.path.count(), 0)
+    end function
+
+    @describe("reusing search state")
+
+    @it("finds the same path in a later search after earlier ones finished")
+    function _()
+      m.world.addSolid(40, 0, 10, 80)
+      grid = m.makeGrid()
+      first = grid.findPath(20, 20, 80, 20, {smooth: false})
+      ' An unrelated search in between leaves its own marks behind
+      grid.findPath(90, 90, 10, 90, {smooth: false})
+      again = grid.findPath(20, 20, 80, 20, {smooth: false})
+      m.assertEqual(again.count(), first.count())
+      for i = 0 to first.count() - 1
+        m.assertPoint(again[i], first[i].x, first[i].y, "point " + i.toStr())
+      end for
+    end function
+
+    @it("runs two searches at once without mixing them up")
+    function _()
+      m.world.addSolid(40, 0, 10, 80)
+      grid = m.makeGrid()
+      expectedA = grid.findPath(20, 20, 80, 20)
+      expectedB = grid.findPath(80, 50, 10, 50)
+      searchA = grid.startSearch(20, 20, 80, 20)
+      searchB = grid.startSearch(80, 50, 10, 50)
+      steps = 0
+      while steps < 1000 and not (searchA.step(0) and searchB.step(0))
+        steps++
+      end while
+      m.assertEqual(searchA.status, "found")
+      m.assertEqual(searchB.status, "found")
+      m.assertEqual(searchA.path.count(), expectedA.count())
+      m.assertEqual(searchB.path.count(), expectedB.count())
+      m.assertPoint(searchB.path[searchB.path.count() - 1], 10, 50, "B goal")
+      m.assertPathClear(grid, searchA.path)
+      m.assertPathClear(grid, searchB.path)
+    end function
+
+    @it("starts fresh after a cancelled search")
+    function _()
+      grid = m.makeGrid()
+      search = grid.startSearch(5, 5, 95, 95)
+      search.step(0)
+      search.cancel()
+      path = grid.findPath(5, 95, 95, 5)
+      m.assertEqual(path.count(), 2)
+      m.assertPoint(path[1], 95, 5, "goal")
+    end function
+
+  end class
+end namespace
