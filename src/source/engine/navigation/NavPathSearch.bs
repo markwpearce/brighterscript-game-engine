@@ -36,6 +36,7 @@ namespace BGE
     private toY as float
     private startMoved as boolean = false
     private goalMoved as boolean = false
+    ' Cell indexes and the goal's col/row are in the grid's padded layout (see NavGrid.cells)
     private startIndex as integer = -1
     private goalIndex as integer = -1
     private goalCol as integer = 0
@@ -44,13 +45,17 @@ namespace BGE
     private allowPartial as boolean = true
     private smooth as boolean = true
 
-    ' Sparse per-cell state, indexed by row * cols + col
-    private gCost as roArray
-    private parentOf as roArray
-    private closed as roArray
-    ' Binary min-heap of open cells, ordered by f
-    private heapCells as integer[]
-    private heapF as float[]
+    private cells as roByteArray
+    private stride as integer = 0
+    private state as dynamic = invalid
+    ' Per neighbour (8-way): index offset, the two cells a diagonal must not cut between
+    ' (the cell itself for straight moves, which is open), col/row offset and step cost
+    private offsets as integer[]
+    private cornerA as integer[]
+    private cornerB as integer[]
+    private colSteps as integer[]
+    private rowSteps as integer[]
+    private stepCosts as float[]
     private bestIndex as integer = -1
     private bestH as float = 0
     private timer as roTimespan
@@ -66,11 +71,6 @@ namespace BGE
       m.toX = toX
       m.toY = toY
       m.path = []
-      m.gCost = []
-      m.parentOf = []
-      m.closed = []
-      m.heapCells = []
-      m.heapF = []
       m.timer = CreateObject("roTimespan")
       if options.DoesExist("maxExpandedCells") and options.maxExpandedCells > 0
         m.maxExpandedCells = options.maxExpandedCells
@@ -91,26 +91,41 @@ namespace BGE
         m.status = BGE.NavPathStatus.failed
         return
       end if
+      stride = grid.getPaddedStride()
+      m.stride = stride
+      m.cells = grid.getPaddedCells()
       m.startMoved = startCell.col <> grid.colAt(fromX) or startCell.row <> grid.rowAt(fromY)
       goalCell = grid.findNearestOpenCell(toX, toY, snapRings)
       if goalCell = invalid
         ' The goal is buried; head for the open cell nearest it instead.
-        m.goalCol = grid.colAt(toX)
-        m.goalRow = grid.rowAt(toY)
+        m.goalCol = grid.colAt(toX) + 1
+        m.goalRow = grid.rowAt(toY) + 1
         m.goalMoved = true
       else
-        m.goalCol = goalCell.col
-        m.goalRow = goalCell.row
-        m.goalIndex = goalCell.row * grid.cols + goalCell.col
+        m.goalCol = goalCell.col + 1
+        m.goalRow = goalCell.row + 1
+        m.goalIndex = m.goalRow * stride + m.goalCol
         m.goalMoved = goalCell.col <> grid.colAt(toX) or goalCell.row <> grid.rowAt(toY)
       end if
 
-      m.startIndex = startCell.row * grid.cols + startCell.col
-      m.gCost[m.startIndex] = 0.0
-      m.parentOf[m.startIndex] = -1
+      diagonal = 1.41421356
+      m.offsets = [-stride - 1, -stride, -stride + 1, -1, 1, stride - 1, stride, stride + 1]
+      m.cornerA = [-1, 0, 1, 0, 0, -1, 0, 1]
+      m.cornerB = [-stride, 0, -stride, 0, 0, stride, 0, stride]
+      m.colSteps = [-1, 0, 1, -1, 1, -1, 0, 1]
+      m.rowSteps = [-1, -1, -1, 0, 0, 1, 1, 1]
+      m.stepCosts = [diagonal, 1.0, diagonal, 1.0, 1.0, diagonal, 1.0, diagonal]
+
+      state = grid.acquireSearchState()
+      m.state = state
+      m.startIndex = (startCell.row + 1) * stride + startCell.col + 1
+      state.mark[m.startIndex] = state.stamp
+      state.gCost[m.startIndex] = 0.0
+      state.parentOf[m.startIndex] = -1
       m.bestIndex = m.startIndex
-      m.bestH = m.heuristic(startCell.col, startCell.row)
-      m.push(m.startIndex, m.bestH)
+      m.bestH = m.heuristic(startCell.col + 1, startCell.row + 1)
+      state.heapCells.push(m.startIndex)
+      state.heapF.push(m.bestH)
     end sub
 
     ' Runs the search for about `budgetMs` milliseconds.
@@ -122,20 +137,72 @@ namespace BGE
         return true
       end if
       m.timer.Mark()
-      cols = m.grid.cols
+      ' Everything below is inlined into one loop: function calls are the main cost of a
+      ' BrightScript search, and far more so on the simulator.
+      state = m.state as BGE.NavSearchState
+      cells = m.cells
+      stride = m.stride
+      gCost = state.gCost
+      parentOf = state.parentOf
+      mark = state.mark
+      openMark = state.stamp
+      closedMark = openMark + 1
+      heapCells = state.heapCells
+      heapF = state.heapF
+      offsets = m.offsets
+      cornerA = m.cornerA
+      cornerB = m.cornerB
+      colSteps = m.colSteps
+      rowSteps = m.rowSteps
+      stepCosts = m.stepCosts
+      goalCol = m.goalCol
+      goalRow = m.goalRow
+      goalIndex = m.goalIndex
       sinceTimeCheck = 0
-      while m.heapCells.count() > 0
-        index = m.pop()
-        if m.closed[index] = invalid
-          m.closed[index] = true
+      while heapCells.count() > 0
+        ' Pop the lowest f
+        index = heapCells[0]
+        lastCell = heapCells.pop()
+        lastF = heapF.pop()
+        count = heapCells.count()
+        if count > 0
+          i = 0
+          while true
+            child = i * 2 + 1
+            if child >= count
+              exit while
+            end if
+            if child + 1 < count and heapF[child + 1] < heapF[child]
+              child++
+            end if
+            if heapF[child] >= lastF
+              exit while
+            end if
+            heapCells[i] = heapCells[child]
+            heapF[i] = heapF[child]
+            i = child
+          end while
+          heapCells[i] = lastCell
+          heapF[i] = lastF
+        end if
+
+        ' The heap can hold stale copies of a cell; only the first one popped counts.
+        if mark[index] <> closedMark
+          mark[index] = closedMark
           m.expandedCells++
-          if index = m.goalIndex
+          if index = goalIndex
             m.finish(index, BGE.NavPathStatus.found)
             return true
           end if
-          col = index mod cols
-          row = Int(index / cols)
-          h = m.heuristic(col, row)
+          col = index mod stride
+          row = index \ stride
+          hx = Abs(col - goalCol)
+          hy = Abs(row - goalRow)
+          if hx < hy
+            h = hy + hx * 0.41421356
+          else
+            h = hx + hy * 0.41421356
+          end if
           if h < m.bestH
             m.bestH = h
             m.bestIndex = index
@@ -144,7 +211,43 @@ namespace BGE
             m.finishWithoutGoal()
             return true
           end if
-          m.expand(index, col, row)
+
+          g = gCost[index]
+          for k = 0 to 7
+            neighbour = index + offsets[k]
+            ' Border cells are blocked, so neighbours never leave the array.
+            if cells[neighbour] = 0 and cells[index + cornerA[k]] = 0 and cells[index + cornerB[k]] = 0 and mark[neighbour] <> closedMark
+              newG = g + stepCosts[k]
+              if mark[neighbour] <> openMark or newG < gCost[neighbour]
+                mark[neighbour] = openMark
+                gCost[neighbour] = newG
+                parentOf[neighbour] = index
+                hx = Abs(col + colSteps[k] - goalCol)
+                hy = Abs(row + rowSteps[k] - goalRow)
+                ' A slightly heavier h breaks ties towards the goal, so fewer cells are expanded.
+                if hx < hy
+                  f = newG + (hy + hx * 0.41421356) * 1.001
+                else
+                  f = newG + (hx + hy * 0.41421356) * 1.001
+                end if
+                ' Push
+                i = heapCells.count()
+                heapCells.push(neighbour)
+                heapF.push(f)
+                while i > 0
+                  parent = (i - 1) \ 2
+                  if heapF[parent] <= f
+                    exit while
+                  end if
+                  heapCells[i] = heapCells[parent]
+                  heapF[i] = heapF[parent]
+                  i = parent
+                end while
+                heapCells[i] = neighbour
+                heapF[i] = f
+              end if
+            end if
+          end for
 
           sinceTimeCheck++
           if sinceTimeCheck >= 32
@@ -167,43 +270,7 @@ namespace BGE
       end if
     end sub
 
-    private sub expand(index as integer, col as integer, row as integer)
-      grid = m.grid
-      cols = grid.cols
-      g = m.gCost[index]
-      for dy = -1 to 1
-        for dx = -1 to 1
-          if dx <> 0 or dy <> 0
-            c = col + dx
-            r = row + dy
-            ' Diagonals need both orthogonal neighbours open, so paths can't cut corners.
-            canMove = not grid.isCellBlocked(c, r)
-            if canMove and dx <> 0 and dy <> 0
-              canMove = not grid.isCellBlocked(col + dx, row) and not grid.isCellBlocked(col, row + dy)
-            end if
-            if canMove
-              neighbour = r * cols + c
-              if m.closed[neighbour] = invalid
-                stepCost = 1.0
-                if dx <> 0 and dy <> 0
-                  stepCost = 1.41421356
-                end if
-                newG = g + stepCost
-                oldG = m.gCost[neighbour]
-                if oldG = invalid or newG < oldG
-                  m.gCost[neighbour] = newG
-                  m.parentOf[neighbour] = index
-                  ' A slightly heavier h breaks ties towards the goal, so fewer cells are expanded.
-                  m.push(neighbour, newG + m.heuristic(c, r) * 1.001)
-                end if
-              end if
-            end if
-          end if
-        end for
-      end for
-    end sub
-
-    ' Octile distance to the goal cell, in cells
+    ' Octile distance to the goal cell, in cells (padded col/row)
     private function heuristic(col as integer, row as integer) as float
       dx = Abs(col - m.goalCol)
       dy = Abs(row - m.goalRow)
@@ -224,17 +291,18 @@ namespace BGE
 
     private sub finish(endIndex as integer, status as string)
       grid = m.grid
-      cols = grid.cols
+      stride = m.stride
+      parentOf = m.state.parentOf
       chain = []
       index = endIndex
       while index >= 0
         chain.push(index)
-        index = m.parentOf[index]
+        index = parentOf[index]
       end while
 
       points = []
       for i = chain.count() - 1 to 0 step -1
-        points.push(grid.cellCenter(chain[i] mod cols, Int(chain[i] / cols)))
+        points.push(grid.cellCenter(chain[i] mod stride - 1, chain[i] \ stride - 1))
       end for
       if not m.startMoved
         points[0] = {x: m.fromX, y: m.fromY}
@@ -246,71 +314,21 @@ namespace BGE
           points[points.count() - 1] = {x: m.toX, y: m.toY}
         end if
       end if
+      m.releaseSearchState()
       if m.smooth
         points = grid.smoothPath(points)
       end if
       m.path = points
       m.status = status
-      m.releaseSearchState()
     end sub
 
+    ' Hands the per-cell state back to the grid for the next search
     private sub releaseSearchState()
-      m.gCost = []
-      m.parentOf = []
-      m.closed = []
-      m.heapCells = []
-      m.heapF = []
-    end sub
-
-    private sub push(cell as integer, f as float)
-      heapCells = m.heapCells
-      heapF = m.heapF
-      i = heapCells.count()
-      heapCells.push(cell)
-      heapF.push(f)
-      while i > 0
-        parent = Int((i - 1) / 2)
-        if heapF[parent] <= f
-          exit while
-        end if
-        heapCells[i] = heapCells[parent]
-        heapF[i] = heapF[parent]
-        i = parent
-      end while
-      heapCells[i] = cell
-      heapF[i] = f
-    end sub
-
-    private function pop() as integer
-      heapCells = m.heapCells
-      heapF = m.heapF
-      top = heapCells[0]
-      lastCell = heapCells.pop()
-      lastF = heapF.pop()
-      count = heapCells.count()
-      if count = 0
-        return top
+      if m.state <> invalid
+        m.grid.releaseSearchState(m.state)
+        m.state = invalid
       end if
-      i = 0
-      while true
-        child = i * 2 + 1
-        if child >= count
-          exit while
-        end if
-        if child + 1 < count and heapF[child + 1] < heapF[child]
-          child++
-        end if
-        if heapF[child] >= lastF
-          exit while
-        end if
-        heapCells[i] = heapCells[child]
-        heapF[i] = heapF[child]
-        i = child
-      end while
-      heapCells[i] = lastCell
-      heapF[i] = lastF
-      return top
-    end function
+    end sub
 
   end class
 

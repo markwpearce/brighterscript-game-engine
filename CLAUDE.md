@@ -111,7 +111,7 @@ Retained-mode widget tree on its own canvas: `Game.gameUi` and `Game.debugUi` (`
 - Edge-to-edge contact is not an overlap: snapping flush stops `onCollision` next frame, so "reset grounded every frame" flickers.
 - `SphereCollider3d`/`BoxCollider3d` do true 3D overlap (two compositor planes plus exact maths). `Game.raycast()`/`raycastAll()` return `BGE.RaycastHit`.
 - `resolveAabbTileCollision()` (tile platformers) and `BGE.SolidWorld.moveAndSlide()` (top-down) resolve against static geometry. `BGE.separateCircles()` pushes moving bodies (characters) apart by mass.
-- Pathfinding (`engine/navigation/`, `docs/pathfinding.md`): `BGE.NavGrid` rasterises a `SolidWorld` (solids grown by `agentRadius`) into a byte-per-cell grid; `findPath()`/`startSearch()` run 8-way A* (no corner cutting, sparse per-search state, `step(budgetMs)` over frames) and smooth with grid line of sight. Works in the `SolidWorld`'s 2D coords (y = world z on a 3D ground plane).
+- Pathfinding (`engine/navigation/`, `docs/pathfinding.md`): `BGE.NavGrid` rasterises a `SolidWorld` (solids grown by `agentRadius`) into a byte-per-cell grid; `findPath()`/`startSearch()` run 8-way A* (no corner cutting, `step(budgetMs)` over frames; the hot loop is one inlined function over a border-padded grid, with per-cell state pooled on the grid and reused by later searches) and smooth with grid line of sight. Works in the `SolidWorld`'s 2D coords (y = world z on a 3D ground plane).
 
 ### Other
 

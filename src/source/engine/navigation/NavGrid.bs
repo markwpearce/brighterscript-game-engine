@@ -32,9 +32,14 @@ namespace BGE
     cols as integer = 0
     rows as integer = 0
 
-    ' Per cell: bit 1 = blocked by a solid, bit 2 = blocked by setCellBlocked()
+    ' Per cell: bit 1 = blocked by a solid, bit 2 = blocked by setCellBlocked(), bit 4 = the
+    ' border. A ring of border cells pads the grid, so searches can read neighbours unchecked.
+    ' Cell (col, row) is at (row + 1) * stride + col + 1.
     private cells as roByteArray = invalid
+    private stride as integer = 2
     private world as BGE.SolidWorld
+    ' Search state left by finished searches, for the next ones to reuse
+    private freeStates as BGE.NavSearchState[]
 
     ' Builds the grid. Every cell is tested once, so build it at scene load (in a `LoadTask` if
     ' the map is big) rather than mid-game.
@@ -47,6 +52,7 @@ namespace BGE
         options = {}
       end if
       m.world = world
+      m.freeStates = []
       if options.DoesExist("cellSize") and options.cellSize > 0
         m.cellSize = options.cellSize
       end if
@@ -89,21 +95,29 @@ namespace BGE
       m.minY = minY
       m.cols = m.ceil((maxX - minX) / m.cellSize)
       m.rows = m.ceil((maxY - minY) / m.cellSize)
+      m.stride = m.cols + 2
       m.rebuild()
     end sub
 
     ' Rebuilds every cell from the world's solids. Cells blocked with `setCellBlocked()` stay blocked.
     sub rebuild()
-      count = m.cols * m.rows
+      stride = m.stride
+      count = stride * (m.rows + 2)
       if m.cells = invalid
         m.cells = CreateObject("roByteArray")
-        if count > 0
-          ' Writing the last byte sizes the array, zero-filled.
-          m.cells[count - 1] = 0
-        end if
+        ' Writing the last byte sizes the array, zero-filled.
+        m.cells[count - 1] = 0
+        for col = 0 to stride - 1
+          m.cells[col] = 4
+          m.cells[count - 1 - col] = 4
+        end for
+        for row = 1 to m.rows
+          m.cells[row * stride] = 4
+          m.cells[row * stride + stride - 1] = 4
+        end for
       else
         for index = 0 to count - 1
-          m.cells[index] = m.cells[index] and 2
+          m.cells[index] = m.cells[index] and 6
         end for
       end if
       for each solid in m.world.getSolids()
@@ -130,7 +144,7 @@ namespace BGE
       end if
       for row = row0 to row1
         for col = col0 to col1
-          index = row * m.cols + col
+          index = (row + 1) * m.stride + col + 1
           m.cells[index] = m.cells[index] and 2
         end for
       end for
@@ -154,7 +168,7 @@ namespace BGE
       if not m.isInGrid(col, row)
         return
       end if
-      index = row * m.cols + col
+      index = (row + 1) * m.stride + col + 1
       if blocked
         m.cells[index] = m.cells[index] or 2
       else
@@ -171,7 +185,7 @@ namespace BGE
       if not m.isInGrid(col, row)
         return true
       end if
-      return m.cells[row * m.cols + col] <> 0
+      return m.cells[(row + 1) * m.stride + col + 1] <> 0
     end function
 
     ' Whether a point is in an open cell.
@@ -229,6 +243,11 @@ namespace BGE
       if m.isCellBlocked(col, row)
         return false
       end if
+      ' Each step moves at most one cell, so from an in-grid start every cell read below is in
+      ' the grid or its border: no bounds checks needed.
+      cells = m.cells
+      stride = m.stride
+      index = (row + 1) * stride + col + 1
 
       ' Walk the cells the line crosses (Amanatides & Woo). tMax is how far along the line
       ' (0..1) the next column/row edge is; tDelta how far one whole cell is.
@@ -247,15 +266,15 @@ namespace BGE
         tMaxX = (gx0 - col) / -dx
         tDeltaX = -1 / dx
       end if
-      stepY = 0
+      stepIndexY = 0
       tMaxY = noEdge
       tDeltaY = noEdge
       if dy > 0
-        stepY = 1
+        stepIndexY = stride
         tMaxY = (row + 1 - gy0) / dy
         tDeltaY = 1 / dy
       else if dy < 0
-        stepY = -1
+        stepIndexY = -stride
         tMaxY = (gy0 - row) / -dy
         tDeltaY = -1 / dy
       end if
@@ -264,24 +283,23 @@ namespace BGE
       remaining = Abs(endCol - col) + Abs(endRow - row)
       while remaining > 0
         if Abs(tMaxX - tMaxY) < 0.000001
-          if m.isCellBlocked(col + stepX, row) or m.isCellBlocked(col, row + stepY)
+          if cells[index + stepX] <> 0 or cells[index + stepIndexY] <> 0
             return false
           end if
-          col += stepX
-          row += stepY
+          index += stepX + stepIndexY
           tMaxX += tDeltaX
           tMaxY += tDeltaY
           remaining -= 2
         else if tMaxX < tMaxY
-          col += stepX
+          index += stepX
           tMaxX += tDeltaX
           remaining--
         else
-          row += stepY
+          index += stepIndexY
           tMaxY += tDeltaY
           remaining--
         end if
-        if m.isCellBlocked(col, row)
+        if cells[index] <> 0
           return false
         end if
       end while
@@ -379,6 +397,53 @@ namespace BGE
       return smoothed
     end function
 
+    '****BEGIN - For Internal Use****
+
+    ' For internal use by NavPathSearch: the padded cell array and its row length
+    function getPaddedCells() as roByteArray
+      return m.cells
+    end function
+
+    function getPaddedStride() as integer
+      return m.stride
+    end function
+
+    ' For internal use by NavPathSearch: state for a new search, reused from a finished one if
+    ' there is one. The grid keeps one set per search running at once, about 3 entries per cell.
+    function acquireSearchState() as BGE.NavSearchState
+      if m.freeStates.count() > 0
+        state = m.freeStates.pop()
+        state.stamp += 2
+        ' Marks from older searches are all below the stamp; start again before it overflows
+        if state.stamp > 1000000000
+          mark = state.mark
+          for i = 0 to mark.count() - 1
+            mark[i] = 0
+          end for
+          state.stamp = 1
+        end if
+        return state
+      end if
+      count = m.cells.count()
+      gCost = CreateObject("roArray", count, false)
+      parentOf = CreateObject("roArray", count, false)
+      mark = CreateObject("roArray", count, false)
+      for i = 0 to count - 1
+        gCost.push(0.0)
+        parentOf.push(-1)
+        mark.push(0)
+      end for
+      return {gCost: gCost, parentOf: parentOf, mark: mark, stamp: 1, heapCells: [], heapF: []}
+    end function
+
+    sub releaseSearchState(state as BGE.NavSearchState)
+      state.heapCells.clear()
+      state.heapF.clear()
+      m.freeStates.push(state)
+    end sub
+
+    '****END - For Internal Use****
+
     ' Blocks every cell (in the given column/row range) that the solid, grown by agentRadius, overlaps.
     private sub markSolid(solid as BGE.SolidWorldSolid, col0 as integer, row0 as integer, col1 as integer, row1 as integer)
       r = m.agentRadius
@@ -389,7 +454,7 @@ namespace BGE
       r1 = m.minInt(row1, m.ceil((solid.y + solid.h + r - m.minY) / m.cellSize) - 1)
       for row = r0 to r1
         for col = c0 to c1
-          index = row * m.cols + col
+          index = (row + 1) * m.stride + col + 1
           m.cells[index] = m.cells[index] or 1
         end for
       end for

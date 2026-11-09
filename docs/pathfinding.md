@@ -154,7 +154,10 @@ end for
 ## Sizing the grid
 
 The grid costs one byte per cell, so even a 512 × 512 m map at 1 m cells is
-256 KB. Search cost is what grows: a search expands roughly the cells between
+256 KB. Searches need more: each one running at once uses three arrays with an
+entry per cell, which the grid keeps when it finishes, so the next search
+reuses them instead of allocating its own. So a grid that has run four
+searches at once keeps four sets. Search cost grows too: a search expands roughly the cells between
 start and goal, and an unreachable goal expands every reachable cell up to
 `maxExpandedCells`. On big maps, use cells as coarse as your narrowest
 gaps allow, cap `maxExpandedCells`, and spread searches over frames.
