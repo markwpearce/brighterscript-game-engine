@@ -1,0 +1,267 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+
+namespace tests
+  @suite("BGE.NavGrid")
+  class NavGridTests extends rooibos.BaseTestSuite
+
+    private world as BGE.SolidWorld
+
+    protected override function beforeEach()
+      m.world = new BGE.SolidWorld()
+    end function
+
+    ' A 10x10-cell grid of 10-unit cells covering (0,0)-(100,100)
+    private function makeGrid(agentRadius = 0 as float) as BGE.NavGrid
+      return new BGE.NavGrid(m.world, {cellSize: 10, agentRadius: agentRadius, minX: 0, minY: 0, width: 100, height: 100})
+    end function
+
+    @describe("building")
+
+    @it("blocks only the cells a solid overlaps")
+    function _()
+      m.world.addSolid(20, 20, 10, 10)
+      grid = m.makeGrid()
+      m.assertTrue(grid.isCellBlocked(2, 2))
+      ' Touching an edge doesn't block
+      m.assertFalse(grid.isCellBlocked(1, 2))
+      m.assertFalse(grid.isCellBlocked(3, 2))
+      m.assertFalse(grid.isCellBlocked(2, 1))
+      m.assertFalse(grid.isCellBlocked(2, 3))
+    end function
+
+    @it("grows solids by the agent radius")
+    function _()
+      m.world.addSolid(20, 20, 10, 10)
+      grid = m.makeGrid(5)
+      for row = 1 to 3
+        for col = 1 to 3
+          m.assertTrue(grid.isCellBlocked(col, row), "cell " + col.toStr() + "," + row.toStr())
+        end for
+      end for
+      m.assertFalse(grid.isCellBlocked(0, 2))
+      m.assertFalse(grid.isCellBlocked(4, 2))
+    end function
+
+    @it("blocks a solid thinner than a cell")
+    function _()
+      m.world.addSolid(44, 0, 1, 100)
+      grid = m.makeGrid()
+      m.assertTrue(grid.isCellBlocked(4, 5))
+      m.assertFalse(grid.isCellBlocked(3, 5))
+      m.assertFalse(grid.isCellBlocked(5, 5))
+    end function
+
+    @it("covers every solid plus a margin when no area is given")
+    function _()
+      m.world.addSolid(-20, 10, 10, 10)
+      m.world.addSolid(90, 90, 10, 30)
+      grid = new BGE.NavGrid(m.world, {cellSize: 10})
+      ' a margin of agentRadius (0) plus one cell on every side
+      m.assertEqual(grid.minX, -30.0)
+      m.assertEqual(grid.minY, 0.0)
+      m.assertEqual(grid.cols, 14)
+      m.assertEqual(grid.rows, 13)
+      ' open cells round the outside, so agents can walk past the outermost solids
+      m.assertFalse(grid.isCellBlocked(0, 1))
+      m.assertTrue(grid.isCellBlocked(1, 1))
+    end function
+
+    @it("treats cells outside the grid as blocked")
+    function _()
+      grid = m.makeGrid()
+      m.assertTrue(grid.isCellBlocked(-1, 0))
+      m.assertTrue(grid.isCellBlocked(0, 10))
+      m.assertFalse(grid.isCellBlocked(9, 9))
+      m.assertFalse(grid.isWalkable(150, 50))
+    end function
+
+    @it("converts between points and cells")
+    function _()
+      grid = m.makeGrid()
+      m.assertEqual(grid.colAt(35), 3)
+      m.assertEqual(grid.rowAt(-5), -1)
+      center = grid.cellCenter(3, 4)
+      m.assertEqual(center.x, 35.0)
+      m.assertEqual(center.y, 45.0)
+    end function
+
+    @describe("changing cells")
+
+    @it("keeps hand-blocked cells through a rebuild")
+    function _()
+      grid = m.makeGrid()
+      grid.setCellBlocked(5, 5, true)
+      grid.rebuild()
+      m.assertTrue(grid.isCellBlocked(5, 5))
+      grid.setCellBlocked(5, 5, false)
+      m.assertFalse(grid.isCellBlocked(5, 5))
+    end function
+
+    @it("unblocking a hand-blocked cell keeps a solid's block")
+    function _()
+      m.world.addSolid(50, 50, 10, 10)
+      grid = m.makeGrid()
+      grid.setCellBlocked(5, 5, true)
+      grid.setCellBlocked(5, 5, false)
+      m.assertTrue(grid.isCellBlocked(5, 5))
+    end function
+
+    @it("rebuildArea frees cells of a removed solid and keeps the rest")
+    function _()
+      doorId = m.world.addSolid(40, 40, 10, 10)
+      m.world.addSolid(50, 40, 10, 10)
+      grid = m.makeGrid(5)
+      grid.setCellBlocked(3, 3, true)
+      m.assertTrue(grid.isCellBlocked(3, 4))
+
+      m.world.removeSolid(doorId)
+      grid.rebuildArea(40, 40, 10, 10)
+      ' Only the door's left edge (grown by the radius) is free now; the neighbour still blocks 4..6.
+      m.assertFalse(grid.isCellBlocked(3, 4))
+      m.assertTrue(grid.isCellBlocked(4, 4))
+      m.assertTrue(grid.isCellBlocked(6, 4))
+      m.assertTrue(grid.isCellBlocked(3, 3), "hand-blocked cell")
+    end function
+
+    @describe("line of sight")
+
+    @it("sees across open cells")
+    function _()
+      grid = m.makeGrid()
+      m.assertTrue(grid.hasLineOfSight(5, 5, 95, 73))
+      m.assertTrue(grid.hasLineOfSight(95, 73, 5, 5))
+    end function
+
+    @it("is blocked by a wall")
+    function _()
+      m.world.addSolid(40, 20, 10, 60)
+      grid = m.makeGrid()
+      m.assertFalse(grid.hasLineOfSight(5, 50, 95, 50))
+      m.assertTrue(grid.hasLineOfSight(5, 95, 95, 95))
+    end function
+
+    @it("is blocked by the edge of the grid")
+    function _()
+      grid = m.makeGrid()
+      m.assertFalse(grid.hasLineOfSight(50, 50, 150, 50), "out the right")
+      m.assertFalse(grid.hasLineOfSight(95, 5, 95, -30), "out the bottom")
+      m.assertFalse(grid.hasLineOfSight(5, 95, -20, 120), "out a corner")
+      m.assertFalse(grid.hasLineOfSight(-5, 50, 50, 50), "starting outside")
+      m.assertTrue(grid.hasLineOfSight(5, 5, 95, 5), "along the bottom row")
+      m.assertTrue(grid.hasLineOfSight(95, 5, 95, 95), "along the right column")
+    end function
+
+    @it("can't squeeze diagonally between two cells touching at a corner")
+    function _()
+      grid = m.makeGrid()
+      grid.setCellBlocked(5, 4, true)
+      grid.setCellBlocked(4, 5, true)
+      m.assertFalse(grid.hasLineOfSight(45, 45, 55, 55))
+    end function
+
+    @it("is blocked when it starts in a blocked cell")
+    function _()
+      grid = m.makeGrid()
+      grid.setCellBlocked(0, 0, true)
+      m.assertFalse(grid.hasLineOfSight(5, 5, 6, 6))
+    end function
+
+    @describe("smoothPath")
+
+    @it("drops waypoints the line can skip")
+    function _()
+      grid = m.makeGrid()
+      points = [{x: 5.0, y: 5.0}, {x: 15.0, y: 5.0}, {x: 25.0, y: 15.0}, {x: 35.0, y: 15.0}]
+      smoothed = grid.smoothPath(points)
+      m.assertEqual(smoothed.count(), 2)
+      m.assertEqual(smoothed[1].x, 35.0)
+    end function
+
+    @it("keeps the corner of a path around a wall")
+    function _()
+      m.world.addSolid(20, 0, 10, 50)
+      grid = m.makeGrid()
+      points = [{x: 5.0, y: 5.0}, {x: 5.0, y: 55.0}, {x: 15.0, y: 55.0}, {x: 35.0, y: 55.0}, {x: 35.0, y: 5.0}]
+      smoothed = grid.smoothPath(points)
+      m.assertTrue(smoothed.count() >= 3)
+      for i = 1 to smoothed.count() - 1
+        m.assertTrue(grid.hasLineOfSight(smoothed[i - 1].x, smoothed[i - 1].y, smoothed[i].x, smoothed[i].y), "segment " + i.toStr())
+      end for
+    end function
+
+    @describe("findNearestOpenCell")
+
+    @it("returns the cell itself when it's open")
+    function _()
+      grid = m.makeGrid()
+      cell = grid.findNearestOpenCell(35, 45)
+      m.assertEqual(cell.col, 3)
+      m.assertEqual(cell.row, 4)
+    end function
+
+    @it("finds the nearest open cell to a buried point")
+    function _()
+      m.world.addSolid(20, 20, 30, 30)
+      grid = m.makeGrid()
+      ' (22, 35) is nearest the left edge
+      cell = grid.findNearestOpenCell(22, 35)
+      m.assertEqual(cell.col, 1)
+      m.assertEqual(cell.row, 3)
+    end function
+
+    @it("snaps a point just outside the grid to the edge")
+    function _()
+      grid = m.makeGrid()
+      cell = grid.findNearestOpenCell(105, 55)
+      m.assertEqual(cell.col, 9)
+      m.assertEqual(cell.row, 5)
+    end function
+
+    @it("returns invalid for a point far outside the grid")
+    function _()
+      grid = m.makeGrid()
+      m.assertInvalid(grid.findNearestOpenCell(500, 55))
+      m.assertInvalid(grid.findNearestOpenCell(-20, 55, 1))
+    end function
+
+    @it("returns invalid when nothing is open within range")
+    function _()
+      m.world.addSolid(0, 0, 100, 100)
+      grid = m.makeGrid()
+      m.assertInvalid(grid.findNearestOpenCell(50, 50, 3))
+    end function
+
+    @describe("smoothing straight runs")
+
+    @it("drops the middle of straight runs")
+    function _()
+      m.world.addSolid(40, 40, 20, 20)
+      grid = m.makeGrid()
+      ' an L round the block: two straight runs
+      points = [{x: 5, y: 5}, {x: 25, y: 5}, {x: 45, y: 5}, {x: 65, y: 5}, {x: 85, y: 5}, {x: 85, y: 25}, {x: 85, y: 45}, {x: 85, y: 65}, {x: 85, y: 85}]
+      smoothed = grid.smoothPath(points)
+      ' the block is in the way of a shortcut, so only the corner stays
+      m.assertEqual(smoothed.count(), 3)
+      m.assertEqual(smoothed[1].x, 85)
+      m.assertEqual(smoothed[1].y, 5)
+      ' a straight line alone
+      straight = grid.smoothPath([{x: 5, y: 5}, {x: 15, y: 15}, {x: 25, y: 25}])
+      m.assertEqual(straight.count(), 2)
+    end function
+
+    @describe("search memory")
+
+    @it("still searches after releasing its memory or with no pooling")
+    function _()
+      grid = m.makeGrid()
+      grid.findPath(5, 5, 95, 95)
+      grid.releaseSearchMemory()
+      m.assertEqual(grid.findPath(5, 5, 95, 95).count(), 2)
+      grid.maxPooledSearches = 0
+      m.assertEqual(grid.findPath(5, 95, 95, 5).count(), 2)
+      m.assertEqual(grid.findPath(5, 95, 95, 5).count(), 2)
+    end function
+
+  end class
+end namespace

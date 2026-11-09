@@ -1,0 +1,244 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+
+' A maze with doors. Four agents path to the flag with a BGE.NavGrid; opening or closing the
+' doors rebuilds just those cells and makes everyone re-plan.
+class MainScene extends BGE.GameScene
+
+  showPaths = true
+  showGrid = false
+  smoothPaths = true
+  doorsOpen = false
+
+  private world as BGE.SolidWorld
+  private nav as BGE.NavGrid
+  private agents as Agent[]
+  private doors as object[]
+  private buildMs = 0
+  ' Time for one corner-to-corner search, to compare devices
+  private benchMs = 0.0
+  private benchCells = 0
+  ' Centres of floor cells, for moving the flag on its own
+  private floorCells as object[]
+  private flagEntity as Flag
+  private allHereFor = 0.0
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "MainScene"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.agents = []
+    m.doors = []
+    m.floorCells = []
+    m.world = new BGE.SolidWorld(80)
+    rows = getMapRows()
+    numRows = rows.count()
+    agentStarts = []
+    flagX = 0.0
+    flagY = 0.0
+
+    for row = 0 to numRows - 1
+      line = rows[row]
+      cellBottom = MAP_BOTTOM + (numRows - row - 1) * MAP_CELL
+      runStart = -1
+      for col = 0 to Len(line)
+        ch = ""
+        if col < Len(line)
+          ch = Mid(line, col + 1, 1)
+        end if
+        ' Merge each horizontal run of wall cells into one solid and one rectangle
+        if ch = "#"
+          if runStart < 0
+            runStart = col
+          end if
+        else if runStart >= 0
+          m.addWall(runStart, col - 1, cellBottom)
+          runStart = -1
+        end if
+        cellX = MAP_LEFT + col * MAP_CELL
+        if ch = "." or ch = "A" or ch = "F"
+          m.floorCells.push({x: cellX + MAP_CELL / 2, y: cellBottom + MAP_CELL / 4})
+        end if
+        if ch = "D"
+          m.addDoor(cellX, cellBottom)
+        else if ch = "A"
+          agentStarts.push({x: cellX + MAP_CELL / 2, y: cellBottom + MAP_CELL / 2})
+        else if ch = "F"
+          flagX = cellX + MAP_CELL / 2
+          flagY = cellBottom + MAP_CELL / 4
+        end if
+      end for
+    end for
+
+    timer = CreateObject("roTimespan")
+    m.nav = new BGE.NavGrid(m.world, {cellSize: 10, agentRadius: 10, minX: MAP_LEFT, minY: MAP_BOTTOM, width: 28 * MAP_CELL, height: numRows * MAP_CELL})
+    m.buildMs = timer.TotalMilliseconds()
+    m.runBenchmark(agentStarts[0], agentStarts[agentStarts.count() - 1])
+
+    m.flagEntity = new Flag(m.game)
+    m.game.addEntity(m.flagEntity, {x: flagX, y: flagY})
+
+    colors = [&hFF5A5F, &h3FA7FF, &h5CD65C, &hC77DFF]
+    for i = 0 to agentStarts.count() - 1
+      newAgent = new Agent(m.game)
+      ' stagger first searches so they don't all land on one frame
+      m.game.addEntity(newAgent, {x: agentStarts[i].x, y: agentStarts[i].y, color: colors[i mod colors.count()], nav: m.nav, world: m.world, flag: m.flagEntity, delay: i * 0.1})
+      m.agents.push(newAgent)
+    end for
+  end sub
+
+  ' One search, so it doesn't hold up the first frame for long on a slow simulator
+  private sub runBenchmark(fromPoint as object, toPoint as object)
+    timer = CreateObject("roTimespan")
+    search = m.nav.startSearch(fromPoint.x, fromPoint.y, toPoint.x, toPoint.y)
+    while not search.step(1000000)
+    end while
+    m.benchCells = search.expandedCells
+    m.benchMs = timer.TotalMilliseconds()
+    print `[nav benchmark] grid ${m.nav.cols}x${m.nav.rows} built in ${m.buildMs}ms; corner path ${m.benchCells} cells in ${m.benchMs}ms`
+  end sub
+
+  private sub addWall(startCol as integer, endCol as integer, cellBottom as float)
+    x = MAP_LEFT + startCol * MAP_CELL
+    width = (endCol - startCol + 1) * MAP_CELL
+    m.world.addSolid(x, cellBottom, width, MAP_CELL)
+    wall = new Block(m.game)
+    m.game.addEntity(wall, {x: x, y: cellBottom + MAP_CELL, width: width, height: MAP_CELL, color: &h3A4255, outline: &h5A6480})
+  end sub
+
+  private sub addDoor(x as float, cellBottom as float)
+    doorBlock = new Block(m.game)
+    m.game.addEntity(doorBlock, {x: x, y: cellBottom + MAP_CELL, width: MAP_CELL, height: MAP_CELL, color: &hB5651D, outline: &hE0A060})
+    door = {x: x, y: cellBottom, block: doorBlock, solidId: ""}
+    door.solidId = m.world.addSolid(x, cellBottom, MAP_CELL, MAP_CELL)
+    m.doors.push(door)
+  end sub
+
+  private sub toggleDoors()
+    m.doorsOpen = not m.doorsOpen
+    for each door in m.doors
+      if m.doorsOpen
+        m.world.removeSolid(door.solidId)
+      else
+        door.solidId = m.world.addSolid(door.x, door.y, MAP_CELL, MAP_CELL)
+      end if
+      door.block.setOpen(m.doorsOpen)
+      m.nav.rebuildArea(door.x, door.y, MAP_CELL, MAP_CELL)
+    end for
+    m.repathAll()
+  end sub
+
+  private sub repathAll()
+    for each navAgent in m.agents
+      navAgent.forceRepath()
+    end for
+  end sub
+
+  ' Once everyone has reached the flag, it moves to a random floor cell so they set off again
+  override sub onUpdate(deltaTime as float)
+    allHere = true
+    for each navAgent in m.agents
+      if navAgent.mode <> "here"
+        allHere = false
+      end if
+    end for
+    if not allHere
+      m.allHereFor = 0
+      return
+    end if
+    m.allHereFor += deltaTime
+    if m.allHereFor > 1.5
+      m.allHereFor = 0
+      cell = m.floorCells[Rnd(m.floorCells.count()) - 1]
+      m.flagEntity.position.x = cell.x
+      m.flagEntity.position.y = cell.y
+    end if
+  end sub
+
+  ' Keeps agents from stacking up on the same route. A push that would put one inside a wall is undone.
+  override sub onPostUpdate(deltaTime as float)
+    bodies = []
+    before = []
+    for each navAgent in m.agents
+      bodies.push({position: navAgent.position, radius: navAgent.radius, mass: 1.0})
+      before.push({x: navAgent.position.x, y: navAgent.position.y})
+    end for
+    BGE.separateCircles(bodies, BGE.SeparationPlane.xy)
+    for i = 0 to m.agents.count() - 1
+      navAgent = m.agents[i]
+      r = navAgent.radius
+      if not m.world.isAreaFree(navAgent.position.x - r, navAgent.position.y - r, r * 2, r * 2)
+        navAgent.position.x = before[i].x
+        navAgent.position.y = before[i].y
+      end if
+    end for
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press
+      return
+    end if
+    if input.isButton("back")
+      m.game.End()
+    else if input.isButton("OK")
+      m.toggleDoors()
+    else if input.isButton("play")
+      m.smoothPaths = not m.smoothPaths
+      m.repathAll()
+    else if input.isButton("replay")
+      m.showGrid = not m.showGrid
+    else if input.isButton("options")
+      m.showPaths = not m.showPaths
+    end if
+  end sub
+
+  ' Blocked cells (solids grown by the agent radius) as a translucent overlay, one rectangle
+  ' per run of blocked cells in a row
+  private sub drawBlockedCells(gameRenderer as BGE.Renderer)
+    nav = m.nav
+    size = nav.cellSize
+    for row = 0 to nav.rows - 1
+      runStart = -1
+      for col = 0 to nav.cols
+        blocked = col < nav.cols and nav.isCellBlocked(col, row)
+        if blocked and runStart < 0
+          runStart = col
+        else if not blocked and runStart >= 0
+          topLeft = gameRenderer.worldPointToCanvasPoint(BGE.Math.VectorOps.create(nav.minX + runStart * size, nav.minY + (row + 1) * size, 0))
+          gameRenderer.drawRectangle(topLeft.x, topLeft.y, (col - runStart) * size, size, &hFF404060)
+          runStart = -1
+        end if
+      end for
+    end for
+  end sub
+
+  override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+    if m.showGrid
+      m.drawBlockedCells(gameRenderer)
+    end if
+    font = m.game.getFont("debugUi")
+    canvasSize = uiRenderer.getCanvasSize()
+    left = canvasSize.x * 0.1
+    right = canvasSize.x * 0.9
+    top = canvasSize.y * 0.05
+
+    onOff = {"true": "on", "false": "off"}
+    doorText = "closed"
+    if m.doorsOpen
+      doorText = "open"
+    end if
+    uiRenderer.drawText(`Arrows flag   OK doors: ${doorText}   Play smoothing: ${onOff[m.smoothPaths.toStr()]}   Replay grid   * paths`, left, top, BGE.Colors.White, font)
+
+    statusY = top + 28
+    x = left
+    for each navAgent in m.agents
+      rgba = (navAgent.colorRGB << 8) or &hFF
+      uiRenderer.drawText(`${navAgent.mode} ${navAgent.lastStatus} ${navAgent.lastExpanded} cells/${navAgent.lastFrames}f`, x, statusY, rgba, font)
+      x += (right - left) / 4
+    end for
+    uiRenderer.drawText(`grid ${m.nav.cols}x${m.nav.rows} built in ${m.buildMs}ms, corner path ${m.benchCells} cells in ${m.benchMs}ms`, right, canvasSize.y * 0.95, &hAAAAAAFF, font, "right", "bottom")
+  end sub
+
+end class

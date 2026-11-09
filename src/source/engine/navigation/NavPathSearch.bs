@@ -1,0 +1,336 @@
+import "pkg:/source/engine/navigation/NavTypes.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+
+namespace BGE
+
+  ' An A* search across a `BGE.NavGrid`, run a little at a time. Make one with
+  ' `NavGrid.startSearch()`, call `step(budgetMs)` each frame until it returns true, then read
+  ' `status` and `path`.
+  '
+  ' Moves are 8-way; diagonals can't cut a blocked cell's corner.
+  '
+  ' @example
+  ' m.search = m.nav.startSearch(fromX, fromY, toX, toY)
+  ' ' each frame:
+  ' if m.search <> invalid and m.search.step(2)
+  '   if m.search.status <> BGE.NavPathStatus.failed
+  '     m.waypoints = m.search.path
+  '   end if
+  '   m.search = invalid
+  ' end if
+  class NavPathSearch
+
+    ' A `BGE.NavPathStatus` value
+    status as string = BGE.NavPathStatus.searching
+    ' Waypoints once the search has finished: path[0] is the start, the last is the goal (or the
+    ' point nearest it for a partial path). A blocked start or goal is replaced by the centre of
+    ' the open cell nearest it. Empty while searching or if the search failed.
+    path as BGE.NavPoint[]
+    ' How many cells the search has expanded so far
+    expandedCells as integer = 0
+
+    private grid as BGE.NavGrid
+    private fromX as float
+    private fromY as float
+    private toX as float
+    private toY as float
+    private startMoved as boolean = false
+    private goalMoved as boolean = false
+    ' Cell indexes and the goal's col/row are in the grid's padded layout (see NavGrid.cells)
+    private startIndex as integer = -1
+    private goalIndex as integer = -1
+    private goalCol as integer = 0
+    private goalRow as integer = 0
+    private maxExpandedCells as integer = 20000
+    private allowPartial as boolean = true
+    private smooth as boolean = true
+
+    private cells as roByteArray
+    private stride as integer = 0
+    private state as dynamic = invalid
+    ' Per neighbour (8-way): index offset, the two cells a diagonal must not cut between
+    ' (the cell itself for straight moves, which is open), col/row offset and step cost
+    private offsets as integer[]
+    private cornerA as integer[]
+    private cornerB as integer[]
+    private colSteps as integer[]
+    private rowSteps as integer[]
+    private stepCosts as float[]
+    private bestIndex as integer = -1
+    private bestH as float = 0
+    private timer as roTimespan
+
+    ' Use `NavGrid.startSearch()` instead.
+    sub new(grid as BGE.NavGrid, fromX as float, fromY as float, toX as float, toY as float, options = {} as BGE.NavSearchOptions)
+      if options = invalid
+        options = {}
+      end if
+      m.grid = grid
+      m.fromX = fromX
+      m.fromY = fromY
+      m.toX = toX
+      m.toY = toY
+      m.path = []
+      m.timer = CreateObject("roTimespan")
+      if options.DoesExist("maxExpandedCells") and options.maxExpandedCells > 0
+        m.maxExpandedCells = options.maxExpandedCells
+      end if
+      if options.DoesExist("allowPartial")
+        m.allowPartial = options.allowPartial
+      end if
+      if options.DoesExist("smooth")
+        m.smooth = options.smooth
+      end if
+      snapRings = 8
+      if options.DoesExist("snapRings") and options.snapRings >= 0
+        snapRings = options.snapRings
+      end if
+
+      startCell = grid.findNearestOpenCell(fromX, fromY, snapRings)
+      if startCell = invalid
+        m.status = BGE.NavPathStatus.failed
+        return
+      end if
+      stride = grid.getPaddedStride()
+      m.stride = stride
+      m.cells = grid.getPaddedCells()
+      m.startMoved = startCell.col <> grid.colAt(fromX) or startCell.row <> grid.rowAt(fromY)
+      goalCell = grid.findNearestOpenCell(toX, toY, snapRings)
+      if goalCell = invalid
+        ' The goal is buried; head for the open cell nearest it instead.
+        m.goalCol = grid.colAt(toX) + 1
+        m.goalRow = grid.rowAt(toY) + 1
+        m.goalMoved = true
+      else
+        m.goalCol = goalCell.col + 1
+        m.goalRow = goalCell.row + 1
+        m.goalIndex = m.goalRow * stride + m.goalCol
+        m.goalMoved = goalCell.col <> grid.colAt(toX) or goalCell.row <> grid.rowAt(toY)
+      end if
+
+      diagonal = 1.41421356
+      m.offsets = [-stride - 1, -stride, -stride + 1, -1, 1, stride - 1, stride, stride + 1]
+      m.cornerA = [-1, 0, 1, 0, 0, -1, 0, 1]
+      m.cornerB = [-stride, 0, -stride, 0, 0, stride, 0, stride]
+      m.colSteps = [-1, 0, 1, -1, 1, -1, 0, 1]
+      m.rowSteps = [-1, -1, -1, 0, 0, 1, 1, 1]
+      m.stepCosts = [diagonal, 1.0, diagonal, 1.0, 1.0, diagonal, 1.0, diagonal]
+
+      state = grid.acquireSearchState()
+      m.state = state
+      m.startIndex = (startCell.row + 1) * stride + startCell.col + 1
+      state.mark[m.startIndex] = state.stamp
+      state.gCost[m.startIndex] = 0.0
+      state.parentOf[m.startIndex] = -1
+      m.bestIndex = m.startIndex
+      m.bestH = m.heuristic(startCell.col + 1, startCell.row + 1)
+      state.heapCells.push(m.startIndex)
+      state.heapF.push(m.bestH)
+    end sub
+
+    ' Runs the search for about `budgetMs` milliseconds.
+    '
+    ' @param {integer} budgetMs
+    ' @return {boolean} true once the search has finished (any status but searching)
+    function step(budgetMs as integer) as boolean
+      if m.status <> BGE.NavPathStatus.searching
+        return true
+      end if
+      m.timer.Mark()
+      ' Everything below is inlined into one loop: function calls are the main cost of a
+      ' BrightScript search, and far more so on the simulator.
+      state = m.state as BGE.NavSearchState
+      cells = m.cells
+      stride = m.stride
+      gCost = state.gCost
+      parentOf = state.parentOf
+      mark = state.mark
+      openMark = state.stamp
+      closedMark = openMark + 1
+      heapCells = state.heapCells
+      heapF = state.heapF
+      offsets = m.offsets
+      cornerA = m.cornerA
+      cornerB = m.cornerB
+      colSteps = m.colSteps
+      rowSteps = m.rowSteps
+      stepCosts = m.stepCosts
+      goalCol = m.goalCol
+      goalRow = m.goalRow
+      goalIndex = m.goalIndex
+      sinceTimeCheck = 0
+      while heapCells.count() > 0
+        ' Pop the lowest f
+        index = heapCells[0]
+        lastCell = heapCells.pop()
+        lastF = heapF.pop()
+        count = heapCells.count()
+        if count > 0
+          i = 0
+          while true
+            child = i * 2 + 1
+            if child >= count
+              exit while
+            end if
+            if child + 1 < count and heapF[child + 1] < heapF[child]
+              child++
+            end if
+            if heapF[child] >= lastF
+              exit while
+            end if
+            heapCells[i] = heapCells[child]
+            heapF[i] = heapF[child]
+            i = child
+          end while
+          heapCells[i] = lastCell
+          heapF[i] = lastF
+        end if
+
+        ' The heap can hold stale copies of a cell; only the first one popped counts.
+        if mark[index] <> closedMark
+          mark[index] = closedMark
+          m.expandedCells++
+          if index = goalIndex
+            m.finish(index, BGE.NavPathStatus.found)
+            return true
+          end if
+          col = index mod stride
+          row = index \ stride
+          hx = Abs(col - goalCol)
+          hy = Abs(row - goalRow)
+          if hx < hy
+            h = hy + hx * 0.41421356
+          else
+            h = hx + hy * 0.41421356
+          end if
+          if h < m.bestH
+            m.bestH = h
+            m.bestIndex = index
+          end if
+          if m.expandedCells >= m.maxExpandedCells
+            m.finishWithoutGoal()
+            return true
+          end if
+
+          g = gCost[index]
+          for k = 0 to 7
+            neighbour = index + offsets[k]
+            ' Border cells are blocked, so neighbours never leave the array.
+            if cells[neighbour] = 0 and cells[index + cornerA[k]] = 0 and cells[index + cornerB[k]] = 0 and mark[neighbour] <> closedMark
+              newG = g + stepCosts[k]
+              if mark[neighbour] <> openMark or newG < gCost[neighbour]
+                mark[neighbour] = openMark
+                gCost[neighbour] = newG
+                parentOf[neighbour] = index
+                hx = Abs(col + colSteps[k] - goalCol)
+                hy = Abs(row + rowSteps[k] - goalRow)
+                ' A slightly heavier h breaks ties towards the goal, so fewer cells are expanded.
+                if hx < hy
+                  f = newG + (hy + hx * 0.41421356) * 1.001
+                else
+                  f = newG + (hx + hy * 0.41421356) * 1.001
+                end if
+                ' Push
+                i = heapCells.count()
+                heapCells.push(neighbour)
+                heapF.push(f)
+                while i > 0
+                  parent = (i - 1) \ 2
+                  if heapF[parent] <= f
+                    exit while
+                  end if
+                  heapCells[i] = heapCells[parent]
+                  heapF[i] = heapF[parent]
+                  i = parent
+                end while
+                heapCells[i] = neighbour
+                heapF[i] = f
+              end if
+            end if
+          end for
+
+          sinceTimeCheck++
+          if sinceTimeCheck >= 32
+            sinceTimeCheck = 0
+            if m.timer.TotalMilliseconds() >= budgetMs
+              return false
+            end if
+          end if
+        end if
+      end while
+      m.finishWithoutGoal()
+      return true
+    end function
+
+    ' Stops the search. `status` becomes failed and `path` stays empty.
+    sub cancel()
+      if m.status = BGE.NavPathStatus.searching
+        m.status = BGE.NavPathStatus.failed
+        m.releaseSearchState()
+      end if
+    end sub
+
+    ' Octile distance to the goal cell, in cells (padded col/row)
+    private function heuristic(col as integer, row as integer) as float
+      dx = Abs(col - m.goalCol)
+      dy = Abs(row - m.goalRow)
+      if dx < dy
+        return dy + dx * 0.41421356
+      end if
+      return dx + dy * 0.41421356
+    end function
+
+    private sub finishWithoutGoal()
+      ' When the start is already the nearest cell, the partial path is just the start.
+      if m.allowPartial
+        m.finish(m.bestIndex, BGE.NavPathStatus.partial)
+      else
+        m.status = BGE.NavPathStatus.failed
+        m.releaseSearchState()
+      end if
+    end sub
+
+    private sub finish(endIndex as integer, status as string)
+      grid = m.grid
+      stride = m.stride
+      parentOf = m.state.parentOf
+      chain = []
+      index = endIndex
+      while index >= 0
+        chain.push(index)
+        index = parentOf[index]
+      end while
+
+      points = []
+      for i = chain.count() - 1 to 0 step -1
+        points.push(grid.cellCenter(chain[i] mod stride - 1, chain[i] \ stride - 1))
+      end for
+      if not m.startMoved
+        points[0] = {x: m.fromX, y: m.fromY}
+      end if
+      if status = BGE.NavPathStatus.found and not m.goalMoved
+        if points.count() = 1
+          points.push({x: m.toX, y: m.toY})
+        else
+          points[points.count() - 1] = {x: m.toX, y: m.toY}
+        end if
+      end if
+      m.releaseSearchState()
+      if m.smooth
+        points = grid.smoothPath(points)
+      end if
+      m.path = points
+      m.status = status
+    end sub
+
+    ' Hands the per-cell state back to the grid for the next search
+    private sub releaseSearchState()
+      if m.state <> invalid
+        m.grid.releaseSearchState(m.state)
+        m.state = invalid
+      end if
+    end sub
+
+  end class
+
+end namespace
