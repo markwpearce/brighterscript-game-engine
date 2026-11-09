@@ -31,6 +31,9 @@ namespace BGE
     ' Grid size in cells
     cols as integer = 0
     rows as integer = 0
+    ' Finished searches leave their per-cell arrays (about 3 entries per cell) for later searches
+    ' to reuse; the grid keeps at most this many sets. Lower it for a big map.
+    maxPooledSearches as integer = 4
 
     ' Per cell: bit 1 = blocked by a solid, bit 2 = blocked by setCellBlocked(), bit 4 = the
     ' border. A ring of border cells pads the grid, so searches can read neighbours unchecked.
@@ -46,7 +49,8 @@ namespace BGE
     '
     ' @param {BGE.SolidWorld} world - the solids to path around. The grid keeps it, for `rebuild()`
     ' @param {BGE.NavGridOptions} [options={}] - `cellSize` (default 32), `agentRadius` (default 0),
-    '   and the area to cover (`minX`, `minY`, `width`, `height`; default: around every solid)
+    '   and the area to cover (`minX`, `minY`, `width`, `height`; default: every solid, plus
+    '   `agentRadius` and one cell round the outside)
     sub new(world as BGE.SolidWorld, options = {} as BGE.NavGridOptions)
       if options = invalid
         options = {}
@@ -89,6 +93,12 @@ namespace BGE
             maxX = m.maxFloat(maxX, solid.x + solid.w)
             maxY = m.maxFloat(maxY, solid.y + solid.h)
           end for
+          ' Leave room to walk round the outside of the outermost solids
+          margin = m.agentRadius + m.cellSize
+          minX -= margin
+          minY -= margin
+          maxX += margin
+          maxY += margin
         end if
       end if
       m.minX = minX
@@ -306,16 +316,21 @@ namespace BGE
       return true
     end function
 
-    ' The open cell nearest a point, searching outwards ring by ring.
+    ' The open cell nearest a point, searching outwards ring by ring. A point outside the grid
+    ' only finds a cell if the grid's edge is within `maxRings` cells of it.
     '
     ' @param {float} x
     ' @param {float} y
     ' @param {integer} [maxRings=8] - how many cells out to look
     ' @return {dynamic} a `BGE.NavCell`, or invalid if there's no open cell that close
     function findNearestOpenCell(x as float, y as float, maxRings = 8 as integer) as dynamic
-      col = m.clampInt(m.colAt(x), 0, m.cols - 1)
-      row = m.clampInt(m.rowAt(y), 0, m.rows - 1)
       if m.cols = 0 or m.rows = 0
+        return invalid
+      end if
+      col = m.colAt(x)
+      row = m.rowAt(y)
+      ' Rings round a point far off the grid would never reach it
+      if col < -maxRings or row < -maxRings or col >= m.cols + maxRings or row >= m.rows + maxRings
         return invalid
       end if
       if not m.isCellBlocked(col, row)
@@ -375,27 +390,51 @@ namespace BGE
       return new BGE.NavPathSearch(m, fromX, fromY, toX, toY, options)
     end function
 
-    ' Removes waypoints that can be skipped: keeps the first and last, and each point after which
-    ' the line from the last kept point would be blocked.
+    ' Removes waypoints that can be skipped: drops points in the middle of a straight run, then
+    ' keeps the first and last, and each point after which the line from the last kept point
+    ' would be blocked.
     '
     ' @param {BGE.NavPoint[]} points
     ' @return {BGE.NavPoint[]}
     function smoothPath(points as BGE.NavPoint[]) as BGE.NavPoint[]
-      if points.count() <= 2
+      count = points.count()
+      if count <= 2
         return points
       end if
-      smoothed = [points[0]]
-      anchor = points[0]
-      for i = 2 to points.count() - 1
-        target = points[i]
+      ' Straight runs need no line-of-sight checks, and a long path is mostly straight runs.
+      turns = [points[0]]
+      for i = 1 to count - 2
+        a = points[i - 1]
+        b = points[i]
+        c = points[i + 1]
+        cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+        if Abs(cross) > 0.0001
+          turns.push(b)
+        end if
+      end for
+      turns.push(points[count - 1])
+      if turns.count() <= 2
+        return turns
+      end if
+
+      smoothed = [turns[0]]
+      anchor = turns[0]
+      for i = 2 to turns.count() - 1
+        target = turns[i]
         if not m.hasLineOfSight(anchor.x, anchor.y, target.x, target.y)
-          anchor = points[i - 1]
+          anchor = turns[i - 1]
           smoothed.push(anchor)
         end if
       end for
-      smoothed.push(points[points.count() - 1])
+      smoothed.push(turns[turns.count() - 1])
       return smoothed
     end function
+
+    ' Frees the search memory the grid keeps for reuse (see `maxPooledSearches`), e.g. after a
+    ' burst of searches on a big map. Searches still running are unaffected.
+    sub releaseSearchMemory()
+      m.freeStates = []
+    end sub
 
     '****BEGIN - For Internal Use****
 
@@ -409,7 +448,7 @@ namespace BGE
     end function
 
     ' For internal use by NavPathSearch: state for a new search, reused from a finished one if
-    ' there is one. The grid keeps one set per search running at once, about 3 entries per cell.
+    ' there is one. Each set is about 3 entries per cell.
     function acquireSearchState() as BGE.NavSearchState
       if m.freeStates.count() > 0
         state = m.freeStates.pop()
@@ -437,6 +476,9 @@ namespace BGE
     end function
 
     sub releaseSearchState(state as BGE.NavSearchState)
+      if m.freeStates.count() >= m.maxPooledSearches
+        return
+      end if
       state.heapCells.clear()
       state.heapF.clear()
       m.freeStates.push(state)
@@ -462,16 +504,6 @@ namespace BGE
 
     private function ceil(value as float) as integer
       return -Int(-value)
-    end function
-
-    private function clampInt(value as integer, low as integer, high as integer) as integer
-      if value < low
-        return low
-      end if
-      if value > high
-        return high
-      end if
-      return value
     end function
 
     private function minInt(a as integer, b as integer) as integer

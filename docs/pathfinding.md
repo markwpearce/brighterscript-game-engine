@@ -31,8 +31,10 @@ m.nav = new BGE.NavGrid(m.solidWorld, {cellSize: 16, agentRadius: 10})
   `2 * agentRadius + cellSize` when the walls line up with the cell edges. So
   a 40-unit doorway with walls on cell edges takes `agentRadius: 10` with
   10-unit cells, but not `agentRadius: 13` with 20-unit cells.
-- By default the grid covers every solid in the world. Pass `minX`, `minY`,
-  `width` and `height` to cover a different area.
+- By default the grid covers every solid in the world, plus a margin of
+  `agentRadius` and one cell so agents can walk round the outside. Points
+  outside the grid count as blocked, so if agents walk on open ground beyond
+  the outermost solids, pass `minX`, `minY`, `width` and `height` to cover it.
 
 Building tests each solid once and costs one byte per cell. For a big map,
 build it in a `LoadTask` (see [Loading Assets](/loading-assets)) so the
@@ -72,9 +74,11 @@ get every cell centre instead.
 
 - **Start or goal inside a solid**: it moves to the nearest open cell (up to
   `snapRings` cells away, default 8), and the path starts or ends at that
-  cell's centre.
+  cell's centre. The same goes for a point just outside the grid; one further
+  out than `snapRings` fails.
 - **Goal walled off**: by default you get a partial path to the open cell
-  nearest the goal, so an agent still heads the right way. Pass
+  nearest the goal, so an agent still heads the right way. If the agent is
+  already there, the path is just its start. Pass
   `{allowPartial: false}` to get `[]` instead.
 - **Long searches**: a search gives up after `maxExpandedCells` cells
   (default 20000) and returns a partial path. An unreachable goal floods every
@@ -156,8 +160,9 @@ end for
 The grid costs one byte per cell, so even a 512 × 512 m map at 1 m cells is
 256 KB. Searches need more: each one running at once uses three arrays with an
 entry per cell, which the grid keeps when it finishes, so the next search
-reuses them instead of allocating its own. So a grid that has run four
-searches at once keeps four sets. Search cost grows too: a search expands roughly the cells between
+reuses them instead of allocating its own. It keeps up to `maxPooledSearches`
+sets (default 4); lower that on a big map, or call `releaseSearchMemory()`
+after a burst of searches. Search cost grows too: a search expands roughly the cells between
 start and goal, and an unreachable goal expands every reachable cell up to
 `maxExpandedCells`. On big maps, use cells as coarse as your narrowest
 gaps allow, cap `maxExpandedCells`, and spread searches over frames.

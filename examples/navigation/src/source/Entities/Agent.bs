@@ -1,7 +1,7 @@
 import "pkg:/source/engine/navigation/NavGrid.bs"
 
 ' Walks to the flag: straight at it while it's in sight, otherwise along a path from the
-' scene's NavGrid, re-planned a few times a second. Each search gets a small slice of every
+' scene's NavGrid, re-planned when the flag moves. Each search gets a small slice of every
 ' frame, so several agents searching at once don't drop frames. position is its centre.
 class Agent extends BGE.GameEntity
 
@@ -17,6 +17,10 @@ class Agent extends BGE.GameEntity
 
   private nav as BGE.NavGrid
   private world as BGE.SolidWorld
+  private flagEntity as BGE.GameEntity
+  ' Line of sight to the flag, checked a few times a second rather than every frame
+  private canSeeFlag = false
+  private sightCheckIn = 0.0
   private search as dynamic = invalid
   private searchFrames = 0
   private waypoints as BGE.NavPoint[]
@@ -37,6 +41,7 @@ class Agent extends BGE.GameEntity
     m.colorRGB = args.color
     m.nav = args.nav
     m.world = args.world
+    m.flagEntity = args.flag
     m.repathIn = args.delay
     r = m.radius
     m.addCircle("body", r, {color: m.colorRGB, outlineRGBA: &hFFFFFF, offset: BGE.Math.VectorOps.create(-r, r)})
@@ -49,16 +54,13 @@ class Agent extends BGE.GameEntity
       m.search = invalid
     end if
     m.repathIn = 0
+    m.sightCheckIn = 0
   end sub
 
   override sub onUpdate(deltaTime as float)
-    flagEntity = m.game.getEntityByName("Flag")
-    if flagEntity = invalid
-      return
-    end if
     scene = m.game.currentScene as MainScene
-    goalX = flagEntity.position.x
-    goalY = flagEntity.position.y
+    goalX = m.flagEntity.position.x
+    goalY = m.flagEntity.position.y
 
     m.updateSearch(scene, goalX, goalY, deltaTime)
 
@@ -70,7 +72,12 @@ class Agent extends BGE.GameEntity
       return
     end if
 
-    if m.nav.hasLineOfSight(m.position.x, m.position.y, goalX, goalY)
+    m.sightCheckIn -= deltaTime
+    if m.sightCheckIn <= 0
+      m.sightCheckIn = 0.1
+      m.canSeeFlag = m.nav.hasLineOfSight(m.position.x, m.position.y, goalX, goalY)
+    end if
+    if m.canSeeFlag
       m.mode = "direct"
       m.moveToward(goalX, goalY, deltaTime)
       return
@@ -95,12 +102,14 @@ class Agent extends BGE.GameEntity
       movedX = goalX - m.pathGoal.x
       movedY = goalY - m.pathGoal.y
       goalMoved = movedX * movedX + movedY * movedY > 20 * 20
-      if m.repathIn <= 0 or (goalMoved and m.repathIn < 0.25)
+      ' Re-plan soon after the flag moves; otherwise only now and then, in case the agent was
+      ' pushed off its path
+      if m.repathIn <= 0 or (goalMoved and m.repathIn < 2.75)
         options = {smooth: scene.smoothPaths} as BGE.NavSearchOptions
         m.search = m.nav.startSearch(m.position.x, m.position.y, goalX, goalY, options)
         m.pathGoal = {x: goalX, y: goalY}
         m.searchFrames = 0
-        m.repathIn = 0.5
+        m.repathIn = 3.0
       end if
     end if
     if m.search <> invalid
@@ -112,8 +121,12 @@ class Agent extends BGE.GameEntity
         m.lastFrames = m.searchFrames
         if search.status <> BGE.NavPathStatus.failed
           m.waypoints = search.path
-          ' path[0] is where we started, so head for the next one
+          ' path[0] is where we started, so head for the next one. But if we're in a blocked
+          ' cell (pushed against a wall), path[0] is the open cell nearest us: go there first.
           m.nextWaypoint = 1
+          if not m.nav.isWalkable(m.position.x, m.position.y)
+            m.nextWaypoint = 0
+          end if
         end if
         m.search = invalid
       end if
