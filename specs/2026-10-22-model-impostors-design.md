@@ -89,7 +89,8 @@ for what's drawn (not a strict one - a concave model's interior can do slightly 
 - **Quality**: a `qualityVersion` change redraws, as today.
 - **Occluders**: a `fastShrink` occluder's claim already shrinks by the stretch threshold
   while it may run (`getOccluderInset()`); add the impostor tolerance there. `exact` takes
-  no impostor path.
+  no impostor path. (Since #486 it shrinks only on frames that blit the capture, by that
+  frame's fit error + 1px; redrawn faces are exact.)
 - **Clusters**: a model in a multi-member overlap cluster draws per face
   (`drawPrimitive`), so it never uses the impostor - unchanged.
 
