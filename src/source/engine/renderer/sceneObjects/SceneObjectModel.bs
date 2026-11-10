@@ -30,6 +30,31 @@ namespace BGE
     private modelWorldBounds as BGE.Math.Vector[] = []
     private modelWorldFaces as BGE.Model3dFace[] = []
 
+    ' The model's distinct vertices (model space) and each face's 3 indexes into them, so
+    ' a vertex shared by several faces is transformed and projected once. Rebuilt when the
+    ' geometry changes; meshUsable is false for a face without 3 vertices.
+    private meshGeometryVersion as integer = -1
+    private meshFaceCount as integer = -1
+    private meshUsable as boolean = false
+    private meshX = [] as float[]
+    private meshY = [] as float[]
+    private meshZ = [] as float[]
+    private meshCorners = [] as integer[]
+    ' world vertices, one per distinct vertex, shared by the world faces and moved in place
+    private meshWorld = [] as BGE.Math.Vector[]
+    ' this frame's canvas point (invalid if behind the camera) and depth per distinct vertex
+    private meshCanvas = [] as dynamic
+    private meshDepth = [] as float[]
+    ' and its camera-space position, which textured faces draw from (meshCameraValid)
+    private meshCamX = [] as float[]
+    private meshCamY = [] as float[]
+    private meshCamZ = [] as float[]
+    private meshCameraValid as boolean = false
+    ' while drawing every face into one target: whether its column projection is set yet
+    private batchingColumns as boolean = false
+    private columnsPrepared as boolean = false
+    private triangleCamera = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] as float[]
+
     private modelCanvasSamplePoints as BGE.Math.Vector[] = []
     private modelCanvasBounds as BGE.Math.Vector[] = []
     ' The canvas plus getFaceClipMargin() on each side, as of this frame's updateCanvasPosition()
@@ -104,9 +129,12 @@ namespace BGE
     protected override function drawToCanvas(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       m.colorFilledFacesThisDraw = 0
       someWorked = false
+      m.batchingColumns = true
+      m.columnsPrepared = false
       for each face in m.modelCanvasFaces
         someWorked = m.drawFaceToCanvas(rendererObj, face, drawMode) or someWorked
       end for
+      m.batchingColumns = false
       return someWorked
     end function
 
@@ -149,7 +177,28 @@ namespace BGE
     ' @return {boolean} true if something was drawn
     private function drawFilledFaceTo(rendererObj as BGE.Renderer, target as ifDraw2d, face as BGE.Model3dFace, color as integer, origin as BGE.Math.Vector, allowQuickDraw as boolean) as boolean
       if m.isTexturedFace(face)
-        strips = rendererObj.drawTriangleColumnsTo(target, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), color, origin)
+        if m.batchingColumns and m.meshCameraValid
+          ' from the camera-space vertices projectMeshFaces() kept, with the projection set once
+          if not m.columnsPrepared
+            rendererObj.beginTriangleColumnsTo(target, origin)
+            m.columnsPrepared = true
+          end if
+          tri = m.triangleCamera
+          corners = m.meshCorners
+          camX = m.meshCamX
+          camY = m.meshCamY
+          camZ = m.meshCamZ
+          c = face.faceIndex * 3
+          for j = 0 to 2
+            u = corners[c + j]
+            tri[j * 3] = camX[u]
+            tri[j * 3 + 1] = camY[u]
+            tri[j * 3 + 2] = camZ[u]
+          end for
+          strips = rendererObj.drawCameraTriangleColumnsTo(target, tri, face.Texture.getColumnCuts(), color)
+        else
+          strips = rendererObj.drawTriangleColumnsTo(target, m.modelWorldFaces[face.faceIndex].vertices, face.Texture.getColumnCuts(), color, origin)
+        end if
         if strips >= 0
           return strips > 0
         end if
@@ -215,6 +264,8 @@ namespace BGE
       m.lastDrawWasFullyFresh = true
       m.colorFilledFacesThisDraw = 0
       m.facesClippedThisDraw = false
+      m.batchingColumns = true
+      m.columnsPrepared = false
 
       for each face in m.modelCanvasFaces
         if drawMode = BGE.SceneObjectDrawMode.oriented or drawMode = BGE.SceneObjectDrawMode.orientedDrawBackFace or drawMode = BGE.SceneObjectDrawMode.solid or drawMode = BGE.SceneObjectDrawMode.solidDrawBackFace
@@ -229,6 +280,7 @@ namespace BGE
         end if
         someWorked = thisWorked or someWorked
       end for
+      m.batchingColumns = false
       if m.drawable.useImpostor
         m.captureImpostor(rendererObj, canvasPointsTopLeftBound, drawMode)
       end if
@@ -349,22 +401,179 @@ namespace BGE
         m.prepareOccluder()
       end if
       m.occluderPanelsWorldValid = false
-      m.modelWorldFaces = []
       m.worldPosition = m.drawable.getWorldPosition()
+      faces = m.drawable.model.faces as BGE.Model3dFace[]
+      if m.meshGeometryVersion <> m.drawable.geometryVersion or m.meshFaceCount <> faces.count()
+        m.buildMesh(faces)
+      end if
+      if not m.meshUsable
+        return m.updateWorldFacesEach(faces)
+      end if
+
+      ' Matrix44.multVecMatrix(), inlined over the distinct vertices
+      mat = m.transformationMatrix
+      r0 = mat[0]
+      r1 = mat[1]
+      r2 = mat[2]
+      r3 = mat[3]
+      a00 = r0[0]
+      a01 = r0[1]
+      a02 = r0[2]
+      a03 = r0[3]
+      a10 = r1[0]
+      a11 = r1[1]
+      a12 = r1[2]
+      a13 = r1[3]
+      a20 = r2[0]
+      a21 = r2[1]
+      a22 = r2[2]
+      a23 = r2[3]
+      a30 = r3[0]
+      a31 = r3[1]
+      a32 = r3[2]
+      a33 = r3[3]
+      mx = m.meshX
+      my = m.meshY
+      mz = m.meshZ
+      world = m.meshWorld
+      count = mx.count()
+      loX = 0.0
+      loY = 0.0
+      loZ = 0.0
+      hiX = 0.0
+      hiY = 0.0
+      hiZ = 0.0
+      for u = 0 to count - 1
+        x = mx[u]
+        y = my[u]
+        z = mz[u]
+        w = x * a03 + y * a13 + z * a23 + a33
+        wx = (x * a00 + y * a10 + z * a20 + a30) / w
+        wy = (x * a01 + y * a11 + z * a21 + a31) / w
+        wz = (x * a02 + y * a12 + z * a22 + a32) / w
+        v = world[u]
+        v.x = wx
+        v.y = wy
+        v.z = wz
+        if u = 0
+          loX = wx
+          loY = wy
+          loZ = wz
+          hiX = wx
+          hiY = wy
+          hiZ = wz
+        else
+          if wx < loX
+            loX = wx
+          else if wx > hiX
+            hiX = wx
+          end if
+          if wy < loY
+            loY = wy
+          else if wy > hiY
+            hiY = wy
+          end if
+          if wz < loZ
+            loZ = wz
+          else if wz > hiZ
+            hiZ = wz
+          end if
+        end if
+      end for
+      m.modelWorldBounds = []
+      if count > 0
+        m.modelWorldBounds = [{x: loX, y: loY, z: loZ}, {x: hiX, y: hiY, z: hiZ}]
+      end if
+
+      ' each face's normal as Model3dFaceOps.resetNormal() makes it; texture and color may
+      ' be set on the model's faces after loading
+      worldFaces = m.modelWorldFaces
+      for f = 0 to worldFaces.count() - 1
+        face = worldFaces[f]
+        src = faces[f]
+        face.Texture = src.Texture
+        face.color = src.color
+        vs = face.vertices
+        v0 = vs[0]
+        v1 = vs[1]
+        v2 = vs[2]
+        tx = v0.x - v2.x
+        ty = v0.y - v2.y
+        tz = v0.z - v2.z
+        dx = v1.x - v2.x
+        dy = v1.y - v2.y
+        dz = v1.z - v2.z
+        nx = ty * dz - tz * dy
+        ny = tz * dx - tx * dz
+        nz = tx * dy - ty * dx
+        n = nx * nx + ny * ny + nz * nz
+        if n > 0
+          k = 1 / Sqr(n)
+          nx *= k
+          ny *= k
+          nz *= k
+        end if
+        normal = face.normal
+        normal.x = nx
+        normal.y = ny
+        normal.z = nz
+      end for
+      return true
+    end function
+
+    ' Lists the distinct vertices of the first 1201 faces (as many as are drawn) and makes
+    ' one world face per model face sharing them.
+    private sub buildMesh(faces as BGE.Model3dFace[])
+      m.meshGeometryVersion = m.drawable.geometryVersion
+      m.meshFaceCount = faces.count()
+      m.meshX = []
+      m.meshY = []
+      m.meshZ = []
+      m.meshCorners = []
+      m.meshWorld = []
+      m.modelWorldFaces = []
+      m.meshUsable = true
+      index = {}
+      last = BGE.Math.Min(faces.count(), 1201) - 1
+      for f = 0 to last
+        face = faces[f]
+        if face.vertices.count() <> 3
+          m.meshUsable = false
+          m.modelWorldFaces = []
+          return
+        end if
+        corners = [] as BGE.Math.Vector[]
+        for each vert in face.vertices
+          z = vert.z
+          if invalid = z
+            z = 0
+          end if
+          key = Str(vert.x) + "," + Str(vert.y) + "," + Str(z)
+          k = index[key]
+          if invalid = k
+            k = m.meshX.count()
+            index[key] = k
+            m.meshX.push(vert.x)
+            m.meshY.push(vert.y)
+            m.meshZ.push(z)
+            m.meshWorld.push({x: 0.0, y: 0.0, z: 0.0})
+          end if
+          m.meshCorners.push(k)
+          corners.push(m.meshWorld[k])
+        end for
+        m.modelWorldFaces.push({vertices: corners, normal: {x: 0.0, y: 0.0, z: 0.0}, brightness: 1, priority: 1, color: face.color, Texture: face.Texture})
+      end for
+    end sub
+
+    ' The general path, for a model with a face that isn't a triangle.
+    private function updateWorldFacesEach(faces as BGE.Model3dFace[]) as boolean
+      m.modelWorldFaces = []
       m.modelWorldBounds = []
       i = 0
-
-      for each face in m.drawable.model.faces as BGE.Model3dFace[]
+      for each face in faces
         worldVerts = [] as BGE.Math.Vector[]
         for each vert in face.vertices
-          ' modelWorldBounds must be in WORLD space (it feeds getPositionsForFrustumCheck,
-          ' which compares against the camera's frustum) - using the raw, untransformed
-          ' `vert` here silently pointed frustum checks at the model's local-space
-          ' coordinates instead of its actual position, culling any model whose entity
-          ' isn't near the world origin the moment a real (non-shortcut) frustum recheck
-          ' ran. Only ever exercised by a multi-frame test that keeps genuinely moving a
-          ' displaced entity - the far more common single-draw-call test pattern always
-          ' hits isFirstFrameSinceEnabled's unconditional "true" shortcut instead.
+          ' world space: it feeds the frustum check
           worldVert = BGE.Math.Matrix44.multVecMatrix(vert, m.transformationMatrix)
           if m.modelWorldBounds.Count() <> 2
             m.modelWorldBounds.push(worldVert)
@@ -383,7 +592,6 @@ namespace BGE
           exit for
         end if
       end for
-
       return true
     end function
 
@@ -595,6 +803,10 @@ namespace BGE
       m.modelCanvasFaces = []
       m.modelCanvasSamplePoints = []
       m.modelCanvasBounds = []
+      if m.meshUsable and rendererObj.camera.name = "Camera3d"
+        return m.projectMeshFaces(rendererObj, drawMode)
+      end if
+      m.meshCameraValid = false
 
       'dataToDraw = []
       'i = 0
@@ -662,6 +874,172 @@ namespace BGE
         m.lightingChangedThisDraw = false
       end if
       m.modelCanvasFaces.SortBy("priority", "r")
+      return true
+    end function
+
+    ' projectCanvasFaces() for a Camera3d: each distinct vertex projected once, with the same
+    ' arithmetic as Camera3d.worldPointToCanvasPoint() and distanceFromCameraFront().
+    private function projectMeshFaces(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      camera = rendererObj.camera as Camera3d
+      if invalid = camera.worldToCamera
+        camera.computeWorldToCameraMatrix()
+      end if
+      mat = camera.worldToCamera
+      r0 = mat[0]
+      r1 = mat[1]
+      r2 = mat[2]
+      r3 = mat[3]
+      a00 = r0[0]
+      a01 = r0[1]
+      a02 = r0[2]
+      a03 = r0[3]
+      a10 = r1[0]
+      a11 = r1[1]
+      a12 = r1[2]
+      a13 = r1[3]
+      a20 = r2[0]
+      a21 = r2[1]
+      a22 = r2[2]
+      a23 = r2[3]
+      a30 = r3[0]
+      a31 = r3[1]
+      a32 = r3[2]
+      a33 = r3[3]
+      near = camera.getFocalLength()
+      canvasWidth = camera.frameSize.x
+      canvasHeight = camera.frameSize.y
+      halfWidth = canvasWidth * 0.5
+      halfHeight = canvasHeight * 0.5
+      nearN = camera.getFrontPlaneNormal()
+      conv = camera.getFrontPlanePoint()
+      nnx = nearN.x
+      nny = nearN.y
+      nnz = nearN.z ?? 0
+      cvx = conv.x
+      cvy = conv.y
+      cvz = conv.z ?? 0
+      camPos = camera.position
+      eyeX = camPos.x
+      eyeY = camPos.y
+      eyeZ = camPos.z ?? 0
+      rendererObj.projectedPointCount += m.meshX.count()
+
+      world = m.meshWorld
+      count = world.count()
+      canvas = m.meshCanvas
+      depth = m.meshDepth
+      camX = m.meshCamX
+      camY = m.meshCamY
+      camZ = m.meshCamZ
+      canvas.Clear()
+      depth.Clear()
+      camX.Clear()
+      camY.Clear()
+      camZ.Clear()
+      m.meshCameraValid = true
+      for u = 0 to count - 1
+        v = world[u]
+        x = v.x
+        y = v.y
+        z = v.z
+        w = x * a03 + y * a13 + z * a23 + a33
+        cz = (x * a02 + y * a12 + z * a22 + a32) / w
+        cx = (x * a00 + y * a10 + z * a20 + a30) / w
+        cy = (x * a01 + y * a11 + z * a21 + a31) / w
+        camX.push(cx)
+        camY.push(cy)
+        camZ.push(cz)
+        if cz >= 0
+          canvas.push(invalid)
+        else
+          ndcX = (near * cx / -cz + halfWidth) / canvasWidth
+          ndcY = (near * cy / -cz + halfHeight) / canvasHeight
+          canvas.push({x: fix(ndcX * canvasWidth), y: cint((1 - ndcY) * canvasHeight), z: 0})
+        end if
+        depth.push((x - cvx) * nnx + (y - cvy) * nny + (z - cvz) * nnz)
+      end for
+
+      lights = rendererObj.getPreparedLights()
+      useLights = m.drawable.isShaded and lights.count() > 0
+      faceColorsChanged = false
+      drawBackFaces = isBackFaceDrawMode(drawMode)
+      corners = m.meshCorners
+      worldFaces = m.modelWorldFaces
+      canvasFaces = m.modelCanvasFaces
+      samples = m.modelCanvasSamplePoints
+      any = false
+      loX = 0
+      loY = 0
+      hiX = 0
+      hiY = 0
+      for f = 0 to worldFaces.count() - 1
+        worldFace = worldFaces[f]
+        ' getOutwardNormalFacingAmount(), inlined
+        n = worldFace.normal
+        v0 = worldFace.vertices[0]
+        rx = v0.x - eyeX
+        ry = v0.y - eyeY
+        rz = v0.z - eyeZ
+        len = rx * rx + ry * ry + rz * rz
+        if len > 0
+          len = 1 / Sqr(len)
+        end if
+        facingAmount = -(n.x * rx + n.y * ry + n.z * rz) * len
+        if drawBackFaces or facingAmount > 0.0001
+          c = f * 3
+          ia = corners[c]
+          ib = corners[c + 1]
+          ic = corners[c + 2]
+          pa = canvas[ia]
+          pb = canvas[ib]
+          pc = canvas[ic]
+          if invalid <> pa and invalid <> pb and invalid <> pc
+            ' only faces that are drawn count towards the bounds, which size the temp bitmap (#344)
+            for each p in [pa, pb, pc]
+              if not any
+                any = true
+                loX = p.x
+                loY = p.y
+                hiX = p.x
+                hiY = p.y
+              else
+                if p.x < loX
+                  loX = p.x
+                else if p.x > hiX
+                  hiX = p.x
+                end if
+                if p.y < loY
+                  loY = p.y
+                else if p.y > hiY
+                  hiY = p.y
+                end if
+              end if
+            end for
+            nearest = depth[ia]
+            if depth[ib] < nearest
+              nearest = depth[ib]
+            end if
+            if depth[ic] < nearest
+              nearest = depth[ic]
+            end if
+            canvasFace = {vertices: [pa, pb, pc], normal: n, brightness: 1, priority: nearest, color: worldFace.color, Texture: worldFace.Texture, faceIndex: f} as BGE.Model3dFace
+            if m.shadeCanvasFace(canvasFace, worldFace, facingAmount, lights, useLights)
+              faceColorsChanged = true
+            end if
+            canvasFaces.Push(canvasFace)
+            samples.push(pa)
+          end if
+        end if
+      end for
+      if any
+        m.modelCanvasBounds = [{x: loX, y: loY, z: 0}, {x: hiX, y: hiY, z: 0}]
+      end if
+
+      if not faceColorsChanged
+        ' relit, but no face looks any different
+        m.lightingChangedThisDraw = false
+      end if
+      canvasFaces.SortBy("priority", "r")
       return true
     end function
 
