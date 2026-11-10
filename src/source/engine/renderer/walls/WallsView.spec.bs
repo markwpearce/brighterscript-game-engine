@@ -144,6 +144,138 @@ namespace tests
       m.assertFalse(view.findSpan([BGE.Math.VectorOps.create(0, 0, 10)], span))
     end function
 
+    @it("projects pieces the same on the level and pitched paths as on the general one")
+    function _()
+      ' a hub ringed by a step and a lintel, then a tall outer wall, all facing in
+      segs = [] as BGE.WallSegment[]
+      boxes = [[150.0, 0.0, 12.0], [150.0, 200.0, 240.0], [300.0, 0.0, 240.0]]
+      for each ring in boxes
+        half = ring[0]
+        corners = [[-half, -half], [half, -half], [half, half], [-half, half]]
+        for i = 0 to 3
+          a = corners[i]
+          b = corners[(i + 1) mod 4]
+          segs.push(BGE.createWallSegment(BGE.Math.VectorOps.create(b[0], 0, b[1]), BGE.Math.VectorOps.create(a[0], 0, a[1]), ring[1], ring[2], "stone"))
+        end for
+      end for
+      bsp = new BGE.WallsBsp(segs)
+      m.camera.position = BGE.Math.VectorOps.create(30, 100, 20)
+      for each view in [[0.0, 0.0], [0.5, 0.0], [2.3, 0.0], [0.5, -0.4], [2.3, 0.25], [0.0, -0.6]]
+        heading = view[0]
+        pitch = view[1]
+        m.camera.orientation = BGE.Math.VectorOps.create(-sin(heading) * cos(pitch), sin(pitch), -cos(heading) * cos(pitch))
+        m.camera.computeWorldToCameraMatrix()
+        level = new BGE.WallsView(segs, bsp)
+        m.assertTrue(level.update(m.camera, 8))
+        pitched = new BGE.WallsView(segs, bsp)
+        pitched.allowLevelPath = false
+        m.assertTrue(pitched.update(m.camera, 8))
+        m.assertTrue(level.pieceCount > 50)
+        ' a strip starting on the canvas's right edge may land either side of it
+        levelPieces = m.innerPieces(level)
+        pitchedPieces = m.innerPieces(pitched)
+        m.assertEqual(pitchedPieces.count(), levelPieces.count())
+        for k = 0 to levelPieces.count() - 1
+          a = pitchedPieces[k]
+          b = levelPieces[k]
+          m.assertEqual(a.ray, b.ray)
+          m.assertEqual(a.segment, b.segment)
+          for each key in ["x", "y", "length"]
+            m.assertNear(a[key], b[key], 0.1)
+          end for
+          ' degrees; a wall's end leans as its ray's line does
+          m.assertNear(a.angle, b.angle, 0.5)
+          ' pitched widths reach the next ray's line rather than its foot
+          m.assertNear(a.width, b.width, 1.5)
+        end for
+      end for
+    end function
+
+    @it("widens far strips over two rays and still hides behind them")
+    function _()
+      wall = m.across(-800, 30)
+      full = m.update([wall])
+      bsp = new BGE.WallsBsp([wall])
+      far = new BGE.WallsView([wall], bsp)
+      far.lodDepth = 500
+      m.assertTrue(far.update(m.camera, 8))
+      m.assertTrue(full.pieceCount > 100)
+      m.assertTrue(far.pieceCount <= int(full.pieceCount / 2) + 2, `${far.pieceCount} of ${full.pieceCount}`)
+      ' a point low behind the short wall is hidden on every ray, widened ones included
+      for x = -600 to 600 step 7
+        m.assertTrue(far.isPointHidden(BGE.Math.VectorOps.create(x, 5, -900)), `x ${x}`)
+        m.assertFalse(far.isPointHidden(BGE.Math.VectorOps.create(x, 45, -900)), `x ${x} above`)
+      end for
+      ' a near wall isn't widened
+      near = new BGE.WallsView([m.across(-300, 30)], new BGE.WallsBsp([m.across(-300, 30)]))
+      near.lodDepth = 500
+      m.assertTrue(near.update(m.camera, 8))
+      m.assertTrue(near.pieceCount > 100)
+    end function
+
+    @it("widens a receding far strip only over a ray it covers")
+    function _()
+      ' a far wall seen at a slant, so its strips shrink from ray to ray
+      wall = BGE.createWallSegment(BGE.Math.VectorOps.create(600, 0, -500), BGE.Math.VectorOps.create(-600, 0, -1500), 0, 120, "stone")
+      full = m.update([wall])
+      far = new BGE.WallsView([wall], new BGE.WallsBsp([wall]))
+      far.lodDepth = 400
+      m.assertTrue(far.update(m.camera, 8))
+      m.assertTrue(far.pieceCount < full.pieceCount)
+      for k = 0 to far.pieceCount - 1
+        if far.pieceWide[k]
+          ' the strip it replaced, on the ray left of its own
+          j = full.rayFirstPiece[far.pieceRay[k] - 1]
+          m.assertTrue(far.pieceY[k] >= full.pieceY[j] - 0.01, `piece ${k} foot`)
+          m.assertTrue(far.pieceY[k] - far.pieceLength[k] <= full.pieceY[j] - full.pieceLength[j] + 0.01, `piece ${k} top`)
+        end if
+      end for
+    end function
+
+    @it("clears widened strips once the camera rolls")
+    function _()
+      wall = m.across(-800, 30)
+      view = new BGE.WallsView([wall], new BGE.WallsBsp([wall]))
+      view.lodDepth = 500
+      m.assertTrue(view.update(m.camera, 8))
+      m.assertTrue(view.pieceWide[0])
+      m.camera.rollDegrees = 10
+      m.camera.computeWorldToCameraMatrix()
+      m.assertTrue(view.update(m.camera, 8))
+      for k = 0 to view.pieceCount - 1
+        m.assertFalse(view.pieceWide[k], `piece ${k}`)
+      end for
+    end function
+
+    @it("records the floor before a wall's foot below the eye and the ceiling past a top above it")
+    function _()
+      low = m.across(-300, 30)
+      high = BGE.createWallSegment(BGE.Math.VectorOps.create(1000, 80, -200), BGE.Math.VectorOps.create(-1000, 80, -200), 80, 100, "stone", {twoSided: true})
+      view = new BGE.WallsView([low, high], new BGE.WallsBsp([low, high]))
+      view.recordSurfaces = true
+      m.assertTrue(view.update(m.camera, 8))
+      m.assertTrue(view.floorCount > 0)
+      m.assertTrue(view.ceilingCount > 0)
+      m.assertEqual(1, view.floorRunCount)
+      m.assertEqual(0.0, view.floorRunY[0])
+      m.assertEqual(100.0, view.ceilingRunY[0])
+      ' the floor from the canvas bottom up to the wall's foot at 300, the ceiling from the top down to the high wall's top at 200
+      m.assertNear(720, view.floorBottom[0])
+      m.assertNear(360 + 640 * 50 / 300, view.floorTop[0], 0.5)
+      m.assertNear(0, view.ceilingTop[0])
+      m.assertNear(360 - 640 * 50 / 200, view.ceilingBottom[0], 0.5)
+    end function
+
+    private function innerPieces(view as BGE.WallsView) as object[]
+      pieces = []
+      for k = 0 to view.pieceCount - 1
+        if view.pieceX[k] < 1270
+          pieces.push({ray: view.pieceRay[k], segment: view.pieceSegment[k], x: view.pieceX[k], y: view.pieceY[k], length: view.pieceLength[k], width: view.pieceWidth[k], angle: view.pieceAngle[k]})
+        end if
+      end for
+      return pieces
+    end function
+
     @describe("BGE.createWallSegment")
 
     @it("faces the left of start to end and rounds the tile count")

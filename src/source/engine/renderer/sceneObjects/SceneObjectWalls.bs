@@ -37,13 +37,34 @@ namespace BGE
     private shadeWrap as float = -1.0
     ' Per piece, packed RGBA with light and distance fade
     private pieceRgba = [] as integer[]
+    ' Per piece, its texture column (invalid for a missing texture) and vertical scale
+    private pieceColumn = [] as dynamic[]
+    private pieceScaleY = [] as float[]
     ' Per segment, its columns (invalid for a missing texture)
     private segmentColumns = [] as dynamic[]
+    ' Per segment, tiles along it (0 for one stretched copy) and 1 / column height
+    private segmentTiles = [] as float[]
+    private segmentInvHeights = [] as float[]
     ' Lit colors per segment and side ("index*2+side"), one per light bucket along it, kept
     ' until the lights or the shading inputs change
     private lightCache = {} as roAssociativeArray
     private redrawOrder = [] as integer[]
     private shadePoint as BGE.Math.Vector
+    ' The camera the view was last walked for (keyValid false if never, or it failed)
+    private keyValid as boolean = false
+    private keyX as float = 0
+    private keyY as float = 0
+    private keyZ as float = 0
+    private keyOx as float = 0
+    private keyOy as float = 0
+    private keyOz as float = 0
+    private keyRoll as float = 0
+    private keyFocal as float = 0
+    private keyFar as float = 0
+    private keyW as float = 0
+    private keyH as float = 0
+    private keyLod as float = 0
+    private keyRecord as boolean = false
     private shadeNormal as BGE.Math.Vector
 
     sub new(name as string, drawableObj as DrawableWalls)
@@ -105,16 +126,75 @@ namespace BGE
       if m.viewGeometryVersion <> d.geometryVersion
         m.view.setSegments(d.segments, d.getBsp())
         m.segmentColumns = []
+        m.segmentTiles = []
+        m.segmentInvHeights = []
         m.lightCache = {}
         m.viewGeometryVersion = d.geometryVersion
       end if
       m.view.hideTolerance = d.hideTolerance
       m.viewStripWidth = m.getStripWidth(rendererObj)
-      if not m.view.update(rendererObj.camera as Camera3d, m.viewStripWidth)
+      camera = rendererObj.camera as Camera3d
+      m.view.lodDepth = m.getLodDepth(rendererObj, camera)
+      m.keyValid = false
+      if not m.view.update(camera, m.viewStripWidth)
         return false
       end if
       m.viewStamp++
+      m.keyX = camera.position.x
+      m.keyY = camera.position.y
+      m.keyZ = camera.position.z
+      m.keyOx = camera.orientation.x
+      m.keyOy = camera.orientation.y
+      m.keyOz = camera.orientation.z
+      m.keyRoll = camera.rollDegrees
+      m.keyFocal = camera.getFocalLength()
+      m.keyFar = camera.getCurrentDrawDistance()
+      m.keyW = camera.frameSize.x
+      m.keyH = camera.frameSize.y
+      m.keyLod = m.view.lodDepth
+      m.keyRecord = m.view.recordSurfaces
+      m.keyValid = true
       return true
+    end function
+
+    ' Walks the view now unless it was already walked for the camera as it is, so its pieces
+    ' and surfaces (WallsView.recordSurfaces) can be read before render(), which then reuses
+    ' the walk. Call after Renderer.setupCameraForFrame().
+    '
+    ' @param {Renderer} rendererObj
+    ' @return {boolean} false with a Camera2d, or a camera looking straight up or down
+    function prepareView(rendererObj as Renderer) as boolean
+      if not m.hasCamera3d(rendererObj)
+        return false
+      end if
+      if m.viewMatches(rendererObj, rendererObj.camera as Camera3d)
+        return m.view.rayCount > 0
+      end if
+      return m.updateView(rendererObj)
+    end function
+
+    ' How far out strips are widened over two rays (WallsView.lodDepth); 0 for none.
+    private function getLodDepth(rendererObj as Renderer, camera as Camera3d) as float
+      fraction = rendererObj.qualitySettings.wallLodDistanceFraction
+      if fraction > 0 and fraction < 1
+        return camera.getCurrentDrawDistance() * fraction
+      end if
+      return 0
+    end function
+
+    ' True when the last walk's settings (strip width, LOD, recording, geometry) still hold.
+    private function walkSettingsMatch(rendererObj as Renderer, camera as Camera3d) as boolean
+      return m.keyValid and m.viewGeometryVersion = m.drawable.geometryVersion and m.viewStripWidth = m.getStripWidth(rendererObj) and m.keyRecord = m.view.recordSurfaces and m.keyLod = m.getLodDepth(rendererObj, camera)
+    end function
+
+    ' True when the last walk was for this camera and walkSettingsMatch().
+    private function viewMatches(rendererObj as Renderer, camera as Camera3d) as boolean
+      if not m.walkSettingsMatch(rendererObj, camera)
+        return false
+      end if
+      p = camera.position
+      o = camera.orientation
+      return p.x = m.keyX and p.y = m.keyY and p.z = m.keyZ and o.x = m.keyOx and o.y = m.keyOy and o.z = m.keyOz and camera.rollDegrees = m.keyRoll and camera.getFocalLength() = m.keyFocal and camera.getCurrentDrawDistance() = m.keyFar and camera.frameSize.x = m.keyW and camera.frameSize.y = m.keyH
     end function
 
     ' Draws again, far to near, the strips drawn this frame on rays firstRay..lastRay nearer
@@ -162,10 +242,13 @@ namespace BGE
       if profile
         lap = rendererObj.getProfileClockMs()
       end if
-      if m.castRequested or m.viewStamp = 0 or m.viewStripWidth <> m.getStripWidth(rendererObj) or camera.farDistanceChangedThisFrame() or m.viewGeometryVersion <> m.drawable.geometryVersion
+      if m.castRequested or m.viewStamp = 0 or camera.farDistanceChangedThisFrame() or not m.walkSettingsMatch(rendererObj, camera)
         m.castRequested = false
-        if not m.updateView(rendererObj)
-          return false
+        ' prepareView() may have walked for this camera already
+        if not m.viewMatches(rendererObj, camera)
+          if not m.updateView(rendererObj)
+            return false
+          end if
         end if
       end if
       if profile
@@ -186,60 +269,35 @@ namespace BGE
     ' Draws every piece, far to near; returns how many drew.
     private function drawPieces(rendererObj as Renderer) as integer
       view = m.view
-      segs = m.drawable.segments
-      columnsBySeg = m.segmentColumns
-      pSeg = view.pieceSegment
-      pAlong = view.pieceAlong
       pX = view.pieceX
       pY = view.pieceY
       pWidth = view.pieceWidth
-      pLength = view.pieceLength
       pAngle = view.pieceAngle
+      pColumn = m.pieceColumn
+      pScaleY = m.pieceScaleY
       rgbas = m.pieceRgba
+      draw2d = rendererObj.getDraw2d()
       drawn = 0
       for k = view.pieceCount - 1 to 0 step -1
-        n = pSeg[k]
-        columns = columnsBySeg[n]
-        if invalid <> columns
-          seg = segs[n]
-          columnCount = columns.count()
-          u = pAlong[k]
-          if seg.tileWidth > 0
-            along = u * seg.length / seg.tileWidth
-            u = along - int(along)
-          end if
-          ci = int(u * columnCount)
-          if ci >= columnCount
-            ci = columnCount - 1
-          end if
-          column = columns[ci]
-          rendererObj.drawTransformedObject(pX[k], pY[k], pWidth[k], pLength[k] / column.GetHeight(), pAngle[k], column, rgbas[k])
+        column = pColumn[k]
+        if invalid <> column
+          draw2d.DrawTransformedObject(pX[k], pY[k], pAngle[k], pWidth[k], pScaleY[k], column, rgbas[k])
           drawn++
         end if
       end for
+      rendererObj.incrementDrawCalls(drawn)
       return drawn
     end function
 
     ' Draws piece k (see drawPieces()).
     private sub drawPiece(rendererObj as Renderer, k as integer)
-      view = m.view
-      columns = m.segmentColumns[view.pieceSegment[k]]
-      if invalid = columns
+      column = m.pieceColumn[k]
+      if invalid = column
         return
       end if
-      seg = m.drawable.segments[view.pieceSegment[k]]
-      columnCount = columns.count()
-      u = view.pieceAlong[k]
-      if seg.tileWidth > 0
-        along = u * seg.length / seg.tileWidth
-        u = along - int(along)
-      end if
-      ci = int(u * columnCount)
-      if ci >= columnCount
-        ci = columnCount - 1
-      end if
-      column = columns[ci]
-      rendererObj.drawTransformedObject(view.pieceX[k], view.pieceY[k], view.pieceWidth[k], view.pieceLength[k] / column.GetHeight(), view.pieceAngle[k], column, m.pieceRgba[k])
+      view = m.view
+      rendererObj.getDraw2d().DrawTransformedObject(view.pieceX[k], view.pieceY[k], view.pieceAngle[k], view.pieceWidth[k], m.pieceScaleY[k], column, m.pieceRgba[k])
+      rendererObj.incrementDrawCalls(1)
     end sub
 
     ' Sets each piece's rgba: the tint, lit from its segment's light cache, then faded.
@@ -263,7 +321,19 @@ namespace BGE
       segs = d.segments
       columns = m.segmentColumns
       for i = columns.count() to segs.count() - 1
-        columns.push(d.getColumns(segs[i].texture, segs[i].tileCount))
+        segColumns = d.getColumns(segs[i].texture, segs[i].tileCount)
+        columns.push(segColumns)
+        tiles = 0.0
+        if segs[i].tileWidth > 0
+          tiles = segs[i].length / segs[i].tileWidth
+        end if
+        m.segmentTiles.push(tiles)
+        invHeight = 1.0
+        if invalid <> segColumns
+          ' every column is cut from one texture, so they share its height
+          invHeight = 1.0 / segColumns[0].GetHeight()
+        end if
+        m.segmentInvHeights.push(invHeight)
       end for
 
       far = camera.getCurrentDrawDistance()
@@ -274,32 +344,68 @@ namespace BGE
       bandStart = far * (1 - fraction)
       fades = fraction > 0
       rgbas = m.pieceRgba
+      pColumn = m.pieceColumn
+      pScaleY = m.pieceScaleY
       for k = rgbas.count() to view.pieceCount - 1
         rgbas.push(base)
+        pColumn.push(invalid)
+        pScaleY.push(1.0)
       end for
       pSeg = view.pieceSegment
       pAlong = view.pieceAlong
       pDepth = view.pieceDepth
+      pLength = view.pieceLength
+      segTiles = m.segmentTiles
+      segInvHeights = m.segmentInvHeights
       shaded = d.isShaded
       lastSegment = -1
       shades = invalid
       lastBucket = 0
+      segColumns = invalid
+      columnCount = 0
+      tiles = 0.0
+      invHeight = 1.0
       for k = 0 to view.pieceCount - 1
-        shade = base
-        if shaded
-          n = pSeg[k]
-          if n <> lastSegment
+        n = pSeg[k]
+        u = pAlong[k]
+        if n <> lastSegment
+          lastSegment = n
+          segColumns = columns[n]
+          columnCount = 0
+          if invalid <> segColumns
+            columnCount = segColumns.count()
+          end if
+          tiles = segTiles[n]
+          invHeight = segInvHeights[n]
+          if shaded
             shades = m.segmentShades(rendererObj, n, base)
-            lastSegment = n
             lastBucket = shades.count() - 1
           end if
-          shade = shades[int(pAlong[k] * lastBucket + 0.5)]
+        end if
+        shade = base
+        if shaded
+          shade = shades[int(u * lastBucket + 0.5)]
         end if
         depth = pDepth[k]
         if fades and depth > bandStart
           shade = BGE.RendererHelpers.applyAlphaFade(shade, (far - depth) / (far - bandStart))
         end if
         rgbas[k] = shade
+        ' the texture column, picked here so drawing is just the draw call
+        if columnCount > 0
+          if tiles > 0
+            along = u * tiles
+            u = along - int(along)
+          end if
+          ci = int(u * columnCount)
+          if ci >= columnCount
+            ci = columnCount - 1
+          end if
+          pColumn[k] = segColumns[ci]
+          pScaleY[k] = pLength[k] * invHeight
+        else
+          pColumn[k] = invalid
+        end if
       end for
     end sub
 
