@@ -3,11 +3,12 @@
 
     python3 tools/crypt-art.py src/sprites [preview.png]
 
-Writes crypt_wall.png (one 2 x 4 m wall segment, tiles left/right), crypt_floor.png (flagstones,
-tiles both ways), crypt_alcove.png (a niche with a seated skeleton, hung on a wall),
-crypt_rubble.png, crypt_bones.png and crypt_altar.png (cut-outs, base on the bottom row).
+Writes crypt_wall.webp (one 2 x 4 m wall segment, tiles left/right), crypt_floor.webp (flagstones,
+tiles both ways), crypt_alcove.webp (a niche with a seated skeleton, hung on a wall),
+crypt_rubble.webp, crypt_bones.webp and crypt_altar.webp (cut-outs, base on the bottom row), as
+lossless WebP.
 With a second path, also writes a preview of the wall and floor tiled, to check the seams.
-Needs ImageMagick (`magick`) to write the PNGs.
+Needs ImageMagick (`magick`) to write the images.
 """
 import math
 import os
@@ -67,7 +68,8 @@ class Image:
             with open(pam, "wb") as f:
                 f.write(f"P7\nWIDTH {self.width}\nHEIGHT {self.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".encode())
                 f.write(bytes(v for p in self.px for v in p))
-            subprocess.run(["magick", pam, "-strip", "PNG32:" + path], check=True)
+            # Lossless for .webp; the preview's extension picks its own format
+            subprocess.run(["magick", pam, "-strip", "-define", "webp:lossless=true", "-define", "webp:exact=true", path], check=True)
 
 
 def shade(rgb, k):
@@ -242,7 +244,7 @@ def main():
         "crypt_altar": altar(rng),
     }
     for name, img in images.items():
-        img.write(os.path.join(out, name + ".png"))
+        img.write(os.path.join(out, name + ".webp"))
     if len(sys.argv) > 2:
         w, f = images["crypt_wall"], images["crypt_floor"]
         preview = Image(w.width * 3 + 8 + f.width * 2, max(w.height, f.height * 2), (40, 0, 40, 255))

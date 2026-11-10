@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Draws the night sky panorama for DrawableSkybox (360 degrees wide, 90 high, horizon in the middle).
 
-    python3 tools/night-sky.py src/sprites/night_sky.png
+    python3 tools/night-sky.py src/sprites/night_sky.webp
 
-Needs ImageMagick (`magick`) to write the PNG. The moon's position must match Night.MOON_YAW_DEGREES
+Needs ImageMagick (`magick`) to write the image (lossy WebP, q90). The moon's position must match Night.MOON_YAW_DEGREES
 and Night.MOON_ELEVATION_DEGREES in src/source/Night.bs, so the moonlight comes from the moon.
 """
 import math
@@ -171,7 +171,7 @@ def main():
         with open(ppm, "wb") as f:
             f.write(f"P6 {WIDTH} {HEIGHT} 255\n".encode())
             f.write(pixels)
-        subprocess.run(["magick", ppm, "-strip", sys.argv[1]], check=True)
+        subprocess.run(["magick", ppm, "-strip", "-quality", "90", sys.argv[1]], check=True)
 
 
 if __name__ == "__main__":

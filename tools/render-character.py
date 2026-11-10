@@ -3,7 +3,7 @@
 # angle. Run with Blender 5.x:
 #
 #   Blender -b <character>.blend --python tools/render-character.py -- \
-#     --config <game>/tools/characters.py --character knight --out <somewhere>/knight.png \
+#     --config <game>/tools/characters.py --character knight --out <somewhere>/knight.webp \
 #     [--parts <folder>] [--directions 16] [--height 64] [--packed] [--mirror] [--test]
 #
 # --config is a Python file defining CHARACTERS, a dict of character name -> settings. It can
@@ -20,7 +20,7 @@
 # See examples/thirdPerson/tools/characters.py.
 #
 # --packed trims every frame to its own pixels and packs them into sheets of at most
-# --sheet-size px (knight.png, knight_1.png, ...), with knight.json listing each frame's rect and
+# --sheet-size px (knight.webp, knight_1.webp, ...), with knight.json listing each frame's rect and
 # offset, for AssetLoader.loadSpriteAtlas() and Game.getSpriteAtlasFrames(). Much less texture
 # than the grid.
 # --mirror renders only the front-to-back half (9 of 16 directions) for
@@ -205,13 +205,14 @@ def load_rgba(path):
     return np.flipud(px.reshape(h, w, 4))
 
 
-def save_png(pixels, path):
+# Sheets are lossy WebP (alpha stays lossless) to keep the channel under Roku's 4 MB limit
+def save_webp(pixels, path):
     h, w = pixels.shape[:2]
     img = bpy.data.images.new("sheet", w, h, alpha=True)
     img.pixels.foreach_set(np.flipud(pixels).ravel())
     img.filepath_raw = path
-    img.file_format = "PNG"
-    img.save()
+    img.file_format = "WEBP"
+    img.save(quality=90)
     bpy.data.images.remove(img)
 
 
@@ -244,7 +245,7 @@ def pack(paths, feet, out, columns, animations, packed, sheet_size):
         for i, cell in enumerate(cells):
             r, c = divmod(i, cols)
             sheet[r * ch:(r + 1) * ch, c * cw:(c + 1) * cw] = cell
-        save_png(sheet, out)
+        save_webp(sheet, out)
         print("SHEET %s %dx%d cell %dx%d, %d directions x %d frames, %d columns, anchor (%.3f, %.3f), %.1f MB texture" % (
             out, cols * cw, rows * ch, cw, ch, len(paths), per_direction, cols, fx / cw, fy / ch, cols * cw * rows * ch * 4 / 1048576))
     offset = 0
@@ -285,8 +286,8 @@ def pack_trimmed(cells, cw, ch, out, sheet_size):
                        "offsetX": ox, "offsetY": oy, "sourceWidth": int(cw), "sourceHeight": int(ch)})
     names = []
     for s, pixels in enumerate(sheets):
-        path = out if s == 0 else "%s_%d.png" % (base, s)
-        save_png(pixels, path)
+        path = out if s == 0 else "%s_%d.webp" % (base, s)
+        save_webp(pixels, path)
         names.append(os.path.basename(path))
     with open(base + ".json", "w") as f:
         json.dump({"sheets": names, "frames": frames}, f, separators=(",", ":"))

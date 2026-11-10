@@ -1,15 +1,15 @@
 #!/usr/bin/env node
-// Builds examples/rpg/src/sprites/witch.png from lpcfemalechainpreview.png, "LPC Combat Armor for
+// Builds examples/rpg/src/sprites/witch.webp from lpcfemalechainpreview.png, "LPC Combat Armor for
 // women" (https://opengameart.org/content/lpc-combat-armor-for-women): the sheet draws a 1px
 // semi-transparent frame round every 64x64 cell, which shows as faint boxes round the sprite, so
-// those border pixels are cleared. No lossless PNG optimiser (oxipng, pngcrush, optipng, zopflipng)
-// was available when this was written, so the output is not further compressed.
+// those border pixels are cleared. Written as lossless WebP (pixel art).
 //
 //   node examples/rpg/scripts/build-witch.js <path to lpcfemalechainpreview.png>
 
 const fs = require('fs');
 const path = require('path');
 const PImage = require('pureimage');
+const { writeWebp } = require('../../../scripts/webp');
 
 const CELL = 64;
 const FRAME_ALPHA = 76;
@@ -38,8 +38,8 @@ async function main() {
       }
     }
   }
-  const outPath = path.join(__dirname, '..', 'src', 'sprites', 'witch.png');
-  await PImage.encodePNGToStream(sheet, fs.createWriteStream(outPath));
+  const outPath = path.join(__dirname, '..', 'src', 'sprites', 'witch.webp');
+  await writeWebp(sheet.data, sheet.width, sheet.height, outPath, { lossless: true });
   console.log(`cleared ${cleared} frame pixels -> ${outPath}`);
 }
 

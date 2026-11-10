@@ -43,6 +43,8 @@ task.weight = 10
 
 `loader.loadBitmap()` decodes an image with Roku's texture manager, which on a Roku runs off the main thread. Even a large image loads without dropping a frame. In testing, a 2048x1024 PNG that stalls a frame for 160ms with `game.loadBitmap()` didn't drop a single frame this way, and was ready about 10 frames later.
 
+Images can be PNG, JPG, WebP, BMP or GIF. A Roku channel must be under 4 MB zipped, so save big images as WebP: lossy WebP at quality 90 keeps a lossless alpha channel and is often a quarter the size of the PNG, and lossless WebP still beats PNG for pixel art. The manifest's splash screen and channel icons must be PNG or JPG, so use JPG for big ones.
+
 The loader can also resize an image as it loads, so only the smaller copy uses texture memory:
 
 ```brightscript

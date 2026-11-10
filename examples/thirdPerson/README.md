@@ -34,7 +34,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
 - `Night.bs`: the moonlight (a cool `DirectionalLight` from where the moon is in the sky) and a blue `AmbientLight`. They shade the ground, the pillars and the fighters' sprites (`isShaded`, lit as cut-outs facing the camera, with `lightWrap` 0.5 so a back-lit figure stays dim rather than black).
 - `Entities/Torch.bs`: a flame (rising `DrawableParticles`, sized in pixels) and a `PointLight` that pools on the ground and lights the pillars and anyone near it: warm firelight, or cold blue spirit fire. The lights never flicker, because a changing light relights everything it reaches every frame.
-- The sky is a `DrawableSkybox` panorama drawn by `tools/night-sky.py` (`python3 tools/night-sky.py src/sprites/night_sky.png`, needs ImageMagick): deep blue with clouds, stars, a distant tree line and the moon, placed where `Night.bs`'s moonlight comes from. The far half of the 40 m draw distance fades out (`drawDistanceFadeFraction` 0.5) into the sky's dark below the horizon.
+- The sky is a `DrawableSkybox` panorama drawn by `tools/night-sky.py` (`python3 tools/night-sky.py src/sprites/night_sky.webp`, needs ImageMagick): deep blue with clouds, stars, a distant tree line and the moon, placed where `Night.bs`'s moonlight comes from. The far half of the 40 m draw distance fades out (`drawDistanceFadeFraction` 0.5) into the sky's dark below the horizon.
 - `Entities/HitEffect.bs`: a one-off particle burst where a blow lands (blood, bone dust, block and parry sparks), using `DrawableParticles` with its particles made by hand so they fan out round the ground direction of the hit.
 - `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view).
 - `Entities/Enemy.bs`: a 16-direction monster, rendered like the knight, with a small AI. While it's waiting for an attack slot (or out of view) it circles the player; otherwise it closes in (straight, or flanking round to the player's side first) and attacks: wind-up, strike, recover, then either stays close or backs off. A hit knocks it back and, during the wind-up, interrupts it, after which it backs off; some enemies block hits from the front, and heavy ones shrug hits off.
@@ -50,10 +50,10 @@ The knight and the monsters are re-rendered from Flare-style Blender sources (Cl
 
 | Sheet | Source | Frames per direction | Untrimmed cell | Texture |
 | --- | --- | --- | --- | --- |
-| `knight.png` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield` | 23 | 92×88 | 6.8 MB |
-| `skeleton.png` | `skeleton_0.blend` | 26 | 112×75 | 6.8 MB |
-| `orc.png` | `orc_flare_0.blend`, layer 2 (hand axe) | 25 | 105×83 | 5.6 MB |
-| `orc_heavy.png` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 22 | 116×101 | 7.4 MB |
+| `knight.webp` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield` | 23 | 92×88 | 6.8 MB |
+| `skeleton.webp` | `skeleton_0.blend` | 26 | 112×75 | 6.8 MB |
+| `orc.webp` | `orc_flare_0.blend`, layer 2 (hand axe) | 25 | 105×83 | 5.6 MB |
+| `orc_heavy.webp` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 22 | 116×101 | 7.4 MB |
 
 1. The sources are in `art/`, unchanged from their downloads. They're Blender 2.49 files, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
 
@@ -64,13 +64,13 @@ blender -b art/skeleton_0.blend --python tools/convert-flare.py -- <converted>/s
 2. Render with Blender 5 (Cycles, with a shadow catcher for the ground shadow), using the engine's generic `tools/render-character.py` at the repo root. `--config tools/characters.py` gives it this game's characters, and `--character` picks one: its frames, layers, parts and colours (see `CHARACTERS` in `tools/characters.py`). `--packed` trims and packs the frames into sheets of at most `--sheet-size` (2048) px, with the `.json` frame list. It prints the cell size, the feet anchor, the frame columns of each animation and the texture size; the anchor and columns go in `Knight.bs` or `EnemyTypes.bs`:
 
 ```
-Blender -b <converted>/steel_armor.blend --python ../../tools/render-character.py -- --config tools/characters.py --character knight --parts <converted> --packed --out <somewhere>/knight.png
-Blender -b <converted>/skeleton_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character skeleton --height 56 --packed --out <somewhere>/skeleton.png
-Blender -b <converted>/orc_flare_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character orc --height 56 --packed --out <somewhere>/orc.png
-Blender -b <converted>/orc_flare_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character orc-heavy --height 58 --packed --out <somewhere>/orc_heavy.png
+Blender -b <converted>/steel_armor.blend --python ../../tools/render-character.py -- --config tools/characters.py --character knight --parts <converted> --packed --out <somewhere>/knight.webp
+Blender -b <converted>/skeleton_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character skeleton --height 56 --packed --out <somewhere>/skeleton.webp
+Blender -b <converted>/orc_flare_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character orc --height 56 --packed --out <somewhere>/orc.webp
+Blender -b <converted>/orc_flare_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character orc-heavy --height 58 --packed --out <somewhere>/orc_heavy.webp
 ```
 
-Copy the `.png` sheets and the `.json` into `src/sprites`. Without `--packed` it writes a full grid instead, wrapping at `--columns`. Add `--mirror` to render only the front-to-back half of the directions, for `DrawableOrientedSprite.mirrorBuckets`.
+Copy the `.webp` sheets and the `.json` into `src/sprites`. Without `--packed` it writes a full grid instead, wrapping at `--columns`. Add `--mirror` to render only the front-to-back half of the directions, for `DrawableOrientedSprite.mirrorBuckets`.
 
 The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/`. They aren't keyed by colour, so clear them after changing `colours`.
 
