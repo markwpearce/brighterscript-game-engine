@@ -13,8 +13,13 @@
 ' On a Roku Ultra at Medium, rows every 4 px took 10-17 ms against 67-72 ms for planes, and
 ' no method reached 40 fps: turning, the walls alone took 37-76 ms (see the room-levels spec).
 '
+' Method 2 takes its slices from the walls' own walk (WallsView.recordSurfaces, one pass)
+' unless onepass=0, which walks the rays again here as phase 1 did.
+'
 ' Launch params: method=0-2, motion=0-3 (still, turn, drive, look), rings=2-5, rows=1-8,
-' level=0-4 (default Medium), pitch=<degrees>. Each case logs a FLOORS line with its
+' level=0-4 (default Medium), pitch=<degrees>, onepass=0, stripWidth=<px> (overrides the
+' level's), warmup=/samples= (frames per case), runid= (echoed as `FLOORS start <runid>` so a
+' script can find this run's lines in the console's replayed history). Each case logs a FLOORS line with its
 ' average frame interval and where the time went; sweep=1 runs every case by itself, or
 ' those in the comma lists methods=, motions=, ringCounts=, rowSteps= (rows only applies
 ' to method 2).
@@ -26,6 +31,14 @@ class FloorsBenchmark extends RendererTest
   private sampleFrames as integer = 120
   private frameCount as integer = 0
   private sampleMs as float = 0
+  private sampleSwapMs as float = 0
+  private sampleTopDownMs as float = 0
+  private sampleSpanMs as float = 0
+  private samplePrepMs as float = 0
+  ' this frame's top-down rebuild, span listing and walls' walk (one-pass), in ms
+  private frameTopDownMs as float = 0
+  private frameSpanMs as float = 0
+  private framePrepMs as float = 0
   private sampleWalkMs as float = 0
   private sampleFloorMs as float = 0
   private sampleRenderMs as float = 0
@@ -62,6 +75,8 @@ class FloorsBenchmark extends RendererTest
   private motionIndex as integer = 1
   private ringCount as integer = 3
   private rowStep as integer = 2
+  ' rows: take the floor and ceiling slices the walls' walk recorded, instead of walking again
+  private onePass as boolean = true
   private level as BGE.RenderQualityLevel = BGE.RenderQualityLevel.medium
   private methodNames = ["flat", "planes", "rows"]
   private motionNames = ["still", "turn", "drive", "look"]
@@ -107,6 +122,10 @@ class FloorsBenchmark extends RendererTest
   private heightLast = [] as integer[]
   private heightTop = [] as float[]
   private heightBottom = [] as float[]
+  ' walkOnePass()'s runs of one height: leftmost ray and slice range
+  private runStart = [] as integer[]
+  private runFirst = [] as integer[]
+  private runLast = [] as integer[]
   private visibleHeights as integer = 0
   private floorDraws as integer = 0
 
@@ -170,6 +189,7 @@ class FloorsBenchmark extends RendererTest
     m.growSlices(0)
 
     params = m.launchParams
+    print "FLOORS start "; params.runid
     if invalid <> params.method
       m.methodIndex = m.wrapIndex(params.method.toInt(), m.methodNames.count())
     end if
@@ -188,6 +208,13 @@ class FloorsBenchmark extends RendererTest
     if invalid <> params.pitch
       m.pitch = val(params.pitch)
     end if
+    if invalid <> params.warmup
+      m.warmupFrames = BGE.Math.Max(1, params.warmup.toInt())
+    end if
+    if invalid <> params.samples
+      m.sampleFrames = BGE.Math.Max(1, params.samples.toInt())
+    end if
+    m.onePass = params.onepass <> "0"
     m.sweeping = params.sweep = "1"
     if m.sweeping
       for each method in m.indexList(params.methods, 0, m.methodNames.count() - 1)
@@ -207,7 +234,11 @@ class FloorsBenchmark extends RendererTest
       end for
       m.applySweepCase()
     end if
-    renderer.setQualitySettings(BGE.getRenderQualityPreset(m.level))
+    settings = BGE.getRenderQualityPreset(m.level)
+    if invalid <> params.stripWidth
+      settings.wallStripWidth = params.stripWidth.toInt()
+    end if
+    renderer.setQualitySettings(settings)
     m.buildLevel()
     m.updateCamera(0)
   end sub
@@ -334,6 +365,7 @@ class FloorsBenchmark extends RendererTest
     end if
     drawable = new BGE.DrawableWalls(invalid, segs, m.wallTextures, {})
     m.walls = drawable.addToRenderer(m.rendererRef) as BGE.SceneObjectWalls
+    m.walls.view.recordSurfaces = m.onePass
     ' height indices mean different heights now
     m.freeHeightBitmaps()
     m.resetSample()
@@ -383,8 +415,15 @@ class FloorsBenchmark extends RendererTest
 
   override sub draw(renderer as BGE.Renderer)
     renderer.setupCameraForFrame()
+    m.frameTopDownMs = 0
+    m.frameSpanMs = 0
+    m.framePrepMs = 0
     m.stageClock.Mark()
-    hasView = m.walk(renderer)
+    if m.onePass and m.methodIndex = 2
+      hasView = m.walkOnePass(renderer)
+    else
+      hasView = m.walk(renderer)
+    end if
     walkMs = m.stageClock.TotalMilliseconds()
     m.stageClock.Mark()
     m.floorDraws = 0
@@ -393,7 +432,9 @@ class FloorsBenchmark extends RendererTest
       if m.methodIndex = 0
         m.drawFlat(renderer)
       else
+        tdClock = CreateObject("roTimespan")
         topDownDraws = m.buildTopDowns()
+        m.frameTopDownMs = tdClock.TotalMicroseconds() / 1000.0
         if m.methodIndex = 1
           m.drawPlanes(renderer)
         else
@@ -664,6 +705,132 @@ class FloorsBenchmark extends RendererTest
         m.visibleHeights++
       end if
     end for
+    return true
+  end function
+
+  ' Like walk(), but takes the slices the walls' own walk recorded (rows method only): each
+  ' height's runs, sorted by ray, are linked left to right.
+  private function walkOnePass(renderer as BGE.Renderer) as boolean
+    m.sliceCount = 0
+    n = m.ringCount
+    for h = 0 to m.heightCount - 1
+      m.heightFirst[h] = -1
+      m.heightLast[h] = -1
+    end for
+    m.visibleHeights = 0
+    prepClock = CreateObject("roTimespan")
+    if not m.walls.prepareView(renderer)
+      return false
+    end if
+    m.framePrepMs = prepClock.TotalMicroseconds() / 1000.0
+    view = m.walls.view
+    m.fan = view
+    camera = m.camera
+    mat = camera.worldToCamera
+    lf = view.levelForward
+    lr = view.levelRight
+    m.pHw = camera.frameSize.x * 0.5
+    m.pHh = camera.frameSize.y * 0.5
+    m.pFocal = camera.getFocalLength()
+    m.pFy = lf.x * mat[0][1] + lf.z * mat[2][1]
+    m.pFz = lf.x * mat[0][2] + lf.z * mat[2][2]
+    m.pUy = mat[1][1]
+    m.pUz = mat[1][2]
+    m.pXf = lf.x * mat[0][0] + lf.z * mat[2][0]
+    m.pXt = lr.x * mat[0][0] + lr.z * mat[2][0]
+    m.pXu = mat[1][0]
+    m.oy = camera.position.y
+    m.drawDistance = camera.getCurrentDrawDistance()
+    m.growSlices(view.floorCount + view.ceilingCount)
+    sRay = m.sliceRay
+    topRows = m.sliceTop
+    bottomRows = m.sliceBottom
+    sNext = m.sliceNext
+    hFirst = m.heightFirst
+    hLast = m.heightLast
+    heightY = m.heightY
+    runStart = m.runStart
+    runFirst = m.runFirst
+    runLast = m.runLast
+    sc = 0
+    for kind = 0 to 1
+      if kind = 0
+        runCount = view.floorRunCount
+        sliceTotal = view.floorCount
+        runY = view.floorRunY
+        runFirsts = view.floorRunFirst
+        rays = view.floorRay
+        tops = view.floorTop
+        bottoms = view.floorBottom
+        firstHeight = 0
+      else
+        runCount = view.ceilingRunCount
+        sliceTotal = view.ceilingCount
+        runY = view.ceilingRunY
+        runFirsts = view.ceilingRunFirst
+        rays = view.ceilingRay
+        tops = view.ceilingTop
+        bottoms = view.ceilingBottom
+        firstHeight = n + 1
+      end if
+      for h = firstHeight to firstHeight + n
+        y = heightY[h]
+        ' this height's runs, by their leftmost ray
+        runStart.Clear()
+        runFirst.Clear()
+        runLast.Clear()
+        for r = 0 to runCount - 1
+          if runY[r] = y
+            a = runFirsts[r]
+            b = sliceTotal - 1
+            if r + 1 < runCount
+              b = runFirsts[r + 1] - 1
+            end if
+            start = rays[b]
+            p = runStart.count()
+            runStart.push(start)
+            runFirst.push(a)
+            runLast.push(b)
+            while p > 0 and runStart[p - 1] > start
+              runStart[p] = runStart[p - 1]
+              runFirst[p] = runFirst[p - 1]
+              runLast[p] = runLast[p - 1]
+              runStart[p - 1] = start
+              runFirst[p - 1] = a
+              runLast[p - 1] = b
+              p--
+            end while
+          end if
+        end for
+        prev = -1
+        prevRay = -1
+        for q = 0 to runStart.count() - 1
+          for j = runLast[q] to runFirst[q] step -1
+            i = rays[j]
+            ' a run overlapping one already linked is dropped
+            if i > prevRay
+              prevRay = i
+              sRay[sc] = i
+              topRows[sc] = tops[j]
+              bottomRows[sc] = bottoms[j]
+              sNext[sc] = -1
+              if prev < 0
+                hFirst[h] = sc
+              else
+                sNext[prev] = sc
+              end if
+              prev = sc
+              sc++
+            end if
+          end for
+        end for
+        hLast[h] = prev
+        if prev >= 0
+          m.visibleHeights++
+        end if
+      end for
+    end for
+    m.sliceCount = sc
     return true
   end function
 
@@ -991,6 +1158,7 @@ class FloorsBenchmark extends RendererTest
       end if
 
       ' list the spans
+      spanClock = CreateObject("roTimespan")
       spanRow.Clear()
       spanA.Clear()
       spanB.Clear()
@@ -998,12 +1166,28 @@ class FloorsBenchmark extends RendererTest
       pb = 0
       prevRay = -2
       s = m.heightFirst[h]
+      invStep = 1.0 / rowStep
+      i = 0
+      ct = 0
+      cb = 0
       while true
         if s >= 0
           i = sRay[s]
-          ct = Int(topRows[s] / rowStep)
-          cb = -Int(-bottomRows[s] / rowStep)
-        else
+          ct = Int(topRows[s] * invStep)
+          cb = -Int(-bottomRows[s] * invStep)
+          ' the same rows as the ray before: nothing opens or closes
+          while ct = pt and cb = pb and i = prevRay + 1
+            prevRay = i
+            s = sNext[s]
+            if s < 0
+              exit while
+            end if
+            i = sRay[s]
+            ct = Int(topRows[s] * invStep)
+            cb = -Int(-bottomRows[s] * invStep)
+          end while
+        end if
+        if s < 0
           i = prevRay + 1
           ct = 0
           cb = 0
@@ -1061,6 +1245,7 @@ class FloorsBenchmark extends RendererTest
         s = sNext[s]
       end while
 
+      m.frameSpanMs += spanClock.TotalMicroseconds() / 1000.0
       ' draw them, moving the region by hand (RegionCursor.moveTo() inlined)
       dh = m.heightY[h] - m.oy
       k = top.pxPerUnit
@@ -1165,6 +1350,10 @@ class FloorsBenchmark extends RendererTest
       return
     end if
     m.sampleMs += elapsed
+    m.sampleSwapMs += m.lastSwapMs
+    m.sampleTopDownMs += m.frameTopDownMs
+    m.sampleSpanMs += m.frameSpanMs
+    m.samplePrepMs += m.framePrepMs
     m.sampleWalkMs += walkMs
     m.sampleFloorMs += floorMs
     m.sampleRenderMs += renderMs
@@ -1178,7 +1367,7 @@ class FloorsBenchmark extends RendererTest
     end if
     n = m.sampleFrames
     frameMs = m.sampleMs / n
-    stats = `${m.format(frameMs)} ms (${m.format(1000 / frameMs)} fps) | walk ${m.format(m.sampleWalkMs / n)} | floors ${m.format(m.sampleFloorMs / n)} | render ${m.format(m.sampleRenderMs / n)} (walls walk ${m.format(m.sampleWallWalkMs / n)} shade ${m.format(m.sampleWallShadeMs / n)} strips ${m.format(m.sampleWallStripMs / n)}) | floor draws ${m.sampleFloorDraws \ n} | wall draws ${m.sampleWallDraws \ n} | top-down draws ${m.sampleTopDownDraws \ n} | slices ${m.sampleSlices \ n} | heights ${m.format(m.sampleHeights / n)}`
+    stats = `${m.format(frameMs)} ms (${m.format(1000 / frameMs)} fps) | swap ${m.format(m.sampleSwapMs / n)} | topdown ${m.format(m.sampleTopDownMs / n)} | spans ${m.format(m.sampleSpanMs / n)} | walls walk ${m.format(m.samplePrepMs / n)} | walk ${m.format(m.sampleWalkMs / n)} | floors ${m.format(m.sampleFloorMs / n)} | render ${m.format(m.sampleRenderMs / n)} (walls walk ${m.format(m.sampleWallWalkMs / n)} shade ${m.format(m.sampleWallShadeMs / n)} strips ${m.format(m.sampleWallStripMs / n)}) | floor draws ${m.sampleFloorDraws \ n} | wall draws ${m.sampleWallDraws \ n} | top-down draws ${m.sampleTopDownDraws \ n} | slices ${m.sampleSlices \ n} | heights ${m.format(m.sampleHeights / n)}`
     if m.allocationFailures > 0
       stats += ` | ${m.allocationFailures} bitmap allocations failed`
     end if
@@ -1203,6 +1392,10 @@ class FloorsBenchmark extends RendererTest
   private sub resetSample()
     m.frameCount = 0
     m.sampleMs = 0
+    m.sampleSwapMs = 0
+    m.sampleTopDownMs = 0
+    m.sampleSpanMs = 0
+    m.samplePrepMs = 0
     m.sampleWalkMs = 0
     m.sampleFloorMs = 0
     m.sampleRenderMs = 0

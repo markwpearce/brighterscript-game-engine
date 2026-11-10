@@ -190,6 +190,23 @@ paths read one camera-aligned top-down bitmap per texture (heights share it), re
   room walk finds wall pieces and floor slices in one pass.
 - Not measured on an HD device yet.
 
+#### Follow-up: walls and one-pass floors (Roku Ultra, Medium, rows every 4 px)
+
+Rings 4, turning: 115.8 ms a frame to 75 ms (8.6 to 13.3 fps); rings 2: 69 to 48 ms; looking
+up and down (pitched): 115 to 97.5 ms. Still short of 40 fps.
+
+- Wall strips drawn straight on the `roDraw2d` (three BrightScript calls a strip less), and
+  `WallsView` paths for level and for pitched-but-unrolled cameras that do per ray what the
+  general path did per piece. Crypt maze: 36.6 to 44.5 fps level, 31.9 to 34.9 pitched 25° down.
+- `WallsView.recordSurfaces`: the walls' walk records floor/ceiling slices as canvas rows in
+  runs, so the demo no longer walks every ray again (phase 2's one pass). A recorded floor
+  closes the window's bottom at the wall's foot, which plain walls don't.
+- `wallLodDistanceFraction`: far strips cover two rays (small here; more in open levels).
+- Cost model: ~0.2-0.6 µs a statement, ~0.2 µs an array access, ~10 µs a native draw whatever
+  its size, so a wall piece costs ~45 µs end to end and frame time is pieces and slices times
+  statements. 16 px strips everywhere give 49 ms. Merging neighbouring strips into one
+  multi-column draw saved under 1 ms net and was dropped.
+
 For phase 2, the row step belongs in `BGE.RenderQualitySettings` (e.g. 6/4/4/3/2 px, Medium
 at the measured 4), as may the top-down bitmap's texel budget, which the demo takes from the
 device tier like a ground plane.

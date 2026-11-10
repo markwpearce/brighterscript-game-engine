@@ -94,6 +94,18 @@ coarser (a fine stair-step along wall feet and tops).
 Override it like any other field, e.g. `{wallStripWidth: 6}` at Medium. Halving the strip
 width roughly doubles the walls' cost, which is why High sits at 6 between Medium's 8 and Ultra's 4.
 
+Past `wallLodDistanceFraction` of the current draw distance, walls draw one strip per two rays,
+twice as wide: far walls are small on screen, and each strip costs about the same however big
+it is. Every ray still closes exactly, so hiding and floors are unchanged.
+
+| Level  | `wallLodDistanceFraction` |
+| ------ | ------------------------- |
+| Basic  | 0.25                      |
+| Low    | 0.3                       |
+| Medium | 0.4                       |
+| High   | 0.6                       |
+| Ultra  | 1 (never)                 |
+
 ## Scale your own content
 
 Every entity and scene gets `onQualityChanged(level)` when the level changes:
