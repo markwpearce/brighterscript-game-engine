@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// Builds examples/rpg/src/sprites/castleWalls.png from Castle2.png: the keep's side/south wall
+// Builds examples/rpg/src/sprites/castleWalls.webp from Castle2.webp: the keep's side/south wall
 // tiles and its rotated, squashed doorway arches (open and barred). Pre-rendered so the device
 // never rotates anything at runtime. Regions must match the castleWalls entries in Maps/Atlas.bs.
 //
 //   node examples/rpg/scripts/build-castle-walls.js
 
-const fs = require('fs');
 const path = require('path');
 const PImage = require('pureimage');
+const { readRgba, writeWebp } = require('../../../scripts/webp');
 
 const SPRITES = path.join(__dirname, '..', 'src', 'sprites');
 const TILE = 32;
@@ -107,7 +107,9 @@ function sideArch(arch, outward) {
 }
 
 async function main() {
-  const castle = await PImage.decodePNGFromStream(fs.createReadStream(path.join(SPRITES, 'Castle2.png')));
+  const src = await readRgba(path.join(SPRITES, 'Castle2.webp'));
+  const castle = PImage.make(src.width, src.height);
+  castle.data.set(src.data);
   const brick = crop(castle, BRICK);
   const open = crop(castle, ARCH_OPEN);
   const bars = crop(castle, ARCH_BARS);
@@ -129,8 +131,8 @@ async function main() {
   blit(sheet, sideArch(open, 's'), 0, 116);
   blit(sheet, sideArch(bars, 's'), 84, 116);
 
-  const outPath = path.join(SPRITES, 'castleWalls.png');
-  await PImage.encodePNGToStream(sheet, fs.createWriteStream(outPath));
+  const outPath = path.join(SPRITES, 'castleWalls.webp');
+  await writeWebp(sheet.data, sheet.width, sheet.height, outPath, { lossless: true });
   console.log('wrote ' + outPath);
 }
 

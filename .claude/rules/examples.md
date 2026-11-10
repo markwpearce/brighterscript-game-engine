@@ -18,3 +18,4 @@ paths:
 - Package paths are case-insensitive: no `source/story` folder (collides with the engine's).
 - Keep `brightscript.projects` in `.vscode/settings.json` to ≤10 entries (language server runs out of heap); always keep the root `bsconfig.json`.
 - An example may have its own `CLAUDE.md` or rule file for example-specific notes; keep engine-wide facts here.
+- Images over ~100 KB: WebP (lossy q90 with lossless alpha; lossless for pixel art), JPG for manifest splash/icons. Asset scripts write WebP via `scripts/webp.js`.

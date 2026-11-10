@@ -20,17 +20,17 @@ Placeholder assets reused from other examples in this repo:
 - `rumble_jungle.mp3` — background music, supplied directly by the repo
   owner. No license/attribution accompanied it — **provenance/license needs
   confirming before this ships** (same caveat as `player.png` above).
-- `title_bg.png` — the "Jungle Adventure" title-screen background art (logo
+- `title_bg.webp` — the "Jungle Adventure" title-screen background art (logo
   and player character composited into a jungle scene), supplied directly by
   the repo owner. No license/attribution file accompanied it — **provenance/
   license needs confirming before this ships** (same caveat as `player.png`
   above).
-- `../images/Splash_HD.png`, `../images/Splash_SD.png`, `../images/Channel_Icon_HD.png`,
+- `../images/Splash_HD.jpg`, `../images/Splash_SD.jpg`, `../images/Channel_Icon_HD.jpg`,
   `../images/Channel_Icon_SD.png` — the channel splash screen and home-screen
   icon, a crop/composite of the same "Jungle Adventure" artwork as
-  `title_bg.png` above, supplied directly by the repo owner. Same caveat:
+  `title_bg.webp` above, supplied directly by the repo owner. Same caveat:
   **provenance/license needs confirming before this ships.**
-- `enemy.png` — a composited 10-col x 5-row spritesheet (idle/walk/run/jump/
+- `enemy.webp` — a composited 10-col x 5-row spritesheet (idle/walk/run/jump/
   dead, 86x60 cells) built from [Free Dino Sprites](https://opengameart.org/content/free-dino-sprites),
   CC0 (public domain) — no attribution required.
 - `goal.png` — a composited 10-frame waving-flag loop (60x96 cells), built

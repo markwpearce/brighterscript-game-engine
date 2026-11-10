@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 const { createCanvas, loadImage } = require('canvas');
+const { writeWebp } = require('../../../scripts/webp');
 
 const ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(ROOT, 'src', 'sprites', 'fighters');
@@ -89,8 +90,9 @@ async function buildSheet(key, file, frames) {
     g.drawImage(img, (frame % SHEET_COLS) * cellW, Math.floor(frame / SHEET_COLS) * cellH, cellW, cellH, ox, oy, cellW * SCALE, cellH * SCALE);
     g.restore();
   });
-  const outFile = path.join(OUT_DIR, `${key}.png`);
-  fs.writeFileSync(outFile, atlas.toBuffer('image/png'));
+  const outFile = path.join(OUT_DIR, `${key}.webp`);
+  const { data } = g.getImageData(0, 0, atlas.width, atlas.height);
+  await writeWebp(data, atlas.width, atlas.height, outFile);
   console.log(`${outFile}: ${frames.length} frames, ${atlas.width}x${atlas.height}`);
 }
 
