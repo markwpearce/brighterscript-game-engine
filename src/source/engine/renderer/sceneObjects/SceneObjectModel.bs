@@ -89,9 +89,6 @@ namespace BGE
     private canvasFacesStale as boolean = false
     ' this frame's impostor kind, for tests and profiling: "" or "rotate"
     private impostorKindThisFrame as string = ""
-    ' the bounding box's canvas diagonal when last projected, which sizes the error an
-    ' impostor may have - see getOccluderInset()
-    private impostorLastDiagonal as float = 0.0
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -293,7 +290,6 @@ namespace BGE
       if invalid = samples or not m.lastDrawWasFullyFresh
         return
       end if
-      m.impostorLastDiagonal = m.getScreenDiagonal(samples.xs, samples.ys)
       samples.originX = origin.x
       samples.originY = origin.y
       samples.transformVersion = m.transformVersion
@@ -351,7 +347,6 @@ namespace BGE
       ' which faces show, and their shading, depend on the direction the model is seen from
       cosine = BGE.Math.VectorOps.dotProduct(samples.direction, capture.direction)
       diagonal = m.getScreenDiagonal(samples.xs, samples.ys)
-      m.impostorLastDiagonal = diagonal
       if cosine >= Cos(BGE.Math.DegreesToRadians(settings.modelImpostorMaxAngleDegrees))
         fit = BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, samples.xs, samples.ys)
         p = fit.params
@@ -361,7 +356,7 @@ namespace BGE
           if capture.clipped and not m.clipRectStillCoversCanvas(renderObj, capture.clipRect, p)
             return invalid
           end if
-          capture.fit = {kind: "rotate", params: p}
+          capture.fit = {kind: "rotate", params: p, residual: fit.residual}
           origin = BGE.ImpostorFit.mapRotateScale(p, capture.originX, capture.originY)
           ' DrawTransformedObject turns counterclockwise on screen, the fit's angle clockwise (y down)
           return {origin: origin, rotation: -p.rotation, scaleX: p.scaleX, scaleY: p.scaleY}
@@ -1296,9 +1291,10 @@ namespace BGE
       return worldPanels
     end function
 
-    ' How far a moving model's draw may fall short of its exact faces: the whole-model
-    ' stretch threshold (when that may run) plus any coarse fill - and never less than a
-    ' skippable tiny face's reach.
+    ' How far this frame's draw may fall short of the model's exact faces. Faces redrawn
+    ' while moving are exact (columns or plain fills, nothing skipped), so only a reused
+    ' rendering is off: an impostor by its fit's error, or the whole-model stretch (wireframe)
+    ' by its threshold plus any coarse fill, never less than a skippable tiny face's reach.
     '
     ' @param {Renderer} rendererObj
     ' @param {SceneObjectDrawMode} drawMode
@@ -1309,7 +1305,10 @@ namespace BGE
         return 0.0
       end if
       if m.drawable.useImpostor
-        return m.getImpostorOccluderInset(rendererObj, drawMode)
+        return m.getImpostorOccluderInset()
+      end if
+      if m.canDrawAsColumns(drawMode)
+        return 0.0
       end if
       inset = 0.0
       if m.mayReuseTransformedTempBitmap(drawMode)
@@ -1321,12 +1320,13 @@ namespace BGE
     end function
 
     ' An impostor model draws its faces exactly (never skipped or coarse-filled), so only a
-    ' reused rendering is off: by at most the error its fit is allowed, plus 1px for the blit.
-    private function getImpostorOccluderInset(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as float
-      if invalid = m.impostorCapture or not m.mayReuseTransformedTempBitmap(drawMode)
+    ' blit of its capture is off: by this frame's fit error at the box corners, plus 1px for
+    ' the blit. Decided in updateCanvasPosition(), before occlusion is built.
+    private function getImpostorOccluderInset() as float
+      if invalid = m.impostorThisFrame or invalid = m.impostorCapture or invalid = m.impostorCapture.fit
         return 0.0
       end if
-      return m.getImpostorAllowedError(rendererObj.qualitySettings.modelImpostorError, m.impostorLastDiagonal, drawMode) + 1
+      return m.impostorCapture.fit.residual + 1
     end function
 
     ' Also needs every face in the cached bitmap drawn as it looks - see attemptTransformTempBitmap().
