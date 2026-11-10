@@ -33,6 +33,11 @@ namespace BGE
     ' How much nearer than a point a wall must be to hide it, in forward depth (strips round
     ' to the nearest ray, so a point flush with a receding wall can land on a nearer strip).
     hideTolerance as float = 8.0
+    ' A level, unrolled camera takes a shorter path; false always takes the general one (tests).
+    allowLevelPath as boolean = true
+    ' Forward depth past which walls (level or pitched, unrolled camera) draw one strip per two
+    ' rays, twice as wide (0 = never). Every ray's window is still exact.
+    lodDepth as float = 0
 
     ' Pieces of the last update(), grown and never shrunk; meaningful below pieceCount.
     pieceCount as integer = 0
@@ -41,18 +46,45 @@ namespace BGE
     pieceAlong = [] as float[]
     ' Forward depth (along levelForward)
     pieceDepth = [] as float[]
-    ' The strip's foot on the canvas, its foot-to-top length, width and lean (radians)
+    ' The strip's foot on the canvas, its foot-to-top length, width and lean (degrees, as
+    ' ifDraw2d.DrawTransformedObject takes it)
     pieceX = [] as float[]
     pieceY = [] as float[]
     pieceLength = [] as float[]
     pieceWidth = [] as float[]
     pieceAngle = [] as float[]
     pieceRay = [] as integer[]
+    ' Whether the piece also covers the ray left of its own (see lodDepth)
+    pieceWide = [] as boolean[]
     ' The ray's next piece further away, or -1
     pieceNext = [] as integer[]
     ' The wall's elevation slopes at the piece, foot and top
     pieceSlopeLow = [] as float[]
     pieceSlopeHigh = [] as float[]
+
+    ' With recordSurfaces on, update() also lists the floor and ceiling each ray sees between
+    ' walls, taking the floor in front of a wall standing below the eye to be at the wall's
+    ' foot, and the ceiling in front of one reaching above the eye to be at its top. Each
+    ' slice is a ray and the canvas rows it covers, top and bottom (clamped to the canvas).
+    ' Slices come in runs, one per wall part and height, over consecutive rays from last to
+    ' first: run r has height floorRunY[r] and slices floorRunFirst[r] up to the next run's
+    ' first (or floorCount). Ceilings likewise. Runs aren't in any order.
+    ' Each wall's foot is taken as floor and its top as ceiling, closing the ray's window there.
+    recordSurfaces as boolean = false
+    floorCount as integer = 0
+    floorRay = [] as integer[]
+    floorTop = [] as float[]
+    floorBottom = [] as float[]
+    floorRunCount as integer = 0
+    floorRunY = [] as float[]
+    floorRunFirst = [] as integer[]
+    ceilingCount as integer = 0
+    ceilingRay = [] as integer[]
+    ceilingTop = [] as float[]
+    ceilingBottom = [] as float[]
+    ceilingRunCount as integer = 0
+    ceilingRunY = [] as float[]
+    ceilingRunFirst = [] as integer[]
 
     ' Per ray: the nearest piece (-1 for none), the forward depth its window closed at and the
     ' nearest wall's depth (1e30 if none)
@@ -88,6 +120,13 @@ namespace BGE
     private clipFootY as float = 0.0
     private clipTopX as float = 0.0
     private clipTopY as float = 0.0
+    private slopeRowFy as float = 0.0
+    private rayCos = [] as float[]
+    private raySin = [] as float[]
+    private rayAngle = [] as float[]
+    private slopeRowFz as float = -1.0
+    private slopeRowUy as float = 1.0
+    private slopeRowUz as float = 0.0
 
     ' @param {BGE.WallSegment[]} segments
     ' @param {BGE.WallsBsp} bsp built from segments
@@ -120,6 +159,10 @@ namespace BGE
     ' @return {boolean}
     function update(camera as BGE.Camera3d, stripWidth as integer) as boolean
       m.pieceCount = 0
+      m.floorCount = 0
+      m.floorRunCount = 0
+      m.ceilingCount = 0
+      m.ceilingRunCount = 0
       m.partsInView = 0
       m.partsVisited = 0
       orient = camera.orientation
@@ -278,6 +321,54 @@ namespace BGE
       pHigh = m.pieceSlopeHigh
       openRays = rayCount
       visited = 0
+      recordSurfaces = m.recordSurfaces
+      lodDepth = m.lodDepth
+      pWide = m.pieceWide
+      floorN = 0
+      floorRuns = 0
+      ceilingN = 0
+      ceilingRuns = 0
+      floorLastRay = -2
+      ceilingLastRay = -2
+      surfaceCap = 0
+      if recordSurfaces
+        m.growSurfaces(rayCount * 8)
+        surfaceCap = m.floorRay.count()
+        m.slopeRowFy = lfx * a01 + lfz * a21
+        m.slopeRowFz = lfx * a02 + lfz * a22
+        m.slopeRowUy = a11
+        m.slopeRowUz = a12
+      end if
+      floorRay = m.floorRay
+      floorTop = m.floorTop
+      floorBottom = m.floorBottom
+      floorRunY = m.floorRunY
+      floorRunFirst = m.floorRunFirst
+      ceilingRay = m.ceilingRay
+      ceilingTop = m.ceilingTop
+      ceilingBottom = m.ceilingBottom
+      ceilingRunY = m.ceilingRunY
+      ceilingRunFirst = m.ceilingRunFirst
+      ' level and unrolled: a ray's canvas column is fixed and a slope e sits on row hh - focal * e
+      upright = m.allowLevelPath and abs(a10) < 1.0e-6 and abs(a12) < 1.0e-6 and abs(a01) < 1.0e-6 and abs(a21) < 1.0e-6 and abs(rx * a00 + rz * a20 - 1) < 1.0e-6 and abs(lfx * a02 + lfz * a22 + 1) < 1.0e-6
+      minFwd = -limit
+      ' pitched but unrolled: every strip on a ray lies on one canvas line through the vanishing
+      ' point of uprights, so its lean and spacing are worked out once per ray
+      pitched = not upright and m.allowLevelPath and abs(a10) < 1.0e-6 and abs(lfx * a00 + lfz * a20) < 1.0e-6 and abs(rx * a01 + rz * a21) < 1.0e-6 and abs(rx * a02 + rz * a22) < 1.0e-6 and abs(rx * a00 + rz * a20 - 1) < 1.0e-6 and abs(a12) > 1.0e-3
+      pFy = lfx * a01 + lfz * a21
+      pFz = lfx * a02 + lfz * a22
+      pUy = a11
+      pUz = a12
+      vpY = 0.0
+      rayCos = m.rayCos
+      raySin = m.raySin
+      rayAngle = m.rayAngle
+      ' past lodDepth, a strip is widened over the next ray instead of drawing another
+      wide = lodDepth > 0 and (upright or pitched)
+      if pitched
+        vpY = hh + focal * pUy / pUz
+        m.prepareRayLines(rayCount, firstTan, tanStep, hw, hh, focal, pFy, pFz, pUy, pUz)
+      end if
       for each n in order
         if openRays <= 0
           exit for
@@ -293,184 +384,777 @@ namespace BGE
         dS = segBss[n] - aS
         bottom = seg.bottom
         top = seg.top
+        dyB = bottom - oy
+        dyT = top - oy
         standsOnFloor = bottom <= floorY
         ax = partAx[n]
         az = partAz[n]
         ex = partBx[n] - ax
         ez = partBz[n] - az
         first = segFirst[n]
+        ' view coordinates of the foot and top are linear in s: start + s * dv
+        bcx = ax * a00 + az * a20 + t30
+        bcy = ax * a01 + az * a21 + t31
+        bcz = ax * a02 + az * a22 + t32
+        f0x = bcx + bottom * a10
+        f0y = bcy + bottom * a11
+        f0z = bcz + bottom * a12
+        t0x = bcx + top * a10
+        t0y = bcy + top * a11
+        t0z = bcz + top * a12
+        dvx = ex * a00 + ez * a20
+        dvy = ex * a01 + ez * a21
+        dvz = ex * a02 + ez * a22
 
-        ' rays last..first, carrying the ray after's projection for the strip width
+        ' rays last..first, carrying the ray after's projection (n*) for the strip width
         nOk = false
         nfx = 0.0
-        nfy = 0.0
-        ntx = 0.0
-        nty = 0.0
+        fx = 0.0
+        fy = 0.0
+        tx = 0.0
+        ty = 0.0
         startRay = segLast[n] + 1
-        for i = startRay to first step -1
-          t = firstTan + i * tanStep
+        floorLastRay = -2
+        ceilingLastRay = -2
+        absorb = false
+        lastRecordRay = -2
+        if upright
+          for i = startRay to first step -1
+            t = firstTan + i * tanStep
+            d = dS - t * dF
+            s = 0.0
+            if d > 1.0e-9 or d < -1.0e-9
+              s = (t * af - aS) / d
+              if s < 0
+                s = 0.0
+              else if s > 1
+                s = 1.0
+              end if
+            end if
+            fwd = af + s * dF
+            ok = fwd >= minFwd
+            if ok
+              fx = hw + focal * (aS + s * dS) / fwd
+            end if
+            jOk = nOk
+            jfx = nfx
+            ' read next ray (bslint misses the loop-carried use)
+            ' bs:disable-next-line: unused-variable
+            nOk = ok
+            ' bs:disable-next-line: unused-variable
+            nfx = fx
+            if ok
+              if i <> startRay and fwd >= near and fwd < drawDistance
+                rLow = low[i]
+                rHigh = high[i]
+                eB = dyB / fwd
+                eT = dyT / fwd
+                if recordSurfaces and rLow < rHigh
+                  ' the floor in front of a wall standing below the eye is at its foot, the ceiling in
+                  ' front of one reaching above the eye at its top; either closes a ray it fills
+                  if floorN >= surfaceCap or ceilingN >= surfaceCap
+                    m.growSurfaces(surfaceCap + rayCount * 4)
+                    surfaceCap = floorRay.count()
+                  end if
+                  if dyB < 0 and eB > rLow
+                    eTop = eB
+                    if eTop > rHigh
+                      eTop = rHigh
+                    end if
+                    rowTop = hh - focal * eTop
+                    rowBottom = hh - focal * rLow
+                    if rowBottom > canvasHeight
+                      rowBottom = canvasHeight
+                    end if
+                    if rowTop < rowBottom
+                      if floorLastRay <> i + 1
+                        floorRunY[floorRuns] = bottom
+                        floorRunFirst[floorRuns] = floorN
+                        floorRuns++
+                      end if
+                      floorLastRay = i
+                      floorRay[floorN] = i
+                      floorTop[floorN] = rowTop
+                      floorBottom[floorN] = rowBottom
+                      floorN++
+                    end if
+                    ' the floor fills the window up to the wall's foot
+                    rLow = eTop
+                    low[i] = rLow
+                    if eB >= rHigh
+                      closeDepth[i] = fwd
+                      openRays--
+                    end if
+                  end if
+                  if dyT > 0 and eT < rHigh and rLow < rHigh
+                    eBottom = eT
+                    if eBottom < rLow
+                      eBottom = rLow
+                    end if
+                    rowTop = hh - focal * rHigh
+                    rowBottom = hh - focal * eBottom
+                    if rowTop < 0
+                      rowTop = 0.0
+                    end if
+                    if rowTop < rowBottom
+                      if ceilingLastRay <> i + 1
+                        ceilingRunY[ceilingRuns] = top
+                        ceilingRunFirst[ceilingRuns] = ceilingN
+                        ceilingRuns++
+                      end if
+                      ceilingLastRay = i
+                      ceilingRay[ceilingN] = i
+                      ceilingTop[ceilingN] = rowTop
+                      ceilingBottom[ceilingN] = rowBottom
+                      ceilingN++
+                    end if
+                    rHigh = eBottom
+                    high[i] = rHigh
+                    if eT <= rLow
+                      closeDepth[i] = fwd
+                      openRays--
+                    end if
+                  end if
+                end if
+                if rLow < rHigh and eT > rLow and eB < rHigh
+                  if fwd < nearestDepth[i]
+                    nearestDepth[i] = fwd
+                  end if
+                  fy = hh - focal * eB
+                  ty = hh - focal * eT
+                  length = fy - ty
+                  if length >= 0.5
+                    width = stripWidth + 0.0
+                    if jOk
+                      width = jfx - fx + 1
+                      if width < 1
+                        width = 1.0
+                      end if
+                    end if
+                    if absorb and lastRecordRay = i + 1 and Abs(fy - pY[pc - 1]) < 1 and Abs(length - pLength[pc - 1]) < 1
+                      ' far: the strip just recorded (the ray right) widens over this ray too,
+                      ' covering both rays' extents
+                      pc--
+                      pWidth[pc] = pX[pc] + pWidth[pc] - fx
+                      pX[pc] = fx
+                      if ty > pY[pc] - pLength[pc]
+                        ty = pY[pc] - pLength[pc]
+                      end if
+                      if fy < pY[pc]
+                        fy = pY[pc]
+                      end if
+                      pY[pc] = fy
+                      pLength[pc] = fy - ty
+                      if eB < pLow[pc]
+                        pLow[pc] = eB
+                      end if
+                      if eT > pHigh[pc]
+                        pHigh[pc] = eT
+                      end if
+                      pAlong[pc] = u0 + s * du
+                      pWide[pc] = true
+                      pc++
+                      absorb = false
+                    else if fx + width >= 0 and fx <= canvasWidth and fy >= 0 and ty <= canvasHeight
+                      absorb = wide and fwd > lodDepth
+                      lastRecordRay = i
+                      if pc >= cap
+                        m.growPieces(pc + rayCount)
+                        cap = pSeg.count()
+                      end if
+                      pWide[pc] = false
+                      pSeg[pc] = segIndex
+                      pAlong[pc] = u0 + s * du
+                      pDepth[pc] = fwd
+                      pX[pc] = fx
+                      pY[pc] = fy
+                      pLength[pc] = length
+                      pWidth[pc] = width
+                      pAngle[pc] = 0.0
+                      pRay[pc] = i
+                      pNext[pc] = -1
+                      pLow[pc] = eB
+                      pHigh[pc] = eT
+                      last = lastPiece[i]
+                      if last < 0
+                        firstPiece[i] = pc
+                      else
+                        pNext[last] = pc
+                      end if
+                      lastPiece[i] = pc
+                      pc++
+                    end if
+                  end if
+                  if (eB <= rLow or standsOnFloor) and eT > rLow
+                    rLow = eT
+                    low[i] = rLow
+                  end if
+                  if eT >= rHigh and eB < rHigh
+                    rHigh = eB
+                    high[i] = rHigh
+                  end if
+                  if rLow >= rHigh
+                    closeDepth[i] = fwd
+                    openRays--
+                  end if
+                end if
+              end if
+            end if
+          end for
+        end if
+        if pitched
+          ' the far end's projection, for the last ray's width
+          last = segLast[n]
+          endOk = false
+          jfx = 0.0
+          jfy = 0.0
+          jtx = 0.0
+          jty = 0.0
+          t = firstTan + startRay * tanStep
           d = dS - t * dF
           s = 0.0
-          if abs(d) > 1.0e-9
+          if d > 1.0e-9 or d < -1.0e-9
             s = (t * af - aS) / d
+            if s < 0
+              s = 0.0
+            else if s > 1
+              s = 1.0
+            end if
           end if
-          if s < 0
-            s = 0.0
-          else if s > 1
-            s = 1.0
-          end if
-          fwd = af + s * dF
-          hx = ax + ex * s
-          hz = az + ez * s
-          bcx = hx * a00 + hz * a20 + t30
-          bcy = hx * a01 + hz * a21 + t31
-          bcz = hx * a02 + hz * a22 + t32
-          cxF = bcx + bottom * a10
-          cyF = bcy + bottom * a11
-          czF = bcz + bottom * a12
-          cxT = bcx + top * a10
-          cyT = bcy + top * a11
-          czT = bcz + top * a12
-          ok = false
-          fx = 0.0
-          fy = 0.0
-          tx = 0.0
-          ty = 0.0
+          czF = f0z + s * dvz
+          czT = t0z + s * dvz
           if czF <= limit and czT <= limit
-            fx = hw + focal * cxF / -czF
-            fy = hh - focal * cyF / -czF
-            tx = hw + focal * cxT / -czT
-            ty = hh - focal * cyT / -czT
+            inv = focal / -czF
+            jfx = hw + (f0x + s * dvx) * inv
+            jfy = hh - (f0y + s * dvy) * inv
+            inv = focal / -czT
+            jtx = hw + (t0x + s * dvx) * inv
+            jty = hh - (t0y + s * dvy) * inv
+            endOk = true
+          end if
+          for i = last to first step -1
+            t = firstTan + i * tanStep
+            d = dS - t * dF
+            s = 0.0
+            if d > 1.0e-9 or d < -1.0e-9
+              s = (t * af - aS) / d
+              if s < 0
+                s = 0.0
+              else if s > 1
+                s = 1.0
+              end if
+            end if
+            fwd = af + s * dF
+            if fwd >= near and fwd < drawDistance
+              rLow = low[i]
+              rHigh = high[i]
+              eB = dyB / fwd
+              eT = dyT / fwd
+              if recordSurfaces and rLow < rHigh
+                ' the floor in front of a wall standing below the eye is at its foot, the ceiling in
+                ' front of one reaching above the eye at its top; either closes a ray it fills
+                if floorN >= surfaceCap or ceilingN >= surfaceCap
+                  m.growSurfaces(surfaceCap + rayCount * 4)
+                  surfaceCap = floorRay.count()
+                end if
+                if dyB < 0 and eB > rLow
+                  eTop = eB
+                  if eTop > rHigh
+                    eTop = rHigh
+                  end if
+                  rowTop = 0.0
+                  if eTop > -1.0e29 and eTop < 1.0e29
+                    zz = pFz + eTop * pUz
+                    if zz < -0.0001
+                      rowTop = hh - focal * (pFy + eTop * pUy) / -zz
+                      if rowTop < 0
+                        rowTop = 0.0
+                      else if rowTop > canvasHeight
+                        rowTop = canvasHeight
+                      end if
+                    end if
+                  end if
+                  rowBottom = canvasHeight
+                  if rLow > -1.0e29 and rLow < 1.0e29
+                    zz = pFz + rLow * pUz
+                    if zz < -0.0001
+                      rowBottom = hh - focal * (pFy + rLow * pUy) / -zz
+                      if rowBottom < 0
+                        rowBottom = 0.0
+                      else if rowBottom > canvasHeight
+                        rowBottom = canvasHeight
+                      end if
+                    end if
+                  end if
+                  if rowTop < rowBottom
+                    if floorLastRay <> i + 1
+                      floorRunY[floorRuns] = bottom
+                      floorRunFirst[floorRuns] = floorN
+                      floorRuns++
+                    end if
+                    floorLastRay = i
+                    floorRay[floorN] = i
+                    floorTop[floorN] = rowTop
+                    floorBottom[floorN] = rowBottom
+                    floorN++
+                  end if
+                  ' the floor fills the window up to the wall's foot
+                  rLow = eTop
+                  low[i] = rLow
+                  if eB >= rHigh
+                    closeDepth[i] = fwd
+                    openRays--
+                  end if
+                end if
+                if dyT > 0 and eT < rHigh and rLow < rHigh
+                  eBottom = eT
+                  if eBottom < rLow
+                    eBottom = rLow
+                  end if
+                  rowTop = 0.0
+                  if rHigh > -1.0e29 and rHigh < 1.0e29
+                    zz = pFz + rHigh * pUz
+                    if zz < -0.0001
+                      rowTop = hh - focal * (pFy + rHigh * pUy) / -zz
+                      if rowTop < 0
+                        rowTop = 0.0
+                      else if rowTop > canvasHeight
+                        rowTop = canvasHeight
+                      end if
+                    end if
+                  end if
+                  rowBottom = canvasHeight
+                  if eBottom > -1.0e29 and eBottom < 1.0e29
+                    zz = pFz + eBottom * pUz
+                    if zz < -0.0001
+                      rowBottom = hh - focal * (pFy + eBottom * pUy) / -zz
+                      if rowBottom < 0
+                        rowBottom = 0.0
+                      else if rowBottom > canvasHeight
+                        rowBottom = canvasHeight
+                      end if
+                    end if
+                  end if
+                  if rowTop < rowBottom
+                    if ceilingLastRay <> i + 1
+                      ceilingRunY[ceilingRuns] = top
+                      ceilingRunFirst[ceilingRuns] = ceilingN
+                      ceilingRuns++
+                    end if
+                    ceilingLastRay = i
+                    ceilingRay[ceilingN] = i
+                    ceilingTop[ceilingN] = rowTop
+                    ceilingBottom[ceilingN] = rowBottom
+                    ceilingN++
+                  end if
+                  rHigh = eBottom
+                  high[i] = rHigh
+                  if eT <= rLow
+                    closeDepth[i] = fwd
+                    openRays--
+                  end if
+                end if
+              end if
+              if rLow < rHigh and eT > rLow and eB < rHigh
+                zB = pFz + eB * pUz
+                zT = pFz + eT * pUz
+                ok = true
+                if zB * fwd <= limit and zT * fwd <= limit
+                  tE = (aS + s * dS) / fwd
+                  inv = focal / -zB
+                  fx = hw + tE * inv
+                  fy = hh - (pFy + eB * pUy) * inv
+                  inv = focal / -zT
+                  tx = hw + tE * inv
+                  ty = hh - (pFy + eT * pUy) * inv
+                else if m.clipSegment(f0x + s * dvx, f0y + s * dvy, f0z + s * dvz, t0x + s * dvx, t0y + s * dvy, t0z + s * dvz)
+                  fx = m.clipFootX
+                  fy = m.clipFootY
+                  tx = m.clipTopX
+                  ty = m.clipTopY
+                else
+                  ok = false
+                end if
+                if ok
+                  if fwd < nearestDepth[i]
+                    nearestDepth[i] = fwd
+                  end if
+                  ddx = tx - fx
+                  ddy = ty - fy
+                  length = sqr(ddx * ddx + ddy * ddy)
+                  if length >= 0.5
+                    cosA = rayCos[i]
+                    sinA = raySin[i]
+                    if i = last and endOk
+                      ' reach the wall's far end exactly
+                      width = (jfx - fx) * cosA - (jfy - fy) * sinA
+                      reach = (jtx - tx) * cosA - (jty - ty) * sinA
+                      if reach > width
+                        width = reach
+                      end if
+                    else
+                      ' across to the next ray's line (through the vanishing point) from the foot or
+                      ' top, whichever is further
+                      cN = rayCos[i + 1]
+                      sN = raySin[i + 1]
+                      width = (fy - vpY) * sN - (fx - hw) * cN
+                      if width < 0
+                        width = -width
+                      end if
+                      reach = (ty - vpY) * sN - (tx - hw) * cN
+                      if reach < 0
+                        reach = -reach
+                      end if
+                      if reach > width
+                        width = reach
+                      end if
+                    end if
+                    width += 1
+                    if width < 1
+                      width = 1.0
+                    end if
+                    visible = true
+                    ' skip a strip wholly off the canvas (the fan reaches past it when pitched)
+                    if not ((fx >= 0 and fx <= canvasWidth and fy >= 0 and fy <= canvasHeight) or (tx >= 0 and tx <= canvasWidth and ty >= 0 and ty <= canvasHeight))
+                      wx = width * cosA
+                      wy = -width * sinA
+                      minX = fx
+                      maxX = fx
+                      if tx < minX
+                        minX = tx
+                      else if tx > maxX
+                        maxX = tx
+                      end if
+                      if wx < 0
+                        minX += wx
+                      else
+                        maxX += wx
+                      end if
+                      minY = fy
+                      maxY = fy
+                      if ty < minY
+                        minY = ty
+                      else if ty > maxY
+                        maxY = ty
+                      end if
+                      if wy < 0
+                        minY += wy
+                      else
+                        maxY += wy
+                      end if
+                      visible = maxX >= 0 and maxY >= 0 and minX <= canvasWidth and minY <= canvasHeight
+                    end if
+                    if absorb and lastRecordRay = i + 1 and Abs(fy - pY[pc - 1]) < 1 and Abs(length - pLength[pc - 1]) < 1
+                      ' far: the strip just recorded (the ray right) widens over this ray too
+                      ' (only when the two match to a pixel, so neither ray shows a gap)
+                      pc--
+                      cN = rayCos[i + 1]
+                      sN = raySin[i + 1]
+                      reach = (fy - vpY) * sN - (fx - hw) * cN
+                      if reach < 0
+                        reach = -reach
+                      end if
+                      pWidth[pc] = pWidth[pc] + reach
+                      pX[pc] = fx
+                      pY[pc] = fy
+                      pLength[pc] = length
+                      pAngle[pc] = rayAngle[i]
+                      pAlong[pc] = u0 + s * du
+                      pWide[pc] = true
+                      pc++
+                      absorb = false
+                    else if visible
+                      absorb = wide and fwd > lodDepth
+                      lastRecordRay = i
+                      if pc >= cap
+                        m.growPieces(pc + rayCount)
+                        cap = pSeg.count()
+                      end if
+                      pWide[pc] = false
+                      pSeg[pc] = segIndex
+                      pAlong[pc] = u0 + s * du
+                      pDepth[pc] = fwd
+                      pX[pc] = fx
+                      pY[pc] = fy
+                      pLength[pc] = length
+                      pWidth[pc] = width
+                      pAngle[pc] = rayAngle[i]
+                      pRay[pc] = i
+                      pNext[pc] = -1
+                      pLow[pc] = eB
+                      pHigh[pc] = eT
+                      prevPiece = lastPiece[i]
+                      if prevPiece < 0
+                        firstPiece[i] = pc
+                      else
+                        pNext[prevPiece] = pc
+                      end if
+                      lastPiece[i] = pc
+                      pc++
+                    end if
+                  end if
+                  ' a wall covering an end of the window closes that end up to its far edge
+                  if (eB <= rLow or standsOnFloor) and eT > rLow
+                    rLow = eT
+                    low[i] = rLow
+                  end if
+                  if eT >= rHigh and eB < rHigh
+                    rHigh = eB
+                    high[i] = rHigh
+                  end if
+                  if rLow >= rHigh
+                    closeDepth[i] = fwd
+                    openRays--
+                  end if
+                end if
+              end if
+            end if
+          end for
+        end if
+        if not upright and not pitched
+          qOk = false
+          qfx = 0.0
+          qfy = 0.0
+          qtx = 0.0
+          qty = 0.0
+          for i = startRay to first step -1
+            t = firstTan + i * tanStep
+            d = dS - t * dF
+            s = 0.0
+            if d > 1.0e-9 or d < -1.0e-9
+              s = (t * af - aS) / d
+              if s < 0
+                s = 0.0
+              else if s > 1
+                s = 1.0
+              end if
+            end if
+            czF = f0z + s * dvz
+            czT = t0z + s * dvz
             ok = true
-          else if m.clipSegment(cxF, cyF, czF, cxT, cyT, czT)
-            fx = m.clipFootX
-            fy = m.clipFootY
-            tx = m.clipTopX
-            ty = m.clipTopY
-            ok = true
-          end if
-          jOk = nOk
-          jfx = nfx
-          jfy = nfy
-          jtx = ntx
-          jty = nty
-          nOk = ok
-          nfx = fx
-          nfy = fy
-          ntx = tx
-          nty = ty
-          if i = startRay or not ok or fwd < near or fwd >= drawDistance
-            continue for
-          end if
-          rLow = low[i]
-          rHigh = high[i]
-          if rLow >= rHigh
-            continue for
-          end if
-          eB = (bottom - oy) / fwd
-          eT = (top - oy) / fwd
-          if eT <= rLow or eB >= rHigh
-            continue for
-          end if
-          if fwd < nearestDepth[i]
-            nearestDepth[i] = fwd
-          end if
-
-          ddx = tx - fx
-          ddy = ty - fy
-          length = sqr(ddx * ddx + ddy * ddy)
-          if length >= 0.5
-            sinA = -ddx / length
-            cosA = -ddy / length
-            ' across to the next ray's foot or top, whichever is further, plus a pixel
-            width = stripWidth + 0.0
-            if jOk
-              reach = (jfx - fx) * cosA - (jfy - fy) * sinA
-              topReach = (jtx - tx) * cosA - (jty - ty) * sinA
-              if topReach > reach
-                reach = topReach
-              end if
-              width = reach + 1
-              if width < 1
-                width = 1.0
-              end if
-            end if
-            ' skip a strip wholly off the canvas (the fan reaches past it when pitched)
-            wx = width * cosA
-            wy = -width * sinA
-            minX = fx
-            maxX = fx
-            if tx < minX
-              minX = tx
-            else if tx > maxX
-              maxX = tx
-            end if
-            if wx < 0
-              minX += wx
+            if czF <= limit and czT <= limit
+              inv = focal / -czF
+              fx = hw + (f0x + s * dvx) * inv
+              fy = hh - (f0y + s * dvy) * inv
+              inv = focal / -czT
+              tx = hw + (t0x + s * dvx) * inv
+              ty = hh - (t0y + s * dvy) * inv
+            else if m.clipSegment(f0x + s * dvx, f0y + s * dvy, czF, t0x + s * dvx, t0y + s * dvy, czT)
+              fx = m.clipFootX
+              fy = m.clipFootY
+              tx = m.clipTopX
+              ty = m.clipTopY
             else
-              maxX += wx
+              ok = false
             end if
-            minY = fy
-            maxY = fy
-            if ty < minY
-              minY = ty
-            else if ty > maxY
-              maxY = ty
-            end if
-            if wy < 0
-              minY += wy
-            else
-              maxY += wy
-            end if
-            if maxX >= 0 and maxY >= 0 and minX <= canvasWidth and minY <= canvasHeight
-              if pc >= cap
-                m.growPieces(pc + rayCount)
-                cap = pSeg.count()
+            jOk = qOk
+            jfx = qfx
+            jfy = qfy
+            jtx = qtx
+            jty = qty
+            qOk = ok
+            qfx = fx
+            qfy = fy
+            qtx = tx
+            qty = ty
+            fwd = af + s * dF
+            if ok and i <> startRay and fwd >= near and fwd < drawDistance
+              rLow = low[i]
+              rHigh = high[i]
+              eB = dyB / fwd
+              eT = dyT / fwd
+              if recordSurfaces and rLow < rHigh
+                ' the floor in front of a wall standing below the eye is at its foot, the ceiling in
+                ' front of one reaching above the eye at its top; either closes a ray it fills
+                if floorN >= surfaceCap or ceilingN >= surfaceCap
+                  m.growSurfaces(surfaceCap + rayCount * 4)
+                  surfaceCap = floorRay.count()
+                end if
+                if dyB < 0 and eB > rLow
+                  eTop = eB
+                  if eTop > rHigh
+                    eTop = rHigh
+                  end if
+                  rowTop = m.slopeRow(eTop, 0.0)
+                  rowBottom = m.slopeRow(rLow, canvasHeight)
+                  if rowTop < rowBottom
+                    if floorLastRay <> i + 1
+                      floorRunY[floorRuns] = bottom
+                      floorRunFirst[floorRuns] = floorN
+                      floorRuns++
+                    end if
+                    floorLastRay = i
+                    floorRay[floorN] = i
+                    floorTop[floorN] = rowTop
+                    floorBottom[floorN] = rowBottom
+                    floorN++
+                  end if
+                  ' the floor fills the window up to the wall's foot
+                  rLow = eTop
+                  low[i] = rLow
+                  if eB >= rHigh
+                    closeDepth[i] = fwd
+                    openRays--
+                  end if
+                end if
+                if dyT > 0 and eT < rHigh and rLow < rHigh
+                  eBottom = eT
+                  if eBottom < rLow
+                    eBottom = rLow
+                  end if
+                  rowTop = m.slopeRow(rHigh, 0.0)
+                  rowBottom = m.slopeRow(eBottom, canvasHeight)
+                  if rowTop < rowBottom
+                    if ceilingLastRay <> i + 1
+                      ceilingRunY[ceilingRuns] = top
+                      ceilingRunFirst[ceilingRuns] = ceilingN
+                      ceilingRuns++
+                    end if
+                    ceilingLastRay = i
+                    ceilingRay[ceilingN] = i
+                    ceilingTop[ceilingN] = rowTop
+                    ceilingBottom[ceilingN] = rowBottom
+                    ceilingN++
+                  end if
+                  rHigh = eBottom
+                  high[i] = rHigh
+                  if eT <= rLow
+                    closeDepth[i] = fwd
+                    openRays--
+                  end if
+                end if
               end if
-              pSeg[pc] = segIndex
-              pAlong[pc] = u0 + s * du
-              pDepth[pc] = fwd
-              pX[pc] = fx
-              pY[pc] = fy
-              pLength[pc] = length
-              pWidth[pc] = width
-              if cosA > 0
-                pAngle[pc] = Atn(sinA / cosA)
-              else
-                pAngle[pc] = BGE.Math.Atan2(sinA, cosA)
-              end if
-              pRay[pc] = i
-              pNext[pc] = -1
-              pLow[pc] = eB
-              pHigh[pc] = eT
-              if lastPiece[i] < 0
-                firstPiece[i] = pc
-              else
-                pNext[lastPiece[i]] = pc
-              end if
-              lastPiece[i] = pc
-              pc++
-            end if
-          end if
+              if rLow < rHigh and eT > rLow and eB < rHigh
+                if fwd < nearestDepth[i]
+                  nearestDepth[i] = fwd
+                end if
+                ddx = tx - fx
+                ddy = ty - fy
+                if ddx < 0.001 and ddx > -0.001 and ddy < -0.5
+                  ' upright (no pitch): no trig, angle 0
+                  length = -ddy
+                  angle = 0.0
+                  width = stripWidth + 0.0
+                  if jOk
+                    width = jfx - fx
+                    if jtx - tx > width
+                      width = jtx - tx
+                    end if
+                    width += 1
+                    if width < 1
+                      width = 1.0
+                    end if
+                  end if
+                  visible = fx + width >= 0 and fx <= canvasWidth and fy >= 0 and ty <= canvasHeight
+                else
+                  length = sqr(ddx * ddx + ddy * ddy)
+                  width = 1.0
+                  angle = 0.0
+                  visible = length >= 0.5
+                  if visible
+                    sinA = -ddx / length
+                    cosA = -ddy / length
+                    ' across to the next ray's foot or top, whichever is further, plus a pixel
+                    width = stripWidth + 0.0
+                    if jOk
+                      reach = (jfx - fx) * cosA - (jfy - fy) * sinA
+                      topReach = (jtx - tx) * cosA - (jty - ty) * sinA
+                      if topReach > reach
+                        reach = topReach
+                      end if
+                      width = reach + 1
+                      if width < 1
+                        width = 1.0
+                      end if
+                    end if
+                    if cosA > 0
+                      angle = Atn(sinA / cosA) * 57.29578
+                    else
+                      angle = BGE.Math.Atan2(sinA, cosA) * 57.29578
+                    end if
+                    ' skip a strip wholly off the canvas (the fan reaches past it when pitched)
+                    if not ((fx >= 0 and fx <= canvasWidth and fy >= 0 and fy <= canvasHeight) or (tx >= 0 and tx <= canvasWidth and ty >= 0 and ty <= canvasHeight))
+                      wx = width * cosA
+                      wy = -width * sinA
+                      minX = fx
+                      maxX = fx
+                      if tx < minX
+                        minX = tx
+                      else if tx > maxX
+                        maxX = tx
+                      end if
+                      if wx < 0
+                        minX += wx
+                      else
+                        maxX += wx
+                      end if
+                      minY = fy
+                      maxY = fy
+                      if ty < minY
+                        minY = ty
+                      else if ty > maxY
+                        maxY = ty
+                      end if
+                      if wy < 0
+                        minY += wy
+                      else
+                        maxY += wy
+                      end if
+                      visible = maxX >= 0 and maxY >= 0 and minX <= canvasWidth and minY <= canvasHeight
+                    end if
+                  end if
+                end if
+                if visible
+                  if pc >= cap
+                    m.growPieces(pc + rayCount)
+                    cap = pSeg.count()
+                  end if
+                  pSeg[pc] = segIndex
+                  pAlong[pc] = u0 + s * du
+                  pDepth[pc] = fwd
+                  pX[pc] = fx
+                  pY[pc] = fy
+                  pLength[pc] = length
+                  pWidth[pc] = width
+                  pAngle[pc] = angle
+                  pRay[pc] = i
+                  pNext[pc] = -1
+                  pLow[pc] = eB
+                  pHigh[pc] = eT
+                  pWide[pc] = false
+                  last = lastPiece[i]
+                  if last < 0
+                    firstPiece[i] = pc
+                  else
+                    pNext[last] = pc
+                  end if
+                  lastPiece[i] = pc
+                  pc++
+                end if
 
-          ' a wall covering an end of the window closes that end up to its far edge
-          if eB <= rLow or standsOnFloor
-            if eT > rLow
-              rLow = eT
+                ' a wall covering an end of the window closes that end up to its far edge
+                if (eB <= rLow or standsOnFloor) and eT > rLow
+                  rLow = eT
+                  low[i] = rLow
+                end if
+                if eT >= rHigh and eB < rHigh
+                  rHigh = eB
+                  high[i] = rHigh
+                end if
+                if rLow >= rHigh
+                  closeDepth[i] = fwd
+                  openRays--
+                end if
+              end if
             end if
-          end if
-          if eT >= rHigh and eB < rHigh
-            rHigh = eB
-          end if
-          low[i] = rLow
-          high[i] = rHigh
-          if rLow >= rHigh
-            closeDepth[i] = fwd
-            openRays--
-          end if
-        end for
+          end for
+        end if
       end for
       m.pieceCount = pc
+      m.floorCount = floorN
+      m.floorRunCount = floorRuns
+      m.ceilingCount = ceilingN
+      m.ceilingRunCount = ceilingRuns
       m.partsVisited = visited
       return true
     end function
@@ -549,6 +1233,16 @@ namespace BGE
         end if
         k = m.pieceNext[k]
       end while
+      ' a far strip on the ray right may be widened over this one
+      if i + 1 < m.rayCount
+        k = m.rayFirstPiece[i + 1]
+        while k >= 0 and m.pieceDepth[k] < limit
+          if m.pieceWide[k] and e >= m.pieceSlopeLow[k] and e <= m.pieceSlopeHigh[k]
+            return true
+          end if
+          k = m.pieceNext[k]
+        end while
+      end if
       return false
     end function
 
@@ -703,6 +1397,72 @@ namespace BGE
       end for
     end sub
 
+    ' The canvas row of elevation slope e on any ray (no roll), clamped to the canvas; offView
+    ' if e is past the edge of what the camera sees.
+    private function slopeRow(e as float, offView as float) as float
+      if e < -1.0e29 or e > 1.0e29
+        return offView
+      end if
+      z = m.slopeRowFz + e * m.slopeRowUz
+      if z > -0.0001
+        return offView
+      end if
+      row = m.halfHeight - m.focal * (m.slopeRowFy + e * m.slopeRowUy) / -z
+      if row < 0
+        return 0.0
+      else if row > m.halfHeight * 2
+        return m.halfHeight * 2
+      end if
+      return row
+    end function
+
+    ' Per ray (0..rayCount, the last for widths): the canvas direction of increasing slope as
+    ' DrawTransformedObject's lean (cos, sin, degrees).
+    private sub prepareRayLines(rayCount as integer, firstTan as float, tanStep as float, hw as float, hh as float, focal as float, pFy as float, pFz as float, pUy as float, pUz as float)
+      rayCos = m.rayCos
+      raySin = m.raySin
+      rayAngle = m.rayAngle
+      for i = rayCos.count() to rayCount + 1
+        rayCos.push(1.0)
+        raySin.push(0.0)
+        rayAngle.push(0.0)
+      end for
+      z0 = pFz
+      z1 = pFz + 0.01 * pUz
+      y0 = hh - focal * pFy / -z0
+      y1 = hh - focal * (pFy + 0.01 * pUy) / -z1
+      dy = y1 - y0
+      for i = 0 to rayCount + 1
+        t = firstTan + i * tanStep
+        dx = focal * t / -z1 - focal * t / -z0
+        length = sqr(dx * dx + dy * dy)
+        sinA = -dx / length
+        cosA = -dy / length
+        rayCos[i] = cosA
+        raySin[i] = sinA
+        if cosA > 0
+          rayAngle[i] = Atn(sinA / cosA) * 57.29578
+        else
+          rayAngle[i] = BGE.Math.Atan2(sinA, cosA) * 57.29578
+        end if
+      end for
+    end sub
+
+    private sub growSurfaces(count as integer)
+      for i = m.floorRay.count() to count - 1
+        m.floorRay.push(0)
+        m.floorTop.push(0.0)
+        m.floorBottom.push(0.0)
+        m.floorRunY.push(0.0)
+        m.floorRunFirst.push(0)
+        m.ceilingRay.push(0)
+        m.ceilingTop.push(0.0)
+        m.ceilingBottom.push(0.0)
+        m.ceilingRunY.push(0.0)
+        m.ceilingRunFirst.push(0)
+      end for
+    end sub
+
     private sub growPieces(count as integer)
       for i = m.pieceSegment.count() to count - 1
         m.pieceSegment.push(0)
@@ -717,6 +1477,7 @@ namespace BGE
         m.pieceNext.push(-1)
         m.pieceSlopeLow.push(0.0)
         m.pieceSlopeHigh.push(0.0)
+        m.pieceWide.push(false)
       end for
     end sub
 

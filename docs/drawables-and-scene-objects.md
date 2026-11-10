@@ -977,7 +977,18 @@ narrow it. A wall standing on the floor closes it up to its top, and one reachin
 screen closes it down to its foot. A closed ray costs nothing more, and the walk stops once
 every ray is closed. So cost follows screen coverage, not the wall count, and a short wall lets
 taller walls behind it show. Strips draw far to near, leaning with the camera's pitch so wall
-feet stay planted on a `DrawablePlane` floor. With a still camera the walk is reused.
+feet stay planted on a `DrawablePlane` floor. With a still camera the walk is reused. Strips past
+`wallLodDistanceFraction` of the draw distance cover two rays each (see
+[Render quality](/render-quality)).
+
+To draw your own floors and ceilings between the walls, set `view.recordSurfaces = true` on the
+walls' scene object (`BGE.SceneObjectWalls`) and call its `prepareView(renderer)` after
+`Renderer.setupCameraForFrame()`: the walk then also lists, per ray, the canvas rows of the
+floor in front of each wall standing below the eye (at that wall's foot height) and of the
+ceiling in front of each wall reaching above it (at its top), in runs of consecutive rays.
+`render()` reuses that walk. rendererTest's `floors-benchmark` draws them as textured row spans.
+It treats every wall's foot as floor and its top as ceiling, so it suits levels built that way
+(rooms and steps): a floating ledge or a lintel then hides what's below or above it too.
 
 ### Grid mazes (`DrawableGridWalls`)
 
