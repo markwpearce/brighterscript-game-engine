@@ -551,8 +551,10 @@ A few things the renderer enforces, which are easy to trip over:
   objects and text are never hidden; a particle emitter is hidden only once every live particle is.
 - An occluder draws like anything else, cached bitmaps and coarse fills included. While it (or
   the camera) moves, the area it claims to cover shrinks by the largest error those shortcuts
-  can make, so it rarely hides something it doesn't actually paint over (a non-convex model
-  can still briefly over-claim near its silhouette). An object near an
+  can make this frame, so it rarely hides something it doesn't actually paint over (a non-convex
+  model can still briefly over-claim near its silhouette). A model redrawing its faces while
+  moving draws them exactly and doesn't shrink; one reusing its impostor shrinks by just that
+  frame's fit error. An object near an
   occluder's edge can therefore stay drawn while the camera moves, and is hidden again once it
   stops.
 - `renderer.occluderDrawPolicy` changes that trade-off. The default,
