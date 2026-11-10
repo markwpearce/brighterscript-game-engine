@@ -167,8 +167,8 @@ the scale fit does nearly all the work.
 
 `DrawableModel.useImpostor` (experimental, on by default; set it false to use per-face reuse instead). The limits come from the quality
 level: `modelImpostorError` (error allowed as a fraction of the model's on-screen diagonal,
-2px at least, capped at the model's 64px reuse threshold for an occluder only), `modelImpostorMaxZoom` (how far
-the bitmap may be enlarged) and `modelImpostorMaxAngleDegrees` (how far the view direction
+2px at least, capped at the model's 64px reuse threshold for an occluder only), `modelImpostorMaxSizeChange` (how far
+the bitmap may grow or shrink; was `modelImpostorMaxZoom`, enlarging only, until #486) and `modelImpostorMaxAngleDegrees` (how far the view direction
 may turn) - no frame limit. A reused frame projects only the 8 box corners, not every
 vertex. A quality step down keeps the reused rendering; only a step up redraws it. It's
 off while `Renderer.computeOverlapClusters` is on (clusters draw per face), and never used
