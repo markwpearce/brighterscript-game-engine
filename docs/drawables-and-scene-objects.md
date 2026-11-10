@@ -987,6 +987,8 @@ walls' scene object (`BGE.SceneObjectWalls`) and call its `prepareView(renderer)
 floor in front of each wall standing below the eye (at that wall's foot height) and of the
 ceiling in front of each wall reaching above it (at its top), in runs of consecutive rays.
 `render()` reuses that walk. rendererTest's `floors-benchmark` draws them as textured row spans.
+It treats every wall's foot as floor and its top as ceiling, so it suits levels built that way
+(rooms and steps): a floating ledge or a lintel then hides what's below or above it too.
 
 ### Grid mazes (`DrawableGridWalls`)
 
