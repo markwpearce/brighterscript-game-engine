@@ -10,3 +10,6 @@
 | `art/orc_flare_0.blend` (as downloaded) | johndh | CC-BY-SA 3.0 | [Orc Flare 3D](https://opengameart.org/content/orc-flare-3d) |
 | `src/sprites/grass.webp` (placeholder ground, shared with `examples/terrain`) | - | CC0 | [Seamless grass textures](https://opengameart.org/content/seamless-grass-textures-20-pack) |
 | `src/sprites/night_sky.webp` (drawn by `tools/night-sky.py`) | - | CC0 | this repo |
+| `src/sprites/tree_1.webp` - `tree_5.webp` (shadow cleared, trimmed and scaled by `tools/trees.js`) | TODO | TODO | TODO: where Mark's `trees/_04` sprites came from |
+| `src/models/props/*` (drawn by `tools/make-props.py`) | - | CC0 | this repo |
+| `src/models/chapel/*` (shared with `examples/terrain`) | - | CC0 | this repo |

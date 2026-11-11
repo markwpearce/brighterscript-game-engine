@@ -2,6 +2,14 @@
 
 A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD, at night under a full moon with torches on the pillars. The map, ripostes and checkpoints come later.
 
+## Scenes
+
+| Scene | Deep link | What's there |
+| --- | --- | --- |
+| Field (`FieldScene`) | (default) | The arena for trying out combat: enemies keep spawning. |
+| Graveyard (`GraveyardScene`) | `scene=graveyard` | A fenced churchyard at night: graves, trees, a chapel, the gravedigger's hut and a well. Three skeletons stand among the graves and wake when you come within 10 m (or hit one); killed ones stay dead until you die. The mausoleum's door at the far end leads down into the crypt; the gap in the fence leads to the field. |
+| Crypt (`CryptScene`) | `scene=crypt` (`at=<col>,<row>`) | A torch-lit stone maze. Its doorway leads back up to the graveyard. |
+
 ## Playing
 
 | Action | Gamepad | Roku remote |
@@ -43,6 +51,14 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
   - Orc: quick, no armour; comes straight at you, chops, then backs off.
   - Heavy orc: slow and tough, blocks often, never flinches; a long wind-up and a heavy hit.
 - `Scenes/FieldScene.bs`: loads every character's packed sprite sheets in `onLoad()` (`loader.loadSpriteAtlas()`; each sprite then gets its shared frames from `game.getSpriteAtlasFrames()`), the ground plane (grass at 2 world units per texel, so the device's plane cap lets it reach twice as far), the sky, lights and torches (deep link `night=0` turns them off, for measuring), the enemy spawner, respawning, the control hints (top right) and the HUD.
+- `Scenes/GraveyardScene.bs` and `Graveyard/GraveyardMap.bs`: the graveyard is a text grid of 2 m cells (`GraveyardMap.layout()`, its key in the comment above it), so editing the layout is editing text. Runs of `f` become one `Fence` each (a see-through, double-sided `DrawableWall` repeating the picket image every 3 m). Each group of `p`, `c` or `h` cells is one building (`PropModel`: a textured `.obj` in metres, scaled to the world, with a camera blocker), centred on its cells. Graves and trees (`Prop`, shaded camera-facing cut-outs) are jittered by a random number fixed per cell, so the layout looks the same every time. Fences, buildings, graves and trunks are solids in a `BGE.SolidWorld`, which `SolidTracker` keeps the knight and the skeletons out of (the crypt uses it for its walls too).
+- `Scenes/` pass `{from: ...}` to `changeSceneWithFade()`, so the next scene starts you at the matching entrance: up from the crypt you're outside the mausoleum door, down from the graveyard you're just inside the crypt's doorway.
+
+## Graveyard art
+
+- `src/models/props/`: the mausoleum, hut, well and fence (and the town's walls, gate, tower and house, for later), one 256 px texture atlas for all of them, and the gravestones. All procedural, from `tools/make-props.py` (`python3 tools/make-props.py`, needs Pillow and numpy), which writes them there.
+- `src/models/chapel/`: the chapel from `examples/terrain`.
+- `src/sprites/tree_<n>.webp`: five autumn trees. The originals are isometric sprites with a shadow drawn in; `node tools/trees.js <folder of Sprite_0N.png>` clears the shadow (near-black, at most half opaque), trims them and scales them to 320 px tall. Each trunk's foot is in `GraveyardScene.treeAnchors`, since some trees' low branches hang below it.
 
 ## Sprite sheets
 
@@ -79,6 +95,7 @@ Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton
 ## Still needed
 
 - [ ] The four packed sheets take ~27 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
-- [ ] Ground texture and the map.
+- [ ] Ground texture, and the rest of the map: the town and the forest.
+- [ ] Townsfolk: the Flare NPC sheets are drawn from high above with shadows drawn in; they need re-rendering from their `.blend` files at 12 degrees, like the knight.
 - [ ] Ripostes and backstabs, checkpoints.
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).
