@@ -35,6 +35,7 @@ namespace BGE
     private maxAffineError as float = 0.0
     ' Camera-space corners of one slab, for slabsForAffineError()
     private affineSlabScratch as float[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    private slabScreen as float[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     private focal as float = 1.0
     ' orthographic: screen x = centerX + scaleX * x, screen y = centerY - scaleY * y
     private ortho as boolean = false
@@ -68,6 +69,12 @@ namespace BGE
     ' texel in the texture
     private edgeTexels = [] as integer[]
     private columnTexels = [] as integer[]
+    ' each repeat's slab width and each column's, as powers of two texels; a repeat's corners
+    private tileLog2 = [] as integer[]
+    private columnLog2 = [] as integer[]
+    private tileCorners = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] as float[]
+    ' the texture's slab regions by width, while drawing a quad
+    private slabSets = [] as roRegion[][]
     ' a band's corners and tints (see drawTiledTo())
     private bandCorners = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] as float[]
     private bandColors = [] as integer[]
@@ -303,6 +310,7 @@ namespace BGE
       tinted = colors.count() >= 4
       n = int(total * m.columnsPerTexel + 0.999)
       extent = m.screenExtent(corners, t0, t1, f0, f1)
+      capByError = false
       if extent >= 0
         byPixels = int(extent / m.minPixelsPerColumn) + 1
         if byPixels < n
@@ -310,12 +318,7 @@ namespace BGE
         end if
         ' a slab is drawn affine, so only depth change across the quad needs more of them;
         ' not when columns are drawn thin, a texel each (seen from behind with no flipped copy)
-        if m.maxAffineError > 0 and not tinted and (not m.drawsThin(useRows, total) or (texture.canMirror and invalid <> texture.getMirrored(useRows)))
-          byError = m.slabsForAffineError(corners, t0, t1, f0, f1, total)
-          if byError < n
-            n = byError
-          end if
-        end if
+        capByError = m.maxAffineError > 0 and not tinted and (not m.drawsThin(useRows, total) or (texture.canMirror and invalid <> texture.getMirrored(useRows)))
       end if
       if n > budget
         n = budget
@@ -324,23 +327,71 @@ namespace BGE
       if n < tiles
         n = tiles
       end if
-      ' columns are whole slabs a power of two texels wide, so their regions can be kept
-      stepLog2 = 0
+      ' columns are whole slabs a power of two texels wide, so their regions can be kept: the
+      ' narrowest density and the canvas allow, and one slab per repeat at the widest
+      minLog2 = 0
       stepSize = 1
       while stepSize < texN and tiles * ((texN + stepSize - 1) \ stepSize) > n
         stepSize = stepSize * 2
-        stepLog2++
+        minLog2++
       end while
+      maxLog2 = minLog2
+      while stepSize < texN
+        stepSize = stepSize * 2
+        maxLog2++
+      end while
+      ' each repeat's own slabs, as wide as its perspective and shape error allow: a long wall
+      ' needs narrow ones only near the camera, and where its ends lean
+      tileLog2 = m.tileLog2
+      tileLog2.Clear()
+      ' each repeat's edges, projected once: a repeat off the canvas is one slab (skipped when
+      ' drawn), and one on it is cut by the errors its projected corners show
+      m.grow(tiles + 1)
+      for b = 0 to tiles
+        m.projectEdge(b, m.tileEdgeTexel(b, texN, phase, total))
+      end for
+      edgeOk = m.edgeOk
+      topX = m.topX
+      topY = m.topY
+      footX = m.footX
+      footY = m.footY
+      maxX = m.canvasWidth + 2
+      maxY = m.canvasHeight + 2
+      for tile = 0 to tiles - 1
+        log2 = minLog2
+        a = tile
+        b = tile + 1
+        if edgeOk[a] and edgeOk[b]
+          if (topX[a] < -2 and topX[b] < -2 and footX[a] < -2 and footX[b] < -2) or (topX[a] > maxX and topX[b] > maxX and footX[a] > maxX and footX[b] > maxX) or (topY[a] < -2 and topY[b] < -2 and footY[a] < -2 and footY[b] < -2) or (topY[a] > maxY and topY[b] > maxY and footY[a] > maxY and footY[b] > maxY)
+            log2 = maxLog2
+          else if capByError
+            first = m.tileEdgeTexel(a, texN, phase, total)
+            last = m.tileEdgeTexel(b, texN, phase, total)
+            widest = (last - first) / m.tileSlabsForError(corners, t0, t1, f0, f1, total, a, b, first, last)
+            log2 = maxLog2
+            slabStep = stepSize
+            while log2 > minLog2 and slabStep > widest
+              slabStep = slabStep / 2
+              log2--
+            end while
+          end if
+        end if
+        tileLog2.push(log2)
+      end for
       ' column edges in texels across the quad, cut at slab and repeat boundaries
       edgeTexels = m.edgeTexels
       edgeTexels.Clear()
       columnTexels = m.columnTexels
       columnTexels.Clear()
+      columnLog2 = m.columnLog2
+      columnLog2.Clear()
       edgeTexels.push(0)
       position = 0
       while position < total
         texel = (position + phase) mod texN
-        slabEnd = (texel \ stepSize + 1) * stepSize
+        log2 = tileLog2[(position + phase) \ texN]
+        slabStep = 1 << log2
+        slabEnd = (texel \ slabStep + 1) * slabStep
         if slabEnd > texN
           slabEnd = texN
         end if
@@ -349,6 +400,7 @@ namespace BGE
           nextPosition = total
         end if
         columnTexels.push(texel)
+        columnLog2.push(log2)
         edgeTexels.push(nextPosition)
         position = nextPosition
       end while
@@ -406,14 +458,9 @@ namespace BGE
         end if
         thin = invalid = mirrored
       end if
-      slabs = []
-      if not thin and invalid = mirrored
-        if useRows
-          slabs = texture.getRowSlabs(stepLog2)
-        else
-          slabs = texture.getColumnSlabs(stepLog2)
-        end if
-      end if
+      ' each slab width's regions, fetched as first needed
+      slabSets = m.slabSets
+      slabSets.Clear()
       margin = 2.0
       maxX = m.canvasWidth + margin
       maxY = m.canvasHeight + margin
@@ -477,9 +524,24 @@ namespace BGE
           end if
         else if invalid <> mirrored
           region = mirrored.getRange(useRows, texN - first - acrossTexels, acrossTexels)
-        else if first mod stepSize = 0 and (acrossTexels = stepSize or first + acrossTexels = texN)
-          region = slabs[first \ stepSize]
         else
+          log2 = columnLog2[k]
+          slabStep = 1 << log2
+          region = invalid
+          if first mod slabStep = 0 and (acrossTexels = slabStep or first + acrossTexels = texN)
+            slabs = slabSets[log2]
+            if invalid = slabs
+              if useRows
+                slabs = texture.getRowSlabs(log2)
+              else
+                slabs = texture.getColumnSlabs(log2)
+              end if
+              slabSets[log2] = slabs
+            end if
+            region = slabs[first \ slabStep]
+          end if
+        end if
+        if invalid = region
           ' cut short by a partial repeat
           region = texture.getRange(useRows, first, acrossTexels)
         end if
@@ -526,15 +588,26 @@ namespace BGE
       return topError
     end function
 
-    ' How many equal slabs the quad needs so none is off by more than maxAffineError: the slab
-    ' nearest the camera is off the most, so slabs are added until that one fits. Under strong
-    ' perspective (a long wall seen side-on) that's far more than the whole quad's error suggests.
+    ' How many equal slabs the quad needs so none is off by more than maxAffineError. A slab is
+    ' drawn as a rotated rectangle along its first edge, so it strays two ways: from perspective
+    ' along it, worst in the slab nearest the camera (under strong perspective, a long wall seen
+    ' side-on, far more than the whole quad's error suggests), and in shape, where the quad's
+    ' edges lean against its top and foot (a fence looked down on, near the canvas's sides),
+    ' worst in a slab at one end or the other. Slabs are added until both end slabs fit.
     private function slabsForAffineError(corners as float[], t0 as integer, t1 as integer, f0 as integer, f1 as integer, total as integer) as integer
+      ' first guess from the whole quad: perspective error shrinks with the square of a
+      ' slab's width and shape error with its width, so usually only one check is needed
       n = int(sqr(m.affineError(corners, t0, t1, f0, f1) / m.maxAffineError) + 0.999)
+      slab = m.affineSlabScratch
+      m.fillEndSlab(corners, t0, t1, f0, f1, 1, slab)
+      byShape = int(m.slabShapeError(slab) / m.maxAffineError + 0.999)
+      if byShape > n
+        n = byShape
+      end if
       if n < 1
         n = 1
       end if
-      ' measure from the end nearer the camera (camera z is negative in front)
+      ' the end nearer the camera first (camera z is negative in front)
       nearT = t0
       farT = t1
       nearF = f0
@@ -545,19 +618,20 @@ namespace BGE
         nearF = f1
         farF = f0
       end if
-      slab = m.affineSlabScratch
       while n < total
         part = 1 / n
-        for c = 0 to 2
-          slab[c] = corners[nearT * 3 + c]
-          slab[3 + c] = corners[nearT * 3 + c] + (corners[farT * 3 + c] - corners[nearT * 3 + c]) * part
-          slab[6 + c] = corners[nearF * 3 + c]
-          slab[9 + c] = corners[nearF * 3 + c] + (corners[farF * 3 + c] - corners[nearF * 3 + c]) * part
-        end for
+        m.fillEndSlab(corners, nearT, farT, nearF, farF, part, slab)
         worst = m.edgeAffineError(slab, 0, 1)
         footError = m.edgeAffineError(slab, 2, 3)
         if footError > worst
           worst = footError
+        end if
+        if worst <= m.maxAffineError
+          worst = m.slabShapeError(slab)
+          if worst <= m.maxAffineError
+            m.fillEndSlab(corners, farT, nearT, farF, nearF, part, slab)
+            worst = m.slabShapeError(slab)
+          end if
         end if
         if worst <= m.maxAffineError
           return n
@@ -565,6 +639,140 @@ namespace BGE
         n = n * 2
       end while
       return total
+    end function
+
+    ' Where repeat edge `b` falls across the quad, in texels.
+    private function tileEdgeTexel(b as integer, texN as integer, phase as integer, total as integer) as integer
+      texel = b * texN - phase
+      if texel < 0
+        return 0
+      end if
+      if texel > total
+        return total
+      end if
+      return texel
+    end function
+
+    ' How many equal slabs the repeat between projected edges a and b (texels first to last)
+    ' needs to be within maxAffineError, from its projected corners: shape error falls with a
+    ' slab's width and perspective error with its square. Only one with depth changing a lot
+    ' across it (beside the camera) is measured slab by slab.
+    private function tileSlabsForError(corners as float[], t0 as integer, t1 as integer, f0 as integer, f1 as integer, total as integer, a as integer, b as integer, first as integer, last as integer) as integer
+      if m.ortho
+        return 1
+      end if
+      zTopA = m.tz0 + m.tdz * first
+      zTopB = m.tz0 + m.tdz * last
+      zFootA = m.fz0 + m.fdz * first
+      zFootB = m.fz0 + m.fdz * last
+      ' in front, z is negative: more than twice as far at one end
+      if zTopA < zTopB * 2 or zTopB < zTopA * 2 or zFootA < zFootB * 2 or zFootB < zFootA * 2
+        tileQuad = m.tileCorners
+        m.lerpAcross(corners, t0, t1, first / total, tileQuad, 0)
+        m.lerpAcross(corners, t0, t1, last / total, tileQuad, 3)
+        m.lerpAcross(corners, f0, f1, first / total, tileQuad, 6)
+        m.lerpAcross(corners, f0, f1, last / total, tileQuad, 9)
+        return m.slabsForAffineError(tileQuad, 0, 1, 2, 3, last - first)
+      end if
+      sx = m.slabScreen
+      sx[0] = m.topX[a]
+      sx[1] = m.topY[a]
+      sx[2] = m.topX[b]
+      sx[3] = m.topY[b]
+      sx[4] = m.footX[a]
+      sx[5] = m.footY[a]
+      sx[6] = m.footX[b]
+      sx[7] = m.footY[b]
+      shape = m.rectangleError(sx, 0, 2, 1, 3)
+      fromEnd = m.rectangleError(sx, 1, 3, 0, 2)
+      if fromEnd > shape
+        shape = fromEnd
+      end if
+      perspective = m.screenEdgeAffineError(sx[0], sx[1], sx[2], sx[3], zTopA, zTopB)
+      footError = m.screenEdgeAffineError(sx[4], sx[5], sx[6], sx[7], zFootA, zFootB)
+      if footError > perspective
+        perspective = footError
+      end if
+      n = int(sqr(perspective / m.maxAffineError) + 0.999)
+      byShape = int(shape / m.maxAffineError + 0.999)
+      if byShape > n
+        n = byShape
+      end if
+      if n < 1
+        n = 1
+      end if
+      return n
+    end function
+
+    ' edgeAffineError() from an edge's projected ends and their depths.
+    private function screenEdgeAffineError(ax as float, ay as float, bx as float, by as float, za as float, zb as float) as float
+      wa = -1 / za
+      wb = -1 / zb
+      return sqr((bx - ax) * (bx - ax) + (by - ay) * (by - ay)) * abs(wa - wb) / (2 * (wa + wb))
+    end function
+
+    ' The slab `part` of the quad wide at its (t, f) end: top-start, top-end, foot-start, foot-end.
+    private sub fillEndSlab(corners as float[], startT as integer, endT as integer, startF as integer, endF as integer, part as float, slab as float[])
+      for c = 0 to 2
+        slab[c] = corners[startT * 3 + c]
+        slab[3 + c] = corners[startT * 3 + c] + (corners[endT * 3 + c] - corners[startT * 3 + c]) * part
+        slab[6 + c] = corners[startF * 3 + c]
+        slab[9 + c] = corners[startF * 3 + c] + (corners[endF * 3 + c] - corners[startF * 3 + c]) * part
+      end for
+    end sub
+
+    ' How far, in pixels, a slab's far corners land from the rectangle drawn along its near edge
+    ' (anchored at either edge, as drawWrapped() may). Only called with every corner in front.
+    private function slabShapeError(slab as float[]) as float
+      if m.ortho
+        return 0
+      end if
+      focal = m.focal
+      ' screen offsets, the same up to a shared shift as projectEdge()
+      sx = m.slabScreen
+      for i = 0 to 3
+        z = slab[i * 3 + 2]
+        sx[i * 2] = -focal * slab[i * 3] / z
+        sx[i * 2 + 1] = focal * slab[i * 3 + 1] / z
+      end for
+      fromStart = m.rectangleError(sx, 0, 2, 1, 3)
+      fromEnd = m.rectangleError(sx, 1, 3, 0, 2)
+      if fromEnd > fromStart
+        return fromEnd
+      end if
+      return fromStart
+    end function
+
+    ' The farther of the other edge's top and foot from the rectangle along edge (top a, foot b)
+    ' that reaches it.
+    private function rectangleError(sx as float[], ta as integer, fa as integer, tb as integer, fb as integer) as float
+      ex = sx[ta * 2] - sx[fa * 2]
+      ey = sx[ta * 2 + 1] - sx[fa * 2 + 1]
+      length = sqr(ex * ex + ey * ey)
+      if length < 0.5
+        return 0
+      end if
+      ' across the edge
+      ux = -ey / length
+      uy = ex / length
+      footX = sx[fb * 2] - sx[fa * 2]
+      footY = sx[fb * 2 + 1] - sx[fa * 2 + 1]
+      topX = sx[tb * 2] - sx[ta * 2]
+      topY = sx[tb * 2 + 1] - sx[ta * 2 + 1]
+      width = footX * ux + footY * uy
+      topWidth = topX * ux + topY * uy
+      if abs(topWidth) > abs(width)
+        width = topWidth
+      end if
+      dx = footX - width * ux
+      dy = footY - width * uy
+      worst = dx * dx + dy * dy
+      dx = topX - width * ux
+      dy = topY - width * uy
+      if dx * dx + dy * dy > worst
+        worst = dx * dx + dy * dy
+      end if
+      return sqr(worst)
     end function
 
     private function edgeAffineError(corners as float[], a as integer, b as integer) as float
@@ -580,6 +788,13 @@ namespace BGE
 
     ' Writes the camera-space point a fraction `u` across and `v` down the quad `corners`
     ' into `out` at `index`.
+    ' Corner `a` moved fraction `s` of the way to corner `b`, into out[index..index + 2].
+    private sub lerpAcross(corners as float[], a as integer, b as integer, s as float, out as float[], index as integer)
+      for c = 0 to 2
+        out[index + c] = corners[a * 3 + c] + (corners[b * 3 + c] - corners[a * 3 + c]) * s
+      end for
+    end sub
+
     private sub lerpCorners(corners as float[], u as float, v as float, out as float[], index as integer)
       for c = 0 to 2
         top = corners[c] + (corners[3 + c] - corners[c]) * u
