@@ -1,5 +1,6 @@
 import "../LevelData.bs"
 import "../Entities/Level.bs"
+import "pkg:/source/utils/tiled/TiledLayers.bs"
 import "../Entities/Player.bs"
 import "../Entities/Coin.bs"
 import "../Entities/Enemy.bs"
@@ -12,7 +13,7 @@ class MainScene extends BGE.GameScene
 
   showingDebug = false
 
-  ' Which level is currently loaded - see LevelData.getLevelRows(). Read back by
+  ' Which level is currently loaded - see LevelData.getAllLevels(). Read back by
   ' onUpdate()'s camera-clamp math below, and forwarded (along with score/lives
   ' carried in via args) to every entity that needs it.
   currentLevelIndex = 0
@@ -22,7 +23,7 @@ class MainScene extends BGE.GameScene
     m.name = "MainScene"
   end sub
 
-  ' @param {integer} [args.levelIndex=0] - which level to load, per LevelData.getLevelRows().
+  ' @param {integer} [args.levelIndex=0] - which level to load, per LevelData.getAllLevels().
   ' @param {integer} [args.score] @param {integer} [args.lives] - forwarded to
   '   GameStateManager (see its own onCreate() doc comment) so a level-to-level
   '   advance (Goal.onCollision) carries the running score/lives forward instead
@@ -75,45 +76,68 @@ class MainScene extends BGE.GameScene
     m.game.addEntity(new GameStateManager(m.game), gameStateArgs)
     m.game.addEntity(new PauseMenu(m.game))
 
+    map = getLevelMap(m.currentLevelIndex)
+    if map <> invalid
+      ' Each spawn point sits exactly where its entity's position goes
+      offsetY = getLevelMapOffsetY(map)
+      for each spawn in BGE.Tiled.getLayer(map, "spawns").objects
+        m.spawnEntity(spawn.type, BGE.Tiled.toWorldX(map, spawn.x), BGE.Tiled.toWorldY(map, spawn.y, offsetY), levelArgs)
+      end for
+      return
+    end if
+
+    spawnKinds = {"P": "player", "o": "coin", "e": "enemy", "B": "boss", "G": "goal"}
     rows = getLevelRows(m.currentLevelIndex)
     for r = 0 to rows.count() - 1
       row = rows[r]
       for c = 0 to row.len() - 1
-        if row.mid(c, 1) = "P"
-          playerEntity = m.game.addEntity(new Player(m.game), levelArgs) as Player
-          playerEntity.position.x = c * TileSize + TileSize / 2.0
-          playerEntity.position.y = (NumRows - r) * TileSize
-        else if row.mid(c, 1) = "o"
-          coinEntity = m.game.addEntity(new Coin(m.game)) as Coin
-          coinEntity.position.x = c * TileSize + TileSize / 2.0
-          coinEntity.position.y = (NumRows - r) * TileSize - TileSize / 2.0
-        else if row.mid(c, 1) = "e"
-          enemyEntity = m.game.addEntity(new Enemy(m.game)) as Enemy
-          enemyEntity.position.x = c * TileSize + TileSize / 2.0
-          ' Unlike Player, Enemy has no gravity (see Enemy.bs) - it never falls
-          ' into place, so its spawn Y must land it directly on the ground
-          ' tile's top edge (one row below the "e" marker's own grid row),
-          ' not the marker row's height like Player's fall-then-land formula.
-          enemyEntity.position.y = (NumRows - r - 1) * TileSize
-        else if row.mid(c, 1) = "B"
-          bossEntity = new PlantBoss(m.game)
-          m.game.addEntity(bossEntity)
-          ' The B column's left edge, not its center - in the 10-column arena that's
-          ' x = 320, dead center, leaving equal clearance to both side platforms.
-          bossEntity.position.x = c * TileSize
-          ' Rooted on the ground tile's top edge, like Enemy/Goal.
-          bossEntity.position.y = (NumRows - r - 1) * TileSize
-        else if row.mid(c, 1) = "G"
-          goalEntity = m.game.addEntity(new Goal(m.game), levelArgs) as Goal
-          goalEntity.position.x = c * TileSize + TileSize / 2.0
-          ' Unlike Player, Goal has no gravity - it never falls into place, so its
-          ' spawn Y must land it directly on the ground tile's top edge (one row
-          ' below the "G" marker's own grid row), not the marker row's height like
-          ' Player's fall-then-land formula.
-          goalEntity.position.y = (NumRows - r - 1) * TileSize
+        kind = spawnKinds[row.mid(c, 1)]
+        if kind = "boss"
+          ' The boss is placed by its left edge, not its center - in the 10-column
+          ' arena that's x = 320, dead center, leaving equal clearance to both side
+          ' platforms.
+          m.spawnEntity(kind, c * TileSize, m.getSpawnY(kind, r), levelArgs)
+        else if kind <> invalid
+          m.spawnEntity(kind, c * TileSize + TileSize / 2.0, m.getSpawnY(kind, r), levelArgs)
         end if
       end for
     end for
+  end sub
+
+  ' World y for a spawn marker in string-level row r.
+  private function getSpawnY(kind as string, r as integer) as float
+    if kind = "player"
+      ' Player has gravity: it starts at the marker row's top and falls into place
+      return (NumRows - r) * TileSize
+    else if kind = "coin"
+      return (NumRows - r) * TileSize - TileSize / 2.0
+    end if
+    ' Enemy, Goal and PlantBoss have no gravity, so they start on the ground tile's
+    ' top edge (one row below the marker's own row)
+    return (NumRows - r - 1) * TileSize
+  end function
+
+  ' Adds one level entity at a world position.
+  '
+  ' @param {string} kind - "player", "coin", "enemy", "boss" or "goal"
+  private sub spawnEntity(kind as string, x as float, y as float, levelArgs as roAssociativeArray)
+    entity = invalid
+    if kind = "player"
+      entity = m.game.addEntity(new Player(m.game), levelArgs)
+    else if kind = "coin"
+      entity = m.game.addEntity(new Coin(m.game))
+    else if kind = "enemy"
+      entity = m.game.addEntity(new Enemy(m.game))
+    else if kind = "boss"
+      entity = m.game.addEntity(new PlantBoss(m.game))
+    else if kind = "goal"
+      entity = m.game.addEntity(new Goal(m.game), levelArgs)
+    else
+      print "MainScene: unknown spawn type """; kind; """"
+      return
+    end if
+    entity.position.x = x
+    entity.position.y = y
   end sub
 
   override sub onInput(input as BGE.GameInput)
