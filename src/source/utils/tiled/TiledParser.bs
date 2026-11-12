@@ -1,0 +1,389 @@
+import "TiledTypes.bs"
+
+namespace BGE.Tiled
+
+  ' Loads a map saved in Tiled's JSON format (.tmj/.json), and any external .tsj tilesets
+  ' it uses. Image and tileset paths are resolved relative to the file that names them.
+  '
+  ' Supported: orthogonal, finite maps; tile layers stored as an array, CSV or uncompressed
+  ' base64; object, image and group layers; embedded and external JSON tilesets
+  ' (spritesheets and image collections); custom properties.
+  '
+  ' Not supported (prints a `[BGE.Tiled]` message and returns invalid): infinite maps,
+  ' isometric/staggered/hexagonal maps, compressed layer data, XML tilesets (.tsx). Object
+  ' templates, animated tiles and Wang sets are ignored.
+  '
+  ' @param {string} filePath - e.g. "pkg:/maps/level1.tmj"
+  ' @return {BGE.Tiled.TiledMap} the map, or invalid
+  function parseMapFile(filePath as string) as BGE.Tiled.TiledMap
+    content = ReadAsciiFile(filePath)
+    if content = ""
+      logError("can't read " + filePath)
+      return invalid
+    end if
+    return parseMapJson(content, getParentPath(filePath))
+  end function
+
+  ' Parses a Tiled JSON map that's already in memory - see parseMapFile().
+  '
+  ' @param {string} json - the map file's contents
+  ' @param {string} baseDir - folder the map lives in, for resolving image and tileset paths; "" leaves them as written
+  ' @return {BGE.Tiled.TiledMap} the map, or invalid
+  function parseMapJson(json as string, baseDir as string) as BGE.Tiled.TiledMap
+    raw = ParseJson(json)
+    if GetInterface(raw, "ifAssociativeArray") = invalid
+      logError("not a JSON object")
+      return invalid
+    end if
+    if raw.infinite = true
+      logError("infinite maps aren't supported")
+      return invalid
+    end if
+    orientation = getString(raw, "orientation", "orthogonal")
+    if orientation <> "orthogonal"
+      logError(orientation + " maps aren't supported, only orthogonal")
+      return invalid
+    end if
+
+    map = {
+      width: getInt(raw, "width", 0),
+      height: getInt(raw, "height", 0),
+      tileWidth: getInt(raw, "tilewidth", 0),
+      tileHeight: getInt(raw, "tileheight", 0),
+      backgroundColor: getString(raw, "backgroundcolor", ""),
+      properties: parseProperties(raw.properties),
+      tilesets: [],
+      layers: []
+    } as BGE.Tiled.TiledMap
+
+    for each rawTileset in getArray(raw, "tilesets")
+      tileset = parseTilesetEntry(rawTileset, baseDir)
+      if tileset = invalid
+        return invalid
+      end if
+      insertByFirstGid(map.tilesets, tileset)
+    end for
+
+    if not parseLayers(getArray(raw, "layers"), map.layers, baseDir, 0.0, 0.0, true)
+      return invalid
+    end if
+    return map
+  end function
+
+  sub insertByFirstGid(tilesets as roArray, tileset as BGE.Tiled.TiledTileset)
+    i = tilesets.count()
+    tilesets.push(tileset)
+    while i > 0 and tilesets[i - 1].firstGid > tileset.firstGid
+      tilesets[i] = tilesets[i - 1]
+      i -= 1
+    end while
+    tilesets[i] = tileset
+  end sub
+
+  ' A map's `tilesets` entry: either a whole tileset, or {firstgid, source} pointing at a file.
+  function parseTilesetEntry(raw as roAssociativeArray, baseDir as string) as BGE.Tiled.TiledTileset
+    firstGid = getInt(raw, "firstgid", 1)
+    source = getString(raw, "source", "")
+    if source = ""
+      return parseTileset(raw, firstGid, baseDir)
+    end if
+    if LCase(Right(source, 4)) = ".tsx"
+      logError("XML tilesets aren't supported (" + source + "): export the tileset as JSON (.tsj)")
+      return invalid
+    end if
+    path = joinPath(baseDir, source)
+    content = ReadAsciiFile(path)
+    rawTileset = invalid
+    if content <> ""
+      rawTileset = ParseJson(content)
+    end if
+    if GetInterface(rawTileset, "ifAssociativeArray") = invalid
+      logError("can't read tileset " + path)
+      return invalid
+    end if
+    return parseTileset(rawTileset, firstGid, getParentPath(path))
+  end function
+
+  function parseTileset(raw as roAssociativeArray, firstGid as integer, baseDir as string) as BGE.Tiled.TiledTileset
+    tileset = {
+      firstGid: firstGid,
+      name: getString(raw, "name", ""),
+      tileCount: getInt(raw, "tilecount", 0),
+      columns: getInt(raw, "columns", 0),
+      tileWidth: getInt(raw, "tilewidth", 0),
+      tileHeight: getInt(raw, "tileheight", 0),
+      margin: getInt(raw, "margin", 0),
+      spacing: getInt(raw, "spacing", 0),
+      image: "",
+      imageWidth: getInt(raw, "imagewidth", 0),
+      imageHeight: getInt(raw, "imageheight", 0),
+      tileOffsetX: 0,
+      tileOffsetY: 0,
+      tileRenderSize: getString(raw, "tilerendersize", "tile"),
+      tiles: {},
+      properties: parseProperties(raw.properties)
+    } as BGE.Tiled.TiledTileset
+    image = getString(raw, "image", "")
+    if image <> ""
+      tileset.image = joinPath(baseDir, image)
+    end if
+    tileOffset = raw.tileoffset
+    if GetInterface(tileOffset, "ifAssociativeArray") <> invalid
+      tileset.tileOffsetX = getInt(tileOffset, "x", 0)
+      tileset.tileOffsetY = getInt(tileOffset, "y", 0)
+    end if
+    for each rawTile in getArray(raw, "tiles")
+      tile = {
+        id: getInt(rawTile, "id", 0),
+        type: getClass(rawTile),
+        properties: parseProperties(rawTile.properties),
+        image: "",
+        imageWidth: getInt(rawTile, "imagewidth", 0),
+        imageHeight: getInt(rawTile, "imageheight", 0)
+      } as BGE.Tiled.TiledTile
+      tileImage = getString(rawTile, "image", "")
+      if tileImage <> ""
+        tile.image = joinPath(baseDir, tileImage)
+      end if
+      tileset.tiles[tile.id.toStr()] = tile
+    end for
+    return tileset
+  end function
+
+  ' Appends each layer in rawLayers to `out`, replacing groups with their own layers.
+  ' Returns false if a layer can't be read.
+  function parseLayers(rawLayers as roArray, out as roArray, baseDir as string, offsetX as float, offsetY as float, visible as boolean) as boolean
+    for each raw in rawLayers
+      layerType = getString(raw, "type", "")
+      layerVisible = visible and getBool(raw, "visible", true)
+      layerOffsetX = offsetX + getFloat(raw, "offsetx", 0.0)
+      layerOffsetY = offsetY + getFloat(raw, "offsety", 0.0)
+      if layerType = "group"
+        if not parseLayers(getArray(raw, "layers"), out, baseDir, layerOffsetX, layerOffsetY, layerVisible)
+          return false
+        end if
+      else
+        layer = {
+          id: getInt(raw, "id", 0),
+          type: layerType,
+          name: getString(raw, "name", ""),
+          visible: layerVisible,
+          opacity: getFloat(raw, "opacity", 1.0),
+          offsetX: layerOffsetX,
+          offsetY: layerOffsetY,
+          properties: parseProperties(raw.properties),
+          width: getInt(raw, "width", 0),
+          height: getInt(raw, "height", 0),
+          data: [],
+          objects: [],
+          image: ""
+        } as BGE.Tiled.TiledLayer
+        if layerType = "tilelayer"
+          data = parseLayerData(raw)
+          if data = invalid
+            return false
+          end if
+          layer.data = data
+        else if layerType = "objectgroup"
+          for each rawObject in getArray(raw, "objects")
+            layer.objects.push(parseObject(rawObject))
+          end for
+        else if layerType = "imagelayer"
+          image = getString(raw, "image", "")
+          if image <> ""
+            layer.image = joinPath(baseDir, image)
+          end if
+        end if
+        out.push(layer)
+      end if
+    end for
+    return true
+  end function
+
+  ' A tile layer's GIDs as an array, from either a JSON array or uncompressed base64.
+  ' GIDs with flip flags set are LongIntegers, matching what ParseJson gives for them.
+  function parseLayerData(raw as roAssociativeArray) as roArray
+    if getString(raw, "encoding", "csv") <> "base64"
+      return getArray(raw, "data")
+    end if
+    compression = getString(raw, "compression", "")
+    if compression <> ""
+      logError("layer """ + getString(raw, "name", "") + """ uses " + compression + " compression, which Roku can't decompress: save layer data as CSV or uncompressed base64")
+      return invalid
+    end if
+    bytes = CreateObject("roByteArray")
+    bytes.FromBase64String(getString(raw, "data", ""))
+    data = []
+    i = 0
+    while i + 3 < bytes.count()
+      value& = bytes[i] + bytes[i + 1] * 256& + bytes[i + 2] * 65536& + bytes[i + 3] * 16777216&
+      if value& < 2147483648&
+        data.push(CInt(value&))
+      else
+        data.push(value&)
+      end if
+      i += 4
+    end while
+    return data
+  end function
+
+  function parseObject(raw as roAssociativeArray) as BGE.Tiled.TiledObject
+    obj = {
+      id: getInt(raw, "id", 0),
+      name: getString(raw, "name", ""),
+      type: getClass(raw),
+      shape: "rectangle",
+      x: getFloat(raw, "x", 0.0),
+      y: getFloat(raw, "y", 0.0),
+      width: getFloat(raw, "width", 0.0),
+      height: getFloat(raw, "height", 0.0),
+      rotation: getFloat(raw, "rotation", 0.0),
+      visible: getBool(raw, "visible", true),
+      points: [],
+      gid: 0,
+      properties: parseProperties(raw.properties)
+    } as BGE.Tiled.TiledObject
+    if raw.template <> invalid
+      logWarning("object " + obj.id.toStr() + " uses a template, which isn't supported: only its own fields are read")
+    end if
+    if raw.gid <> invalid and raw.gid <> 0
+      obj.shape = "tile"
+      obj.gid = raw.gid
+    else if raw.point = true
+      obj.shape = "point"
+    else if raw.ellipse = true
+      obj.shape = "ellipse"
+    else if raw.polygon <> invalid
+      obj.shape = "polygon"
+      obj.points = parsePoints(raw.polygon)
+    else if raw.polyline <> invalid
+      obj.shape = "polyline"
+      obj.points = parsePoints(raw.polyline)
+    else if raw.text <> invalid
+      obj.shape = "text"
+    end if
+    return obj
+  end function
+
+  function parsePoints(rawPoints as roArray) as roArray
+    points = []
+    for each rawPoint in rawPoints
+      points.push({x: getFloat(rawPoint, "x", 0.0), y: getFloat(rawPoint, "y", 0.0)})
+    end for
+    return points
+  end function
+
+  ' Tiled's [{name, type, value}] property list as a name -> value lookup.
+  function parseProperties(rawProperties as dynamic) as roAssociativeArray
+    properties = {}
+    if GetInterface(rawProperties, "ifArray") = invalid
+      return properties
+    end if
+    for each rawProperty in rawProperties
+      properties[getString(rawProperty, "name", "")] = rawProperty.value
+    end for
+    return properties
+  end function
+
+  ' Tiled 1.9 renamed objects' and tiles' "type" to "class".
+  function getClass(raw as roAssociativeArray) as string
+    className = getString(raw, "class", "")
+    if className <> ""
+      return className
+    end if
+    return getString(raw, "type", "")
+  end function
+
+  ' Resolves a path written relative to baseDir, collapsing "." and ".." segments.
+  function joinPath(baseDir as string, relativePath as string) as string
+    if baseDir = "" or Instr(1, relativePath, ":/") > 0
+      return relativePath
+    end if
+    schemeEnd = Instr(1, baseDir, ":/")
+    prefix = ""
+    rest = baseDir
+    if schemeEnd > 0
+      prefix = Left(baseDir, schemeEnd + 1)
+      rest = Mid(baseDir, schemeEnd + 2)
+    end if
+    parts = []
+    for each segment in (rest + "/" + relativePath).Split("/")
+      if segment = ".."
+        if parts.count() > 0
+          parts.pop()
+        end if
+      else if segment <> "" and segment <> "."
+        parts.push(segment)
+      end if
+    end for
+    return prefix + parts.Join("/")
+  end function
+
+  ' "pkg:/maps/level.tmj" -> "pkg:/maps"
+  function getParentPath(filePath as string) as string
+    lastSlash = 0
+    for i = 1 to Len(filePath)
+      if Mid(filePath, i, 1) = "/"
+        lastSlash = i
+      end if
+    end for
+    if lastSlash = 0
+      return ""
+    end if
+    return Left(filePath, lastSlash - 1)
+  end function
+
+  function getInt(raw as roAssociativeArray, key as string, default as integer) as integer
+    value = raw[key]
+    if not isNumber(value)
+      return default
+    end if
+    return CInt(value)
+  end function
+
+  function getFloat(raw as roAssociativeArray, key as string, default as float) as float
+    value = raw[key]
+    if not isNumber(value)
+      return default
+    end if
+    ' Not CSng(): brs-cli returns 0 for CSng() of a Float
+    return value * 1.0
+  end function
+
+  function isNumber(value as dynamic) as boolean
+    return GetInterface(value, "ifInt") <> invalid or GetInterface(value, "ifLongInt") <> invalid or GetInterface(value, "ifFloat") <> invalid or GetInterface(value, "ifDouble") <> invalid
+  end function
+
+  function getString(raw as roAssociativeArray, key as string, default as string) as string
+    value = raw[key]
+    if Type(value) <> "roString" and Type(value) <> "String"
+      return default
+    end if
+    return value
+  end function
+
+  function getBool(raw as roAssociativeArray, key as string, default as boolean) as boolean
+    value = raw[key]
+    if Type(value) <> "roBoolean" and Type(value) <> "Boolean"
+      return default
+    end if
+    return value
+  end function
+
+  function getArray(raw as roAssociativeArray, key as string) as roArray
+    value = raw[key]
+    if GetInterface(value, "ifArray") = invalid
+      return []
+    end if
+    return value
+  end function
+
+  sub logError(message as string)
+    print "[BGE.Tiled] " + message
+  end sub
+
+  sub logWarning(message as string)
+    print "[BGE.Tiled] warning: " + message
+  end sub
+
+end namespace
