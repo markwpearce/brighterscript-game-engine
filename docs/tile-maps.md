@@ -396,15 +396,22 @@ Tiled draws it:
 - Spritesheet and image-collection tilesets both work, including margin and
   spacing.
 - A tile bigger than a cell sits on the cell's bottom-left corner, unless the
-  tileset's **Tile Render Size** is **Map Grid Size**, which stretches it to
-  the cell.
+  tileset's **Tile Render Size** is **Map Grid Size**, which fits it to the
+  cell: stretched, or scaled evenly and centered when **Fill Mode** is
+  **Preserve Aspect Fit**.
 - The tileset's **Drawing Offset** and the layer's offset move tiles, so a
   nudge like the platformer's 5px grass lip lives in the tileset, not in code.
 - Horizontally and vertically flipped tiles are drawn flipped. Rotated tiles
-  draw unrotated (a warning is printed).
+  draw unrotated and unflipped (a warning is printed).
+- A hidden layer gives no tiles. Opacity isn't baked into the images: set
+  `alpha: layer.opacity * 255` on the images you add for the chunks.
+- Each tileset image is loaded once per call. If your game already loaded
+  some of them, pass `{bitmaps: {"pkg:/sprites/tile.png": bitmap}}` and those
+  are used instead; images it has to load get added to the same lookup.
 
 `layerToColliderCells()` makes a cell for every tile with a custom
-**collision** property, tagged with its value (`"solid"`, `"oneWay"`). Pass a
+**collision** property, tagged with its value (`"solid"`, `"oneWay"`). Hidden
+layers count, so collisions can live on a layer you don't draw. Pass a
 different property name to read another one. Set the property on the tile in
 the tileset editor, once, and every cell painted with that tile gets it.
 

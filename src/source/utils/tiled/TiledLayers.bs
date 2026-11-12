@@ -85,6 +85,7 @@ namespace BGE.Tiled
 
   ' One BGE.TileMap.ColliderCell per cell whose tile has a non-empty string value for the
   ' property, tagged with that value - ready for BGE.TileMap.mergeTileColliderRuns().
+  ' Hidden layers count too, so collisions can live on a layer that isn't drawn.
   '
   ' @param {BGE.Tiled.TiledMap} map
   ' @param {BGE.Tiled.TiledLayer} layer - a tile layer
@@ -108,11 +109,15 @@ namespace BGE.Tiled
   ' draws it - ready for BGE.TileMap.bakeTileMapImages().
   '
   ' A tile bigger than a cell sits on the cell's bottom-left corner, unless its tileset's
-  ' "Tile Render Size" is "Map Grid Size", which stretches it to the cell. The tileset's tile
-  ' offset and the layer's offset are applied. Flipped tiles set flipH/flipV; diagonal flips
-  ' (rotations) aren't supported and draw unrotated.
+  ' "Tile Render Size" is "Map Grid Size", which fits it to the cell (stretched, or scaled
+  ' evenly and centered for the "Preserve Aspect Fit" fill mode). The tileset's tile offset
+  ' and the layer's offset are applied. Flipped tiles set flipH/flipV; rotated tiles
+  ' (diagonal flips) aren't supported and draw unrotated and unflipped.
   '
-  ' Tileset images are loaded here, once each per call.
+  ' A hidden layer (or one in a hidden group) gives no tiles. Opacity isn't baked in: set
+  ' `alpha` (layer.opacity * 255) on the drawables made from them.
+  '
+  ' Tileset images are loaded here, once each per call, unless options.bitmaps has them.
   '
   ' @param {BGE.Tiled.TiledMap} map
   ' @param {BGE.Tiled.TiledLayer} layer - a tile layer
@@ -127,11 +132,17 @@ namespace BGE.Tiled
     if options.offsetY <> invalid
       offsetY = options.offsetY
     end if
+    bitmaps = options.bitmaps
+    if bitmaps = invalid
+      bitmaps = {}
+    end if
 
-    bitmaps = {}
+    tiles = [] as BGE.TileMap.TileSpec[]
+    if layer = invalid or not layer.visible
+      return tiles
+    end if
     regions = {}
     warnedDiagonal = false
-    tiles = [] as BGE.TileMap.TileSpec[]
     for each cell in getLayerCells(map, layer)
       info = cell.info
       tileset = info.tileset
@@ -153,20 +164,40 @@ namespace BGE.Tiled
         end if
         width = region.GetWidth() * 1.0
         height = region.GetHeight() * 1.0
+        ' Where the tile sits inside its cell when it doesn't fill it
+        insetX = 0.0
+        insetY = 0.0
         if tileset.tileRenderSize = "grid"
-          width = map.tileWidth * 1.0
-          height = map.tileHeight * 1.0
+          cellWidth = map.tileWidth * 1.0
+          cellHeight = map.tileHeight * 1.0
+          if tileset.fillMode = "preserve-aspect-fit"
+            scale = cellWidth / width
+            if cellHeight / height < scale
+              scale = cellHeight / height
+            end if
+            width = width * scale
+            height = height * scale
+            insetX = (cellWidth - width) / 2
+            insetY = (cellHeight - height) / 2
+          else
+            width = cellWidth
+            height = cellHeight
+          end if
         end if
-        left = cell.col * map.tileWidth + layer.offsetX + tileset.tileOffsetX
-        top = (cell.row + 1) * map.tileHeight - height + layer.offsetY + tileset.tileOffsetY
+        left = cell.col * map.tileWidth + insetX + layer.offsetX + tileset.tileOffsetX
+        top = (cell.row + 1) * map.tileHeight - height - insetY + layer.offsetY + tileset.tileOffsetY
+        ' A rotation is stored as a diagonal flip plus flips; without the rotation the
+        ' flips alone would draw a third, wrong orientation
+        flipH = info.flipH and not info.flipD
+        flipV = info.flipV and not info.flipD
         tiles.push({
           worldX: toWorldX(map, left, offsetX),
           worldY: toWorldY(map, top, offsetY),
           region: region,
           width: width,
           height: height,
-          flipH: info.flipH,
-          flipV: info.flipV
+          flipH: flipH,
+          flipV: flipV
         })
       end if
     end for
@@ -192,7 +223,8 @@ namespace BGE.Tiled
     return CreateObject("roRegion", bitmap, x, y, tileset.tileWidth, tileset.tileHeight)
   end function
 
-  function loadTileBitmap(path as string, bitmaps as roAssociativeArray) as object
+  ' The image at path, from bitmaps or loaded into it; invalid if it won't load.
+  function loadTileBitmap(path as string, bitmaps as roAssociativeArray) as dynamic
     bitmap = bitmaps[path]
     if bitmap = invalid
       bitmap = CreateObject("roBitmap", path)
