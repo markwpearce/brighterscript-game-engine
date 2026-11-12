@@ -11,6 +11,7 @@ import "../lighting/Lighting.bs"
 import "../occlusion/ConvexInset.bs"
 import "../occlusion/OcclusionTypes.bs"
 import "../cameras/Camera3d.bs"
+import "../quadColumns/QuadColumnDrawer.bs"
 import "../quadColumns/QuadColumnTexture.bs"
 import "../Renderer.bs"
 import "../RendererHelpers.bs"
@@ -99,6 +100,8 @@ namespace BGE
     ' because canUseTransformedFastDraw() has no renderer parameter.
     private fastDrawParallelogramTolerance as float = 0.03
     private fastDrawPerpendicularityTolerance as float = 0.05
+    ' Whether updateCanvasPosition() moved corners that were behind the camera this frame
+    private cornersBehindCameraThisFrame as boolean = false
 
     ' Whether this frame draws texture columns straight to the canvas
     protected drawsColumnsThisFrame = false
@@ -256,6 +259,10 @@ namespace BGE
     '
     ' @return {boolean}
     protected function canUseTransformedFastDraw() as boolean
+      if m.cornersBehindCameraThisFrame
+        ' the canvas points only bound the visible part
+        return false
+      end if
       return m.canvasPoints.isApproximatelyRotatedRectangle(m.fastDrawParallelogramTolerance, m.fastDrawPerpendicularityTolerance)
     end function
 
@@ -1018,6 +1025,7 @@ namespace BGE
 
 
     protected function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.cornersBehindCameraThisFrame = false
       if isDirectDrawMode(drawMode)
         worldPos = m.worldPosition
         if m.needsManualPretranslationForDirectMode()
@@ -1039,16 +1047,68 @@ namespace BGE
         end if
         return m.updateCanvasPointsForCameraFacingQuad(rendererObj, drawMode)
       else if isOrientedDrawMode(drawMode)
-        index = 0
-        for each corner in m.worldPoints.toArray()
-          canvasPoint = rendererObj.worldPointToCanvasPoint(corner)
-          if invalid = canvasPoint
-            return false
-          end if
-          m.canvasPoints.setPointByIndex(index, canvasPoint)
-          index++
-        end for
+        return m.updateOrientedCanvasPoints(rendererObj, drawMode)
       end if
+      return true
+    end function
+
+    ' Projects the oriented quad's corners onto the canvas. A quad drawn as columns may run past
+    ' the camera (a long wall beside it): each corner behind the camera is moved along an edge
+    ' toward a corner in front, to the near plane the columns are clipped at, so the quad's
+    ' canvas bounds match what's drawn.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean} false if it can't be drawn this frame
+    private function updateOrientedCanvasPoints(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
+      corners = m.worldPoints.toArray()
+      behind = [] as integer[]
+      for index = 0 to 3
+        canvasPoint = rendererObj.worldPointToCanvasPoint(corners[index])
+        if invalid = canvasPoint
+          behind.push(index)
+        else
+          m.canvasPoints.setPointByIndex(index, canvasPoint)
+        end if
+      end for
+      if behind.Count() = 0
+        return true
+      end if
+      if behind.Count() = 4 or rendererObj.camera.name <> "Camera3d" or not m.canDrawAsColumns(drawMode)
+        return false
+      end if
+      worldToCamera = rendererObj.camera.worldToCamera
+      nearZ = BGE.QuadColumnNearZ((rendererObj.camera as Camera3d).getFocalLength())
+      ' for each corner (topLeft, topRight, bottomLeft, bottomRight), the two it shares an edge with
+      neighbours = [[1, 2], [0, 3], [0, 3], [1, 2]]
+      inFront = [true, true, true, true]
+      for each index in behind
+        inFront[index] = false
+      end for
+      for each index in behind
+        moved = false
+        for each neighbour in neighbours[index]
+          if not moved and inFront[neighbour]
+            back = BGE.Math.Matrix44.multVecMatrix(corners[index], worldToCamera)
+            front = BGE.Math.Matrix44.multVecMatrix(corners[neighbour], worldToCamera)
+            ' the columns' near plane, or the front corner if that's nearer
+            targetZ = BGE.Math.Max(nearZ, front.z)
+            along = (targetZ - front.z) / (back.z - front.z)
+            from = corners[neighbour]
+            toward = corners[index]
+            point = BGE.Math.VectorOps.create(from.x + (toward.x - from.x) * along, from.y + (toward.y - from.y) * along, from.z + (toward.z - from.z) * along)
+            canvasPoint = rendererObj.worldPointToCanvasPoint(point)
+            if invalid <> canvasPoint
+              m.canvasPoints.setPointByIndex(index, canvasPoint)
+              moved = true
+            end if
+          end if
+        end for
+        if not moved
+          return false
+        end if
+      end for
+      m.cornersBehindCameraThisFrame = true
       return true
     end function
 

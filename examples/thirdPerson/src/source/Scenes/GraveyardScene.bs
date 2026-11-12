@@ -1,0 +1,335 @@
+import "../World.bs"
+import "../Night.bs"
+import "../SolidTracker.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/EnemyTypes.bs"
+import "../Entities/Fence.bs"
+import "../Entities/Pillar.bs"
+import "../Entities/Prop.bs"
+import "../Entities/PropModel.bs"
+import "../Entities/Torch.bs"
+import "../Graveyard/GraveyardMap.bs"
+import "ThirdPersonScene.bs"
+
+' A building GraveyardScene places on a group of cells: its size in metres, and how far its .obj's
+' origin is from the middle of its base
+interface GraveyardBuilding extends roAssociativeArray
+  model as string
+  width as float
+  height as float
+  depth as float
+  ' The model's base runs from -depth/2 + centerZ to depth/2 + centerZ
+  centerZ as float
+end interface
+
+' A fenced churchyard at night above the crypt, laid out by GraveyardMap: graves, trees, a chapel,
+' the gravedigger's hut and the mausoleum whose door leads down into the crypt. Skeletons stand
+' among the graves until the knight comes near. The gap in the fence leads to the field.
+class GraveyardScene extends ThirdPersonScene
+
+  respawnSeconds as float = 3
+  ' World units per grass texel, as the field
+  groundTexelScale as float = 2
+  ' Skeletons wake when the knight is this close
+  wakeDistance as float = World.metres(10)
+
+  walls as SolidTracker
+
+  private layout as GraveyardLayout
+  private lights as BGE.Light[] = []
+  private skeletonType as EnemyType = EnemyTypes.skeleton()
+  private skeletonSpots as GraveyardCell[] = []
+  ' The way in from the field (`@`)
+  private gateCell as GraveyardCell
+  ' Where the knight started, and respawns
+  private startX as float = 0
+  private startZ as float = 0
+  private showSkeletons as boolean = true
+  private deadSeconds as float = 0
+  private leaving as boolean = false
+
+  ' Bitmaps the field uses too, kept when the scene ends
+  private sharedBitmapPaths as roAssociativeArray = {
+    grass: "pkg:/sprites/grass.webp",
+    nightSky: "pkg:/sprites/night_sky.webp"
+  }
+  ' Bitmaps only this scene uses, freed when it ends
+  private bitmapPaths as roAssociativeArray = {
+    tree1: "pkg:/sprites/tree_1.webp",
+    tree2: "pkg:/sprites/tree_2.webp",
+    tree3: "pkg:/sprites/tree_3.webp",
+    tree4: "pkg:/sprites/tree_4.webp",
+    tree5: "pkg:/sprites/tree_5.webp",
+    graveSlab: "pkg:/models/props/grave_slab.png",
+    graveCross: "pkg:/models/props/grave_cross.png",
+    graveBroken: "pkg:/models/props/grave_broken.png",
+    propsAtlas: "pkg:/models/props/props_atlas.png"
+  }
+  private modelPaths as roAssociativeArray = {
+    chapel: "pkg:/models/chapel/chapel.obj",
+    mausoleum: "pkg:/models/props/crypt.obj",
+    hut: "pkg:/models/props/hut.obj",
+    well: "pkg:/models/props/well.obj"
+  }
+  ' The point on each tree image where its trunk meets the ground (tools/trees.js)
+  private treeAnchors as float[][] = [[0.51, 0.86], [0.52, 0.89], [0.51, 0.99], [0.42, 0.99], [0.49, 0.99]]
+  private graveBitmaps as string[] = ["graveSlab", "graveCross", "graveBroken"]
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "GraveyardScene"
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    loader.loadSpriteAtlas(m.skeletonType.atlas, `pkg:/sprites/${m.skeletonType.atlas}.json`)
+    for each paths in [m.sharedBitmapPaths, m.bitmapPaths]
+      for each name in paths
+        if m.game.Bitmaps[name] = invalid
+          loader.loadBitmap(name, paths[name])
+        end if
+      end for
+    end for
+    for each name in m.modelPaths
+      loader.load3dModel(name, m.modelPaths[name])
+    end for
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.readCommonArgs(args)
+    m.leaving = false
+    m.deadSeconds = 0
+    m.skeletonSpots = []
+    ' The sky texture's zenith, for anything past its top
+    m.game.setBackgroundColor(&h080E28FF)
+    m.layout = GraveyardMap.parse(GraveyardMap.layout())
+
+    grassBmp = m.game.getBitmap("grass")
+    ground = new BGE.DrawablePlane(m, CreateObject("roRegion", grassBmp, 0, 0, grassBmp.GetWidth(), grassBmp.GetHeight()), {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.tiledImage,
+      scale: BGE.Math.VectorOps.create(m.groundTexelScale, m.groundTexelScale, 1)
+    })
+    ground.isShaded = true
+    m.addDrawable("Ground", ground)
+    skyBmp = m.game.getBitmap("nightSky")
+    m.addDrawable("Sky", new BGE.DrawableSkybox(m, CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())))
+    m.lights = Night.addLights(m.game)
+
+    solids = new BGE.SolidWorld()
+    size = World.metres(GraveyardMap.CELL_METRES)
+    solids.addBounds(-m.layout.cols * size / 2, -m.layout.rows * size / 2, m.layout.cols * size, m.layout.rows * size, size)
+    m.addFences(solids)
+    m.addBuildings(solids)
+    for each cell in m.layout.cells
+      m.addCellContents(cell, solids)
+    end for
+
+    if args.from = "crypt"
+      ' Up from the crypt: a few metres out from the mausoleum's door, facing away from it, so the
+      ' camera behind him isn't inside the mausoleum
+      doorstep = m.layout.groups.D as GraveyardGroup
+      spot = GraveyardMap.cellCenter(m.layout, doorstep.col + (doorstep.cols - 1) / 2, doorstep.row + doorstep.rows + 2)
+      heading = BGE.Math.PI
+    else if args.at <> invalid
+      ' Measuring: `at=<col>,<row>[,<heading in degrees>]` starts in another cell
+      colRow = args.at.split(",")
+      spot = GraveyardMap.cellCenter(m.layout, colRow[0].toInt(), colRow[1].toInt())
+      heading = 0
+      if colRow.count() > 2
+        heading = BGE.Math.DegreesToRadians(colRow[2].toFloat())
+      end if
+    else
+      spot = GraveyardMap.cellCenter(m.layout, m.gateCell.col, m.gateCell.row)
+      ' Into the graveyard, away from the gate
+      heading = 0
+    end if
+    m.startX = spot.x
+    m.startZ = spot.z
+    m.addKnight(m.startX, m.startZ, heading)
+    fadeFraction = 0.5
+    m.setUpCamera(World.metres(32), fadeFraction, 0)
+
+    m.walls = new SolidTracker(solids)
+    m.walls.track(m.knight)
+    ' Measuring: `enemies=0` leaves the skeletons out
+    m.showSkeletons = args.enemies <> "0"
+    m.addSkeletons()
+  end sub
+
+  ' One wall per straight run of fence, a thin solid along it, and a stone post either side of the
+  ' gate
+  private sub addFences(solids as BGE.SolidWorld)
+    ' The pickets are the atlas's bottom right tile; copied out, so the wall can repeat it
+    atlas = m.game.getBitmap("propsAtlas")
+    ' Alpha blending off, so the gaps between the pickets are copied as transparent
+    pickets = CreateObject("roBitmap", {width: 62, height: 62, AlphaEnable: false})
+    pickets.DrawObject(-193, -193, atlas)
+    pickets.Finish()
+    region = CreateObject("roRegion", pickets, 0, 0, 62, 62)
+    thickness = World.metres(0.3)
+    for each fenceRun in m.layout.fenceRuns
+      first = GraveyardMap.cellCenter(m.layout, fenceRun.col, fenceRun.row)
+      last = GraveyardMap.cellCenter(m.layout, fenceRun.col + fenceRun.cols - 1, fenceRun.row + fenceRun.rows - 1)
+      solids.addSolid(first.x - thickness / 2, first.z - thickness / 2, last.x - first.x + thickness, last.z - first.z + thickness)
+      fenceWall = new Fence(m.game)
+      m.game.addEntity(fenceWall, {from: first, to: last, region: region})
+    end for
+
+    gate = m.layout.groups.E as GraveyardGroup
+    for each col in [gate.col - 1, gate.col + gate.cols]
+      spot = GraveyardMap.cellCenter(m.layout, col, gate.row)
+      post = new Pillar(m.game)
+      width = World.metres(0.5)
+      m.game.addEntity(post, {x: spot.x, z: spot.z, width: width, height: World.metres(1.6)})
+      solids.addSolid(spot.x - width / 2, spot.z - width / 2, width, width)
+    end for
+  end sub
+
+  ' The chapel, mausoleum and hut, each centred on its group of cells
+  private sub addBuildings(solids as BGE.SolidWorld)
+    buildings = {
+      ' The chapel's .obj runs from z -5.35 (the tower) to 7.6 (the door)
+      p: {model: "chapel", width: 6.8, height: 13.2, depth: 12.95, centerZ: 1.125},
+      c: {model: "mausoleum", width: 3.6, height: 3.6, depth: 4.5, centerZ: 0},
+      h: {model: "hut", width: 4, height: 4.6, depth: 5, centerZ: 0}
+    }
+    for each kind in buildings
+      group = m.layout.groups[kind] as GraveyardGroup
+      if group <> invalid
+        building = buildings[kind] as GraveyardBuilding
+        center = GraveyardMap.groupCenter(m.layout, group)
+        m.addBuilding(center, building, solids)
+        if kind = "h"
+          ' A lantern beside the hut's door
+          flame = new Torch(m.game)
+          m.game.addEntity(flame, {x: center.x + World.metres(1.4), y: World.metres(2.1), z: center.z + World.metres(building.depth / 2 + 0.3), kind: FlameKind.fire})
+        end if
+      end if
+    end for
+  end sub
+
+  private sub addBuilding(center as BGE.Math.Vector, building as GraveyardBuilding, solids as BGE.SolidWorld)
+    width = World.metres(building.width)
+    depth = World.metres(building.depth)
+    entity = new PropModel(m.game)
+    m.game.addEntity(entity, {
+      x: center.x,
+      z: center.z,
+      model: building.model,
+      width: width,
+      height: World.metres(building.height),
+      depth: depth,
+      shiftZ: -World.metres(building.centerZ)
+    })
+    solids.addSolid(center.x - width / 2, center.z - depth / 2, width, depth)
+  end sub
+
+  ' Graves, trees, the well, spirit flames, and where skeletons and the knight start
+  private sub addCellContents(cell as GraveyardCell, solids as BGE.SolidWorld)
+    center = GraveyardMap.cellCenter(m.layout, cell.col, cell.row)
+    jitter = World.metres(GraveyardMap.CELL_METRES) * 0.3
+    if cell.kind = "g"
+      x = center.x + (m.cellRandom(cell, 1) - 0.5) * jitter
+      z = center.z + (m.cellRandom(cell, 2) - 0.5) * jitter
+      bitmap = m.graveBitmaps[Int(m.cellRandom(cell, 3) * m.graveBitmaps.Count())]
+      grave = new Prop(m.game)
+      ' The 32 x 48 px stones are drawn at 0.6 x 0.9 m
+      m.game.addEntity(grave, {x: x, z: z, bitmap: bitmap, scale: World.metres(0.9) / 48})
+      half = World.metres(0.3)
+      solids.addSolid(x - half, z - half, half * 2, half * 2)
+    else if cell.kind = "T"
+      x = center.x + (m.cellRandom(cell, 1) - 0.5) * jitter
+      z = center.z + (m.cellRandom(cell, 2) - 0.5) * jitter
+      which = Int(m.cellRandom(cell, 3) * m.treeAnchors.Count())
+      anchor = m.treeAnchors[which]
+      ' 7-9 m tall to the top of the 320 px image
+      tall = World.metres(7 + m.cellRandom(cell, 4) * 2)
+      tree = new Prop(m.game)
+      m.game.addEntity(tree, {x: x, z: z, bitmap: `tree${which + 1}`, scale: tall / 320, anchorX: anchor[0], anchorY: anchor[1]})
+      half = World.metres(0.3)
+      solids.addSolid(x - half, z - half, half * 2, half * 2)
+    else if cell.kind = "W"
+      m.addBuilding(center, {model: "well", width: 1.8, height: 2.4, depth: 1.8, centerZ: 0} as GraveyardBuilding, solids)
+    else if cell.kind = "s"
+      wisp = new Torch(m.game)
+      m.game.addEntity(wisp, {x: center.x, y: World.metres(1.2), z: center.z, kind: FlameKind.spirit})
+    else if cell.kind = "S"
+      m.skeletonSpots.push(cell)
+    else if cell.kind = "@"
+      m.gateCell = cell
+    end if
+  end sub
+
+  ' A number in [0, 1) that's the same for a cell every time, different for each `salt`
+  private function cellRandom(cell as GraveyardCell, salt as integer) as float
+    value = Sin(cell.col * 12.9898 + cell.row * 78.233 + salt * 37.719) * 43758.5453
+    return value - Int(value)
+  end function
+
+  ' A skeleton on each `S`, facing the gate, asleep until the knight comes near
+  private sub addSkeletons()
+    if not m.showSkeletons
+      return
+    end if
+    for each cell in m.skeletonSpots
+      spot = GraveyardMap.cellCenter(m.layout, cell.col, cell.row)
+      skeleton = new Enemy(m.game)
+      m.game.addEntity(skeleton, {
+        type: m.skeletonType,
+        director: m.director,
+        x: spot.x,
+        z: spot.z,
+        heading: BGE.Math.PI,
+        wakeDistance: m.wakeDistance
+      })
+      m.walls.track(skeleton)
+    end for
+  end sub
+
+  override sub onDestroy()
+    for each light in m.lights
+      m.game.removeLight(light)
+    end for
+    m.lights = []
+    for each name in m.bitmapPaths
+      m.game.unloadBitmap(name)
+    end for
+    for each name in m.modelPaths
+      m.game.unload3dModel(name)
+    end for
+  end sub
+
+  override sub onUpdate(dt as float)
+    m.director.viewHeading = m.cameraRig.heading
+    m.hud.update(dt, m.knight)
+    m.director.update(dt)
+    if not m.knight.isAlive()
+      ' Start over: the knight back at the start, every skeleton back on its feet and asleep
+      m.deadSeconds += dt
+      if m.deadSeconds >= m.respawnSeconds
+        m.deadSeconds = 0
+        m.director.clearEnemies()
+        m.walls.clear()
+        m.knight.respawn(m.startX, m.startZ)
+        m.walls.track(m.knight)
+        m.addSkeletons()
+      end if
+      return
+    end if
+    if m.leaving
+      return
+    end if
+    x = m.knight.position.x
+    z = m.knight.position.z
+    if GraveyardMap.isInGroup(m.layout, m.layout.groups.D, x, z)
+      m.leaving = m.game.changeSceneWithFade("CryptScene", {from: "graveyard"})
+    else if GraveyardMap.isInGroup(m.layout, m.layout.groups.E, x, z)
+      m.leaving = m.game.changeSceneWithFade("FieldScene")
+    end if
+  end sub
+
+  protected override sub afterBodiesMoved(dt as float)
+    m.walls.resolve()
+  end sub
+
+end class

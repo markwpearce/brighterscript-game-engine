@@ -1,0 +1,169 @@
+import "../World.bs"
+
+' One cell of the graveyard's grid
+interface GraveyardCell extends roAssociativeArray
+  col as integer
+  row as integer
+  ' Its character in GraveyardMap.layout()
+  kind as string
+end interface
+
+' A rectangle of cells of one kind (a building's footprint, a run of fence, a doorstep)
+interface GraveyardGroup extends roAssociativeArray
+  kind as string
+  col as integer
+  row as integer
+  cols as integer
+  rows as integer
+end interface
+
+' A parsed GraveyardMap.layout()
+interface GraveyardLayout extends roAssociativeArray
+  cols as integer
+  rows as integer
+  ' Rows of single-character kinds, [row][col]
+  grid as string[][]
+  ' Every cell that isn't grass or outside
+  cells as GraveyardCell[]
+  ' Rectangles of the building and doorway kinds (GraveyardMap.GROUP_KINDS), by kind
+  groups as roAssociativeArray
+  ' Straight runs of fence, each one cell wide
+  fenceRuns as GraveyardGroup[]
+end interface
+
+' The graveyard as a text grid: fences, buildings, graves, trees, lights, skeletons and the ways out
+' all come from it.
+namespace GraveyardMap
+
+  const CELL_METRES = 2
+  ' Kinds whose cells make one rectangle each
+  const GROUP_KINDS = "pchDE"
+
+  ' Row 0 is the far (-z) edge, column 0 the -x edge. `,` outside the fence, `.` grass, `f` fence,
+  ' `E` the gap in the fence out to the field, `g` a grave, `T` a tree, `p` the chapel, `c` the
+  ' mausoleum over the crypt (its door faces +z), `D` the mausoleum's doorstep (down to the crypt),
+  ' `h` the gravedigger's hut, `W` the well, `s` a spirit flame, `S` a skeleton, `@` the way in
+  ' from the field.
+  function layout() as string[]
+    return [
+      ",,,T,,,,,,,,T,,,,,,,T,,,"
+      ",ffffffffffffffffffffff,"
+      ",f.T..g.g...cc...g.g..f,"
+      "Tf.....S....cc.....S..f,"
+      ",f..g.g.....cc....g.g.f,"
+      ",fs.........DD.......sf,"
+      ",f....................fT"
+      ",f.pppp...g.g.g..g.g..f,"
+      ",f.pppp...............f,"
+      "Tf.pppp...g...g..g....f,"
+      ",f.pppp..T..........T.f,"
+      ",f.pppp.....g.g....g..fT"
+      ",f.pppp...............f,"
+      ",f.pppp...g..Sg..g.g..f,"
+      "Tf.......s............f,"
+      ",f...T.........hh.....f,"
+      ",f.g.g.........hh..W..fT"
+      ",f......T......hh.....f,"
+      ",f..g.g...............f,"
+      ",f....................f,"
+      ",fT..........@.......Tf,"
+      ",f....................f,"
+      ",fffffffffffEEfffffffff,"
+      ",,,,T,,,,,,,,,,,,,T,,,,,"
+    ]
+  end function
+
+  function parse(rows as string[]) as GraveyardLayout
+    layout = {cols: Len(rows[0]), rows: rows.Count(), grid: [], cells: [], groups: {}, fenceRuns: []} as GraveyardLayout
+    for row = 0 to rows.Count() - 1
+      kinds = [] as string[]
+      for col = 0 to layout.cols - 1
+        kind = Mid(rows[row], col + 1, 1)
+        kinds.push(kind)
+        if kind <> "." and kind <> ","
+          layout.cells.push({col: col, row: row, kind: kind} as GraveyardCell)
+        end if
+        if Instr(1, GraveyardMap.GROUP_KINDS, kind) > 0
+          GraveyardMap.growGroup(layout, kind, col, row)
+        end if
+      end for
+      layout.grid.push(kinds)
+    end for
+    GraveyardMap.findFenceRuns(layout)
+    return layout
+  end function
+
+  ' Stretches a kind's rectangle to take in a cell (each group kind appears once)
+  sub growGroup(layout as GraveyardLayout, kind as string, col as integer, row as integer)
+    group = layout.groups[kind]
+    if group = invalid
+      layout.groups[kind] = {kind: kind, col: col, row: row, cols: 1, rows: 1} as GraveyardGroup
+      return
+    end if
+    ' Rows are read top to bottom and left to right, so a cell can only push the far edges out
+    ' (or the left edge, on a later row)
+    lastCol = group.col + group.cols - 1
+    if col > lastCol
+      lastCol = col
+    end if
+    if col < group.col
+      group.col = col
+    end if
+    group.cols = lastCol - group.col + 1
+    group.rows = row - group.row + 1
+  end sub
+
+  ' Runs of two or more `f` along each row, then each column. A corner cell is in both.
+  sub findFenceRuns(layout as GraveyardLayout)
+    for row = 0 to layout.rows - 1
+      col = 0
+      while col < layout.cols
+        length = 0
+        while col + length < layout.cols and layout.grid[row][col + length] = "f"
+          length++
+        end while
+        if length > 1
+          layout.fenceRuns.push({kind: "f", col: col, row: row, cols: length, rows: 1} as GraveyardGroup)
+        end if
+        col += length + 1
+      end while
+    end for
+    for col = 0 to layout.cols - 1
+      row = 0
+      while row < layout.rows
+        length = 0
+        while row + length < layout.rows and layout.grid[row + length][col] = "f"
+          length++
+        end while
+        if length > 1
+          layout.fenceRuns.push({kind: "f", col: col, row: row, cols: 1, rows: length} as GraveyardGroup)
+        end if
+        row += length + 1
+      end while
+    end for
+  end sub
+
+  ' World x/z of a cell's centre (y 0), with the grid centred on the origin
+  function cellCenter(layout as GraveyardLayout, col as float, row as float) as BGE.Math.Vector
+    size = World.metres(GraveyardMap.CELL_METRES)
+    return BGE.Math.VectorOps.create((col - (layout.cols - 1) / 2) * size, 0, (row - (layout.rows - 1) / 2) * size)
+  end function
+
+  ' World x/z of the middle of a group of cells
+  function groupCenter(layout as GraveyardLayout, group as GraveyardGroup) as BGE.Math.Vector
+    return GraveyardMap.cellCenter(layout, group.col + (group.cols - 1) / 2, group.row + (group.rows - 1) / 2)
+  end function
+
+  ' The cell a world point is in, as [col, row]
+  function cellAt(layout as GraveyardLayout, x as float, z as float) as integer[]
+    size = World.metres(GraveyardMap.CELL_METRES)
+    return [Int(x / size + layout.cols / 2), Int(z / size + layout.rows / 2)]
+  end function
+
+  ' Whether a world point is in a group's cells
+  function isInGroup(layout as GraveyardLayout, group as GraveyardGroup, x as float, z as float) as boolean
+    here = GraveyardMap.cellAt(layout, x, z)
+    return here[0] >= group.col and here[0] < group.col + group.cols and here[1] >= group.row and here[1] < group.row + group.rows
+  end function
+
+end namespace
