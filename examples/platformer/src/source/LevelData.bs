@@ -1,5 +1,8 @@
-' The platformer's level layouts, as one row-of-characters-per-string array per
-' level - no tilemap format/editor, per this example's design spec. Row 0 is the
+import "pkg:/source/utils/tiled/TiledLayers.bs"
+
+' The platformer's level layouts. Level 1 is a Tiled map (see getLevelMap()), to
+' show loading one; the rest are one row-of-characters-per-string array per level,
+' which is quicker to read and edit in code. Row 0 is the
 ' top of a level; row (NumRows - 1) is the camera-visible bottom row (world y = 0,
 ' via Level.bs's `(NumRows - r) * TileSize` formula - this always lands exactly on
 ' MainScene's fixed camera framing's bottom edge, regardless of how many rows exist
@@ -21,42 +24,15 @@
 ' Every level shares the same NumRows (the camera-anchoring formula above depends
 ' on it staying fixed) but each has its own width (getLevelNumCols()) - later
 ' levels are simply longer, with more/wider gaps and more enemies, rather than
-' taller. A level's own row array is the unit of "a level" throughout this file
-' and MainScene/Level/Player/Goal - see their own `levelIndex` fields/args.
+' taller. `levelIndex` picks a level throughout this file and MainScene/Level/
+' Player/Goal - see their own `levelIndex` fields/args.
 const TileSize = 64
 const NumRows = 11
 
-function getLevel1Rows() as string[]
-  return [
-    "........................................",
-    "........................................",
-    "........................................",
-    "........................................",
-    "........................................",
-    "........................................",
-    "................ooo.....................",
-    "...............-----....................",
-    ".P...ooo...................e...oo...G...",
-    "####################..##################",
-    "####################..##################",
-    ' Extra buried filler, purely defensive: MainScene's camera Y target/frameSize
-    ' math already puts world y = 0 (the row above, index NumRows - 1) exactly on the
-    ' visible screen's bottom edge with no gap (confirmed on-device - see
-    ' specs/ or the ground-depth fix commit), so these rows never actually appear
-    ' on screen. They exist only to guard against a future camera change (e.g. any
-    ' vertical follow/shake) exposing world y < 0 with nothing solid underneath. Row
-    ' index intentionally does NOT bump NumRows - see Level.bs/MainScene.bs comments
-    ' on why every Y-position formula in this example is anchored off the NumRows
-    ' constant, not off the level array's actual length; bumping NumRows here would
-    ' shift the existing ground/spawn positions up instead of merely adding depth
-    ' below them. Pit columns (20-21) stay open here too, so falling into the pit is
-    ' still a real bottomless-void hazard, not a false floor.
-    "####################..##################",
-    "####################..##################",
-    "####################..##################",
-    "####################..##################"
-  ]
-end function
+' Level 1 is a Tiled map instead (src/maps/level1.tmj, edited in Tiled - see
+' getLevelMap()). Its tile layer uses the same rows and columns as the strings
+' below, including the buried filler rows.
+const Level1MapPath = "pkg:/maps/level1.tmj"
 
 function getLevel2Rows() as string[]
   return [
@@ -180,18 +156,24 @@ function getLevel7Rows() as string[]
   ]
 end function
 
-' Every level's row array, in play order - `levelIndex` everywhere in this
-' example (MainScene/Level/Player/Goal) is a 0-based index into this array.
+' Every level in play order: a Tiled map's path, or a row array - `levelIndex`
+' everywhere in this example (MainScene/Level/Player/Goal) is a 0-based index into
+' this array.
+' Built once and kept: Player asks about the ground every frame.
 function getAllLevels() as object
-  return [
-    getLevel1Rows(),
-    getLevel2Rows(),
-    getLevel3Rows(),
-    getLevel4Rows(),
-    getLevel5Rows(),
-    getLevel6Rows(),
-    getLevel7Rows()
-  ]
+  globals = GetGlobalAA()
+  if globals.platformerLevels = invalid
+    globals.platformerLevels = [
+      Level1MapPath,
+      getLevel2Rows(),
+      getLevel3Rows(),
+      getLevel4Rows(),
+      getLevel5Rows(),
+      getLevel6Rows(),
+      getLevel7Rows()
+    ]
+  end if
+  return globals.platformerLevels
 end function
 
 function getLevelCount() as integer
@@ -201,8 +183,8 @@ end function
 ' @param {integer} levelIndex - 0-based; clamped into range so an out-of-bounds
 '   index (e.g. a bad `level` launch param, see main.bs) falls back to the last
 '   real level rather than crashing.
-' @return {string[]} the given level's row layout
-function getLevelRows(levelIndex as integer) as string[]
+' @return {dynamic} the level's map path or row array
+function getLevelSource(levelIndex as integer) as dynamic
   levels = getAllLevels()
   clampedIndex = levelIndex
   if clampedIndex < 0
@@ -213,13 +195,100 @@ function getLevelRows(levelIndex as integer) as string[]
   return levels[clampedIndex]
 end function
 
+' @param {integer} levelIndex
+' @return {string[]} the given level's row layout; empty for a Tiled map level
+function getLevelRows(levelIndex as integer) as string[]
+  source = getLevelSource(levelIndex)
+  if GetInterface(source, "ifArray") = invalid
+    return []
+  end if
+  return source
+end function
+
+' The given level's Tiled map, parsed on first use and then kept (Player asks every
+' frame, via isSolidGroundAt()).
+'
+' A map has a "ground" tile layer, whose tiles' "collision" property is "solid" or
+' "oneWay", and a "spawns" object layer of points typed player/coin/enemy/goal/boss,
+' each placed where that entity's position goes.
+'
+' @param {integer} levelIndex
+' @return {BGE.Tiled.TiledMap} invalid for a string level
+function getLevelMap(levelIndex as integer) as BGE.Tiled.TiledMap
+  source = getLevelSource(levelIndex)
+  if GetInterface(source, "ifString") = invalid
+    return invalid
+  end if
+  globals = GetGlobalAA()
+  if globals.platformerLevelMaps = invalid
+    globals.platformerLevelMaps = {}
+  end if
+  cached = globals.platformerLevelMaps[source]
+  if cached = invalid
+    cached = BGE.Tiled.parseMapFile(source)
+    if cached = invalid
+      ' Already reported by parseMapFile(); remember the failure rather than retry
+      ' every frame. The level is then empty.
+      cached = false
+    end if
+    globals.platformerLevelMaps[source] = cached
+  end if
+  if GetInterface(cached, "ifAssociativeArray") = invalid
+    return invalid
+  end if
+  return cached
+end function
+
+' The "col,row" keys of a Tiled level's colliding ground cells - the same cells Level.bs
+' makes colliders for - built once, since Player asks every frame.
+'
+' @param {integer} levelIndex
+' @return {roAssociativeArray} invalid for a string level
+function getLevelMapSolidCells(levelIndex as integer) as roAssociativeArray
+  map = getLevelMap(levelIndex)
+  if map = invalid
+    return invalid
+  end if
+  source = getLevelSource(levelIndex) as string
+  globals = GetGlobalAA()
+  if globals.platformerLevelSolidCells = invalid
+    globals.platformerLevelSolidCells = {}
+  end if
+  solidCells = globals.platformerLevelSolidCells[source]
+  if solidCells = invalid
+    solidCells = {}
+    for each cell in BGE.Tiled.layerToColliderCells(map, BGE.Tiled.getLayer(map, "ground"), "collision")
+      solidCells[cell.col.toStr() + "," + cell.row.toStr()] = true
+    end for
+    globals.platformerLevelSolidCells[source] = solidCells
+  end if
+  return solidCells
+end function
+
+' World units to add to a map's y coordinates so its row NumRows lands on world y = 0,
+' as `(NumRows - r) * TileSize` does for string levels (the rows below it are buried
+' filler).
+'
+' @param {BGE.Tiled.TiledMap} map
+' @return {float}
+function getLevelMapOffsetY(map as BGE.Tiled.TiledMap) as float
+  return (NumRows - map.height) * TileSize
+end function
+
 ' A level's width, derived from its own row length rather than a shared constant -
 ' unlike NumRows, levels are not all the same width.
 '
 ' @param {integer} levelIndex
 ' @return {integer}
 function getLevelNumCols(levelIndex as integer) as integer
+  map = getLevelMap(levelIndex)
+  if map <> invalid
+    return map.width
+  end if
   rows = getLevelRows(levelIndex)
+  if rows.count() = 0
+    return 0
+  end if
   return rows[0].len()
 end function
 
@@ -248,8 +317,12 @@ function isSolidGroundAt(x as float, y as float, levelIndex as integer) as boole
   if row < 0 or col < 0
     return false
   end if
+  solidCells = getLevelMapSolidCells(levelIndex)
+  if solidCells <> invalid
+    return solidCells.DoesExist(col.toStr() + "," + row.toStr())
+  end if
   rows = getLevelRows(levelIndex)
-  if col >= rows[0].len() or row >= rows.count()
+  if rows.count() = 0 or col >= rows[0].len() or row >= rows.count()
     return false
   end if
   tileChar = rows[row].mid(col, 1)

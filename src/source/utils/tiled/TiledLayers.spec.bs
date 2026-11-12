@@ -1,0 +1,189 @@
+namespace tests
+
+  @suite("BGE.Tiled (layers)")
+  class TiledLayersTests extends rooibos.BaseTestSuite
+
+    private map as BGE.Tiled.TiledMap
+
+    protected override function setup()
+      fs = CreateObject("roFileSystem")
+      fs.CreateDirectory("tmp:/bge_tiled_layers")
+      ' Two 16x16 tiles, 1px margin, 2px spacing
+      CreateObject("roBitmap", {width: 36, height: 18, AlphaEnable: true}).GetPng(0, 0, 36, 18).WriteFile("tmp:/bge_tiled_layers/sheet.png")
+      CreateObject("roBitmap", {width: 16, height: 32, AlphaEnable: true}).GetPng(0, 0, 16, 32).WriteFile("tmp:/bge_tiled_layers/tall.png")
+
+      sheet = {firstgid: 1, name: "sheet", tilecount: 2, columns: 2, tilewidth: 16, tileheight: 16, margin: 1, spacing: 2, image: "sheet.png", imagewidth: 36, imageheight: 18,
+        tiles: [{id: 1, properties: [{name: "collision", type: "string", value: "solid"}]}]}
+      collection = {firstgid: 3, name: "collection", tilecount: 1, columns: 0, tilewidth: 16, tileheight: 32,
+        tiles: [{id: 0, image: "tall.png", imagewidth: 16, imageheight: 32, properties: [{name: "collision", type: "string", value: ""}]}]}
+      grid = {firstgid: 10, name: "grid", tilecount: 1, columns: 0, tilewidth: 16, tileheight: 32, tilerendersize: "grid", tileoffset: {x: 2, y: -5},
+        tiles: [{id: 0, image: "tall.png", imagewidth: 16, imageheight: 32, properties: [{name: "collision", type: "string", value: "oneWay"}]}]}
+      aspect = {firstgid: 11, name: "aspect", tilecount: 1, columns: 0, tilewidth: 16, tileheight: 32, tilerendersize: "grid", fillmode: "preserve-aspect-fit",
+        tiles: [{id: 0, image: "tall.png", imagewidth: 16, imageheight: 32, properties: [{name: "collision", type: "string", value: "solid"}]}]}
+      ' 3x2 cells of 16px; the last cell is GID 2 flipped horizontally
+      ground = {type: "tilelayer", id: 1, name: "ground", width: 3, height: 2, offsetx: 4, offsety: 0, data: [1, 2, 0, 3, 10, 2147483650&]}
+      ' GID 1 rotated 90 degrees clockwise (diagonal + horizontal flip), then the aspect-fit tile
+      extras = {type: "tilelayer", id: 2, name: "extras", width: 3, height: 2, data: [2684354561&, 11, 0, 0, 0, 0]}
+      hidden = {type: "tilelayer", id: 3, name: "hidden", visible: false, width: 3, height: 2, data: [2, 0, 0, 0, 0, 0]}
+      spawns = tests.TiledFixtures.objectLayer("spawns", [])
+      m.map = BGE.Tiled.parseMapJson(tests.TiledFixtures.mapJson({width: 3, height: 2, tilesets: [sheet, collection, grid, aspect], layers: [ground, extras, hidden, spawns]}), "tmp:/bge_tiled_layers")
+    end function
+
+    @describe("finding layers and tiles")
+
+    @it("finds a layer by name")
+    function _()
+      m.assertEqual("spawns", BGE.Tiled.getLayer(m.map, "spawns").name)
+      m.assertInvalid(BGE.Tiled.getLayer(m.map, "missing"))
+    end function
+
+    @it("looks up the tile in a cell")
+    function _()
+      ground = BGE.Tiled.getLayer(m.map, "ground")
+      m.assertEqual(2, BGE.Tiled.getTileAt(m.map, ground, 1, 0).gid)
+      m.assertEqual(10, BGE.Tiled.getTileAt(m.map, ground, 1, 1).gid)
+      m.assertInvalid(BGE.Tiled.getTileAt(m.map, ground, 2, 0))
+      m.assertInvalid(BGE.Tiled.getTileAt(m.map, ground, 3, 0))
+      m.assertInvalid(BGE.Tiled.getTileAt(m.map, ground, 0, -1))
+    end function
+
+    @it("lists the non-empty cells")
+    function _()
+      cells = BGE.Tiled.getLayerCells(m.map, BGE.Tiled.getLayer(m.map, "ground"))
+      m.assertEqual(5, cells.count())
+      m.assertEqual(1, cells[2].row)
+      m.assertEqual(0, cells[2].col)
+      m.assertEqual(3, cells[2].info.gid)
+      m.assertTrue(cells[4].info.flipH)
+    end function
+
+    @it("treats a missing layer, or one with no width, as empty")
+    function _()
+      m.assertEqual(0, BGE.Tiled.getLayerCells(m.map, invalid).count())
+      m.assertInvalid(BGE.Tiled.getTileAt(m.map, invalid, 0, 0))
+      m.assertEqual(0, BGE.Tiled.layerToTileSpecs(m.map, invalid).count())
+      m.assertEqual(0, BGE.Tiled.layerToColliderCells(m.map, invalid).count())
+      noWidth = {type: "tilelayer", id: 1, name: "ground", data: [1, 2]}
+      map = BGE.Tiled.parseMapJson(tests.TiledFixtures.mapJson({layers: [noWidth]}), "")
+      m.assertEqual(0, BGE.Tiled.getLayerCells(map, map.layers[0]).count())
+    end function
+
+    @describe("world coordinates")
+
+    @it("flips y so the map's bottom edge is world y 0")
+    function _()
+      m.assertEqual(32.0, BGE.Tiled.toWorldY(m.map, 0))
+      m.assertEqual(0.0, BGE.Tiled.toWorldY(m.map, 32))
+      m.assertEqual(-36.0, BGE.Tiled.toWorldY(m.map, 4, -64))
+      m.assertEqual(12.0, BGE.Tiled.toWorldX(m.map, 2, 10))
+    end function
+
+    @describe("collider cells")
+
+    @it("tags each cell whose tile has the property set")
+    function _()
+      cells = BGE.Tiled.layerToColliderCells(m.map, BGE.Tiled.getLayer(m.map, "ground"))
+      m.assertEqual(3, cells.count())
+      m.assertEqual({row: 0, col: 1, tag: "solid"}, cells[0])
+      m.assertEqual({row: 1, col: 1, tag: "oneWay"}, cells[1])
+      m.assertEqual({row: 1, col: 2, tag: "solid"}, cells[2])
+    end function
+
+    @it("reads a different property when asked")
+    function _()
+      m.assertEqual(0, BGE.Tiled.layerToColliderCells(m.map, BGE.Tiled.getLayer(m.map, "ground"), "damage").count())
+    end function
+
+    @it("still reads a hidden layer")
+    function _()
+      cells = BGE.Tiled.layerToColliderCells(m.map, BGE.Tiled.getLayer(m.map, "hidden"))
+      m.assertEqual(1, cells.count())
+      m.assertEqual("solid", cells[0].tag)
+    end function
+
+    @describe("tile specs")
+
+    @it("cuts spritesheet tiles out past the margin and spacing")
+    function _()
+      tiles = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "ground"))
+      m.assertEqual(5, tiles.count())
+      m.assertEqual(1, tiles[0].region.GetX())
+      m.assertEqual(1, tiles[0].region.GetY())
+      m.assertEqual(16, tiles[0].region.GetWidth())
+      m.assertEqual(19, tiles[1].region.GetX())
+      m.assertEqual(4.0, tiles[0].worldX)
+      m.assertEqual(32.0, tiles[0].worldY)
+      m.assertEqual(20.0, tiles[1].worldX)
+      m.assertEqual(16.0, tiles[0].width)
+      m.assertEqual(16.0, tiles[0].height)
+    end function
+
+    @it("draws a collection tile at its own size, bottom-aligned to its cell")
+    function _()
+      tile = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "ground"))[2]
+      m.assertEqual(4.0, tile.worldX)
+      m.assertEqual(32.0, tile.worldY)
+      m.assertEqual(16.0, tile.width)
+      m.assertEqual(32.0, tile.height)
+      m.assertEqual(32, tile.region.GetHeight())
+    end function
+
+    @it("stretches a grid-sized tile to its cell, moved by the tileset's offset")
+    function _()
+      tile = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "ground"))[3]
+      m.assertEqual(22.0, tile.worldX)
+      m.assertEqual(21.0, tile.worldY)
+      m.assertEqual(16.0, tile.width)
+      m.assertEqual(16.0, tile.height)
+    end function
+
+    @it("marks flipped tiles")
+    function _()
+      tiles = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "ground"))
+      m.assertTrue(tiles[4].flipH)
+      m.assertFalse(tiles[4].flipV)
+      m.assertFalse(tiles[0].flipH)
+      m.assertEqual(36.0, tiles[4].worldX)
+      m.assertEqual(16.0, tiles[4].worldY)
+    end function
+
+    @it("adds the offsets passed in")
+    function _()
+      tile = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "ground"), {offsetX: 100, offsetY: -64})[0]
+      m.assertEqual(104.0, tile.worldX)
+      m.assertEqual(-32.0, tile.worldY)
+    end function
+
+    @it("draws a rotated tile unrotated and unflipped")
+    function _()
+      tile = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "extras"))[0]
+      m.assertFalse(tile.flipH)
+      m.assertFalse(tile.flipV)
+    end function
+
+    @it("scales an aspect-fit tile evenly and centers it in its cell")
+    function _()
+      tile = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "extras"))[1]
+      m.assertEqual(8.0, tile.width)
+      m.assertEqual(16.0, tile.height)
+      m.assertEqual(20.0, tile.worldX)
+      m.assertEqual(32.0, tile.worldY)
+    end function
+
+    @it("gives no tiles for a hidden layer")
+    function _()
+      m.assertEqual(0, BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "hidden")).count())
+    end function
+
+    @it("uses and fills the bitmaps passed in")
+    function _()
+      own = CreateObject("roBitmap", {width: 40, height: 20, AlphaEnable: true})
+      bitmaps = {"tmp:/bge_tiled_layers/sheet.png": own}
+      tiles = BGE.Tiled.layerToTileSpecs(m.map, BGE.Tiled.getLayer(m.map, "ground"), {bitmaps: bitmaps})
+      m.assertEqual(40, tiles[0].region.GetBitmap().GetWidth())
+      m.assertNotInvalid(bitmaps["tmp:/bge_tiled_layers/tall.png"])
+    end function
+
+  end class
+
+end namespace

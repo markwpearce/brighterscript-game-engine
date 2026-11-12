@@ -113,7 +113,7 @@ The `examples/` directory has full Roku channels you can build and run:
 | [`asteroids`](examples/asteroids) | A complete 2D game - player movement, bullets, collisions, particle-style explosions, sound |
 | [`pong`](examples/pong) | Classic 2D Pong, playable in both 2D and 3D camera modes |
 | [`snake`](examples/snake) | Grid-based movement and growing collision shapes, in 2D and 3D |
-| [`platformer`](examples/platformer) | A side-scrolling, multi-level platformer demonstrating gravity, jumping, and collision *resolution* built on top of the engine's detection-only collider system - plus sound, particle effects, and a full `BGE.UI` menu/HUD |
+| [`platformer`](examples/platformer) | A side-scrolling, multi-level platformer demonstrating gravity, jumping, and collision *resolution* built on top of the engine's detection-only collider system - plus a level loaded from a [Tiled](https://www.mapeditor.org/) map, sound, particle effects, and a full `BGE.UI` menu/HUD |
 | [`rpg`](examples/rpg) | A *Link to the Past*-style top-down world (work in progress, issue #63): an auto-tiled town built from character-grid map data, free movement that slides along walls, props the player walks in front of and behind, and fade transitions between the town and a castle interior using persistent entities |
 | [`fighter`](examples/fighter) | A two-player *Street Fighter 2*-style fighting game (work in progress, issue #295): one controller per player, fixed 60 Hz frame data, separate hitbox/hurtbox colliders, blocking, hit-pause, a parallax stage and a best-of-3 HUD |
 | [`3d`](examples/3d) | Loading and rendering `.stl` 3D models with the pseudo-3D renderer |
