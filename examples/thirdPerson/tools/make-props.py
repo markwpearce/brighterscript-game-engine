@@ -2,7 +2,7 @@
 Low-poly prop generator for examples/thirdPerson.
 
 Outputs (in ./out):
-  props_atlas.png   256x256 palette PNG shared by every model (4x4 grid of 64px tiles)
+  props_atlas.png   256x320 palette PNG shared by every model (4x5 grid of 64px tiles)
   props.mtl         one material, "props", pointing at the atlas
   *.obj             models: metres, Y-up, origin at the centre of the base, front faces +Z,
                     counter-clockwise winding, flat normals
@@ -17,8 +17,10 @@ from PIL import Image, ImageDraw
 
 SCALE = 1.0
 TILE = 64
-GRID = 4
+GRID = 4            # tiles across
+ROWS = 5            # tiles down; new tiles go on new rows so existing ones keep their place
 ATLAS = TILE * GRID
+ATLAS_H = TILE * ROWS
 INSET = 1.0  # px kept clear at tile edges so bilinear filtering doesn't bleed
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "models", "props")
 
@@ -165,16 +167,42 @@ def t_fence():       # alpha cut-out pickets
         d.rectangle([0, y, T, y + max(2, T // 20)], fill=(70, 50, 32, 255))
     return im
 
+def t_keepdoor():     # big arched door in a stone wall
+    im = blocks(T, T, max(4, T // 12), T // 6, T // 3, (84, 86, 94), (46, 48, 54), 16, moss=1)
+    d = ImageDraw.Draw(im); cx, w = T // 2, T // 3
+    d.rectangle([cx - w // 2 - 3, T // 3, cx + w // 2 + 3, T], fill=(62, 62, 66, 255))
+    d.ellipse([cx - w // 2 - 3, T // 3 - w // 2 - 3, cx + w // 2 + 3, T // 3 + w // 2 + 3], fill=(62, 62, 66, 255))
+    d.ellipse([cx - w // 2, T // 3 - w // 2, cx + w // 2, T // 3 + w // 2], fill=(72, 48, 28, 255))
+    d.rectangle([cx - w // 2, T // 3, cx + w // 2, T], fill=(72, 48, 28, 255))
+    for x in range(cx - w // 2 + 3, cx + w // 2, 3): d.line([x, T // 3 - w // 3, x, T], fill=(56, 36, 20, 255))
+    for y in (T // 2, 3 * T // 4): d.line([cx - w // 2, y, cx + w // 2, y], fill=(30, 30, 32, 255), width=2)
+    return im
+def t_iron():
+    r = rng(17); im = Image.new("RGBA", (T, T), (34, 32, 32, 255)); d = ImageDraw.Draw(im)
+    for y in range(0, T, T // 8): d.line([0, y, T, y], fill=jitter((50, 46, 44), r, 6) + (255,))
+    return noise(im, 6, 17)
+def t_merlons():      # alpha cut-out battlements along the top of a wall
+    im = blocks(T, T, max(4, T // 8), T // 6, T // 3, (88, 90, 98), (48, 50, 56), 18)
+    a = np.asarray(im).copy(); n = 4; w = T // n
+    for i in range(n): a[: T // 2, i * w + w // 2: (i + 1) * w, 3] = 0
+    return Image.fromarray(a, "RGBA")
+def t_banner():       # the keep's red banner
+    im = Image.new("RGBA", (T, T), (0, 0, 0, 0)); d = ImageDraw.Draw(im)
+    d.polygon([(T // 4, 0), (3 * T // 4, 0), (3 * T // 4, T - 1), (T // 2, 3 * T // 4), (T // 4, T - 1)], fill=(120, 24, 28, 255))
+    d.polygon([(T // 2, T // 6), (T // 2 + 8, T // 3), (T // 2, T // 2), (T // 2 - 8, T // 3)], fill=(200, 170, 70, 255))
+    return noise(im, 5, 19)
+
 TILES = [  # name, builder          grid position = index (row-major)
     ("stone", t_stone), ("flag", t_flag), ("tower", t_tower), ("slate", t_slate),
     ("housefront", t_housefront), ("housewall", t_housewall), ("gable", t_gable), ("thatch", t_thatch),
     ("hutdoor", lambda: t_hutwall(True)), ("hutwall", lambda: t_hutwall(False)), ("cryptfront", t_cryptfront), ("cryptside", t_cryptside),
     ("wood", t_wood), ("wellstone", t_wellstone), ("water", t_water), ("fence", t_fence),
+    ("keepdoor", t_keepdoor), ("iron", t_iron), ("merlons", t_merlons), ("banner", t_banner),
 ]
 TILE_INDEX = {n: i for i, (n, _) in enumerate(TILES)}
 
 def build_atlas():
-    atlas = Image.new("RGBA", (ATLAS, ATLAS), (0, 0, 0, 0))
+    atlas = Image.new("RGBA", (ATLAS, ATLAS_H), (0, 0, 0, 0))
     for i, (_, fn) in enumerate(TILES):
         atlas.paste(fn(), ((i % GRID) * T, (i // GRID) * T))
     return atlas
@@ -208,7 +236,7 @@ class Model:
         i = TILE_INDEX[tile]; col, row = i % GRID, i // GRID
         px = col * T + INSET + s * (T - 2 * INSET)
         py = row * T + INSET + (1 - t) * (T - 2 * INSET)
-        return (px / ATLAS, 1 - py / ATLAS)
+        return (px / ATLAS, 1 - py / ATLAS_H)
     def tri(self, a, b, c, tile, ua, ub, uc):
         a, b, c = map(np.array, (a, b, c))
         n = np.cross(b - a, c - a); n = n / np.linalg.norm(n)
@@ -278,22 +306,22 @@ def prism(m, p_bottom, p_top, r, tile, axis="y"):
 
 def models():
     out = []
-    # --- town wall segment: 8 m long, 10 m tall, 1.5 m thick. Tiles end-to-end along X.
-    L, H, Th = 8.0, 10.0, 1.5; x, z = L / 2, Th / 2
+    # --- town wall segment: 8 m long, 6 m tall, 1.5 m thick. Tiles end-to-end along X.
+    L, H, Th = 8.0, 6.0, 1.5; x, z = L / 2, Th / 2
     m = Model("wall_segment")
     box_walls(m, -x, x, -z, z, 0, H, ("stone",), ("stone",), ("stone", (0, 0, Th / L, 1)), ("stone", (0, 0, Th / L, 1)))
     m.quad((-x, H, z), (x, H, z), (x, H, -z), (-x, H, -z), "flag")
     out.append(m)
 
-    # --- wall tower: 4 x 4 m, 13 m to the eaves, pyramid roof to 17 m.
-    m = Model("wall_tower"); s, h, p = 2.0, 13.0, 17.0
+    # --- wall tower: 4 x 4 m, 8 m to the eaves, pyramid roof to 11 m.
+    m = Model("wall_tower"); s, h, p = 2.0, 8.0, 11.0
     box_walls(m, -s, s, -s, s, 0, h, ("tower",), ("tower",), ("tower",), ("tower",))
     for a, b in (((-s, h, s), (s, h, s)), ((s, h, s), (s, h, -s)), ((s, h, -s), (-s, h, -s)), ((-s, h, -s), (-s, h, s))):
         m.gable(a, b, (0, p, 0), "slate")
     out.append(m)
 
-    # --- gatehouse wall: same size as a segment with a 3.5 x 5 m passage through it.
-    m = Model("wall_gate"); g, gh = 1.75, 5.0
+    # --- gatehouse wall: same size as a segment with a 3.5 x 4 m passage through it.
+    m = Model("wall_gate"); g, gh = 1.75, 4.0
     U = lambda a: (a + x) / L; V = lambda b: b / H
     for zz, sign in ((z, 1), (-z, -1)):
         def q(xa, xb, ya, yb):
@@ -325,6 +353,34 @@ def models():
     prism(m, (-0.8, h, 0), (-0.8, 2.3, 0), 0.09, "wood")
     prism(m, (0.8, h, 0), (0.8, 2.3, 0), 0.09, "wood")
     prism(m, (-0.85, 2.15, 0), (0.85, 2.15, 0), 0.07, "wood")
+    out.append(m)
+
+    # --- keep: 10 x 10 m stone tower, 13 m to the battlements' foot, door and banner on the front.
+    m = Model("keep"); s, h, cols, rows = 5.0, 13.0, 2, 3
+    def face(corner, along, tiles):
+        # cols x rows quads so the tower tile keeps its size; tiles(col, row) picks each one
+        c, a = np.array(corner, float), np.array(along, float)
+        for col in range(cols):
+            for row in range(rows):
+                p0 = c + a * (2 * s * col / cols) + np.array([0, h * row / rows, 0])
+                p1 = c + a * (2 * s * (col + 1) / cols) + np.array([0, h * row / rows, 0])
+                up = np.array([0, h / rows, 0])
+                m.quad(p0, p1, p1 + up, p0 + up, tiles(col, row))
+    face((-s, 0, s), (1, 0, 0), lambda c, r: "keepdoor" if (c, r) == (1, 0) else "tower")    # +Z, the door
+    face((s, 0, -s), (-1, 0, 0), lambda c, r: "tower")                                      # -Z
+    face((-s, 0, -s), (0, 0, 1), lambda c, r: "tower")                                      # -X
+    face((s, 0, s), (0, 0, -1), lambda c, r: "tower")                                       # +X
+    mh = 1.6
+    box_walls(m, -s, s, -s, s, h, h + mh, ("merlons", (0, 0, 1, 1)), ("merlons",), ("merlons",), ("merlons",))
+    # banner hung on the front above the door, just proud of the wall
+    m.quad((-0.9, 5.0, s + 0.05), (0.9, 5.0, s + 0.05), (0.9, 9.0, s + 0.05), (-0.9, 9.0, s + 0.05), "banner")
+    out.append(m)
+
+    # --- wall torch: an iron bracket out of a wall (the wall is z 0, front +Z) holding a short
+    # torch whose tip, where the flame sits, is at (0, 2.75, 0.4).
+    m = Model("torch_wall")
+    prism(m, (0, 2.2, 0.0), (0, 2.35, 0.32), 0.04, "iron")
+    prism(m, (0, 2.3, 0.36), (0, 2.75, 0.4), 0.06, "wood")
     out.append(m)
 
     # --- fence: 3 m x 1.2 m alpha cut-out, both sides.

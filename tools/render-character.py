@@ -8,7 +8,8 @@
 #
 # --config is a Python file defining CHARACTERS, a dict of character name -> settings. It can
 # call inbetweens(start, end, count), which this script provides.
-#   animations: [(animation, source action frames)]; fractional frames are in-betweens
+#   animations: [(animation, source action frames)]; fractional frames are in-betweens. An
+#     optional third item names the action to play for it (else the file's current one)
 #   size: the camera's view in Blender units, enough for the widest swing
 #   parts (optional): objects from other files (object name -> file in --parts)
 #   layers (optional): which of the file's layers ("Collection N") to render, if not all of them
@@ -16,6 +17,10 @@
 #   colours (optional): material -> colour (linear RGB), replacing its RGB node and texture colours
 #   platform (optional): the turntable object the character stands on (default "RenderPlatform")
 #   lamp (optional): the key light (default "Lamp"; a sun is added if the file has none)
+#   shadow (optional): the ground object that catches the shadow, if its material isn't "ShadowCatcher"
+#   rig (optional): the armature an animation's action is assigned to (default: every animated one)
+#   turn (optional): degrees to start the turntable at, so the character faces the camera at direction 0
+#   turntable (optional): objects to stand on the turntable that aren't parented to it
 # An object with a material named "ShadowCatcher" catches the ground shadow.
 # See examples/thirdPerson/tools/characters.py.
 #
@@ -125,7 +130,23 @@ def find_platform(character):
     platform = bpy.data.objects.get(name)
     if platform is None:
         sys.exit("No turntable object named %s to stand the character on (set 'platform' in the config)" % name)
+    platform.rotation_euler = (0, 0, 0)
+    bpy.context.view_layer.update()
+    for obj_name in character.get("turntable", []):
+        obj = bpy.data.objects[obj_name]
+        obj.parent = platform
+        obj.matrix_parent_inverse = platform.matrix_world.inverted()
     return platform
+
+
+def set_action(character, name):
+    action = bpy.data.actions[name]
+    rig = character.get("rig")
+    rigs = [bpy.data.objects[rig]] if rig else [o for o in bpy.data.objects if o.type == "ARMATURE" and o.animation_data]
+    for obj in rigs:
+        obj.animation_data_create().action = action
+        if obj.animation_data.action_slot is None and action.slots:
+            obj.animation_data.action_slot = action.slots[0]
 
 
 def setup_scene(args, character):
@@ -141,6 +162,8 @@ def setup_scene(args, character):
     for obj in bpy.data.objects:
         if any(slot.material and slot.material.name == "ShadowCatcher" for slot in obj.material_slots):
             obj.is_shadow_catcher = True
+    if character.get("shadow"):
+        bpy.data.objects[character["shadow"]].is_shadow_catcher = True
 
     world = sc.world
     world.use_nodes = True
@@ -155,8 +178,10 @@ def setup_scene(args, character):
     lamp.data.energy = 4.5
 
     cam = sc.camera
-    # Some files fly the camera round; ours stays put while the turntable turns
+    # Some files fly the camera (and lights) round; ours stay put while the turntable turns
     cam.animation_data_clear()
+    cam.parent = None
+    lamp.parent = None
     cam.data.type = "ORTHO"
     cam.data.ortho_scale = character["size"]
     target = Vector((0, 0, 0.95))
@@ -171,25 +196,30 @@ def setup_scene(args, character):
 
 
 def render_frames(sc, cam, args, character, frame_dir, platform):
-    frames = [f for _, fs in character["animations"] for f in fs]
+    # (action or None, frame) for each frame
+    frames = [(anim[2] if len(anim) > 2 else None, f) for anim in character["animations"] for f in anim[1]]
     if args.test:
         frames = frames[:1]
+    turn = character.get("turn", 0)
     paths = []
     rendered = args.directions // 2 + 1 if args.mirror else args.directions
     for d in range(rendered):
         # The character faces the camera at 0; turning it counter-clockwise puts the camera
         # clockwise round from its front, which is bucket d
-        platform.rotation_euler = (0, 0, math.radians(d * 360.0 / args.directions))
+        platform.rotation_euler = (0, 0, math.radians(turn + d * 360.0 / args.directions))
         row = []
-        for f in frames:
-            path = os.path.join(frame_dir, "d%02d_f%07.3f.png" % (d, f))
+        for action, f in frames:
+            prefix = "d%02d_%s_" % (d, action) if action else "d%02d_" % d
+            path = os.path.join(frame_dir, "%sf%07.3f.png" % (prefix, f))
             if not os.path.exists(path):
+                if action:
+                    set_action(character, action)
                 sc.frame_set(int(f), subframe=f - int(f))
                 sc.render.filepath = path
                 bpy.ops.render.render(write_still=True)
             row.append(path)
         paths.append(row)
-    platform.rotation_euler = (0, 0, 0)
+    platform.rotation_euler = (0, 0, math.radians(turn))
     sc.frame_set(1)
     feet = world_to_camera_view(sc, cam, Vector((0, 0, 0)))
     return paths, (feet.x * sc.render.resolution_x, (1 - feet.y) * sc.render.resolution_y)
@@ -249,7 +279,7 @@ def pack(paths, feet, out, columns, animations, packed, sheet_size):
         print("SHEET %s %dx%d cell %dx%d, %d directions x %d frames, %d columns, anchor (%.3f, %.3f), %.1f MB texture" % (
             out, cols * cw, rows * ch, cw, ch, len(paths), per_direction, cols, fx / cw, fy / ch, cols * cw * rows * ch * 4 / 1048576))
     offset = 0
-    for name, fs in animations:
+    for name, fs, *_ in animations:
         print("ANIM %s frames %d-%d" % (name, offset, offset + len(fs) - 1))
         offset += len(fs)
 

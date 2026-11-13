@@ -1,0 +1,442 @@
+import "../World.bs"
+import "../Night.bs"
+import "../SolidTracker.bs"
+import "../Entities/Fence.bs"
+import "../Entities/FogBand.bs"
+import "../Entities/Pig.bs"
+import "../Entities/PropModel.bs"
+import "../Entities/Torch.bs"
+import "../Entities/Townsfolk.bs"
+import "../Entities/TownWall.bs"
+import "../Town/TownMap.bs"
+import "../Town/TownsfolkTypes.bs"
+import "ThirdPersonScene.bs"
+
+' A building TownScene stands on a group of cells: its model, its size in metres, and how many
+' cells wide its door side is
+interface TownBuilding extends roAssociativeArray
+  model as string
+  width as float
+  height as float
+  depth as float
+  frontCells as integer
+end interface
+
+' The walled town the knight starts in, at night, laid out by src/maps/town.txt: houses, huts and
+' the keep round a cobbled square with a well, fenced fields, a pig pen, torches, and townsfolk
+' standing about. The gate in the south wall leads to the graveyard.
+class TownScene extends ThirdPersonScene
+
+  ' World units per ground texel; tools/town-ground.py paints 16 texels per 2 m cell
+  groundTexelScale as float = 4
+  wallHeight as float = World.metres(6)
+
+  walls as SolidTracker
+
+  private layout as TownLayout
+  private lights as BGE.Light[] = []
+  private startX as float = 0
+  private startZ as float = 0
+  private leaving as boolean = false
+  ' Where the well is, for the townsfolk to face
+  private wellCenter as BGE.Math.Vector
+
+  ' Bitmaps the other scenes use too, kept when the scene ends
+  private sharedBitmapPaths as roAssociativeArray = {
+    nightSky: "pkg:/sprites/night_sky.webp",
+    propsAtlas: "pkg:/models/props/props_atlas.png"
+  }
+  ' Bitmaps only this scene uses, freed when it ends
+  private bitmapPaths as roAssociativeArray = {
+    townGround: "pkg:/sprites/town_ground.webp"
+  }
+  private modelPaths as roAssociativeArray = {
+    house: "pkg:/models/props/house.obj",
+    hut: "pkg:/models/props/hut.obj",
+    keep: "pkg:/models/props/keep.obj",
+    well: "pkg:/models/props/well.obj",
+    tower: "pkg:/models/props/wall_tower.obj",
+    gate: "pkg:/models/props/wall_gate.obj",
+    torchWall: "pkg:/models/props/torch_wall.obj"
+  }
+  private buildingTypes as roAssociativeArray = {
+    H: {model: "house", width: 6, height: 9.6, depth: 8, frontCells: 3},
+    u: {model: "hut", width: 4, height: 4.6, depth: 5, frontCells: 2},
+    K: {model: "keep", width: 10, height: 14.6, depth: 10, frontCells: 5}
+  }
+  private people as TownsfolkType[] = TownsfolkTypes.people()
+  private pigType as TownsfolkType = TownsfolkTypes.pig()
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "TownScene"
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    for each kind in m.people
+      loader.loadSpriteAtlas(kind.atlas, `pkg:/sprites/${kind.atlas}.json`)
+    end for
+    loader.loadSpriteAtlas(m.pigType.atlas, `pkg:/sprites/${m.pigType.atlas}.json`)
+    for each paths in [m.sharedBitmapPaths, m.bitmapPaths]
+      for each name in paths
+        if m.game.Bitmaps[name] = invalid
+          loader.loadBitmap(name, paths[name])
+        end if
+      end for
+    end for
+    for each name in m.modelPaths
+      loader.load3dModel(name, m.modelPaths[name])
+    end for
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.readCommonArgs(args)
+    m.leaving = false
+    ' Off: rebuilding the occlusion map costs about what it saves here, as the town's open
+    ' streets hide little. `occlusion=1` turns it on.
+    m.game.canvas.renderer.occlusionCullingEnabled = args.occlusion = "1"
+    m.game.setBackgroundColor(&h080E28FF)
+    m.layout = TownMap.load()
+
+    groundBmp = m.game.getBitmap("townGround")
+    ground = new BGE.DrawablePlane(m, CreateObject("roRegion", groundBmp, 0, 0, groundBmp.GetWidth(), groundBmp.GetHeight()), {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.staticImage,
+      scale: BGE.Math.VectorOps.create(m.groundTexelScale, m.groundTexelScale, 1)
+    })
+    ground.isShaded = true
+    m.addDrawable("Ground", ground)
+    skyBmp = m.game.getBitmap("nightSky")
+    m.addDrawable("Sky", new BGE.DrawableSkybox(m, CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())))
+    m.lights = Night.addLights(m.game)
+
+    solids = new BGE.SolidWorld()
+    size = World.metres(TownMap.CELL_METRES)
+    solids.addBounds(-m.layout.cols * size / 2, -m.layout.rows * size / 2, m.layout.cols * size, m.layout.rows * size, size)
+    m.addWalls(solids)
+    m.addFences(solids)
+    for each group in m.layout.buildings
+      m.addBuilding(group, solids)
+    end for
+    m.addPigs()
+    ' Found first: people face the well, and the start is needed after the loop. (A nested
+    ' for each over the same array would share this loop's iterator.)
+    startCell = m.layout.cells[0]
+    m.wellCenter = invalid
+    for each cell in m.layout.cells
+      if cell.kind = "@"
+        startCell = cell
+      else if cell.kind = "W"
+        m.wellCenter = TownMap.cellCenter(m.layout, cell.col, cell.row)
+      end if
+    end for
+    for each cell in m.layout.cells
+      if cell.kind <> "@"
+        m.addCellContents(cell, solids)
+      end if
+    end for
+
+    gate = m.layout.gate
+    heading = 0
+    if args.from = "graveyard"
+      ' Back from the graveyard: just inside the gate, facing into town
+      spot = TownMap.cellCenter(m.layout, gate.col + (gate.cols - 1) / 2, gate.row - 2)
+    else if args.at <> invalid
+      ' Measuring: `at=<col>,<row>[,<heading in degrees>]` starts in another cell
+      colRow = args.at.split(",")
+      spot = TownMap.cellCenter(m.layout, colRow[0].toInt(), colRow[1].toInt())
+      if colRow.count() > 2
+        heading = BGE.Math.DegreesToRadians(colRow[2].toFloat())
+      end if
+    else
+      spot = TownMap.cellCenter(m.layout, startCell.col, startCell.row)
+    end if
+    m.startX = spot.x
+    m.startZ = spot.z
+    m.addKnight(m.startX, m.startZ, heading)
+    ' A short draw distance, its end hidden by the mist: every building in view costs a lot to
+    ' redraw while the camera moves
+    m.setUpCamera(World.metres(22), 0.5, 0)
+    ' `fog=0` turns the mist off, `fog=<style>` picks a look (see FogBands.style())
+    if args.fog <> "0"
+      m.addFog(FogBands.style(args.fog ?? ""))
+    end if
+
+    m.walls = new SolidTracker(solids)
+    m.walls.track(m.knight)
+  end sub
+
+  ' The wall round the town: a stone wall along the inside of each side (split round the gate),
+  ' a tower on each corner, the gatehouse, and torches either side of the gate
+  private sub addWalls(solids as BGE.SolidWorld)
+    atlas = m.game.getBitmap("propsAtlas")
+    ' The stone tile is the atlas's top left; copied out, so the wall can repeat it
+    stone = CreateObject("roBitmap", {width: 62, height: 62, AlphaEnable: false})
+    stone.DrawObject(-1, -1, atlas)
+    stone.Finish()
+    region = CreateObject("roRegion", stone, 0, 0, 62, 62)
+
+    size = World.metres(TownMap.CELL_METRES)
+    ' The inside faces of the one-cell ring of wall
+    west = -(m.layout.cols / 2 - 1) * size
+    east = -west
+    north = -(m.layout.rows / 2 - 1) * size
+    south = -north
+    gate = m.layout.gate
+    gateCenter = TownMap.groupCenter(m.layout, gate)
+    gateHalf = gate.cols * size / 2
+    sides = [
+      [{x: west, z: north}, {x: east, z: north}],
+      [{x: west, z: north}, {x: west, z: south}],
+      [{x: east, z: north}, {x: east, z: south}],
+      [{x: west, z: south}, {x: gateCenter.x - gateHalf, z: south}],
+      [{x: gateCenter.x + gateHalf, z: south}, {x: east, z: south}]
+    ]
+    for each side in sides
+      wall = new TownWall(m.game)
+      m.game.addEntity(wall, {from: BGE.Math.VectorOps.create(side[0].x, 0, side[0].z), to: BGE.Math.VectorOps.create(side[1].x, 0, side[1].z), height: m.wallHeight, region: region})
+    end for
+    ' The ring of wall cells is solid, apart from the gate's passage
+    half = m.layout.cols * size / 2
+    halfRows = m.layout.rows * size / 2
+    solids.addSolid(-half, -halfRows, half * 2, size)
+    solids.addSolid(-half, -halfRows, size, halfRows * 2)
+    solids.addSolid(half - size, -halfRows, size, halfRows * 2)
+    passage = World.metres(1.75)
+    solids.addSolid(-half, halfRows - size, gateCenter.x - passage + half, size)
+    solids.addSolid(gateCenter.x + passage, halfRows - size, half - gateCenter.x - passage, size)
+
+    for each tower in m.layout.towers
+      center = TownMap.groupCenter(m.layout, tower)
+      m.addModel("tower", center, 0, 4, 11, 4, true)
+      solids.addSolid(center.x - size, center.z - size, size * 2, size * 2)
+    end for
+    m.addModel("gate", gateCenter, 0, 8, 6, 1.5, true)
+    ' Torches on the wall either side of the gate, facing into town
+    for each side in [-1, 1]
+      m.addWallTorch(gateCenter.x + side * World.metres(2.8), south, BGE.Math.PI)
+    end for
+  end sub
+
+  ' A loaded model on the ground (sizes in metres), facing +z turned by `turn`
+  ' Bands of mist from inside the fade-out to the draw distance, so distant things fade into
+  ' mist rather than to the sky behind them (see FogBand)
+  private sub addFog(style as FogStyle)
+    region = FogBands.makeGradient(style.rgb, style.alpha)
+    for each distance in style.distances
+      band = new FogBand(m.game)
+      m.game.addEntity(band, {distance: World.metres(distance), height: World.metres(style.height), region: region})
+    end for
+  end sub
+
+  ' A loaded model on the ground (sizes in metres), facing +z turned by `turn`. Only the big
+  ' ones (occluders) block the camera: each blocker costs the boom a ray test.
+  private sub addModel(model as string, center as BGE.Math.Vector, turn as float, width as float, height as float, depth as float, occluder = false as boolean)
+    entity = new PropModel(m.game)
+    m.game.addEntity(entity, {
+      x: center.x,
+      z: center.z,
+      model: model,
+      width: World.metres(width),
+      height: World.metres(height),
+      depth: World.metres(depth),
+      turn: turn,
+      occluder: occluder,
+      blocksCamera: occluder
+    })
+  end sub
+
+  ' A house, hut or the keep, centred on its cells with its door toward the street
+  private sub addBuilding(group as TownGroup, solids as BGE.SolidWorld)
+    building = m.buildingTypes[group.kind] as TownBuilding
+    center = TownMap.groupCenter(m.layout, group)
+    turn = TownMap.doorTurn(m.layout, group, building.frontCells)
+    ' Big and solid, so they hide what's behind them from the renderer
+    m.addModel(building.model, center, turn, building.width, building.height, building.depth, true)
+    width = World.metres(building.width)
+    depth = World.metres(building.depth)
+    if Abs(Sin(turn)) > 0.5
+      width = World.metres(building.depth)
+      depth = World.metres(building.width)
+    end if
+    solids.addSolid(center.x - width / 2, center.z - depth / 2, width, depth)
+    if group.kind = "K"
+      ' Torches either side of the keep's door
+      forward = BGE.Math.VectorOps.create(Sin(turn), 0, Cos(turn))
+      doorX = center.x + forward.x * (width / 2)
+      doorZ = center.z + forward.z * (depth / 2)
+      for each side in [-1, 1]
+        m.addWallTorch(doorX + forward.z * side * World.metres(2.6), doorZ - forward.x * side * World.metres(2.6), turn)
+      end for
+    end if
+  end sub
+
+  ' A torch on a bracket fixed to a wall at x, z, facing out along `turn` (+z at 0)
+  private sub addWallTorch(x as float, z as float, turn as float)
+    m.addModel("torchWall", {x: x, y: 0, z: z}, turn, 0.2, 2.8, 0.2)
+    ' The model's tip is 0.4 m out from the wall and 2.75 m up
+    flame = new Torch(m.game)
+    m.game.addEntity(flame, {x: x + Sin(turn) * World.metres(0.4), y: World.metres(2.75), z: z + Cos(turn) * World.metres(0.4), kind: FlameKind.fire})
+  end sub
+
+  ' Straight runs of `f`, as in the graveyard: a picket fence along each, and a thin solid
+  private sub addFences(solids as BGE.SolidWorld)
+    atlas = m.game.getBitmap("propsAtlas")
+    pickets = CreateObject("roBitmap", {width: 62, height: 62, AlphaEnable: false})
+    pickets.DrawObject(-193, -193, atlas)
+    pickets.Finish()
+    region = CreateObject("roRegion", pickets, 0, 0, 62, 62)
+    thickness = World.metres(0.3)
+    for each fenceRun in m.fenceRuns()
+      first = TownMap.cellCenter(m.layout, fenceRun.col, fenceRun.row)
+      last = TownMap.cellCenter(m.layout, fenceRun.col + fenceRun.cols - 1, fenceRun.row + fenceRun.rows - 1)
+      solids.addSolid(first.x - thickness / 2, first.z - thickness / 2, last.x - first.x + thickness, last.z - first.z + thickness)
+      picketFence = new Fence(m.game)
+      m.game.addEntity(picketFence, {from: first, to: last, region: region})
+    end for
+  end sub
+
+  ' Runs of two or more `f` along each row, then each column
+  private function fenceRuns() as TownGroup[]
+    runs = [] as TownGroup[]
+    grid = m.layout.grid
+    for row = 0 to m.layout.rows - 1
+      col = 0
+      while col < m.layout.cols
+        length = 0
+        while col + length < m.layout.cols and grid[row][col + length] = "f"
+          length++
+        end while
+        if length > 1
+          runs.push({kind: "f", col: col, row: row, cols: length, rows: 1} as TownGroup)
+        end if
+        col += length + 1
+      end while
+    end for
+    for col = 0 to m.layout.cols - 1
+      row = 0
+      while row < m.layout.rows
+        length = 0
+        while row + length < m.layout.rows and grid[row + length][col] = "f"
+          length++
+        end while
+        if length > 1
+          runs.push({kind: "f", col: col, row: row, cols: 1, rows: length} as TownGroup)
+        end if
+        row += length + 1
+      end while
+    end for
+    return runs
+  end function
+
+  ' Pigs on each `P`, kept inside the mud (`x` and `P` cells) round them
+  private sub addPigs()
+    size = World.metres(TownMap.CELL_METRES)
+    minCol = m.layout.cols
+    maxCol = -1
+    minRow = m.layout.rows
+    maxRow = -1
+    for row = 0 to m.layout.rows - 1
+      for col = 0 to m.layout.cols - 1
+        kind = m.layout.grid[row][col]
+        if kind = "x" or kind = "P"
+          minCol = BGE.Math.Min(minCol, col)
+          maxCol = BGE.Math.Max(maxCol, col)
+          minRow = BGE.Math.Min(minRow, row)
+          maxRow = BGE.Math.Max(maxRow, row)
+        end if
+      end for
+    end for
+    if maxCol < 0
+      return
+    end if
+    corner = TownMap.cellCenter(m.layout, minCol, minRow)
+    far = TownMap.cellCenter(m.layout, maxCol, maxRow)
+    for each cell in m.layout.cells
+      if cell.kind = "P"
+        spot = TownMap.cellCenter(m.layout, cell.col, cell.row)
+        animal = new Pig(m.game)
+        m.game.addEntity(animal, {
+          type: m.pigType,
+          x: spot.x,
+          z: spot.z,
+          heading: TownMap.cellRandom(cell.col, cell.row, 1) * BGE.Math.PI * 2,
+          idleRate: 3 + TownMap.cellRandom(cell.col, cell.row, 2) * 2,
+          minX: corner.x - size * 0.3,
+          maxX: far.x + size * 0.3,
+          minZ: corner.z - size * 0.3,
+          maxZ: far.z + size * 0.3
+        })
+      end if
+    end for
+  end sub
+
+  ' Torches, townsfolk and the well
+  private sub addCellContents(cell as TownCell, solids as BGE.SolidWorld)
+    center = TownMap.cellCenter(m.layout, cell.col, cell.row)
+    if cell.kind = "l"
+      ' A flat post rather than a model: a model costs a full reprojection every frame the camera moves
+      flame = new Torch(m.game)
+      m.game.addEntity(flame, {x: center.x, y: World.metres(2), z: center.z, kind: FlameKind.fire, post: true})
+      half = World.metres(0.15)
+      solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+    else if cell.kind = "W"
+      m.addModel("well", center, 0, 1.8, 2.4, 1.8)
+      half = World.metres(0.9)
+      solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+    else if cell.kind = "n"
+      m.addPerson(cell, center, solids)
+    end if
+  end sub
+
+  ' A townsperson, picked and turned by a number fixed per cell so the town looks the same every
+  ' time: most face the well, give or take
+  private sub addPerson(cell as TownCell, center as BGE.Math.Vector, solids as BGE.SolidWorld)
+    kind = m.people[Int(TownMap.cellRandom(cell.col, cell.row, 3) * m.people.Count())]
+    heading = TownMap.cellRandom(cell.col, cell.row, 4) * BGE.Math.PI * 2
+    if m.wellCenter <> invalid
+      heading = BGE.Math.headingOf(BGE.Math.VectorOps.subtract(m.wellCenter, center)) + (TownMap.cellRandom(cell.col, cell.row, 5) - 0.5) * 2
+    end if
+    person = new Townsfolk(m.game)
+    m.game.addEntity(person, {
+      type: kind,
+      x: center.x,
+      z: center.z,
+      heading: heading,
+      idleRate: 3 + TownMap.cellRandom(cell.col, cell.row, 6) * 2
+    })
+    half = World.metres(0.3)
+    solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+  end sub
+
+  override sub onDestroy()
+    m.game.canvas.renderer.occlusionCullingEnabled = true
+    for each light in m.lights
+      m.game.removeLight(light)
+    end for
+    m.lights = []
+    for each name in m.bitmapPaths
+      m.game.unloadBitmap(name)
+    end for
+    for each name in m.modelPaths
+      m.game.unload3dModel(name)
+    end for
+  end sub
+
+  override sub onUpdate(dt as float)
+    m.director.viewHeading = m.cameraRig.heading
+    m.hud.update(dt, m.knight)
+    m.director.update(dt)
+    if m.leaving
+      return
+    end if
+    if TownMap.isInGroup(m.layout, m.layout.gate, m.knight.position.x, m.knight.position.z)
+      m.leaving = m.game.changeSceneWithFade("GraveyardScene", {from: "town"})
+    end if
+  end sub
+
+  protected override sub afterBodiesMoved(dt as float)
+    m.walls.resolve()
+  end sub
+
+end class
