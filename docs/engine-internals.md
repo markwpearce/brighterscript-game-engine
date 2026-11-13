@@ -340,7 +340,9 @@ intersect, which is how you'd implement, say, "bullets hit enemies but not other
 
 An `isStatic` entity never starts a check of its own - anything that moves into it finds it from
 its own side - so a town full of walls and buildings doesn't test them against each other every
-frame. Its colliders only reach the compositor when it moves or one of them changes: call
+frame. The mover gets the `onCollision()`; the static entity's own collision callbacks never
+fire, so don't make a trigger zone static. Its colliders only reach the compositor when it moves
+(a frame late if a tween or `onPostUpdate()` moved it) or one of them changes: call
 `Collider.markChanged()` after resizing or moving a static entity's collider.
 
 ## Garbage collection and entity lifecycle
