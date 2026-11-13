@@ -338,6 +338,13 @@ anywhere in engine code. `Collider.memberFlags`/`collidableFlags` are the same b
 `ifSprite.SetMemberFlags`/`SetCollidableFlags` - two colliders only register a hit if their flags
 intersect, which is how you'd implement, say, "bullets hit enemies but not other bullets."
 
+An `isStatic` entity never starts a check of its own - anything that moves into it finds it from
+its own side - so a town full of walls and buildings doesn't test them against each other every
+frame. The mover gets the `onCollision()`; the static entity's own collision callbacks never
+fire, so don't make a trigger zone static. Its colliders only reach the compositor when it moves
+(a frame late if a tween or `onPostUpdate()` moved it) or one of them changes: call
+`Collider.markChanged()` after resizing or moving a static entity's collider.
+
 ## Garbage collection and entity lifecycle
 
 `Game` runs BrightScript's garbage collector on a timer (`secondsBetweenGarbageCollection`, default
