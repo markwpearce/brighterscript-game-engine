@@ -61,4 +61,43 @@ CHARACTERS = {
         "colours": ORC_COLOURS,
         "size": 3.6,
     },
+    # Townsfolk, from the Flare NPC sources (art/npcs/), idle only: four frames across each idle loop
+    # MalePeasant.blend: the hoe is the short one on layer 12; HumanMale.001 duplicates HumanMale
+    "peasant_m": {
+        "animations": [("idle", inbetweens(0.39, 16.76, 5)[:4])],  # noqa: F821
+        "hide": ["HumanMale.001", "capelli1.001", "Plane.002"],
+        "platform": "RenderPlatform.002",
+        "lamp": "Lamp.001",
+        "shadow": "ShadowPlane.001",
+        "size": 2.4,
+    },
+    # FemalePeasant4.blend: green dress and broom
+    "peasant_f": {"animations": [("idle", [0, 1.5, 3, 4.5])], "size": 2.4},
+    # NobleWoman1.blend: red dress and fan
+    "noblewoman": {"animations": [("idle", [0, 1.5, 3, 4.5])], "size": 2.4},
+    # Nobleman.blend: the blue suit on layer 11 (layer 4 is a green one)
+    "nobleman": {
+        "animations": [("idle", [1, 2.5, 4, 5.5])],
+        "hide": ["Plane.003"],
+        "size": 2.4,
+    },
+    "old_man": {"animations": [("idle", [0, 1.25, 2.5, 3.75])], "size": 2.4},
+    # LuxPriestNPC.blend turns its camera and lights round the character, so it goes on the turntable
+    "priest": {
+        "animations": [("idle", [0, 1.5, 3, 4.5])],
+        "turntable": ["MaleArm", "HumanMale.001"],
+        "hide": ["Sun.001", "Sun.002"],
+        "lamp": "Sun",
+        "shadow": "ShadowPlane",
+        "size": 2.6,
+    },
+    # Pig.blend keeps each animation in its own action. Its Walk and Run are for another rig (they
+    # crumple it); Flare's walk is Armature.001Action, a 10-frame cycle
+    "pig": {
+        "animations": [
+            ("idle", [0, 37.5, 75, 112.5], "Idle"),
+            ("walk", inbetweens(0, 10, 9)[:8], "Armature.001Action"),  # noqa: F821
+        ],
+        "size": 2.4,
+    },
 }

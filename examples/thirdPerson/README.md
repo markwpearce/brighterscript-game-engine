@@ -1,13 +1,14 @@
 # Third Person
 
-A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD, at night under a full moon with torches on the pillars. The map, ripostes and checkpoints come later.
+A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a walled town to start in, a graveyard and a crypt below it, and a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD, at night under a full moon with torches on the pillars. The map, ripostes and checkpoints come later.
 
 ## Scenes
 
 | Scene | Deep link | What's there |
 | --- | --- | --- |
-| Field (`FieldScene`) | (default) | The arena for trying out combat: enemies keep spawning. |
-| Graveyard (`GraveyardScene`) | `scene=graveyard` | A fenced churchyard at night: graves, trees, a chapel, the gravedigger's hut and a well. Three skeletons stand among the graves and wake when you come within 10 m (or hit one); killed ones stay dead until you die. The mausoleum's door at the far end leads down into the crypt; the gap in the fence leads to the field. |
+| Town (`TownScene`) | (default; `at=<col>,<row>[,<heading>]`) | A walled town at night: houses, huts and a keep round a cobbled square with a well, fenced fields, a pig pen, torches, and townsfolk standing about (no talking yet). The gate in the south wall leads to the graveyard. |
+| Field (`FieldScene`) | `scene=field` | The arena for trying out combat: enemies keep spawning. Nothing leads here; it's for testing. |
+| Graveyard (`GraveyardScene`) | `scene=graveyard` | A fenced churchyard at night: graves, trees, a chapel, the gravedigger's hut and a well. Three skeletons stand among the graves and wake when you come within 10 m (or hit one); killed ones stay dead until you die. The mausoleum's door at the far end leads down into the crypt; the gap in the fence leads back to the town. |
 | Crypt (`CryptScene`) | `scene=crypt` (`at=<col>,<row>`) | A torch-lit stone maze. Its doorway leads back up to the graveyard. |
 
 ## Playing
@@ -41,7 +42,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - `Hud.bs`: health and stamina bars, top left in the title-safe area. Lost health stays as a pale chunk that drains after a moment.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
 - `Night.bs`: the moonlight (a cool `DirectionalLight` from where the moon is in the sky) and a blue `AmbientLight`. They shade the ground, the pillars and the fighters' sprites (`isShaded`, lit as cut-outs facing the camera, with `lightWrap` 0.5 so a back-lit figure stays dim rather than black).
-- `Entities/Torch.bs`: a flame (rising `DrawableParticles`, sized in pixels) and a `PointLight` that pools on the ground and lights the pillars and anyone near it: warm firelight, or cold blue spirit fire. The lights never flicker, because a changing light relights everything it reaches every frame.
+- `Entities/Torch.bs`: a flame and a `PointLight` that pools on the ground and lights the pillars and anyone near it: warm firelight, or cold blue spirit fire. The lights never flicker, because a changing light relights everything it reaches every frame. The flame is one unlit, looping `AnimatedImage` drawn once per kind at startup (squares that rise, shrink and cool), shared by every torch: a particle emitter per torch cost about 1 ms a frame each.
 - The sky is a `DrawableSkybox` panorama drawn by `tools/night-sky.py` (`python3 tools/night-sky.py src/sprites/night_sky.webp`, needs ImageMagick): deep blue with clouds, stars, a distant tree line and the moon, placed where `Night.bs`'s moonlight comes from. The far half of the 40 m draw distance fades out (`drawDistanceFadeFraction` 0.5) into the sky's dark below the horizon.
 - `Entities/HitEffect.bs`: a one-off particle burst where a blow lands (blood, bone dust, block and parry sparks), using `DrawableParticles` with its particles made by hand so they fan out round the ground direction of the hit.
 - `CombatDirector.bs`: knows the player and the enemies, pushes overlapping bodies apart (so nobody walks through anybody; lighter bodies move further), finds who a swing hits, hands out the attack slot (one at a time, with a gap between attacks, only to enemies in view).
@@ -54,9 +55,19 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - `Scenes/GraveyardScene.bs` and `Graveyard/GraveyardMap.bs`: the graveyard is a text grid of 2 m cells (`GraveyardMap.layout()`, its key in the comment above it), so editing the layout is editing text. Runs of `f` become one `Fence` each (a see-through, double-sided `DrawableWall` repeating the picket image every 3 m). Each group of `p`, `c` or `h` cells is one building (`PropModel`: a textured `.obj` in metres, scaled to the world, with a camera blocker), centred on its cells. Graves and trees (`Prop`, shaded camera-facing cut-outs) are jittered by a random number fixed per cell, so the layout looks the same every time. Fences, buildings, graves and trunks are solids in a `BGE.SolidWorld`, which `SolidTracker` keeps the knight and the skeletons out of (the crypt uses it for its walls too).
 - `Scenes/` pass `{from: ...}` to `changeSceneWithFade()`, so the next scene starts you at the matching entrance: up from the crypt you're outside the mausoleum door, down from the graveyard you're just inside the crypt's doorway.
 
+## Town
+
+- `src/maps/town.txt`: the town as a text grid of 2 m cells (its key is the comment at the top). `Town/TownMap.bs` reads it at runtime (`ReadAsciiFile`) and finds each connected block of a building kind, so there can be many houses. A building's door faces whichever end of it has more street or path next to it; a house or hut on its side (4×3 rather than 3×4 cells) turns to face east or west.
+- `tools/town-ground.py` (`python3 tools/town-ground.py`, needs Pillow and numpy) paints the ground from the same file into `src/sprites/town_ground.webp`, 16 texels per cell: cobbles, dirt, grass, crops, ploughed earth and mud, with ragged edges and a glow round each standing torch. `TownScene` draws it as one `staticImage` `DrawablePlane` at 4 world units per texel. A static plane gets no light pools, hence the baked glow.
+- The town has a 22 m draw distance, its end hidden by mist (`Entities/FogBand.bs`): a few see-through gradients standing on the ground at fixed distances ahead of the camera, so things fade into mist rather than into the sky. `fog=<style>` picks another look (`edge`, `thick`, `low`, `dark`; see `FogBands.style()`), `fog=0` turns it off. Occlusion culling is off in the town (its open streets hide too little to pay for it; `occlusion=1` turns it on).
+- Every prop (`PropModel`) is `isStatic`, so it never checks collisions itself, and only the big buildings block the camera.
+- The town wall is four inward-facing `DrawableWall`s (`Entities/TownWall.bs`), since the knight never sees the outside: far cheaper than the `wall_segment` models. The corner towers and the gate are models.
+- Torches stand on a flat post image (`Torch`'s `post` arg, far cheaper than a model while the camera moves) or hang from `torch_wall` brackets (by the gate and the keep's door), the flame at the bracket's tip.
+- `Entities/Townsfolk.bs` stands a person, picked and turned by a number fixed per cell (most face the well); only those within 10 m of the camera play their idle loop, the rest hold one frame. `Town/TownsfolkTypes.bs` has each sheet's anchor and frames. `Entities/Pig.bs` ambles round the pen.
+
 ## Graveyard art
 
-- `src/models/props/`: the mausoleum, hut, well and fence (and the town's walls, gate, tower and house, for later), one 256 px texture atlas for all of them, and the gravestones. All procedural, from `tools/make-props.py` (`python3 tools/make-props.py`, needs Pillow and numpy), which writes them there.
+- `src/models/props/`: the mausoleum, hut, well and fence, the town's walls, gate, tower, house, keep and torches, one 256×320 px texture atlas for all of them, and the gravestones. All procedural, from `tools/make-props.py` (`python3 tools/make-props.py`, needs Pillow and numpy), which writes them there.
 - `src/models/chapel/`: the chapel from `examples/terrain`.
 - `src/sprites/tree_<n>.webp`: five autumn trees. The originals are isometric sprites with a shadow drawn in; `node tools/trees.js <folder of Sprite_0N.png>` clears the shadow (near-black, at most half opaque), trims them and scales them to 320 px tall. Each trunk's foot is in `GraveyardScene.treeAnchors`, since some trees' low branches hang below it.
 
@@ -70,8 +81,15 @@ The knight and the monsters are re-rendered from Flare-style Blender sources (Cl
 | `skeleton.webp` | `skeleton_0.blend` | 26 | 112×75 | 6.8 MB |
 | `orc.webp` | `orc_flare_0.blend`, layer 2 (hand axe) | 25 | 105×83 | 5.6 MB |
 | `orc_heavy.webp` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 22 | 116×101 | 7.4 MB |
+| `peasant_m.webp` | [Flare NPCs](https://opengameart.org/content/flare-npcs-animated-pack-1) `art/npcs/MalePeasant.blend` (`--height 62`) | 4 (idle) | 62×68 | 1.0 MB |
+| `peasant_f.webp` | `FemalePeasant4.blend` (`--height 61`) | 4 | 73×68 | 1.0 MB |
+| `nobleman.webp` | `Nobleman.blend` (`--height 60 --mirror`) | 4 | 51×67 | 0.4 MB |
+| `noblewoman.webp` | `NobleWoman1.blend` (`--height 64`) | 4 | 64×65 | 1.0 MB |
+| `old_man.webp` | `OldMan.blend` (`--height 58`) | 4 | 57×63 | 0.9 MB |
+| `priest.webp` | `LuxPriestNPC.blend` (`--height 60`) | 4 | 76×79 | 1.1 MB |
+| `pig.webp` | `Pig.blend` (`--height 34 --mirror`): idle, and a walk from `Armature.001Action` | 12 | 40×23 | 0.3 MB |
 
-1. The sources are in `art/`, unchanged from their downloads. They're Blender 2.49 files, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
+1. The sources are in `art/` (the townsfolk in `art/npcs/`), unchanged from their downloads. The knight's and monsters' are Blender 2.49 files and the townsfolk's 2.79, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
 
 ```
 blender -b art/skeleton_0.blend --python tools/convert-flare.py -- <converted>/skeleton_0.blend
@@ -95,7 +113,7 @@ Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton
 ## Still needed
 
 - [ ] The four packed sheets take ~27 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
-- [ ] Ground texture, and the rest of the map: the town and the forest.
-- [ ] Townsfolk: the Flare NPC sheets are drawn from high above with shadows drawn in; they need re-rendering from their `.blend` files at 12 degrees, like the knight.
+- [ ] The rest of the map: the forest.
+- [ ] Talking to the townsfolk.
 - [ ] Ripostes and backstabs, checkpoints.
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).

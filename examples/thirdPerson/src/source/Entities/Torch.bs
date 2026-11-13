@@ -9,7 +9,7 @@ end enum
 
 ' How a FlameKind looks and lights its surroundings
 interface FlameStyle extends roAssociativeArray
-  ' RGB, particles fade from start to end
+  ' RGB, the flame cools from start to end
   startColor as integer
   endColor as integer
   ' RGB
@@ -18,7 +18,7 @@ interface FlameStyle extends roAssociativeArray
   range as float
 end interface
 
-' A flame (rising particles) with a point light that pools on the ground round it. The light
+' A flame (a looping animation of rising, fading squares) with a point light that pools on the ground round it. The light
 ' never moves or flickers: a changing light relights everything it reaches every frame.
 class Torch extends BGE.GameEntity
 
@@ -29,7 +29,8 @@ class Torch extends BGE.GameEntity
     m.name = "Torch"
   end sub
 
-  ' args: x, y, z (the base of the flame), kind (a FlameKind, fire by default)
+  ' args: x, y, z (the base of the flame), kind (a FlameKind, fire by default), post (optional:
+  ' true for a post from the ground up to the flame)
   override sub onCreate(args as roAssociativeArray)
     m.position = BGE.Math.VectorOps.create(args.x, args.y, args.z)
     kind = args.kind
@@ -54,27 +55,41 @@ class Torch extends BGE.GameEntity
       } as FlameStyle
     end if
 
-    particles = new BGE.DrawableParticles(m, BGE.ParticleShape.Rectangle, {
-      spawnRate: 16,
-      lifetime: 0.55,
-      lifetimeSpread: 0.2,
-      velocity: BGE.Math.VectorOps.create(0, World.metres(1.3), 0),
-      velocitySpreadAngleDegrees: 18,
-      velocitySpreadMagnitude: World.metres(0.4),
-      startColor: flame.startColor,
-      endColor: flame.endColor,
-      startAlpha: 240,
-      endAlpha: 0,
-      startSize: 26,
-      endSize: 8,
-      maxParticles: 10
+    ' One looping animated image, unlit as it's the light: a particle emitter cost about 1 ms a
+    ' frame per torch
+    frames = FlameFrames.get(m.game, kind, flame)
+    image = m.addAnimatedImage("flame", frames, {
+      drawMode: BGE.SceneObjectDrawMode.axisAligned,
+      animationDurationMs: FlameFrames.LOOP_MS
     })
-    m.addDrawable("flame", particles)
-    particles.start()
+    image.setAnchor(0.5, 1)
+    image.scale = BGE.Math.createScaleVector(World.metres(FlameFrames.WIDTH_METRES) / frames[0].GetWidth())
+    if args.post = true
+      m.addPost()
+    end if
 
     lightPosition = BGE.Math.VectorOps.create(m.position.x, m.position.y + World.metres(0.4), m.position.z)
     m.light = new BGE.PointLight(lightPosition, flame.range, flame.lightColor, flame.intensity)
     m.game.addLight(m.light)
+  end sub
+
+  ' A wooden post from the ground up to the flame, as a flat upright image
+  private sub addPost()
+    strip = m.game.getBitmap("torchPost")
+    if strip = invalid
+      strip = CreateObject("roBitmap", {width: 4, height: 16, AlphaEnable: false})
+      strip.Clear(&h3A2616FF)
+      ' a lit edge, so it reads as round
+      strip.DrawRect(1, 0, 1, 16, &h5C3C22FF)
+      strip.Finish()
+      m.game.loadBitmap("torchPost", strip)
+    end if
+    region = CreateObject("roRegion", strip, 0, 0, 4, 16)
+    post = m.addImage("post", region, {drawMode: BGE.SceneObjectDrawMode.axisAligned, isShaded: true, ambientBrightness: 0.3})
+    post.setAnchor(0.5, 1)
+    ' the entity sits at the flame's base
+    post.offset = BGE.Math.VectorOps.create(0, -m.position.y, 0)
+    post.scale = BGE.Math.createScaleVector(World.metres(0.18) / 4, m.position.y / 16)
   end sub
 
   override sub onDestroy()
@@ -87,3 +102,66 @@ class Torch extends BGE.GameEntity
   end sub
 
 end class
+
+' The flame's animation frames, drawn once per FlameKind and shared by every torch: squares
+' that rise, shrink and cool from startColor to endColor, staggered so the loop is seamless
+namespace FlameFrames
+
+  const FRAME_COUNT = 8
+  const LOOP_MS = 560
+  ' Pixels per frame, and the world width the frame is drawn at
+  const FRAME_WIDTH = 24
+  const FRAME_HEIGHT = 48
+  const WIDTH_METRES = 0.8
+  ' Squares in flight at once
+  const SQUARE_COUNT = 6
+
+  function get(game as BGE.Game, kind as string, flame as FlameStyle) as roRegion[]
+    name = "flameFrames_" + kind
+    strip = game.getBitmap(name)
+    if strip = invalid
+      strip = FlameFrames.draw(flame)
+      game.loadBitmap(name, strip)
+    end if
+    frames = [] as roRegion[]
+    for i = 0 to FlameFrames.FRAME_COUNT - 1
+      frames.push(CreateObject("roRegion", strip, i * FlameFrames.FRAME_WIDTH, 0, FlameFrames.FRAME_WIDTH, FlameFrames.FRAME_HEIGHT))
+    end for
+    return frames
+  end function
+
+  function draw(flame as FlameStyle) as roBitmap
+    width = FlameFrames.FRAME_WIDTH
+    height = FlameFrames.FRAME_HEIGHT
+    count = FlameFrames.SQUARE_COUNT
+    ' Written straight, not blended, so the frame keeps its own alpha
+    strip = CreateObject("roBitmap", {width: width * FlameFrames.FRAME_COUNT, height: height, AlphaEnable: false})
+    strip.Clear(0)
+    ' A fixed sideways drift per square, so the flame sways
+    drift = [-0.18, 0.12, -0.05, 0.2, -0.14, 0.07]
+    for frame = 0 to FlameFrames.FRAME_COUNT - 1
+      originX = frame * width + width / 2
+      ' oldest first, so the young bright squares at the base end up on top
+      for k = 0 to count - 1
+        age = FlameFrames.loopAge(frame, count - 1 - k, count)
+        size = 16 + (5 - 16) * age
+        rise = age * (height - 16)
+        x = originX + drift[k mod drift.Count()] * rise - size / 2
+        y = height - 2 - rise - size
+        color = BGE.lerpColorRGB(flame.startColor, flame.endColor, age)
+        alpha = Int(250 * (1 - age * age))
+        strip.DrawRect(Int(x), Int(y), Int(size), Int(size), (color << 8) + alpha)
+      end for
+    end for
+    strip.Finish()
+    return strip
+  end function
+
+  ' How far through its life (0-1) square `index` of `count` is in `frame`: each lives one
+  ' loop, the squares a fraction of a life apart
+  function loopAge(frame as integer, index as integer, count as integer) as float
+    age = frame / FlameFrames.FRAME_COUNT + index / count
+    return age - Int(age)
+  end function
+
+end namespace

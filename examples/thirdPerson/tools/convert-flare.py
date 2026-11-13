@@ -79,7 +79,14 @@ def main():
     for material in bpy.data.materials:
         if material.name != "ShadowCatcher":
             convert(material)
-    bpy.ops.file.pack_all()
+    # Pack each image on its own: some NPC files point at images only on their author's machine
+    # (used by hidden objects), which would make pack_all() fail outright
+    for image in bpy.data.images:
+        if image.source == "FILE" and not image.packed_file:
+            try:
+                image.pack()
+            except RuntimeError as error:
+                print("SKIPPED", image.name, error)
     bpy.ops.wm.save_as_mainfile(filepath=out, copy=True)
 
 
