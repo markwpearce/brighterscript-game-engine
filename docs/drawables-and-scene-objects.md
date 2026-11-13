@@ -480,7 +480,9 @@ gradually. Call `camera.snapDrawDistance()` after a camera cut to skip the trans
 
 Ground planes, skyboxes and parallax layers don't fade: they have no single distance from
 the camera. Everything else fades by its nearest corner, so a long wall stays solid while
-its near end is well inside the draw distance.
+its near end is well inside the draw distance. Set `Drawable.fadesWithDistance = false` to keep
+something drawn at full strength wherever it is - for example a mist layer that stands at a
+fixed distance ahead of the camera, inside the fade band, to hide where the scene ends.
 
 A ground plane always reaches the farthest any quality level would draw objects (1.5x
 `maxDrawDistance` with the default presets), so objects fade out on the ground rather than

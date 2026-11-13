@@ -19,6 +19,10 @@ namespace BGE
   class SceneObjectParticle extends SceneObject
     drawable as DrawableParticles
 
+    ' Scratch for drawRectanglesFast()
+    private fastPositions as BGE.Math.Vector[] = []
+    private fastProjected as float[] = []
+
     sub new(name as string, drawableObj as DrawableParticles)
       super(name, drawableObj, BGE.SceneObjectType.Particle)
       ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
@@ -57,21 +61,54 @@ namespace BGE
         return [m.worldPosition]
       end if
       isLine = m.drawable.shape = BGE.ParticleShape.Line
-      positions = [] as BGE.Math.Vector[]
       ' each particle keeps the sizes it spawned with, even if the emitter's change since
       maxSize = 0.0
+      first = particles[0].position
+      minX = first.x
+      maxX = minX
+      minY = first.y
+      maxY = minY
+      minZ = first.z ?? 0.0
+      maxZ = minZ
+      ' scalars rather than a list of points: this runs every frame for every emitter
       for each particle in particles
-        positions.push(particle.position)
-        maxSize = BGE.Math.max(maxSize, BGE.Math.max(particle.startSize, particle.endSize))
-        if isLine
-          positions.push(m.getLineParticleEnd(particle, BGE.Math.lerp(particle.startSize, particle.endSize, particle.age / particle.lifetime)))
+        size = particle.startSize
+        if particle.endSize > size
+          size = particle.endSize
         end if
+        if size > maxSize
+          maxSize = size
+        end if
+        point = particle.position
+        for pass = 0 to 1
+          if pass = 1
+            if not isLine
+              exit for
+            end if
+            point = m.getLineParticleEnd(particle, BGE.Math.lerp(particle.startSize, particle.endSize, particle.age / particle.lifetime))
+          end if
+          x = point.x
+          y = point.y
+          z = point.z ?? 0.0
+          if x < minX
+            minX = x
+          else if x > maxX
+            maxX = x
+          end if
+          if y < minY
+            minY = y
+          else if y > maxY
+            maxY = y
+          end if
+          if z < minZ
+            minZ = z
+          else if z > maxZ
+            maxZ = z
+          end if
+        end for
       end for
-      bounds = BGE.Math.getBounds(positions)
-      minPoint = bounds[0]
-      maxPoint = bounds[1]
-      minZ = minPoint.z ?? 0
-      maxZ = maxPoint.z ?? 0
+      minPoint = BGE.Math.VectorOps.create(minX, minY, minZ)
+      maxPoint = BGE.Math.VectorOps.create(maxX, maxY, maxZ)
       pad = m.getCanvasRadius(maxSize) * m.getWorldUnitsPerPixel(cameraObj, minPoint, maxPoint)
       x0 = minPoint.x - pad
       x1 = maxPoint.x + pad
@@ -135,9 +172,69 @@ namespace BGE
     end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      if m.drawable.shape = BGE.ParticleShape.Rectangle and rendererObj.camera.isPerspective()
+        return m.drawRectanglesFast(rendererObj)
+      end if
+      return m.drawEachParticle(rendererObj)
+    end function
+
+    ' Rectangle particles with a Camera3d: projected in one pass, with the color maths inline.
+    private function drawRectanglesFast(rendererObj as BGE.Renderer) as boolean
+      particles = m.drawable.particles
+      if particles.count() = 0
+        return false
+      end if
+      camera = rendererObj.camera
+      fadesWithDistance = camera.fadesWithDistance() and m.drawable.fadesWithDistance
+      positions = m.fastPositions
+      positions.Clear()
+      for each particle in particles
+        positions.push(particle.position)
+      end for
+      projected = m.fastProjected
+      if not (camera as BGE.Camera3d).projectPointsWithDepth(positions, projected)
+        ' one is behind the camera: project each, skipping those
+        return m.drawEachParticle(rendererObj)
+      end if
+      didDrawAny = false
+      i = 0
+      for each particle in particles
+        fade = 1.0
+        if fadesWithDistance
+          fade = camera.getDistanceFadeAlpha(particle.position)
+        end if
+        t = particle.age / particle.lifetime
+        if t > 1
+          t = 1
+        end if
+        a = particle.startColor
+        b = particle.endColor
+        red = (a >> 16) and &hFF
+        green = (a >> 8) and &hFF
+        blue = a and &hFF
+        red = Int(red + (((b >> 16) and &hFF) - red) * t + 0.5)
+        green = Int(green + (((b >> 8) and &hFF) - green) * t + 0.5)
+        blue = Int(blue + ((b and &hFF) - blue) * t + 0.5)
+        alpha = Int((particle.startAlpha + (particle.endAlpha - particle.startAlpha) * t) * fade + 0.5)
+        if alpha > 255
+          alpha = 255
+        else if alpha < 0
+          alpha = 0
+        end if
+        size = particle.startSize + (particle.endSize - particle.startSize) * t
+        ' DrawPoint: a centred square, about twice as fast as DrawRect on device
+        if fade > 0
+          didDrawAny = rendererObj.drawSquare(projected[i], projected[i + 1], size, (red << 24) + (green << 16) + (blue << 8) + alpha) or didDrawAny
+        end if
+        i += 3
+      end for
+      return didDrawAny
+    end function
+
+    private function drawEachParticle(rendererObj as BGE.Renderer) as boolean
       didDrawAny = false
 
-      fadesWithDistance = rendererObj.camera.fadesWithDistance()
+      fadesWithDistance = rendererObj.camera.fadesWithDistance() and m.drawable.fadesWithDistance
       for each particle in m.drawable.particles
         particleFade = 1.0
         if fadesWithDistance
@@ -152,6 +249,9 @@ namespace BGE
         end if
 
         t = particle.age / particle.lifetime
+        if t > 1
+          t = 1
+        end if
         color = BGE.lerpColorRGB(particle.startColor, particle.endColor, t)
         alpha = BGE.Math.lerp(particle.startAlpha, particle.endAlpha, t) / 255.0
         rgba = BGE.RGBAtoRGBA((color >> 16) and &hFF, (color >> 8) and &hFF, color and &hFF, alpha)
@@ -161,8 +261,7 @@ namespace BGE
         if m.drawable.shape = BGE.ParticleShape.Line
           didDrawAny = m.drawLineParticle(rendererObj, particle, canvasPos, size, rgba) or didDrawAny
         else if m.drawable.shape = BGE.ParticleShape.Rectangle
-          half = size / 2.0
-          didDrawAny = rendererObj.drawRectangle(canvasPos.x - half, canvasPos.y - half, size, size, rgba) or didDrawAny
+          didDrawAny = rendererObj.drawSquare(canvasPos.x, canvasPos.y, size, rgba) or didDrawAny
         else if m.drawable.shape = BGE.ParticleShape.Image and m.drawable.image <> invalid
           regionToDraw = m.drawable.image
           frameRegions = m.drawable.getFrameRegions()
