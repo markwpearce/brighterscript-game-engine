@@ -107,6 +107,11 @@ namespace BGE
     private paused = false
     sortedEntities as GameEntity[] = []
 
+    ' Ids of entities with a collider the compositor hasn't caught up with - see markColliderUnsynced()
+    private unsyncedColliderEntityIds as roAssociativeArray = {}
+    ' Reused by collectColliders() for Collider.getWorldBounds()
+    private colliderBoundsScratch as float[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
     ' Held buttons, keyed by remote id and button code ("<remoteId>|<code>" -> {remoteId, buttonCode, timer}),
     ' so a gamepad holding several buttons at once repeats each of them.
     private remoteHeldButtons = {}
@@ -903,7 +908,7 @@ namespace BGE
           ' end if
 
           ' --------------Adjust compositor collider at end of loop so collider is accurate for collision checking from other objects-------------
-          if m.isValidEntity(entity) and (not entity.isStatic or entity.movedLastFrame() or m.hasUnsyncedCollider(entity))
+          if m.isValidEntity(entity) and (not entity.isStatic or entity.movedLastFrame() or m.unsyncedColliderEntityIds.DoesExist(entity.id))
             m.adjustEntityCompositorObjectPostCollision(entity)
           end if
         end if
@@ -916,17 +921,13 @@ namespace BGE
     end sub
 
 
-    ' Whether any of a static entity's colliders hasn't reached the compositor since it was
-    ' added or last changed (see Collider.markChanged())
-    private function hasUnsyncedCollider(entity as GameEntity) as boolean
-      for each colliderKey in entity.colliders
-        myCollider = entity.colliders[colliderKey] as Collider
-        if myCollider <> invalid and not myCollider.compositorSynced
-          return true
-        end if
-      end for
-      return false
-    end function
+    ' Used internal to GameEntity/Collider - flags an entity whose colliders the compositor
+    ' hasn't caught up with, so a static entity syncs them next frame (see Collider.markChanged())
+    '
+    ' @param {string} entityId - id of the entity that owns the collider
+    sub markColliderUnsynced(entityId as string)
+      m.unsyncedColliderEntityIds[entityId] = true
+    end sub
 
     ' Checks if an entity is still valid
     '
@@ -1267,6 +1268,9 @@ namespace BGE
     private function adjustEntityCompositorObjectPostCollision(entity as GameEntity) as boolean
       if not m.isValidEntity(entity)
         return false
+      end if
+      if m.unsyncedColliderEntityIds.Count() > 0
+        m.unsyncedColliderEntityIds.Delete(entity.id)
       end if
       for each colliderKey in entity.colliders
         myCollider = entity.colliders[colliderKey]
@@ -2062,7 +2066,40 @@ namespace BGE
     ' @param {integer} [collidableFlags=&hFFFFFFFF] - only colliders whose memberFlags overlap this mask
     ' @return {BGE.EntityCollider[]}
     function getColliders(collidableFlags = &hFFFFFFFF as integer) as BGE.EntityCollider[]
+      return m.collectColliders(collidableFlags, invalid)
+    end function
+
+
+    ' Like getColliders(), but only the colliders whose world bounds (Collider.getWorldBounds())
+    ' touch a box, plus any without bounds. Cheaper when most colliders are far away, as
+    ' only the ones kept are allocated.
+    '
+    ' @param {float[]} area - minX, minY, minZ, maxX, maxY, maxZ
+    ' @param {integer} [collidableFlags=&hFFFFFFFF] - only colliders whose memberFlags overlap this mask
+    ' @return {BGE.EntityCollider[]}
+    function getCollidersInBox(area as float[], collidableFlags = &hFFFFFFFF as integer) as BGE.EntityCollider[]
+      return m.collectColliders(collidableFlags, area)
+    end function
+
+
+    private function collectColliders(collidableFlags as integer, area as dynamic) as BGE.EntityCollider[]
       found = []
+      useArea = invalid <> area
+      minX = 0.0
+      minY = 0.0
+      minZ = 0.0
+      maxX = 0.0
+      maxY = 0.0
+      maxZ = 0.0
+      if useArea
+        minX = area[0]
+        minY = area[1]
+        minZ = area[2]
+        maxX = area[3]
+        maxY = area[4]
+        maxZ = area[5]
+      end if
+      bounds = m.colliderBoundsScratch
       for i = m.sortedEntities.Count() to 0 step -1
         entity = invalid as BGE.GameEntity
         if i = m.sortedEntities.Count()
@@ -2074,7 +2111,11 @@ namespace BGE
           for each colliderKey in entity.colliders
             myCollider = entity.colliders[colliderKey] as Collider
             if invalid <> myCollider and myCollider.enabled and (myCollider.memberFlags and collidableFlags) <> 0
-              found.Push({entity: entity, collider: myCollider})
+              if not useArea or not myCollider.getWorldBounds(entity.position, bounds)
+                found.Push({entity: entity, collider: myCollider})
+              else if bounds[0] <= maxX and bounds[3] >= minX and bounds[1] <= maxY and bounds[4] >= minY and bounds[2] <= maxZ and bounds[5] >= minZ
+                found.Push({entity: entity, collider: myCollider})
+              end if
             end if
           end for
         end if
@@ -2280,6 +2321,9 @@ namespace BGE
         entityId = entity.id
         if invalid <> entity.clearAllColliders
           entity.clearAllColliders()
+        end if
+        if invalid <> entityId
+          m.unsyncedColliderEntityIds.Delete(entityId)
         end if
         if invalid <> entity.onDestroy and callOnDestroy
           entity.onDestroy()
