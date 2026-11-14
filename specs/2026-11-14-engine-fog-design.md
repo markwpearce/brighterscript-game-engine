@@ -24,8 +24,10 @@ town (24.7 fps with bands vs 35.2 with no fog, measured 2026-11-14).
   outline: their strips carry on past the draw distance as flat fog-coloured strips.
 - Two PRs: the engine (fog, silhouettes, walls, tests, rendererTest demo and benchmark, docs),
   then thirdPerson's town switching to it, after the look is signed off from device screenshots.
-- No FPS loss beyond noise (~0.5 fps) against no fog at the same draw distance, and in the town,
-  engine fog at a shorter draw distance beats no fog at today's 44 m.
+- No FPS loss beyond noise (~0.5 fps) against no fog at the same draw distance, ideally. A 2-5%
+  drop is acceptable if it looks better. The draw distance may come down, as long as buildings and
+  walls past it still block the skybox. In the town, engine fog at a shorter draw distance should
+  beat no fog at today's 44 m.
 
 ## Non-goals
 
