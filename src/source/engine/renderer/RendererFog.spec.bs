@@ -1,8 +1,11 @@
 import "../../math/vector.bs"
+import "../drawables/DrawableRectangle.bs"
 import "../Game.bs"
+import "../GameEntity.bs"
 import "cameras/Camera3d.bs"
 import "Fog.bs"
 import "Renderer.bs"
+import "sceneObjects/SceneObject.bs"
 
 namespace tests
 
@@ -84,6 +87,147 @@ namespace tests
       m.camera.orientation = BGE.Math.VectorOps.create(0, -1, 0)
       m.renderFrames()
       m.assertEqual(0, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    ' A 400 wide, 600 tall rectangle facing the camera, centred on x at depth -z, spanning the
+    ' eye's height (row 360), on a static entity
+    private function newTower(z as float, casts = true as boolean, x = 0.0 as float) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "tower", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(x - 200, 300, z)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 400, 600, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace, castsFogSilhouette: casts})
+      return drawable.addToRenderer(m.renderer)
+    end function
+
+    @describe("silhouettes")
+
+    @it("leaves fog colour where a caster past the draw distance stands")
+    function _()
+      m.turnOnFog(0)
+      m.newTower(-1500)
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 360))
+    end function
+
+    @it("leaves the sky for a drawable that doesn't cast")
+    function _()
+      m.turnOnFog(0)
+      m.newTower(-1500, false)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h000000FF, m.pixelAt(640, 360))
+    end function
+
+    @it("draws nothing with fog off")
+    function _()
+      m.newTower(-1500)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h000000FF, m.pixelAt(640, 360))
+    end function
+
+    @it("draws nothing for a caster past the reach or behind the camera")
+    function _()
+      m.turnOnFog(0)
+      m.newTower(-2500)
+      m.newTower(500)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+    end function
+
+    @it("draws no box while the caster is still mostly opaque")
+    function _()
+      m.turnOnFog(0)
+      m.newTower(-500)
+      ' in the fade band at alpha 2/3: above silhouetteStartAlpha
+      m.newTower(-900)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+    end function
+
+    @it("fades the box in as the caster fades out")
+    function _()
+      m.turnOnFog(0)
+      ' the band is 850 to 1000: alpha 0.25 at 962.5, so the box is half solid
+      m.newTower(-962.5)
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual((&h1C2842 << 8) + 127, m.renderer.fogSilhouetteRgbas[0])
+    end function
+
+    @it("draws a solid box past the draw distance with fading off, and none inside")
+    function _()
+      m.camera.drawDistanceFadeFraction = 0
+      m.turnOnFog(0)
+      m.newTower(-1500)
+      m.newTower(-990)
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h1C2842FF, m.renderer.fogSilhouetteRgbas[0])
+    end function
+
+    @it("draws no box for a caster that reaches behind the camera")
+    function _()
+      m.camera.drawDistanceFadeFraction = 0
+      m.turnOnFog(0)
+      ' 2600 long along z, from 200 behind the eye to 2400 ahead: its centre is past the draw distance
+      entity = new BGE.GameEntity(m.game, {name: "longWall", isStatic: true})
+      ' it runs from its position along -z
+      entity.position = BGE.Math.VectorOps.create(200, 300, 200)
+      entity.rotation = BGE.Math.VectorOps.create(0, -BGE.Math.PI / 2, 0)
+      entity.updateTransformationMatrix()
+      drawable = new BGE.DrawableRectangle(entity, 2600, 600, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace, castsFogSilhouette: true})
+      drawable.addToRenderer(m.renderer)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+    end function
+
+    @it("repeats the boxes without projecting while the camera is still")
+    function _()
+      m.turnOnFog(0)
+      m.newTower(-1500)
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesProjectedLastFrame)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesProjectedLastFrame)
+      m.assertEqual(1, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 360))
+      m.camera.position.x += 5
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesProjectedLastFrame)
+    end function
+
+    @it("redraws the boxes in a new fog colour with the camera still")
+    function _()
+      m.turnOnFog(0)
+      m.newTower(-1500)
+      m.renderFrames(2)
+      m.camera.fog.color = &h405060
+      m.renderFrames()
+      m.assertEqual(&h405060FF, m.pixelAt(640, 360))
+    end function
+
+    @it("notices a caster flag set after adding")
+    function _()
+      m.turnOnFog(0)
+      tower = m.newTower(-1500, false)
+      m.renderFrames(2)
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+      tower.drawable.castsFogSilhouette = true
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesDrawnLastFrame)
+    end function
+
+    @it("forgets a removed caster")
+    function _()
+      m.turnOnFog(0)
+      tower = m.newTower(-1500)
+      m.renderFrames(2)
+      m.renderer.removeSceneObject(tower)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h000000FF, m.pixelAt(640, 360))
     end function
 
   end class
