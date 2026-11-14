@@ -25,15 +25,31 @@ namespace BGE.BSP
   ' Builds a classification-only BSP tree over static quads - no polygon splitting (see
   ' the design spec for why). Picks the first item as each node's splitting plane and
   ' partitions every other remaining item to front/back by which side of that plane its
-  ' center falls on.
+  ' center falls on. Each node gets an `id` (0 up, in build order) for findLeaf().
   '
   ' @param {BGE.BSP.StaticItem[]} items
-  ' @return {object} `invalid` for an empty list, else `{item, front, back}`
-  function buildTree(items as BGE.BSP.StaticItem[]) as object
+  ' @param {object} counter internal: shares the next node id across the recursion
+  ' @return {object} `invalid` for an empty list, else `{item, front, back, id}`
+  function buildTree(items as BGE.BSP.StaticItem[], counter = invalid as object) as object
     if items.count() = 0
       return invalid
     end if
+    if counter = invalid
+      counter = {next: 0}
+    end if
     pivot = items[0]
+    normal = pivot.planeNormal
+    point = pivot.planePoint
+    ' the plane as n.x*x + n.y*y + n.z*z = d, so classifying a point is one inline expression
+    node = {
+      item: pivot,
+      id: counter.next,
+      nx: normal.x,
+      ny: normal.y,
+      nz: normal.z,
+      d: normal.x * point.x + normal.y * point.y + normal.z * point.z
+    }
+    counter.next++
     front = []
     back = []
     for i = 1 to items.count() - 1
@@ -45,12 +61,80 @@ namespace BGE.BSP
         back.push(item)
       end if
     end for
-    return {
-      item: pivot,
-      front: buildTree(front),
-      back: buildTree(back)
-    }
+    node.front = buildTree(front, counter)
+    node.back = buildTree(back, counter)
+    return node
   end function
+
+  ' Which leaf of the tree a point falls in: an index into the buckets collectLeafOrder()
+  ' takes. Depends only on the point and the tree, so callers can cache it while neither
+  ' changes. An empty tree has the one leaf 0.
+  '
+  ' @param {object} root result of buildTree(), or invalid
+  ' @return {integer} leaf index, 0 to twice the node count - 1
+  function findLeaf(root as object, x as float, y as float, z as float) as integer
+    node = root
+    leaf = 0
+    while node <> invalid
+      if node.nx * x + node.ny * y + node.nz * z >= node.d
+        leaf = node.id * 2
+        node = node.front
+      else
+        leaf = node.id * 2 + 1
+        node = node.back
+      end if
+    end while
+    return leaf
+  end function
+
+  ' Walks the tree back-to-front relative to the camera, appending each static item's
+  ' sceneObj to result, with each leaf's bucket (buckets[findLeaf(...)], already in draw
+  ' order, or invalid when empty) appended where the leaf falls.
+  '
+  ' @param {object} node result of buildTree(), or invalid
+  ' @param {BGE.Math.Vector} cameraPosition
+  ' @param {object[]} buckets arrays of payloads by leaf index
+  ' @param {dynamic[]} result appended to in draw order
+  sub collectLeafOrder(node as object, cameraPosition as BGE.Math.Vector, buckets as object[], result as dynamic[])
+    if node = invalid
+      if buckets[0] <> invalid
+        result.append(buckets[0])
+      end if
+      return
+    end if
+    collectNodeOrder(node, cameraPosition.x, cameraPosition.y, cameraPosition.z, buckets, result)
+  end sub
+
+  sub collectNodeOrder(node as object, cx as float, cy as float, cz as float, buckets as object[], result as dynamic[])
+    frontLeaf = node.id * 2
+    if node.nx * cx + node.ny * cy + node.nz * cz >= node.d
+      ' camera in front: the back subtree is farther, so it draws first
+      firstChild = node.back
+      firstLeaf = frontLeaf + 1
+      secondChild = node.front
+      secondLeaf = frontLeaf
+    else
+      firstChild = node.front
+      firstLeaf = frontLeaf
+      secondChild = node.back
+      secondLeaf = frontLeaf + 1
+    end if
+    if firstChild = invalid
+      if buckets[firstLeaf] <> invalid
+        result.append(buckets[firstLeaf])
+      end if
+    else
+      collectNodeOrder(firstChild, cx, cy, cz, buckets, result)
+    end if
+    result.push(node.item.sceneObj)
+    if secondChild = invalid
+      if buckets[secondLeaf] <> invalid
+        result.append(buckets[secondLeaf])
+      end if
+    else
+      collectNodeOrder(secondChild, cx, cy, cz, buckets, result)
+    end if
+  end sub
 
   ' Walks the tree back-to-front relative to cameraPosition, appending each static
   ' item's sceneObj payload to result in the correct draw position, with dynamicItems
@@ -64,46 +148,22 @@ namespace BGE.BSP
   ' @param {dynamic[]} result appended to in draw order - not returned, so a caller can
   '   reuse one array across a partial traversal if ever needed
   sub collectDrawOrder(node as object, cameraPosition as BGE.Math.Vector, dynamicItems as BGE.BSP.DynamicItem[], result as dynamic[])
-    if node = invalid
-      appendLeafDynamicItems(dynamicItems, result)
-      return
-    end if
-
-    frontDynamic = []
-    backDynamic = []
-    for each dynItem in dynamicItems
-      side = BGE.Math.distanceFromPlane(node.item.planePoint, node.item.planeNormal, dynItem.position)
-      if side >= 0
-        frontDynamic.push(dynItem)
-      else
-        backDynamic.push(dynItem)
-      end if
-    end for
-
-    cameraSide = BGE.Math.distanceFromPlane(node.item.planePoint, node.item.planeNormal, cameraPosition)
-    if cameraSide >= 0
-      ' Camera is in front of this node's plane - the back subtree is farther away, so
-      ' it draws first (back-to-front painter's order).
-      collectDrawOrder(node.back, cameraPosition, backDynamic, result)
-      result.push(node.item.sceneObj)
-      collectDrawOrder(node.front, cameraPosition, frontDynamic, result)
-    else
-      collectDrawOrder(node.front, cameraPosition, frontDynamic, result)
-      result.push(node.item.sceneObj)
-      collectDrawOrder(node.back, cameraPosition, backDynamic, result)
-    end if
-  end sub
-
-  function appendLeafDynamicItems(dynamicItems as BGE.BSP.DynamicItem[], result as dynamic[]) as void
     ' Ascending sort = farthest-first (back-to-front painter's order), matching
     ' Renderer.bs's own depth-sort convention. Note: the pinned brs-node@2.6.0 test
     ' binary used by `npm run test:ci` has a confirmed numeric-sortBy bug that sorts
     ' descending instead of ascending - real Roku/brs-engine hardware sorts ascending
     ' as documented. See issue #230.
     dynamicItems.sortBy("depthKey")
+    buckets = []
     for each dynItem in dynamicItems
-      result.push(dynItem.sceneObj)
+      position = dynItem.position
+      leaf = findLeaf(node, position.x, position.y, position.z)
+      if buckets[leaf] = invalid
+        buckets[leaf] = []
+      end if
+      buckets[leaf].push(dynItem.sceneObj)
     end for
-  end function
+    collectLeafOrder(node, cameraPosition, buckets, result)
+  end sub
 
 end namespace
