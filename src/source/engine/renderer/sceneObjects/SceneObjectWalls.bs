@@ -47,6 +47,18 @@ namespace BGE
     ' A white column, tinted with the fog colour for fog strips
     private fogColumn as object = invalid
     private fogColumnHeight as float = 64
+    ' Fog strips, merged up to maxFogRun neighbours on a wall: foot x and y, width, vertical
+    ' scale, lean and RGBA each (see buildFogRuns())
+    private fogRunX = [] as float[]
+    private fogRunY = [] as float[]
+    private fogRunWidth = [] as float[]
+    private fogRunScale = [] as float[]
+    private fogRunAngle = [] as float[]
+    private fogRunRgbas = [] as integer[]
+    private fogRunRgba as integer = 0
+    private maxFogRun as integer = 4
+    ' Per piece, whether it's past the draw distance, so only a fog strip
+    private pieceFogOnly = [] as boolean[]
     ' The fog the shading was worked out for (-1 colour for none)
     private shadeFogColor as integer = -1
     private shadeFogStart as float = -1.0
@@ -304,7 +316,16 @@ namespace BGE
       fogScale = 1.0 / m.fogColumnHeight
       pLength = view.pieceLength
       drawn = 0
-      fogDrawn = 0
+      fogDrawn = m.fogRunX.count()
+      runX = m.fogRunX
+      runY = m.fogRunY
+      runWidth = m.fogRunWidth
+      runScale = m.fogRunScale
+      runAngle = m.fogRunAngle
+      runRgbas = m.fogRunRgbas
+      for i = 0 to fogDrawn - 1
+        draw2d.DrawTransformedObject(runX[i], runY[i], runAngle[i], runWidth[i], runScale[i], fogColumn, runRgbas[i])
+      end for
       for k = view.pieceCount - 1 to 0 step -1
         fogRgba = pFog[k]
         if fogRgba <> 0
@@ -393,11 +414,13 @@ namespace BGE
       pColumn = m.pieceColumn
       pScaleY = m.pieceScaleY
       pFog = m.pieceFogRgba
+      pFogOnly = m.pieceFogOnly
       for k = rgbas.count() to view.pieceCount - 1
         rgbas.push(base)
         pColumn.push(invalid)
         pScaleY.push(1.0)
         pFog.push(0)
+        pFogOnly.push(false)
       end for
       ' fog strips: crossfading in under pieces whose fade alpha is below fogStart, and alone past
       ' the draw distance
@@ -446,9 +469,10 @@ namespace BGE
         end if
         depth = pDepth[k]
         pFog[k] = 0
+        pFogOnly[k] = false
         if fogs and depth >= far
-          ' past the draw distance: the fog strip alone
-          pFog[k] = fogBase + &hFF
+          ' past the draw distance: only a fog strip, merged with its neighbours below
+          pFogOnly[k] = true
           pColumn[k] = invalid
           rgbas[k] = shade
         else
@@ -480,6 +504,104 @@ namespace BGE
           end if
         end if
       end for
+      m.fogRunRgba = fogBase + &hFF
+      m.buildFogRuns()
+    end sub
+
+    ' Merges fog strips into runs of up to maxFogRun touching strips of one wall, each as tall
+    ' as the tallest of them: the fog-only pieces past the draw distance, solid, and the
+    ' crossfading ones under fading pieces, at their mean alpha. They're drawn first: the solid
+    ' ones are behind every textured strip, and a crossfading one under its own piece only
+    ' differs where a farther fading piece shows through, which it then covers instead.
+    private sub buildFogRuns()
+      view = m.view
+      runX = m.fogRunX
+      runY = m.fogRunY
+      runWidth = m.fogRunWidth
+      runScale = m.fogRunScale
+      runAngle = m.fogRunAngle
+      runX.Clear()
+      runY.Clear()
+      runWidth.Clear()
+      runScale.Clear()
+      runAngle.Clear()
+      runRgbas = m.fogRunRgbas
+      runRgbas.Clear()
+      solid = m.fogRunRgba
+      fogBase = solid - &hFF
+      pFog = m.pieceFogRgba
+      pFogOnly = m.pieceFogOnly
+      pSeg = view.pieceSegment
+      pX = view.pieceX
+      pY = view.pieceY
+      pWidth = view.pieceWidth
+      pLength = view.pieceLength
+      pAngle = view.pieceAngle
+      invHeight = 1.0 / m.fogColumnHeight
+      count = view.pieceCount
+      maxRun = m.maxFogRun
+      k = 0
+      while k < count
+        fogOnly = pFogOnly[k]
+        if fogOnly or pFog[k] <> 0
+          alphas = 0
+          if not fogOnly
+            alphas = pFog[k] and &hFF
+            pFog[k] = 0
+          end if
+          seg = pSeg[k]
+          minX = pX[k]
+          maxX = minX + pWidth[k]
+          foot = pY[k]
+          top = foot - pLength[k]
+          angles = pAngle[k]
+          n = 1
+          j = k + 1
+          while j < count and n < maxRun
+            if pFogOnly[j] <> fogOnly or pSeg[j] <> seg or (not fogOnly and pFog[j] = 0)
+              exit while
+            end if
+            x = pX[j]
+            right = x + pWidth[j]
+            ' touching the run on either side
+            if x > maxX + 1.5 or right < minX - 1.5
+              exit while
+            end if
+            if x < minX
+              minX = x
+            end if
+            if right > maxX
+              maxX = right
+            end if
+            if pY[j] > foot
+              foot = pY[j]
+            end if
+            if pY[j] - pLength[j] < top
+              top = pY[j] - pLength[j]
+            end if
+            angles += pAngle[j]
+            if not fogOnly
+              alphas += pFog[j] and &hFF
+              pFog[j] = 0
+            end if
+            n++
+            j++
+          end while
+          runX.push(minX)
+          runY.push(foot)
+          runWidth.push(maxX - minX)
+          runScale.push((foot - top) * invHeight)
+          runAngle.push(angles / n)
+          if fogOnly
+            runRgbas.push(solid)
+          else
+            runRgbas.push(fogBase + int(alphas / n))
+          end if
+          k = j
+        else
+          k++
+        end if
+      end while
     end sub
 
     ' Lit colors along segment n for the side the eye is on, from the cache.
