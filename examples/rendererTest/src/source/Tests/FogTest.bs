@@ -1,0 +1,299 @@
+' Engine fog (BGE.Fog, #520): a night sky, a dark ground, towers scattered from 0.4 times the
+' draw distance out to twice it, and a ring of level walls at 1.5 times it.
+'
+' Live (`demo=fog`): OK cycles fog off / backdrop / backdrop + silhouettes, up/down step the
+' draw distance by 250, *: hold the turn. Prints a timing line every 2 s.
+'
+' Benchmark (`demo=fog-benchmark`, or `sweep=1`): times every mode x draw distance (500, 1000)
+' x tower count (10, 50, 200), still and turning, and prints one `FOG` line per case, then
+' stays live. In the live demo half the towers cast silhouettes; in the benchmark all do.
+class FogTest extends RendererTest
+
+  private modeNames as string[] = ["off", "backdrop", "full"]
+  private drawDistances as float[] = [500, 1000]
+  private towerCounts as integer[] = [10, 50, 200]
+  private warmupFrames = 10
+  private timedFrames = 60
+  private turnRate = 0.3
+  private eyeHeight = 50.0
+  private fogColor = &h1C2842
+
+  private rendererRef as BGE.Renderer
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private sky as BGE.SceneObjectSkybox
+  private towers = [] as BGE.SceneObject[]
+  private walls as BGE.SceneObjectWalls
+  private font as roFont
+  private sweep as boolean = false
+
+  private mode = 2
+  private drawDistance = 1000.0
+  private towerCount = 50
+  private turning = true
+  private heading = 0.0
+
+  ' the sweep: one case per index, in order mode, draw distance, towers, motion
+  private caseIndex = -1
+  private caseFrame = 0
+  private caseFrameMs = 0.0
+  private caseRenderMs = 0
+  private caseCalls = 0
+  private caseStages = {} as roAssociativeArray
+  private renderTimer as roTimespan
+
+  private windowSeconds = 0.0
+  private windowFrames = 0
+  private reportLine = "measuring..."
+
+  sub new(sweep = false as boolean)
+    super("Fog")
+    m.sweep = sweep
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+    m.renderTimer = CreateObject("roTimespan")
+    m.sweep = m.sweep or m.launchParams.sweep = "1"
+
+    m.camera = new BGE.Camera3d()
+    m.camera.setFrameSize(renderer.getCanvasSize().x, renderer.getCanvasSize().y)
+    m.camera.fieldOfViewDegrees = 90
+    m.camera.drawDistanceFadeFraction = 0.3
+    m.camera.drawDistanceTransitionSeconds = 0
+    m.camera.fog.color = m.fogColor
+    m.camera.fog.backdropHeight = 250
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+
+    skyBmp = CreateObject("roBitmap", "pkg:/sprites/skybox_night.jpg")
+    skyRegion = CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())
+    ' drawn with renderNow() before each render(): an ownerless skybox can't go through update()
+    m.sky = new BGE.SceneObjectSkybox("sky", new BGE.DrawableSkybox(invalid, skyRegion))
+
+    ground = new BGE.DrawablePlane(invalid, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: &h20281C})
+    ground.addToRenderer(renderer)
+
+    m.addWalls(renderer)
+    if m.sweep
+      ' stage times only: per-object timers would cost more than what's measured
+      renderer.profileStages = true
+      m.caseIndex = 0
+      while m.caseIndex < m.caseCount() - 1 and not m.isModeSwept(m.caseIndex)
+        m.caseIndex++
+      end while
+      m.startCase()
+    else
+      m.setTowers(m.towerCount, true)
+      m.applyMode()
+    end if
+  end sub
+
+  ' A ring of 24 walls, 300 tall, at 1.5 times the draw distance
+  private sub addWalls(renderer as BGE.Renderer)
+    tile = CreateObject("roBitmap", "pkg:/sprites/crypt_wall.png")
+    region = CreateObject("roRegion", tile, 0, 0, tile.GetWidth(), tile.GetHeight())
+    segments = [] as BGE.WallSegment[]
+    radius = 1500.0
+    sides = 24
+    for i = 0 to sides - 1
+      a0 = 2 * BGE.Math.PI * i / sides
+      a1 = 2 * BGE.Math.PI * (i + 1) / sides
+      a = BGE.Math.VectorOps.create(radius * Cos(a0), 0, radius * Sin(a0))
+      b = BGE.Math.VectorOps.create(radius * Cos(a1), 0, radius * Sin(a1))
+      segments.push(BGE.createWallSegment(a, b, 0, 300, "stone", {tileWidth: 128, tileHeight: 256, twoSided: true}))
+    end for
+    drawable = new BGE.DrawableWalls(invalid, segments, {stone: region}, {castsFogSilhouette: true})
+    m.walls = drawable.addToRenderer(renderer) as BGE.SceneObjectWalls
+  end sub
+
+  ' count towers, 80 wide and 150 to 350 tall, at fixed spots from 400 to 2000 out; every
+  ' other one casts a silhouette when everyOther is set
+  private sub setTowers(count as integer, everyOther as boolean)
+    for each tower in m.towers
+      m.rendererRef.removeSceneObject(tower)
+    end for
+    m.towers.clear()
+    for i = 0 to count - 1
+      ' a golden-angle spiral, so any count spreads evenly
+      angle = i * 2.39996
+      distance = 400 + 1600 * (i + 0.5) / count
+      height = 150 + 200 * ((i * 7) mod 4) / 3
+      casts = not everyOther or i mod 2 = 0
+      x = distance * Cos(angle)
+      z = distance * Sin(angle)
+      tower = new BGE.DrawableRectangle(invalid, 80, height, {
+        offset: BGE.Math.VectorOps.create(x - 40, height, z),
+        rotation: BGE.Math.VectorOps.create(0, -angle - BGE.Math.HALF_PI, 0),
+        color: &h7A6A5A,
+        drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace,
+        castsFogSilhouette: casts
+      })
+      m.towers.push(tower.addToRenderer(m.rendererRef))
+    end for
+  end sub
+
+  private sub applyMode()
+    m.camera.maxDrawDistance = m.drawDistance
+    m.camera.fog.enabled = m.mode > 0
+    if m.mode = 2
+      m.camera.fog.silhouetteReach = 2.0
+    else
+      m.camera.fog.silhouetteReach = 0
+    end if
+    m.windowSeconds = 0
+    m.windowFrames = 0
+  end sub
+
+  ' The sweep's case caseIndex: mode slowest, motion fastest
+  private sub startCase()
+    motions = 2
+    perMode = m.drawDistances.count() * m.towerCounts.count() * motions
+    i = m.caseIndex
+    m.mode = i \ perMode
+    rest = i mod perMode
+    m.drawDistance = m.drawDistances[rest \ (m.towerCounts.count() * motions)]
+    rest = rest mod (m.towerCounts.count() * motions)
+    count = m.towerCounts[rest \ motions]
+    m.turning = rest mod motions = 1
+    if count <> m.towers.count()
+      m.setTowers(count, false)
+    end if
+    m.towerCount = count
+    m.applyMode()
+    ' every case turns through the same view
+    m.heading = 0.0
+    m.caseFrame = 0
+    m.caseFrameMs = 0
+    m.caseRenderMs = 0
+    m.caseCalls = 0
+    m.caseStages = {fogBackdrop: 0, fogSilhouettes: 0, walls: 0, wallsWalk: 0, wallsShade: 0, wallsStrips: 0, objects: 0}
+  end sub
+
+  ' `modes=off,full` limits the sweep to those modes
+  private function isModeSwept(index as integer) as boolean
+    modes = m.launchParams.modes
+    if invalid = modes
+      return true
+    end if
+    perMode = m.drawDistances.count() * m.towerCounts.count() * 2
+    return modes.split(",").count() > 0 and Instr(1, "," + modes + ",", "," + m.modeNames[index \ perMode] + ",") > 0
+  end function
+
+  private function caseCount() as integer
+    return m.modeNames.count() * m.drawDistances.count() * m.towerCounts.count() * 2
+  end function
+
+  override sub update(dt as float)
+    if m.turning
+      m.heading += dt * m.turnRate
+    end if
+    m.camera.position = BGE.Math.VectorOps.create(0, m.eyeHeight, 0)
+    m.camera.setTarget(BGE.Math.VectorOps.create(-Sin(m.heading), m.eyeHeight, -Cos(m.heading)))
+    if m.caseIndex >= 0
+      m.caseFrame++
+      if m.caseFrame > m.warmupFrames
+        m.caseFrameMs += dt * 1000
+      end if
+      return
+    end if
+    m.windowSeconds += dt
+    m.windowFrames++
+    if m.windowSeconds >= 2
+      fps = m.windowFrames / m.windowSeconds
+      m.reportLine = `fog ${m.modeNames[m.mode]}, draw ${cint(m.drawDistance)}: ${m.format(fps)} fps, ${m.format(1000 / fps)} ms`
+      print `[fog] ${m.reportLine}`
+      m.windowSeconds = 0
+      m.windowFrames = 0
+    end if
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    renderer.setupCameraForFrame()
+    m.renderTimer.Mark()
+    m.sky.renderNow(renderer)
+    renderer.render()
+    if m.caseIndex >= 0
+      if m.caseFrame > m.warmupFrames
+        m.caseRenderMs += m.renderTimer.TotalMilliseconds()
+        m.caseCalls += renderer.getDrawCallsLastFrame()
+        stages = renderer.getStageMsLastFrame()
+        for each name in m.caseStages
+          if invalid <> stages[name]
+            m.caseStages[name] += stages[name]
+          end if
+        end for
+      end if
+      if m.caseFrame >= m.warmupFrames + m.timedFrames
+        m.reportCase()
+        m.caseIndex++
+        while m.caseIndex < m.caseCount() and not m.isModeSwept(m.caseIndex)
+          m.caseIndex++
+        end while
+        if m.caseIndex >= m.caseCount()
+          m.caseIndex = -1
+          print "FOG done"
+          renderer.profileStages = false
+          m.drawDistance = 1000
+          m.mode = 2
+          m.turning = true
+          m.applyMode()
+        else
+          m.startCase()
+        end if
+      end if
+      m.drawHud(renderer, `benchmark case ${m.caseIndex + 1} of ${m.caseCount()}`)
+      return
+    end if
+    m.drawHud(renderer, m.reportLine)
+  end sub
+
+  private sub reportCase()
+    n = m.timedFrames
+    motion = "still"
+    if m.turning
+      motion = "turning"
+    end if
+    print `FOG mode=${m.modeNames[m.mode]} draw=${cint(m.drawDistance)} towers=${m.towerCount} motion=${motion} frameMs=${m.format(m.caseFrameMs / n)} renderMs=${m.format(m.caseRenderMs / n)} calls=${cint(m.caseCalls / n)} backdropMs=${m.format(m.caseStages.fogBackdrop / n)} silhouettesMs=${m.format(m.caseStages.fogSilhouettes / n)} wallsMs=${m.format(m.caseStages.walls / n)} (walk ${m.format(m.caseStages.wallsWalk / n)} shade ${m.format(m.caseStages.wallsShade / n)} strips ${m.format(m.caseStages.wallsStrips / n)} pieces ${m.walls.view.pieceCount} fogStrips ${m.walls.fogStripsDrawnLastFrame}) objectsMs=${m.format(m.caseStages.objects / n)}`
+  end sub
+
+  private sub drawHud(renderer as BGE.Renderer, line as string)
+    x = 140
+    y = 80
+    renderer.drawRectangle(x - 10, y - 4, 900, 58, &h000000A0)
+    renderer.drawText(line, x, y, BGE.Colors.Yellow, m.font)
+    renderer.drawText("OK: fog off / backdrop / full   up/down: draw distance   *: hold turn", x, y + 26, BGE.Colors.Gray, m.font)
+  end sub
+
+  private function format(value as float) as string
+    return Str(cint(value * 10) / 10.0).trim()
+  end function
+
+  override sub onInput(buttonName as string)
+    if m.caseIndex >= 0
+      return
+    end if
+    if buttonName = "OK"
+      m.mode = (m.mode + 1) mod 3
+      m.applyMode()
+    else if buttonName = "up"
+      m.drawDistance += 250
+      m.applyMode()
+    else if buttonName = "down" and m.drawDistance > 250
+      m.drawDistance -= 250
+      m.applyMode()
+    else if buttonName = "options"
+      m.turning = not m.turning
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.profileStages = false
+    renderer.setCamera(m.previousCamera)
+  end sub
+
+end class
