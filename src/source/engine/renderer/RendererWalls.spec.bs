@@ -19,6 +19,7 @@ namespace tests
     private renderer as BGE.Renderer
     private camera as BGE.Camera3d
     private walls as BGE.SceneObjectWalls
+    private target as roBitmap
 
     protected override sub beforeEach()
       m.game = new BGE.Game(1280, 720)
@@ -29,8 +30,8 @@ namespace tests
       m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
       m.camera.drawDistanceFadeFraction = 0
       m.camera.drawDistanceTransitionSeconds = 0
-      bitmap = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
-      m.renderer = new BGE.Renderer(bitmap, m.game, m.camera)
+      m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.target, m.game, m.camera)
     end sub
 
     private sub addWalls(segments as BGE.WallSegment[])
@@ -131,6 +132,119 @@ namespace tests
       m.renderer.setQualitySettings(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
       m.renderFrames(1)
       m.assertTrue(m.walls.view.lodDepth > 0)
+    end function
+
+    @describe("fog past the draw distance")
+
+    ' RGBA of one pixel of the target
+    private function pixelAt(x as integer, y as integer) as integer
+      bytes = m.target.GetByteArray(x, y, 1, 1)
+      return (bytes[0] << 24) + (bytes[1] << 16) + (bytes[2] << 8) + bytes[3]
+    end function
+
+    ' Fog on, draw distance 1000 with a 0.15 fade band (850 to 1000), reach 2
+    private sub setUpFog(casts = true as boolean)
+      m.camera.maxDrawDistance = 1000
+      (m.camera as object).maxDrawDistanceDeviceCap = 2500
+      m.camera.drawDistanceFadeFraction = 0.15
+      m.camera.fog.enabled = true
+      m.camera.fog.color = &h1C2842
+      m.walls.drawable.castsFogSilhouette = casts
+    end sub
+
+    private sub renderClearedFrames(count = 1 as integer)
+      for i = 1 to count
+        m.target.Clear(&h000000FF)
+        m.renderer.setupCameraForFrame()
+        m.renderer.render()
+      end for
+    end sub
+
+    @it("draws a wall past the draw distance in fog colour")
+    function _()
+      m.addWalls([m.across(-1500, 300)])
+      m.setUpFog()
+      m.renderClearedFrames()
+      m.assertTrue(m.walls.fogStripsDrawnLastFrame > 0)
+      ' 250 above the eye at 1500: its top is row 360 - 640 * 250 / 1500 = 253
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 340))
+      m.assertEqual(&h000000FF, m.pixelAt(640, 200))
+    end function
+
+    @it("draws nothing past the draw distance without the flag")
+    function _()
+      m.addWalls([m.across(-1500, 300)])
+      m.setUpFog(false)
+      m.renderClearedFrames()
+      m.assertEqual(0, m.walls.stripsDrawnLastFrame)
+      m.assertEqual(&h000000FF, m.pixelAt(640, 340))
+    end function
+
+    @it("draws nothing past the draw distance with fog off")
+    function _()
+      m.addWalls([m.across(-1500, 300)])
+      m.setUpFog()
+      m.camera.fog.enabled = false
+      m.renderClearedFrames()
+      m.assertEqual(0, m.walls.stripsDrawnLastFrame)
+    end function
+
+    @it("draws nothing past the reach")
+    function _()
+      m.addWalls([m.across(-2500, 300)])
+      m.setUpFog()
+      m.renderClearedFrames()
+      m.assertEqual(0, m.walls.stripsDrawnLastFrame)
+    end function
+
+    @it("crossfades a wall late in the fade band")
+    function _()
+      ' alpha 0.25 at 962.5, under silhouetteStartAlpha
+      m.addWalls([m.across(-962.5, 300)])
+      m.setUpFog()
+      m.renderClearedFrames()
+      m.assertTrue(m.walls.fogStripsDrawnLastFrame > 0)
+      m.assertTrue(m.walls.stripsDrawnLastFrame > m.walls.fogStripsDrawnLastFrame)
+    end function
+
+    @it("draws no fog strip while the wall is mostly opaque")
+    function _()
+      m.addWalls([m.across(-500, 300)])
+      m.setUpFog()
+      m.renderClearedFrames()
+      m.assertTrue(m.walls.stripsDrawnLastFrame > 0)
+      m.assertEqual(0, m.walls.fogStripsDrawnLastFrame)
+    end function
+
+    @it("walks again when fog is turned on with the camera still")
+    function _()
+      m.addWalls([m.across(-1500, 300)])
+      m.setUpFog()
+      m.camera.fog.enabled = false
+      m.renderClearedFrames(2)
+      m.assertEqual(0, m.walls.stripsDrawnLastFrame)
+      m.camera.fog.enabled = true
+      m.renderClearedFrames()
+      m.assertTrue(m.walls.fogStripsDrawnLastFrame > 0)
+    end function
+
+    @it("redraws the fog strips in a new colour with the camera still")
+    function _()
+      m.addWalls([m.across(-1500, 300)])
+      m.setUpFog()
+      m.renderClearedFrames(2)
+      m.camera.fog.color = &h405060
+      m.renderClearedFrames()
+      m.assertEqual(&h405060FF, m.pixelAt(640, 340))
+    end function
+
+    @it("still hides an object behind a near wall with fog on")
+    function _()
+      m.addWalls([m.across(-300, 1000), m.across(-1500, 300)])
+      m.setUpFog()
+      billboard = m.newBillboard(0, 20, -500)
+      m.renderClearedFrames(2)
+      m.assertTrue(billboard.hiddenByWallsThisFrame)
     end function
 
   end class
