@@ -629,7 +629,10 @@ but most of the expensive work is skipped unless something actually changed:
   (`getDrawReplayKey()`), unless the new frame is the same size and offset and can simply be
   swapped in. On a device, the dozens of method calls a draw normally makes cost far more than the
   blit itself, so this is most of a still scene's frame. A region swapped by hand still has to call
-  `invalidateGeometry()`, as before.
+  `invalidateGeometry()`, as before. An unshaded image in `axisAligned` or `directScaled` also
+  repeats while it and the camera move together - its blit only depends on where it sits relative
+  to the camera, the camera's pitch and roll, and its scale (`getCameraLockedReplayPose()`), so
+  something that follows the camera, like a fog band, stays a single replayed blit as the camera turns.
 
 One supporting piece worth knowing about if you're touching rendering performance:
 
