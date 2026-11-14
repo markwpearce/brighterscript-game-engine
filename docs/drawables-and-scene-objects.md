@@ -596,7 +596,7 @@ separate `Renderer` for the game canvas and the UI canvas). It does three things
 `SceneObject.update(cameraObj)` and `.draw(rendererObj)` are called every frame for every object,
 but most of the expensive work is skipped unless something actually changed:
 
-- **`objMovedLastFrame = m.drawable.movedLastFrame(true)`** - `Drawable`/`Camera` use a
+- **`objMovedLastFrame`** (the drawable's and its owner's `MotionChecker`s) - `Drawable`/`Camera` use a
   `MotionChecker` (`utils/MotionChecker.bs`) for dirty-checking; if neither the object nor the
   camera moved since last frame, `update()` skips recomputing the transformation matrix and world
   position entirely.
@@ -621,6 +621,15 @@ but most of the expensive work is skipped unless something actually changed:
   (`SceneObjectBillboard`, `SceneObjectPlane`) cache a rendered bitmap and reuse it across frames
   when nothing's moved, rather than re-rasterizing from scratch every frame - drawing that cached
   bitmap is far cheaper than recomputing the object's projected geometry and re-drawing it.
+- **Draw replay** - images (including sprites and walls) and models go one step further. When a
+  still frame's `performDraw()` came down to a single blit, `draw()` keeps that blit and, on later
+  frames, repeats it without running any of the steps above, for as long as nothing that shaped it
+  has changed: the object, its owner and the camera are still; geometry, draw mode, projection,
+  quality, lighting, distance fade and fill color are the same; and so is the animation frame
+  (`getDrawReplayKey()`), unless the new frame is the same size and offset and can simply be
+  swapped in. On a device, the dozens of method calls a draw normally makes cost far more than the
+  blit itself, so this is most of a still scene's frame. A region swapped by hand still has to call
+  `invalidateGeometry()`, as before.
 
 One supporting piece worth knowing about if you're touching rendering performance:
 

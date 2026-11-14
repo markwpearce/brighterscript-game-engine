@@ -85,6 +85,10 @@ namespace BGE
     protected onlyDrawWhenInFrame as boolean = true
 
     private drawCallsLastFrame = 0
+    ' The single blit a SceneObject's draw made, for it to repeat (see beginBlitCapture())
+    private capturingBlit as boolean = false
+    private capturedBlit as object = invalid
+    private captureStartDrawCalls as integer = 0
     private activeDebugCells = 0
     private debugCellSize = 50
     private debugCellStart as BGE.Math.Vector = BGE.Math.VectorOps.create(100, 100)
@@ -100,6 +104,8 @@ namespace BGE
     ' ever registered with this renderer. Staying invalid is what makes render() take
     ' today's exact code path for a renderer with no static geometry - see hasStaticGeometry.
     private staticTree as object = invalid
+    ' bumped on every rebuild, so cached leaves (SceneObject.bspLeaf) know they're stale
+    private staticTreeVersion as integer = 0
     private needsStaticTreeRebuild as boolean = false
 
     ' Whether any SceneObject has ever been marked static on this renderer. Distinct from
@@ -854,11 +860,14 @@ namespace BGE
         if sceneObj.isStatic and sceneObj.checkStaticEnabledStateChanged()
           m.needsStaticTreeRebuild = true
         end if
-        if sceneObj.drawable.isOccluder <> sceneObj.occluderFlagSeen
+        drawable = sceneObj.drawable
+        if drawable.isOccluder <> sceneObj.occluderFlagSeen
           m.syncOccluderFlag(sceneObj)
         end if
         sceneObj.hiddenByWallsThisFrame = false
-        if sceneObj.drawable.isEnabled()
+        ' Drawable.isEnabled(), inlined: this runs for every object every frame
+        owner = drawable.owner
+        if drawable.enabled and (invalid = owner or owner.enabled)
           if m.profileStages
             start = m.occlusionTimer.TotalMilliseconds()
             sceneObj.update(m.camera)
@@ -1085,6 +1094,7 @@ namespace BGE
         end if
       end for
       m.staticTree = BGE.BSP.buildTree(items)
+      m.staticTreeVersion++
       m.needsStaticTreeRebuild = false
     end sub
 
@@ -1095,7 +1105,7 @@ namespace BGE
     ' genuinely dynamic objects, AND a static object that failed
     ' isReadyForStaticBspBuild() (e.g. a screen-aligned static billboard that can't
     ' define a plane - see that method's doc comment) - is threaded into that same walk
-    ' as a dynamic item (see BGE.BSP.collectDrawOrder) instead of being drawn in a
+    ' as a dynamic item (see BGE.BSP.findLeaf/collectLeafOrder) instead of being drawn in a
     ' separate pass, so a dynamic object between two static quads' depths draws in the
     ' correct interleaved position, and a plane-ineligible static object still draws,
     ' classified against the tree's real planes every frame instead of vanishing.
@@ -1104,30 +1114,36 @@ namespace BGE
         m.buildStaticGeometryTree()
       end if
 
-      dynamicItems = []
+      tree = m.staticTree
+      treeVersion = m.staticTreeVersion
+      ' Each dynamic object goes in its leaf's bucket, found again only when it or the tree
+      ' moved. m.sceneObjects is in the stable depth order (stableSortKey, #59), so each
+      ' bucket is too.
+      buckets = []
       for each sceneObj in m.sceneObjects
         isDynamicItem = sceneObj.isEnabled() and not sceneObj.drawsInFixedStage() and (not sceneObj.isStatic or not sceneObj.isReadyForStaticBspBuild(m.camera))
         if isDynamicItem and sceneObj.negDistanceFromCamera >= 0
           sceneObj.markSkippedBehindCamera(m.camera)
         else if isDynamicItem
-          dynamicItems.push({
-            sceneObj: sceneObj,
-            position: sceneObj.getDepthPosition(),
-            ' The same stable, tie-break-aware key render()'s legacy sorted path
-            ' uses (see the needsDepthSort block above) - not the raw
-            ' negDistanceFromCamera float, which would reintroduce the frame-to-frame
-            ' order flicker #59 fixed for near-tied depths landing in the same leaf.
-            ' It's kept current here because Renderer.updateSceneObjects() sets
-            ' needsDepthSort whenever any object's depth changes, and that block
-            ' recomputes stableSortKey for every SceneObject (not just the ones that
-            ' moved) - so a value from a stale (no-op) frame is still valid to compare.
-            depthKey: sceneObj.stableSortKey
-          })
+          position = sceneObj.getDepthPosition()
+          if sceneObj.bspTreeVersion <> treeVersion or sceneObj.bspLeafX <> position.x or sceneObj.bspLeafY <> position.y or sceneObj.bspLeafZ <> position.z
+            sceneObj.bspLeaf = BGE.BSP.findLeaf(tree, position.x, position.y, position.z)
+            sceneObj.bspLeafX = position.x
+            sceneObj.bspLeafY = position.y
+            sceneObj.bspLeafZ = position.z
+            sceneObj.bspTreeVersion = treeVersion
+          end if
+          bucket = buckets[sceneObj.bspLeaf]
+          if bucket = invalid
+            buckets[sceneObj.bspLeaf] = [sceneObj]
+          else
+            bucket.push(sceneObj)
+          end if
         end if
       end for
 
       drawOrder = []
-      BGE.BSP.collectDrawOrder(m.staticTree, m.camera.position, dynamicItems, drawOrder)
+      BGE.BSP.collectLeafOrder(tree, m.camera.position, buckets, drawOrder)
       for each sceneObj in drawOrder
         ' A static item's isEnabled() was already true when the (cached) tree was
         ' built, but may have changed since - the tree itself doesn't get rebuilt for
@@ -1912,6 +1928,72 @@ namespace BGE
       return worked
     end function
 
+    ' Starts watching the draw calls a SceneObject's draw makes, so that if it's exactly one
+    ' blit, the object can repeat it on later frames while nothing it depends on changes
+    ' (see SceneObject.draw()). For the engine's own scene objects.
+    sub beginBlitCapture()
+      m.capturingBlit = true
+      m.capturedBlit = invalid
+      m.captureStartDrawCalls = m.drawCallsLastFrame
+    end sub
+
+    ' Stops watching (see beginBlitCapture()).
+    '
+    ' @return {object} the one blit made since beginBlitCapture(), or invalid if it drew
+    '   anything else, or drew more than once
+    function endBlitCapture() as object
+      m.capturingBlit = false
+      blit = m.capturedBlit
+      m.capturedBlit = invalid
+      if m.drawCallsLastFrame - m.captureStartDrawCalls <> 1
+        return invalid
+      end if
+      return blit
+    end function
+
+    ' Rules out repeating the current capture: for a draw that also drew something the
+    ' capture can't see, or blitted from a scratch bitmap that won't last the frame.
+    sub cancelBlitCapture()
+      m.captureStartDrawCalls = -1000000
+    end sub
+
+    ' Records that the blit just captured was drawn with its source region's pretranslation
+    ' set to 0 for the call, so replayBlit() does the same.
+    sub markCapturedBlitWithoutPretranslation()
+      if m.capturingBlit and invalid <> m.capturedBlit
+        m.capturedBlit.zeroPretranslation = true
+      end if
+    end sub
+
+    ' Repeats a blit endBlitCapture() returned.
+    '
+    ' @param {object} blit
+    ' @return {boolean} true if it drew
+    function replayBlit(blit as object) as boolean
+      if blit.zeroPretranslation
+        src = blit.src as roRegion
+        preTransX = src.GetPretranslationX()
+        preTransY = src.GetPretranslationY()
+        src.SetPretranslation(0, 0)
+        retVal = m.replayBlitAsIs(blit)
+        src.SetPretranslation(preTransX, preTransY)
+        return retVal
+      end if
+      return m.replayBlitAsIs(blit)
+    end function
+
+    private function replayBlitAsIs(blit as object) as boolean
+      kind = blit.kind
+      if kind = "object"
+        return m.drawObjectTo(blit.target, blit.x, blit.y, blit.src, blit.rgba)
+      else if kind = "transformed"
+        return m.drawTransformedObjectTo(blit.target, blit.x, blit.y, blit.scaleX, blit.scaleY, blit.theta, blit.src, blit.rgba)
+      else if kind = "scaled"
+        return m.drawScaledObjectTo(blit.target, blit.x, blit.y, blit.scaleX, blit.scaleY, blit.src, blit.rgba)
+      end if
+      return m.drawRotatedObjectTo(blit.target, blit.x, blit.y, blit.theta, blit.src, blit.rgba)
+    end function
+
     ' Draws a region to the canvas at the given scale, rotation and position.
     function drawTransformedObject(x as float, y as float, scaleX as float, scaleY as float, theta as float, region as ifDraw2d, rgba = -1 as integer) as boolean
       return m.drawTransformedObjectTo(m.draw2d, x, y, scaleX, scaleY, theta, region, rgba)
@@ -1921,6 +2003,9 @@ namespace BGE
       thetaDeg = BGE.Math.RadiansToDegrees(theta)
       result = draw2d.DrawTransformedObject(x, y, thetaDeg, scale_x, scale_y, region, rgba)
       m.drawCallsLastFrame++
+      if m.capturingBlit
+        m.capturedBlit = {kind: "transformed", target: draw2d, x: x, y: y, scaleX: scale_x, scaleY: scale_y, theta: theta, src: region, rgba: rgba, zeroPretranslation: false}
+      end if
       return result
     end function
 
@@ -2292,6 +2377,9 @@ namespace BGE
       ' using undocumented ifDraw2d function
       result = (draw2d as dynamic).drawObject(fix(x), fix(y), src, rgba)
       m.drawCallsLastFrame++
+      if m.capturingBlit
+        m.capturedBlit = {kind: "object", target: draw2d, x: x, y: y, src: src, rgba: rgba, zeroPretranslation: false}
+      end if
       return result
     end function
 
@@ -2306,6 +2394,9 @@ namespace BGE
       end if
       result = draw2d.DrawScaledObject(fix(x), fix(y), scaleX, scaleY, src, rgba)
       m.drawCallsLastFrame++
+      if m.capturingBlit
+        m.capturedBlit = {kind: "scaled", target: draw2d, x: x, y: y, scaleX: scaleX, scaleY: scaleY, src: src, rgba: rgba, zeroPretranslation: false}
+      end if
       return result
     end function
 
@@ -2323,6 +2414,9 @@ namespace BGE
       fixY = fix(y)
       result = draw2d.DrawRotatedObject(fixX, fixY, thetaDeg, src, rgba)
       m.drawCallsLastFrame++
+      if m.capturingBlit
+        m.capturedBlit = {kind: "rotated", target: draw2d, x: x, y: y, theta: theta, src: src, rgba: rgba, zeroPretranslation: false}
+      end if
       return result
     end function
 
