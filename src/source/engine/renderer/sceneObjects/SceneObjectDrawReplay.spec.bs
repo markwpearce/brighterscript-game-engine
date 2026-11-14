@@ -1,0 +1,121 @@
+namespace tests
+
+  ' A still object repeats its last frame's single blit instead of redrawing, until
+  ' something that shapes the blit changes.
+  @suite("BGE.SceneObject draw replay")
+  class SceneObjectDrawReplayTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    entity as BGE.GameEntity
+    bitmap as roBitmap
+    renderer as BGE.Renderer
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.entity = new BGE.GameEntity(m.game, {name: "TestEntity"})
+      m.bitmap = CreateObject("roBitmap", {width: 200, height: 200, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.bitmap, m.game, new BGE.Camera3d())
+      (m.renderer.camera as BGE.Camera3d).drawDistanceFadeFraction = 0
+      ' in front of the camera, which starts at (0, 0, 1000) looking down -z
+      m.entity.position = BGE.Math.VectorOps.create(0, 0, 0)
+    end function
+
+    ' An upright billboard, anchored at its feet: one direct blit from its own region
+    private function addUpright(args = {} as roAssociativeArray) as BGE.SceneObject
+      source = CreateObject("roBitmap", {width: 32, height: 64, alphaEnable: true})
+      source.Clear(&hFFFFFFFF)
+      source.Finish()
+      region = CreateObject("roRegion", source, 0, 0, 32, 64)
+      args.drawMode = BGE.SceneObjectDrawMode.axisAligned
+      image = new BGE.Image(m.entity, region, args)
+      image.setAnchor(0.5, 1)
+      return image.addToRenderer(m.renderer)
+    end function
+
+    ' One Game frame's worth of movement bookkeeping and rendering; returns the draw calls
+    private function renderFrame() as integer
+      m.bitmap.Clear(0)
+      m.entity.updateTransformationMatrix()
+      m.renderer.resetDrawCallCounter()
+      m.renderer.setupCameraForFrame()
+      m.renderer.render()
+      return m.renderer.getDrawCallsLastFrame()
+    end function
+
+    private sub settle()
+      for i = 1 to 4
+        m.renderFrame()
+      end for
+    end sub
+
+    @describe("repeating the last blit")
+
+    @it("repeats a still object's blit")
+    function _()
+      sceneObj = m.addUpright()
+      m.settle()
+      m.assertTrue(sceneObj.hasDrawReplay())
+      m.assertEqual(1, m.renderFrame())
+      m.assertTrue(sceneObj.didDrawLastFrame())
+    end function
+
+    @it("keeps the region's pretranslation after repeating a blit drawn without it")
+    function _()
+      sceneObj = m.addUpright()
+      m.settle()
+      m.renderFrame()
+      region = (sceneObj.drawable as BGE.Image).region
+      m.assertEqual(-16, region.GetPretranslationX())
+      m.assertEqual(-64, region.GetPretranslationY())
+    end function
+
+    @it("redraws once its owner moves")
+    function _()
+      sceneObj = m.addUpright()
+      m.settle()
+      m.entity.position = BGE.Math.VectorOps.create(5, 0, 0)
+      m.renderFrame()
+      m.assertFalse(sceneObj.hasDrawReplay())
+    end function
+
+    @it("draws a color change, rather than repeating the old blit")
+    function _()
+      sceneObj = m.addUpright()
+      m.settle()
+      sceneObj.drawable.color = &hFF0000
+      m.renderFrame()
+      m.bitmap.Finish()
+      ' the first drawn pixel down the canvas's middle column, where the sprite stands
+      column = m.bitmap.GetByteArray(100, 0, 1, 200)
+      found = -1
+      for i = 0 to column.Count() - 4 step 4
+        if column[i + 3] > 0
+          found = i
+          exit for
+        end if
+      end for
+      m.assertTrue(found >= 0, "the sprite drew")
+      m.assertTrue(column[found] > 200, "red")
+      m.assertTrue(column[found + 1] < 50, "not white")
+    end function
+
+    @it("redraws once the camera moves")
+    function _()
+      sceneObj = m.addUpright()
+      m.settle()
+      m.renderer.camera.position = BGE.Math.VectorOps.create(10, 0, 1000)
+      m.renderFrame()
+      m.assertFalse(sceneObj.hasDrawReplay())
+    end function
+
+    @it("doesn't repeat for a type that hasn't opted in")
+    function _()
+      rect = new BGE.DrawableRectangle(m.entity, 20, 20, {color: &hFF0000, drawMode: BGE.SceneObjectDrawMode.axisAligned})
+      sceneObj = rect.addToRenderer(m.renderer)
+      m.settle()
+      m.assertFalse(sceneObj.hasDrawReplay())
+    end function
+
+  end class
+
+end namespace
