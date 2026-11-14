@@ -217,6 +217,10 @@ namespace BGE
     protected replayFillColor as integer = 0
     protected replayFade as float = 0
     protected replayKey as integer = 0
+    ' For a blit captured while moving: getCameraLockedReplayPose() at the capture
+    protected replayPose as float[] = invalid
+    ' Whether the last draw() repeated replayBlit
+    protected replayedLastDraw as boolean = false
 
     ' The Current Transformation Matrix
     transformationMatrix = BGE.Math.getFloat44Identity()
@@ -603,6 +607,7 @@ namespace BGE
     ' @param {Renderer} rendererObj
     sub draw(rendererObj as Renderer)
       cam = rendererObj.camera
+      m.replayedLastDraw = false
       if m.lastFrameWasCulled and not m.depthChangedThisFrame and not m.isFirstFrameSinceEnabled and m.lastGeometryVersion = m.drawable.geometryVersion and m.lastProjectionVersion = cam.projectionVersion and not cam.farDistanceChangedThisFrame()
         ' Still culled: nothing that isPotentiallyOnScreen() below would look at has changed
         m.lastFrameDidDraw = false
@@ -615,8 +620,9 @@ namespace BGE
       end if
       if invalid <> m.replayBlit
         ' Last frame drew one blit and nothing that shapes it has changed: repeat it, which
-        ' skips the whole draw path below (most of a still object's frame cost)
-        if m.lastFrameDidDraw and not m.depthChangedThisFrame and not m.isFirstFrameSinceEnabled and m.clusterMemberCount = 1 and m.lastGeometryVersion = m.drawable.geometryVersion and m.lastProjectionVersion = cam.projectionVersion and m.lastQualityVersion = rendererObj.qualityVersion and m.lastLightingVersion = rendererObj.lightingVersion and m.distanceFadeAlpha = m.replayFade and not cam.farDistanceChangedThisFrame() and m.drawable.getFillColorRGBA() = m.replayFillColor
+        ' skips the whole draw path below (most of a still object's frame cost). A blit
+        ' captured with a pose also repeats while this keeps the same place in view.
+        if m.lastFrameDidDraw and (not m.depthChangedThisFrame or (invalid <> m.replayPose and m.cameraLockedReplayMatches(cam))) and not m.isFirstFrameSinceEnabled and m.clusterMemberCount = 1 and m.lastGeometryVersion = m.drawable.geometryVersion and m.lastProjectionVersion = cam.projectionVersion and m.lastQualityVersion = rendererObj.qualityVersion and m.lastLightingVersion = rendererObj.lightingVersion and m.distanceFadeAlpha = m.replayFade and not cam.farDistanceChangedThisFrame() and m.drawable.getFillColorRGBA() = m.replayFillColor
           key = m.getDrawReplayKey()
           if key <> m.replayKey
             ' e.g. a new animation frame: still a repeat if it can just swap the source
@@ -624,6 +630,7 @@ namespace BGE
             m.replayKey = key
           end if
           if invalid <> m.replayBlit and rendererObj.replayBlit(m.replayBlit)
+            m.replayedLastDraw = true
             m.afterDraw()
             m.lastFrameWasCulled = false
             m.visibility = BGE.VisibilityState.visible
@@ -682,9 +689,15 @@ namespace BGE
               didDraw = m.performDraw(rendererObj, drawModeToUse)
               blit = rendererObj.endBlitCapture()
               ' only a still frame's blit: one drawn while moving may be an approximation
-              ' (a re-transformed cached bitmap) that the next still frame redraws properly
-              if didDraw and invalid <> blit and not m.depthChangedThisFrame
+              ' (a re-transformed cached bitmap) that the next still frame redraws properly,
+              ' unless the type vouches for it with a pose
+              pose = invalid
+              if didDraw and invalid <> blit and m.depthChangedThisFrame
+                pose = m.getCameraLockedReplayPose(cam, drawModeToUse)
+              end if
+              if didDraw and invalid <> blit and (not m.depthChangedThisFrame or invalid <> pose)
                 m.replayBlit = blit
+                m.replayPose = pose
                 m.replayFillColor = m.drawable.getFillColorRGBA()
                 m.replayFade = m.distanceFadeAlpha
                 m.replayKey = m.getDrawReplayKey()
@@ -918,6 +931,54 @@ namespace BGE
     ' @return {object} the blit to repeat instead, or invalid to draw normally
     protected function getReplayBlitForNewKey(blit as object) as object
       return invalid
+    end function
+
+    ' For a type whose blit depends only on where it sits relative to the camera, not where
+    ' either is in the world: everything that shapes the blit, so a blit drawn while moving
+    ' can repeat while this stays the same (e.g. a billboard that follows the camera).
+    '
+    ' @param {Camera} cameraObj
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {float[]} anchor's forward/side/up offset from the camera (across its yaw), then
+    '   anything else compared exactly; invalid when this draw can't repeat while moving
+    protected function getCameraLockedReplayPose(cameraObj as Camera, drawMode as SceneObjectDrawMode) as float[]
+      return invalid
+    end function
+
+    ' Whether replayPose still describes this frame (see getCameraLockedReplayPose())
+    '
+    ' @param {Camera} cameraObj
+    ' @return {boolean}
+    private function cameraLockedReplayMatches(cameraObj as Camera) as boolean
+      drawMode = m.getActualDrawMode(cameraObj)
+      if drawMode <> m.lastDrawMode
+        return false
+      end if
+      pose = m.getCameraLockedReplayPose(cameraObj, drawMode)
+      old = m.replayPose
+      if invalid = pose or pose.Count() <> old.Count()
+        return false
+      end if
+      ' ~0.2px at a 1000px focal length
+      tolerance = Abs(old[0]) * 0.0002
+      for i = 0 to 2
+        if Abs(pose[i] - old[i]) > tolerance
+          return false
+        end if
+      end for
+      for i = 3 to old.Count() - 1
+        if Abs(pose[i] - old[i]) > 0.00001
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    ' Whether the last draw() repeated an earlier blit instead of drawing. For tests and profiling.
+    '
+    ' @return {boolean}
+    function didReplayLastDraw() as boolean
+      return m.replayedLastDraw
     end function
 
     ' Check if the object has moved since it was last drawn
