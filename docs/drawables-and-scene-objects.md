@@ -608,7 +608,10 @@ but most of the expensive work is skipped unless something actually changed:
   very next frame, because `findCanvasPosition()` and `performDraw()` are both
   transient-failure-prone and both already recover. A camera *projection* change - its frame size
   or field of view, neither of which counts as camera movement - lifts the latch too, via
-  `Camera.projectionVersion`.
+  `Camera.projectionVersion`. On a `Camera3d` the frustum's sides meet at the camera when
+  `getPositionsForFrustumCheck()` gives the object's real extent (two or more points), so an object
+  just off the edge of the screen is culled. A single anchor point can't say how big its object is,
+  so it gets a wider margin.
 - **`findCanvasPosition(rendererObj, drawMode)`** - only re-run when `objMovedInRelationToCamera()`
   is true (the object or camera moved), there's no valid canvas position yet, or the camera's
   projection changed (`Camera.projectionVersion`, same signal as above). This is where a
