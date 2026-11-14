@@ -489,6 +489,45 @@ A ground plane always reaches the farthest any quality level would draw objects 
 past its edge, and the horizon doesn't move when the quality level changes. Past the
 default distance, the ground's texture gets a little softer instead of costing more memory.
 
+## Fog
+
+Fog lets distant things sink into mist instead of fading to the sky, so a scene can use a
+shorter draw distance without looking like the world just ends. Turn it on with the camera's
+`fog`, and mark the big things that make the skyline with `castsFogSilhouette`:
+
+```brighterscript
+camera.fog.enabled = true
+camera.fog.color = &h1C2842          ' RGB, like Drawable.color
+camera.fog.backdropHeight = 256      ' world units, at the draw distance
+
+house = new BGE.DrawableModel(m, model, {isOccluder: true, castsFogSilhouette: true})
+walls = new BGE.DrawableWalls(m, segments, textures, {castsFogSilhouette: true})
+```
+
+That does three things:
+
+- **The backdrop.** The strip of screen from where the ground ends up to `backdropHeight` at the
+  draw distance is filled with the fog colour, behind everything. Objects fading out across the
+  fade band (see above) now fade into fog rather than sky.
+- **Silhouettes.** A drawable with `castsFogSilhouette` keeps blocking the sky past the draw
+  distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured box over its
+  bounding points. The box fades in as the object fades out: it starts once the object's fade
+  alpha drops below `fog.silhouetteStartAlpha` (default 0.5). Meant for buildings, towers and big
+  trees; small props aren't worth it.
+- **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
+  their real outline past the draw distance as flat fog-coloured strips, crossfading in under
+  the textured strips late in the fade band.
+
+The fog fields are read every frame, so you can change them live. `examples/rendererTest`'s Fog
+demo (`--param demo=fog`) cycles fog off / backdrop / backdrop + silhouettes, and
+`demo=fog-benchmark` times each.
+
+> **Cost:** the backdrop is one rectangle. Silhouette boxes cost about what the screen area
+> they fill costs, and are repeated without being worked out again while nothing moves. Walls
+> walk out to the reach, so the far part of a level costs a walk while the camera moves, and its
+> fog strips are merged four at a time. In thirdPerson's town on a Roku Ultra, fog cost about 5%
+> at the same draw distance, and fog at 22 m ran faster than no fog at 30 m.
+
 ## Occluders and visibility
 
 A big opaque thing in a 3D scene (a building, a wall, a hill) hides whatever stands behind it.
