@@ -59,8 +59,10 @@ A still camera lets the renderer reuse cached drawings, so there's usually plent
 headroom. Once the camera has been still for `stillCameraSeconds` (0.2), quality climbs
 straight up by the measured headroom - a level per doubling of the frame rate over the
 target, or right to the top when frames come at the display's refresh rate - usually
-within a second. When the camera moves again, the level stays put and steps down a
-level at a time as usual if frames fall short. Set
+within a second. When the camera moves again, the level stays put unless frames fall
+short - then it steps down after just 0.3s of frames, by a level plus one per halving of
+the frame rate under the target, and keeps doing that until moving frames hold the
+target. Set
 `stillCameraSeconds: 0` to turn this off.
 
 ### How it decides

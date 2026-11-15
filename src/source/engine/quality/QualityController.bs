@@ -108,6 +108,8 @@ namespace BGE
     ' seconds the camera has been still, and whether that's long enough to count
     private stillTime as float = 0
     private isStill as boolean = false
+    ' the camera just started moving after a still spell: step down on short samples
+    private justMoved as boolean = false
 
     ' @param {BGE.AdaptiveQualityOptions} [options={}] - any subset of the options
     sub new(options = {} as AdaptiveQualityOptions)
@@ -212,6 +214,7 @@ namespace BGE
       m.stillTime = 0
       if m.isStill
         m.isStill = false
+        m.justMoved = true
         m.resetWindow()
       end if
     end sub
@@ -259,13 +262,23 @@ namespace BGE
       ' need at least half a window before trusting the average, or a short sample to step up
       ' while still
       trusted = m.sampleTime >= m.windowSeconds * 0.5
-      if not trusted and not (m.isStill and m.sampleTime >= m.stillSampleSeconds)
+      if not trusted and not ((m.isStill or m.justMoved) and m.sampleTime >= m.stillSampleSeconds)
         return currentLevel
       end if
 
       avgFps = m.samples.count() / m.sampleTime
       upThreshold = BGE.Math.Min(m.targetFps * m.stepUpHeadroomFraction, m.maxMeasurableFps * 0.97)
 
+      if m.justMoved
+        if avgFps < m.targetFps * m.stepDownBelowFraction and currentLevel > m.minLevel
+          return m.stepDownMoved(avgFps, currentLevel)
+        end if
+        ' holding up, so back to the usual timings
+        m.justMoved = false
+        if not trusted
+          return currentLevel
+        end if
+      end if
       if m.isStill and avgFps >= upThreshold
         return m.stepUpStill(avgFps, currentLevel)
       end if
@@ -339,8 +352,21 @@ namespace BGE
 
     ' Call after a scene change, for the same reason as notifyLevelChanged().
     sub notifySceneChanged()
+      m.justMoved = false
       m.resetWindow()
     end sub
+
+    ' Down by the measured shortfall: a level, plus one per halving of the frame rate under
+    ' the target. No cooldown - the short settle and sample are the wait.
+    private function stepDownMoved(avgFps as float, currentLevel as integer) as integer
+      newLevel = m.stepDown(currentLevel)
+      bar = m.targetFps / 2
+      while avgFps < bar and newLevel > m.minLevel
+        newLevel--
+        bar = bar / 2
+      end while
+      return newLevel
+    end function
 
     private function stepDown(currentLevel as integer) as integer
       ' a probe made still that drops once the camera moves (or vice versa) didn't fail
@@ -371,7 +397,7 @@ namespace BGE
       m.sampleTime = 0
       m.headroomTime = 0
       m.settleRemaining = m.settleSeconds
-      if m.isStill
+      if m.isStill or m.justMoved
         m.settleRemaining = m.stillSettleSeconds
       end if
     end sub
