@@ -68,9 +68,11 @@ level at a time as usual if frames fall short. Set
 It's a plain step-down/step-up controller, not a PID loop: it steps down fast (average
 frame rate below 90% of target), and only steps up after the frame rate has stayed
 comfortably above target for a while. A level that steps up but doesn't hold goes into
-a backoff and isn't retried for a while (doubling on each repeated failure). A still
-camera keeps its own backoffs, since a level that failed while moving can hold when
-still. The headroom that earns a probe keeps accruing while the next level up is in
+a backoff and isn't retried for 4s (`probeBackoffSeconds`), doubling on each repeated
+failure up to 16s and starting over once the level holds. A still camera keeps its own,
+shorter backoffs (1s, up to 4s, `stillProbeBackoffSeconds`), since a level that failed
+while moving can hold when still. A level that drops because the camera started or
+stopped moving doesn't count as failing. The headroom that earns a probe keeps accruing while the next level up is in
 backoff, so it's tried the moment the backoff ends.
 
 ## Pick a level yourself
