@@ -19,9 +19,11 @@ namespace BGE
     ' This frame's strips and the depth windows that hide things behind walls.
     view as BGE.WallsView
 
-    ' Rays in the fan and strips drawn by the last draw.
+    ' Rays in the fan and strips drawn by the last draw, and how many of those were fog strips
+    ' (see BGE.Fog)
     raysLastFrame as integer = 0
     stripsDrawnLastFrame as integer = 0
+    fogStripsDrawnLastFrame as integer = 0
 
     private rendererObj as Renderer
     private warnedCamera2d as boolean = false
@@ -40,6 +42,25 @@ namespace BGE
     ' Per piece, its texture column (invalid for a missing texture) and vertical scale
     private pieceColumn = [] as dynamic[]
     private pieceScaleY = [] as float[]
+    ' Per piece, whether a solid fog strip goes under it, until buildFogRuns() merges it into a run
+    private pieceFogUnder = [] as boolean[]
+    ' A white column, tinted with the fog colour for fog strips
+    private fogColumn as object = invalid
+    private fogColumnHeight as float = 64
+    ' Fog strips, merged up to maxFogRun neighbours on a wall: foot x and y, width, vertical
+    ' scale and lean each, all in fogRunRgba (see buildFogRuns())
+    private fogRunX = [] as float[]
+    private fogRunY = [] as float[]
+    private fogRunWidth = [] as float[]
+    private fogRunScale = [] as float[]
+    private fogRunAngle = [] as float[]
+    private fogRunRgba as integer = 0
+    private maxFogRun as integer = 4
+    ' Per piece, whether it's past the draw distance, so only a fog strip
+    private pieceFogOnly = [] as boolean[]
+    ' The fog the shading was worked out for (-1 colour for none)
+    private shadeFogColor as integer = -1
+    private shadeFogStart as float = -1.0
     ' Per segment, its columns (invalid for a missing texture)
     private segmentColumns = [] as dynamic[]
     ' Per segment, tiles along it (0 for one stretched copy) and 1 / column height
@@ -136,7 +157,7 @@ namespace BGE
       camera = rendererObj.camera as Camera3d
       m.view.lodDepth = m.getLodDepth(rendererObj, camera)
       m.keyValid = false
-      if not m.view.update(camera, m.viewStripWidth)
+      if not m.view.update(camera, m.viewStripWidth, m.getWalkFar(camera))
         return false
       end if
       m.viewStamp++
@@ -148,7 +169,7 @@ namespace BGE
       m.keyOz = camera.orientation.z
       m.keyRoll = camera.rollDegrees
       m.keyFocal = camera.getFocalLength()
-      m.keyFar = camera.getCurrentDrawDistance()
+      m.keyFar = m.getWalkFar(camera)
       m.keyW = camera.frameSize.x
       m.keyH = camera.frameSize.y
       m.keyLod = m.view.lodDepth
@@ -182,9 +203,21 @@ namespace BGE
       return 0
     end function
 
-    ' True when the last walk's settings (strip width, LOD, recording, geometry) still hold.
+    ' How far out to walk: past the draw distance to the fog's silhouette reach while the walls
+    ' cast fog silhouettes (see BGE.Fog), else the draw distance.
+    private function getWalkFar(camera as Camera3d) as float
+      far = camera.getCurrentDrawDistance()
+      fog = camera.fog
+      if fog.enabled and fog.silhouetteReach > 1 and m.drawable.castsFogSilhouette
+        return far * fog.silhouetteReach
+      end if
+      return far
+    end function
+
+    ' True when the last walk's settings (strip width, LOD, recording, geometry, how far) still
+    ' hold.
     private function walkSettingsMatch(rendererObj as Renderer, camera as Camera3d) as boolean
-      return m.keyValid and m.viewGeometryVersion = m.drawable.geometryVersion and m.viewStripWidth = m.getStripWidth(rendererObj) and m.keyRecord = m.view.recordSurfaces and m.keyLod = m.getLodDepth(rendererObj, camera)
+      return m.keyFar = m.getWalkFar(camera) and m.keyValid and m.viewGeometryVersion = m.drawable.geometryVersion and m.viewStripWidth = m.getStripWidth(rendererObj) and m.keyRecord = m.view.recordSurfaces and m.keyLod = m.getLodDepth(rendererObj, camera)
     end function
 
     ' True when the last walk was for this camera and walkSettingsMatch().
@@ -194,7 +227,7 @@ namespace BGE
       end if
       p = camera.position
       o = camera.orientation
-      return p.x = m.keyX and p.y = m.keyY and p.z = m.keyZ and o.x = m.keyOx and o.y = m.keyOy and o.z = m.keyOz and camera.rollDegrees = m.keyRoll and camera.getFocalLength() = m.keyFocal and camera.getCurrentDrawDistance() = m.keyFar and camera.frameSize.x = m.keyW and camera.frameSize.y = m.keyH
+      return p.x = m.keyX and p.y = m.keyY and p.z = m.keyZ and o.x = m.keyOx and o.y = m.keyOy and o.z = m.keyOz and camera.rollDegrees = m.keyRoll and camera.getFocalLength() = m.keyFocal and camera.frameSize.x = m.keyW and camera.frameSize.y = m.keyH
     end function
 
     ' Draws again, far to near, the strips drawn this frame on rays firstRay..lastRay nearer
@@ -277,7 +310,18 @@ namespace BGE
       pScaleY = m.pieceScaleY
       rgbas = m.pieceRgba
       draw2d = rendererObj.getDraw2d()
+      fogColumn = m.fogColumn
       drawn = 0
+      fogDrawn = m.fogRunX.count()
+      runX = m.fogRunX
+      runY = m.fogRunY
+      runWidth = m.fogRunWidth
+      runScale = m.fogRunScale
+      runAngle = m.fogRunAngle
+      fogRgba = m.fogRunRgba
+      for i = 0 to fogDrawn - 1
+        draw2d.DrawTransformedObject(runX[i], runY[i], runAngle[i], runWidth[i], runScale[i], fogColumn, fogRgba)
+      end for
       for k = view.pieceCount - 1 to 0 step -1
         column = pColumn[k]
         if invalid <> column
@@ -285,8 +329,9 @@ namespace BGE
           drawn++
         end if
       end for
-      rendererObj.incrementDrawCalls(drawn)
-      return drawn
+      m.fogStripsDrawnLastFrame = fogDrawn
+      rendererObj.incrementDrawCalls(drawn + fogDrawn)
+      return drawn + fogDrawn
     end function
 
     ' Draws piece k (see drawPieces()).
@@ -305,7 +350,13 @@ namespace BGE
       d = m.drawable
       view = m.view
       base = d.getFillColorRGBA()
-      if m.shadeStamp = m.viewStamp and not m.lightingChangedThisDraw and not m.qualityChangedThisDraw and base = m.shadeBase and d.isShaded = m.shadeShaded and d.ambientBrightness = m.shadeAmbient and d.lightWrap = m.shadeWrap
+      fog = camera.fog
+      fogColor = -1
+      if fog.enabled and fog.silhouetteReach > 0 and m.drawable.castsFogSilhouette
+        fogColor = fog.color
+      end if
+      fogStart = fog.silhouetteStartAlpha
+      if fogColor = m.shadeFogColor and fogStart = m.shadeFogStart and m.shadeStamp = m.viewStamp and not m.lightingChangedThisDraw and not m.qualityChangedThisDraw and base = m.shadeBase and d.isShaded = m.shadeShaded and d.ambientBrightness = m.shadeAmbient and d.lightWrap = m.shadeWrap
         return
       end if
       ' with no lights, shading follows the camera, so it's only cached within a frame
@@ -313,6 +364,8 @@ namespace BGE
         m.lightCache = {}
       end if
       m.shadeStamp = m.viewStamp
+      m.shadeFogColor = fogColor
+      m.shadeFogStart = fogStart
       m.shadeBase = base
       m.shadeShaded = d.isShaded
       m.shadeAmbient = d.ambientBrightness
@@ -346,11 +399,25 @@ namespace BGE
       rgbas = m.pieceRgba
       pColumn = m.pieceColumn
       pScaleY = m.pieceScaleY
+      pFog = m.pieceFogUnder
+      pFogOnly = m.pieceFogOnly
       for k = rgbas.count() to view.pieceCount - 1
         rgbas.push(base)
         pColumn.push(invalid)
         pScaleY.push(1.0)
+        pFog.push(false)
+        pFogOnly.push(false)
       end for
+      ' fog strips: solid under pieces whose fade alpha is below fogStart, and alone past
+      ' the draw distance
+      fogs = fogColor >= 0
+      fogBase = 0
+      if fogs
+        fogBase = fogColor << 8
+        if invalid = m.fogColumn
+          m.fogColumn = m.createFogColumn()
+        end if
+      end if
       pSeg = view.pieceSegment
       pAlong = view.pieceAlong
       pDepth = view.pieceDepth
@@ -387,26 +454,132 @@ namespace BGE
           shade = shades[int(u * lastBucket + 0.5)]
         end if
         depth = pDepth[k]
-        if fades and depth > bandStart
-          shade = BGE.RendererHelpers.applyAlphaFade(shade, (far - depth) / (far - bandStart))
+        if fogs
+          pFog[k] = false
+          pFogOnly[k] = false
         end if
-        rgbas[k] = shade
-        ' the texture column, picked here so drawing is just the draw call
-        if columnCount > 0
-          if tiles > 0
-            along = u * tiles
-            u = along - int(along)
-          end if
-          ci = int(u * columnCount)
-          if ci >= columnCount
-            ci = columnCount - 1
-          end if
-          pColumn[k] = segColumns[ci]
-          pScaleY[k] = pLength[k] * invHeight
-        else
+        if fogs and depth >= far
+          ' past the draw distance: only a fog strip, merged with its neighbours below
+          pFogOnly[k] = true
           pColumn[k] = invalid
+          rgbas[k] = shade
+        else
+          if fades and depth > bandStart
+            alpha = (far - depth) / (far - bandStart)
+            shade = BGE.RendererHelpers.applyAlphaFade(shade, alpha)
+            ' solid fog under it, so the faded wall and the fog add up to fully opaque
+            if fogs and alpha < fogStart
+              pFog[k] = true
+            end if
+          end if
+          rgbas[k] = shade
+          ' the texture column, picked here so drawing is just the draw call
+          if columnCount > 0
+            if tiles > 0
+              along = u * tiles
+              u = along - int(along)
+            end if
+            ci = int(u * columnCount)
+            if ci >= columnCount
+              ci = columnCount - 1
+            end if
+            pColumn[k] = segColumns[ci]
+            pScaleY[k] = pLength[k] * invHeight
+          else
+            pColumn[k] = invalid
+          end if
         end if
       end for
+      if fogs
+        m.fogRunRgba = fogBase + &hFF
+        m.buildFogRuns()
+      else if m.fogRunX.count() > 0
+        m.fogRunX.Clear()
+        m.fogRunY.Clear()
+        m.fogRunWidth.Clear()
+        m.fogRunScale.Clear()
+        m.fogRunAngle.Clear()
+      end if
+    end sub
+
+    ' Merges fog strips into runs of up to maxFogRun touching strips of one wall, each as tall
+    ' as the tallest of them: the fog-only pieces past the draw distance, and the solid fog
+    ' under fading pieces. All are drawn first: those past the draw distance are behind every
+    ' textured strip, and one under a fading piece only differs where a farther fading piece
+    ' shows through, which it then covers instead.
+    private sub buildFogRuns()
+      view = m.view
+      runX = m.fogRunX
+      runY = m.fogRunY
+      runWidth = m.fogRunWidth
+      runScale = m.fogRunScale
+      runAngle = m.fogRunAngle
+      runX.Clear()
+      runY.Clear()
+      runWidth.Clear()
+      runScale.Clear()
+      runAngle.Clear()
+      pFog = m.pieceFogUnder
+      pFogOnly = m.pieceFogOnly
+      pSeg = view.pieceSegment
+      pX = view.pieceX
+      pY = view.pieceY
+      pWidth = view.pieceWidth
+      pLength = view.pieceLength
+      pAngle = view.pieceAngle
+      invHeight = 1.0 / m.fogColumnHeight
+      count = view.pieceCount
+      maxRun = m.maxFogRun
+      k = 0
+      while k < count
+        fogOnly = pFogOnly[k]
+        if fogOnly or pFog[k]
+          pFog[k] = false
+          seg = pSeg[k]
+          minX = pX[k]
+          maxX = minX + pWidth[k]
+          foot = pY[k]
+          top = foot - pLength[k]
+          angles = pAngle[k]
+          n = 1
+          j = k + 1
+          while j < count and n < maxRun
+            if pFogOnly[j] <> fogOnly or pSeg[j] <> seg or (not fogOnly and not pFog[j])
+              exit while
+            end if
+            x = pX[j]
+            right = x + pWidth[j]
+            ' touching the run on either side
+            if x > maxX + 1.5 or right < minX - 1.5
+              exit while
+            end if
+            if x < minX
+              minX = x
+            end if
+            if right > maxX
+              maxX = right
+            end if
+            if pY[j] > foot
+              foot = pY[j]
+            end if
+            if pY[j] - pLength[j] < top
+              top = pY[j] - pLength[j]
+            end if
+            angles += pAngle[j]
+            pFog[j] = false
+            n++
+            j++
+          end while
+          runX.push(minX)
+          runY.push(foot)
+          runWidth.push(maxX - minX)
+          runScale.push((foot - top) * invHeight)
+          runAngle.push(angles / n)
+          k = j
+        else
+          k++
+        end if
+      end while
     end sub
 
     ' Lit colors along segment n for the side the eye is on, from the cache.
@@ -452,6 +625,17 @@ namespace BGE
       end for
       m.lightCache[key] = shades
       return shades
+    end function
+
+    ' A white 1px column for fog strips, pre-translated so its foot is at the draw point (see
+    ' DrawableWalls.getColumns())
+    private function createFogColumn() as object
+      height = cint(m.fogColumnHeight)
+      bitmap = CreateObject("roBitmap", {width: 1, height: height, alphaEnable: false})
+      bitmap.Clear(&hFFFFFFFF)
+      column = CreateObject("roRegion", bitmap, 0, 0, 1, height)
+      column.SetPreTranslation(0, -height)
+      return column
     end function
 
     private function lapStage(rendererObj as Renderer, name as string, lap as integer) as integer

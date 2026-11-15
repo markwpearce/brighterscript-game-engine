@@ -182,6 +182,32 @@ namespace BGE
     ' outside profiling.
     public profileStages as boolean = false
 
+    ' Fog silhouettes (see BGE.Fog) drawn and worked out last frame; 0 worked out means the last
+    ' boxes were repeated. Read-only.
+    fogSilhouettesDrawnLastFrame as integer = 0
+    fogSilhouettesProjectedLastFrame as integer = 0
+
+    ' Scene objects whose drawable casts a fog silhouette, rebuilt when dirty
+    private fogCasters = [] as SceneObject[]
+    private fogCastersDirty as boolean = true
+    ' Last worked-out boxes: x, y, width, height in turn, and their colours
+    private fogBoxes = [] as float[]
+    private fogBoxRgbas = [] as integer[]
+    private fogBoxesValid as boolean = false
+    private fogPoints = [] as float[]
+    ' What the boxes were worked out for
+    private fogKeyColor as integer = -1
+    private fogKeyReach as float = -1.0
+    private fogKeyStart as float = -1.0
+    private fogKeyFraction as float = -1.0
+    ' the camera's projectionVersion: field of view and frame size
+    private fogKeyProjection as integer = -1
+    private fogKeyEnabledCount as integer = -1
+    ' Per caster as of the last frame, fogKeyStride values: depth point x, y, z, geometry
+    ' version, transform version, then its world matrix's 3x3 turn and scale, row by row
+    private fogKeyPositions = [] as float[]
+    private fogKeyStride as integer = 14
+
     ' The walls object this renderer draws (one at most), and the one drawn this frame.
     private wallsObject as dynamic = invalid
     private activeWalls as dynamic = invalid
@@ -618,6 +644,7 @@ namespace BGE
       end if
 
       m.syncOccluderFlag(sceneObj)
+      m.fogCastersDirty = true
 
       if sceneObj.type = SceneObjectType.Walls
         if invalid = m.wallsObject
@@ -823,6 +850,7 @@ namespace BGE
           m.needsStaticTreeRebuild = true
         end if
         m.unmarkOccluder(sceneObjToRemove)
+        m.fogCastersDirty = true
         if invalid <> m.wallsObject and m.wallsObject.id = sceneObjToRemove.id
           m.wallsObject = invalid
         end if
@@ -863,6 +891,10 @@ namespace BGE
         drawable = sceneObj.drawable
         if drawable.isOccluder <> sceneObj.occluderFlagSeen
           m.syncOccluderFlag(sceneObj)
+        end if
+        if drawable.castsFogSilhouette <> sceneObj.fogCasterFlagSeen
+          sceneObj.fogCasterFlagSeen = drawable.castsFogSilhouette
+          m.fogCastersDirty = true
         end if
         sceneObj.hiddenByWallsThisFrame = false
         ' Drawable.isEnabled(), inlined: this runs for every object every frame
@@ -1157,6 +1189,261 @@ namespace BGE
       end for
     end sub
 
+    ' Fills the band from the fog's top at the draw distance down to just below where the ground
+    ' ends in the fog colour (see BGE.Fog.backdropHeight). Roll is ignored.
+    private sub drawFogBackdrop(cam as Camera3d)
+      fog = cam.fog
+      if not fog.enabled or fog.backdropHeight <= 0
+        return
+      end if
+      f = cam.orientation
+      flat = Sqr(f.x * f.x + f.z * f.z)
+      if flat < 0.001
+        return
+      end if
+      fx = f.x / flat
+      fz = f.z / flat
+      p = cam.position
+      far = cam.getCurrentDrawDistance()
+      top = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(p.x + fx * far, fog.backdropHeight, p.z + fz * far))
+      if invalid = top
+        return
+      end if
+      ground = cam.getPlaneDrawDistance()
+      foot = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(p.x + fx * ground, 0, p.z + fz * ground))
+      height = cam.frameSize.y
+      bottom = height
+      ' 4px under the ground's edge, so no sky shows along the seam; the ground covers the rest
+      if invalid <> foot and foot.y + 4 < bottom
+        bottom = foot.y + 4
+      end if
+      rgba = (fog.color << 8) + &hFF
+      region = fog.backdropRegion
+      if invalid <> region
+        ' stretched from its top, wherever that is, so a clear top stays in place
+        if bottom > top.y
+          m.draw2d.DrawScaledObject(0, top.y, cam.frameSize.x / region.GetWidth(), (bottom - top.y) / region.GetHeight(), region, rgba)
+          m.drawCallsLastFrame++
+        end if
+        return
+      end if
+      y = top.y
+      if y < 0
+        y = 0
+      end if
+      if bottom > y
+        m.draw2d.DrawRect(0, y, cam.frameSize.x, bottom - y, rgba)
+        m.drawCallsLastFrame++
+      end if
+    end sub
+
+    ' Draws a fog-coloured screen box for each caster fading out or past the draw distance, out
+    ' to silhouetteReach times it (see BGE.Fog), repeating the last boxes when nothing that
+    ' shapes them changed.
+    private sub drawFogSilhouettes(cam as Camera3d)
+      fog = cam.fog
+      if not fog.enabled or fog.silhouetteReach <= 0
+        m.fogBoxesValid = false
+        return
+      end if
+      if m.fogCastersDirty
+        m.fogCasters.Clear()
+        for each sceneObj in m.sceneObjects
+          if sceneObj.drawable.castsFogSilhouette
+            m.fogCasters.push(sceneObj)
+          end if
+        end for
+        m.fogCastersDirty = false
+        m.fogBoxesValid = false
+        m.fogKeyPositions.Clear()
+      end if
+      if m.fogCasters.count() = 0
+        return
+      end if
+      ' depthChangedThisFrame stays set on a culled object, so watch each depth point instead, and
+      ' the geometry and world matrix for a turn or resize that leaves it in place. The transform
+      ' version can be bumped with nothing changed, so it only gates comparing the matrix.
+      enabledCount = 0
+      anyMoved = false
+      keys = m.fogKeyPositions
+      k = 0
+      for each sceneObj in m.fogCasters
+        x = 1.0e30
+        y = 0.0
+        z = 0.0
+        geometry = 0
+        enabled = sceneObj.isEnabled()
+        if enabled
+          enabledCount++
+          p = sceneObj.getDepthPosition()
+          x = p.x
+          y = p.y
+          z = p.z ?? 0
+          geometry = sceneObj.drawable.geometryVersion
+        end if
+        if k + m.fogKeyStride > keys.count()
+          for i = 1 to m.fogKeyStride
+            keys.push(0.0)
+          end for
+          anyMoved = true
+        end if
+        if keys[k] <> x or keys[k + 1] <> y or keys[k + 2] <> z or keys[k + 3] <> geometry
+          keys[k] = x
+          keys[k + 1] = y
+          keys[k + 2] = z
+          keys[k + 3] = geometry
+          anyMoved = true
+        end if
+        if enabled
+          transform = sceneObj.getTransformVersion()
+          if keys[k + 4] <> transform
+            keys[k + 4] = transform
+            mat = sceneObj.transformationMatrix
+            j = k + 5
+            for row = 0 to 2
+              r = mat[row]
+              for col = 0 to 2
+                if keys[j] <> r[col]
+                  keys[j] = r[col]
+                  anyMoved = true
+                end if
+                j++
+              end for
+            end for
+          end if
+        end if
+        k += m.fogKeyStride
+      end for
+      color = fog.color
+      start = fog.silhouetteStartAlpha
+      fraction = cam.drawDistanceFadeFraction
+      projection = cam.projectionVersion
+      repeat = m.fogBoxesValid and not anyMoved and not cam.motionChecker.movedLastFrame and not cam.farDistanceChangedThisFrame()
+      repeat = repeat and color = m.fogKeyColor and fog.silhouetteReach = m.fogKeyReach and start = m.fogKeyStart and fraction = m.fogKeyFraction and projection = m.fogKeyProjection and enabledCount = m.fogKeyEnabledCount
+      if not repeat
+        m.fogKeyColor = color
+        m.fogKeyReach = fog.silhouetteReach
+        m.fogKeyStart = start
+        m.fogKeyFraction = fraction
+        m.fogKeyProjection = projection
+        m.fogKeyEnabledCount = enabledCount
+        m.fogBoxesValid = true
+        m.workOutFogBoxes(cam)
+      end if
+      boxes = m.fogBoxes
+      rgbas = m.fogBoxRgbas
+      draw2d = m.draw2d
+      n = rgbas.count()
+      for i = 0 to n - 1
+        b = i * 4
+        draw2d.DrawRect(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3], rgbas[i])
+      end for
+      m.fogSilhouettesDrawnLastFrame = n
+      m.drawCallsLastFrame += n
+    end sub
+
+    ' Each fog silhouette box's RGBA, as drawn last frame (see BGE.Fog). Don't change it.
+    '
+    ' @return {integer[]}
+    function getFogSilhouetteRgbas() as integer[]
+      if m.fogSilhouettesDrawnLastFrame = 0
+        return []
+      end if
+      return m.fogBoxRgbas
+    end function
+
+    ' Projects each caster that's due a box (see drawFogSilhouettes()) into fogBoxes and
+    ' fogBoxRgbas: the screen box of its bounding points (none if any are behind the eye), at alpha
+    ' 1 - its fade alpha.
+    private sub workOutFogBoxes(cam as Camera3d)
+      fog = cam.fog
+      boxes = m.fogBoxes
+      rgbas = m.fogBoxRgbas
+      boxes.Clear()
+      rgbas.Clear()
+      far = cam.getCurrentDrawDistance()
+      reach = far * fog.silhouetteReach
+      start = fog.silhouetteStartAlpha
+      fades = cam.drawDistanceFadeFraction > 0
+      base = fog.color << 8
+      w = cam.frameSize.x
+      h = cam.frameSize.y
+      out = m.fogPoints
+      projected = 0
+      eye = cam.position
+      f = cam.orientation
+      for each sceneObj in m.fogCasters
+        ' forward depth, as the draw distance is judged (not negDistanceFromCamera, which is from
+        ' behind the eye)
+        p = sceneObj.getDepthPosition()
+        depth = (p.x - eye.x) * f.x + (p.y - eye.y) * f.y + ((p.z ?? 0) - eye.z) * f.z
+        if depth > 0 and depth < reach and sceneObj.isEnabled()
+          ' one that never fades counts as faded out past the draw distance
+          if fades and sceneObj.participatesInDistanceFade()
+            alpha = sceneObj.distanceFadeAlpha
+          else if depth > far
+            alpha = 0.0
+          else
+            alpha = 1.0
+          end if
+          ' the opacity it has lost
+          alphaByte = 0
+          if alpha < start
+            alphaByte = int((1 - alpha) * 255)
+          end if
+          if alphaByte > 0
+            projected++
+            cam.projectPointsWithDepth(sceneObj.getBoundingPointsThisFrame(cam), out, true)
+            x0 = 1.0e30
+            y0 = 1.0e30
+            x1 = -1.0e30
+            y1 = -1.0e30
+            for i = 0 to out.count() - 1 step 3
+              if out[i + 2] = BGE.PROJECTED_BEHIND_CAMERA_DEPTH
+                ' reaching behind the eye, it's near and big enough to cover its own box
+                x1 = x0
+                exit for
+              end if
+              x = out[i]
+              y = out[i + 1]
+              if x < x0
+                x0 = x
+              end if
+              if x > x1
+                x1 = x
+              end if
+              if y < y0
+                y0 = y
+              end if
+              if y > y1
+                y1 = y
+              end if
+            end for
+            if x0 < 0
+              x0 = 0
+            end if
+            if y0 < 0
+              y0 = 0
+            end if
+            if x1 > w
+              x1 = w
+            end if
+            if y1 > h
+              y1 = h
+            end if
+            if x1 > x0 and y1 > y0
+              boxes.push(x0)
+              boxes.push(y0)
+              boxes.push(x1 - x0)
+              boxes.push(y1 - y0)
+              rgbas.push(base + alphaByte)
+            end if
+          end if
+        end if
+      end for
+      m.fogSilhouettesProjectedLastFrame = projected
+    end sub
+
     ' Draws one object of the sorted pass, unless the span map or the walls hide it. An
     ' object partly behind the walls draws, then the nearer wall strips are drawn over it.
     private sub drawSortedObject(sceneObj as SceneObject)
@@ -1446,6 +1733,11 @@ namespace BGE
       end for
       lap = m.lapStage("skybox", lap)
 
+      if m.camera.name = "Camera3d"
+        m.drawFogBackdrop(m.camera as Camera3d)
+      end if
+      lap = m.lapStage("fogBackdrop", lap)
+
       'TODO - Do proper occlusion culling
       ' draw planes first
 
@@ -1462,6 +1754,13 @@ namespace BGE
         end if
       end for
       lap = m.lapStage("planes", lap)
+
+      m.fogSilhouettesDrawnLastFrame = 0
+      m.fogSilhouettesProjectedLastFrame = 0
+      if m.camera.name = "Camera3d"
+        m.drawFogSilhouettes(m.camera as Camera3d)
+      end if
+      lap = m.lapStage("fogSilhouettes", lap)
 
       walls = m.wallsObject
       if invalid <> walls and walls.isEnabled()
