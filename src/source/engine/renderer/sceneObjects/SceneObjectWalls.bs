@@ -42,20 +42,18 @@ namespace BGE
     ' Per piece, its texture column (invalid for a missing texture) and vertical scale
     private pieceColumn = [] as dynamic[]
     private pieceScaleY = [] as float[]
-    ' Per piece, the RGBA of the solid fog strip under it (0 for none), until
-    ' buildFogRuns() merges it into a run
-    private pieceFogRgba = [] as integer[]
+    ' Per piece, whether a solid fog strip goes under it, until buildFogRuns() merges it into a run
+    private pieceFogUnder = [] as boolean[]
     ' A white column, tinted with the fog colour for fog strips
     private fogColumn as object = invalid
     private fogColumnHeight as float = 64
     ' Fog strips, merged up to maxFogRun neighbours on a wall: foot x and y, width, vertical
-    ' scale, lean and RGBA each (see buildFogRuns())
+    ' scale and lean each, all in fogRunRgba (see buildFogRuns())
     private fogRunX = [] as float[]
     private fogRunY = [] as float[]
     private fogRunWidth = [] as float[]
     private fogRunScale = [] as float[]
     private fogRunAngle = [] as float[]
-    private fogRunRgbas = [] as integer[]
     private fogRunRgba as integer = 0
     private maxFogRun as integer = 4
     ' Per piece, whether it's past the draw distance, so only a fog strip
@@ -320,9 +318,9 @@ namespace BGE
       runWidth = m.fogRunWidth
       runScale = m.fogRunScale
       runAngle = m.fogRunAngle
-      runRgbas = m.fogRunRgbas
+      fogRgba = m.fogRunRgba
       for i = 0 to fogDrawn - 1
-        draw2d.DrawTransformedObject(runX[i], runY[i], runAngle[i], runWidth[i], runScale[i], fogColumn, runRgbas[i])
+        draw2d.DrawTransformedObject(runX[i], runY[i], runAngle[i], runWidth[i], runScale[i], fogColumn, fogRgba)
       end for
       for k = view.pieceCount - 1 to 0 step -1
         column = pColumn[k]
@@ -338,11 +336,11 @@ namespace BGE
 
     ' Draws piece k (see drawPieces()).
     private sub drawPiece(rendererObj as Renderer, k as integer)
-      view = m.view
       column = m.pieceColumn[k]
       if invalid = column
         return
       end if
+      view = m.view
       rendererObj.getDraw2d().DrawTransformedObject(view.pieceX[k], view.pieceY[k], view.pieceAngle[k], view.pieceWidth[k], m.pieceScaleY[k], column, m.pieceRgba[k])
       rendererObj.incrementDrawCalls(1)
     end sub
@@ -354,7 +352,7 @@ namespace BGE
       base = d.getFillColorRGBA()
       fog = camera.fog
       fogColor = -1
-      if fog.enabled and m.drawable.castsFogSilhouette
+      if fog.enabled and fog.silhouetteReach > 0 and m.drawable.castsFogSilhouette
         fogColor = fog.color
       end if
       fogStart = fog.silhouetteStartAlpha
@@ -401,13 +399,13 @@ namespace BGE
       rgbas = m.pieceRgba
       pColumn = m.pieceColumn
       pScaleY = m.pieceScaleY
-      pFog = m.pieceFogRgba
+      pFog = m.pieceFogUnder
       pFogOnly = m.pieceFogOnly
       for k = rgbas.count() to view.pieceCount - 1
         rgbas.push(base)
         pColumn.push(invalid)
         pScaleY.push(1.0)
-        pFog.push(0)
+        pFog.push(false)
         pFogOnly.push(false)
       end for
       ' fog strips: solid under pieces whose fade alpha is below fogStart, and alone past
@@ -457,7 +455,7 @@ namespace BGE
         end if
         depth = pDepth[k]
         if fogs
-          pFog[k] = 0
+          pFog[k] = false
           pFogOnly[k] = false
         end if
         if fogs and depth >= far
@@ -471,7 +469,7 @@ namespace BGE
             shade = BGE.RendererHelpers.applyAlphaFade(shade, alpha)
             ' solid fog under it, so the faded wall and the fog add up to fully opaque
             if fogs and alpha < fogStart
-              pFog[k] = fogBase + &hFF
+              pFog[k] = true
             end if
           end if
           rgbas[k] = shade
@@ -501,7 +499,6 @@ namespace BGE
         m.fogRunWidth.Clear()
         m.fogRunScale.Clear()
         m.fogRunAngle.Clear()
-        m.fogRunRgbas.Clear()
       end if
     end sub
 
@@ -522,11 +519,7 @@ namespace BGE
       runWidth.Clear()
       runScale.Clear()
       runAngle.Clear()
-      runRgbas = m.fogRunRgbas
-      runRgbas.Clear()
-      solid = m.fogRunRgba
-      fogBase = solid - &hFF
-      pFog = m.pieceFogRgba
+      pFog = m.pieceFogUnder
       pFogOnly = m.pieceFogOnly
       pSeg = view.pieceSegment
       pX = view.pieceX
@@ -540,12 +533,8 @@ namespace BGE
       k = 0
       while k < count
         fogOnly = pFogOnly[k]
-        if fogOnly or pFog[k] <> 0
-          alphas = 0
-          if not fogOnly
-            alphas = pFog[k] and &hFF
-            pFog[k] = 0
-          end if
+        if fogOnly or pFog[k]
+          pFog[k] = false
           seg = pSeg[k]
           minX = pX[k]
           maxX = minX + pWidth[k]
@@ -555,7 +544,7 @@ namespace BGE
           n = 1
           j = k + 1
           while j < count and n < maxRun
-            if pFogOnly[j] <> fogOnly or pSeg[j] <> seg or (not fogOnly and pFog[j] = 0)
+            if pFogOnly[j] <> fogOnly or pSeg[j] <> seg or (not fogOnly and not pFog[j])
               exit while
             end if
             x = pX[j]
@@ -577,10 +566,7 @@ namespace BGE
               top = pY[j] - pLength[j]
             end if
             angles += pAngle[j]
-            if not fogOnly
-              alphas += pFog[j] and &hFF
-              pFog[j] = 0
-            end if
+            pFog[j] = false
             n++
             j++
           end while
@@ -589,11 +575,6 @@ namespace BGE
           runWidth.push(maxX - minX)
           runScale.push((foot - top) * invHeight)
           runAngle.push(angles / n)
-          if fogOnly
-            runRgbas.push(solid)
-          else
-            runRgbas.push(fogBase + int(alphas / n))
-          end if
           k = j
         else
           k++

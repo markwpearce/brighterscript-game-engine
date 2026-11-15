@@ -186,8 +186,6 @@ namespace BGE
     ' boxes were repeated. Read-only.
     fogSilhouettesDrawnLastFrame as integer = 0
     fogSilhouettesProjectedLastFrame as integer = 0
-    ' Each box's RGBA, as drawn last frame. Read-only.
-    fogSilhouetteRgbas = [] as integer[]
 
     ' Scene objects whose drawable casts a fog silhouette, rebuilt when dirty
     private fogCasters = [] as SceneObject[]
@@ -205,8 +203,10 @@ namespace BGE
     ' the camera's projectionVersion: field of view and frame size
     private fogKeyProjection as integer = -1
     private fogKeyEnabledCount as integer = -1
-    ' Each caster's depth point as of the last frame, x, y, z in turn
+    ' Per caster as of the last frame, fogKeyStride values: depth point x, y, z, geometry
+    ' version, transform version, then its world matrix's 3x3 turn and scale, row by row
     private fogKeyPositions = [] as float[]
+    private fogKeyStride as integer = 14
 
     ' The walls object this renderer draws (one at most), and the one drawn this frame.
     private wallsObject as dynamic = invalid
@@ -1260,7 +1260,9 @@ namespace BGE
       if m.fogCasters.count() = 0
         return
       end if
-      ' depthChangedThisFrame stays set on a culled object, so watch each depth point instead
+      ' depthChangedThisFrame stays set on a culled object, so watch each depth point instead, and
+      ' the geometry and world matrix for a turn or resize that leaves it in place. The transform
+      ' version can be bumped with nothing changed, so it only gates comparing the matrix.
       enabledCount = 0
       anyMoved = false
       keys = m.fogKeyPositions
@@ -1269,26 +1271,48 @@ namespace BGE
         x = 1.0e30
         y = 0.0
         z = 0.0
-        if sceneObj.isEnabled()
+        geometry = 0
+        enabled = sceneObj.isEnabled()
+        if enabled
           enabledCount++
           p = sceneObj.getDepthPosition()
           x = p.x
           y = p.y
           z = p.z ?? 0
+          geometry = sceneObj.drawable.geometryVersion
         end if
-        if k + 2 >= keys.count()
-          keys.push(0.0)
-          keys.push(0.0)
-          keys.push(0.0)
+        if k + m.fogKeyStride > keys.count()
+          for i = 1 to m.fogKeyStride
+            keys.push(0.0)
+          end for
           anyMoved = true
         end if
-        if keys[k] <> x or keys[k + 1] <> y or keys[k + 2] <> z
+        if keys[k] <> x or keys[k + 1] <> y or keys[k + 2] <> z or keys[k + 3] <> geometry
           keys[k] = x
           keys[k + 1] = y
           keys[k + 2] = z
+          keys[k + 3] = geometry
           anyMoved = true
         end if
-        k += 3
+        if enabled
+          transform = sceneObj.getTransformVersion()
+          if keys[k + 4] <> transform
+            keys[k + 4] = transform
+            mat = sceneObj.transformationMatrix
+            j = k + 5
+            for row = 0 to 2
+              r = mat[row]
+              for col = 0 to 2
+                if keys[j] <> r[col]
+                  keys[j] = r[col]
+                  anyMoved = true
+                end if
+                j++
+              end for
+            end for
+          end if
+        end if
+        k += m.fogKeyStride
       end for
       color = fog.color
       start = fog.silhouetteStartAlpha
@@ -1314,10 +1338,19 @@ namespace BGE
         b = i * 4
         draw2d.DrawRect(boxes[b], boxes[b + 1], boxes[b + 2], boxes[b + 3], rgbas[i])
       end for
-      m.fogSilhouetteRgbas.append(rgbas)
       m.fogSilhouettesDrawnLastFrame = n
       m.drawCallsLastFrame += n
     end sub
+
+    ' Each fog silhouette box's RGBA, as drawn last frame (see BGE.Fog). Don't change it.
+    '
+    ' @return {integer[]}
+    function getFogSilhouetteRgbas() as integer[]
+      if m.fogSilhouettesDrawnLastFrame = 0
+        return []
+      end if
+      return m.fogBoxRgbas
+    end function
 
     ' Projects each caster that's due a box (see drawFogSilhouettes()) into fogBoxes and
     ' fogBoxRgbas: the screen box of its bounding points (none if any are behind the eye), at alpha
@@ -1724,7 +1757,6 @@ namespace BGE
 
       m.fogSilhouettesDrawnLastFrame = 0
       m.fogSilhouettesProjectedLastFrame = 0
-      m.fogSilhouetteRgbas.Clear()
       if m.camera.name = "Camera3d"
         m.drawFogSilhouettes(m.camera as Camera3d)
       end if
