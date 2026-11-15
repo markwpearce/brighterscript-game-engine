@@ -28,7 +28,7 @@ game.enableAdaptiveQuality()
 The target defaults to 20fps; pass `{targetFps: 30}` to aim higher. The level drops
 quickly if the frame rate falls below the target, and rises about a second after
 there's headroom - two levels at once when the frame rate is at least double the
-target, e.g. when a still camera lets the renderer reuse cached draws. Keep it within a range with `minLevel`/`maxLevel`:
+target. Keep it within a range with `minLevel`/`maxLevel`:
 
 ```brighterscript
 game.enableAdaptiveQuality({minLevel: BGE.RenderQualityLevel.low, maxLevel: BGE.RenderQualityLevel.high})
@@ -36,14 +36,46 @@ game.enableAdaptiveQuality({minLevel: BGE.RenderQualityLevel.low, maxLevel: BGE.
 
 The debug FPS display (`game.enableStandardDebugUi()`) shows the current level.
 
-Under the hood this is a plain step-down/step-up controller, not a PID loop: it
-steps down fast (average frame rate below 90% of target), and only steps up after
-frame rate has stayed comfortably above target for a few seconds straight, one
-level at a time. A level that steps up but doesn't hold goes into a backoff and
-isn't retried for a while (doubling on each repeated failure) - the headroom time
-that earns a probe keeps accruing while the next level up is in that backoff, so
-once the backoff ends the very next frame's worth of headroom can trigger the
-probe immediately.
+### Per scene
+
+A scene can hold its own frame rate and range, in force while it's the current scene.
+Set its `qualityOptions` in `new()` or `onCreate()`; fields it leaves out use the game's:
+
+```brighterscript
+sub new(game as BGE.Game)
+  super(game)
+  m.name = "TownScene"
+  ' a busy scene: settle for 16fps and a richer view
+  m.qualityOptions = {targetFps: 16}
+end sub
+```
+
+The options apply once the scene has loaded (after `onCreate()`), and the next scene's
+replace them. `minLevel`/`maxLevel` move the level into range straight away.
+
+### When the camera stops
+
+A still camera lets the renderer reuse cached drawings, so there's usually plenty of
+headroom. Once the camera has been still for `stillCameraSeconds` (0.2), quality climbs
+straight up by the measured headroom - a level per doubling of the frame rate over the
+target, or right to the top when frames come at the display's refresh rate - usually
+within a second. When the camera moves again, the level stays put unless frames fall
+short - then it steps down after just 0.3s of frames, by a level plus one per halving of
+the frame rate under the target, and keeps doing that until moving frames hold the
+target. Set
+`stillCameraSeconds: 0` to turn this off.
+
+### How it decides
+
+It's a plain step-down/step-up controller, not a PID loop: it steps down fast (average
+frame rate below 90% of target), and only steps up after the frame rate has stayed
+comfortably above target for a while. A level that steps up but doesn't hold goes into
+a backoff and isn't retried for 4s (`probeBackoffSeconds`), doubling on each repeated
+failure up to 16s and starting over once the level holds. A still camera keeps its own,
+shorter backoffs (1s, up to 4s, `stillProbeBackoffSeconds`), since a level that failed
+while moving can hold when still. A level that drops because the camera started or
+stopped moving doesn't count as failing. The headroom that earns a probe keeps accruing while the next level up is in
+backoff, so it's tried the moment the backoff ends.
 
 ## Pick a level yourself
 
@@ -57,7 +89,16 @@ This also turns adaptive tuning off - handy for testing, or for a settings menu.
 
 A level scales your camera's `maxDrawDistance` rather than replacing it: Basic
 draws 0.75x as far, Low 0.825x, Medium exactly what you set, Ultra 1.5x. Set `maxDrawDistance` to
-what suits your game at Medium. The distance actually used is
+what suits your game at Medium.
+
+To keep the draw distance from changing with the level - walls in a maze that would
+otherwise reach farther or cut off nearer as the level moves - set `fixedDrawDistance`
+in a scene's `qualityOptions`: it draws out to `maxDrawDistance` at every level. Other
+settings still follow the level.
+
+```brighterscript
+m.qualityOptions = {fixedDrawDistance: true}
+``` The distance actually used is
 `camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
 running out of memory.
 
