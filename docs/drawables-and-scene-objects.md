@@ -422,8 +422,10 @@ texture toward the light's color; `lightPoolOpacity` (0.4 by default) caps how f
 still shows through. While a pool is in view, a light change redraws the plane rather than just
 re-tinting it - see the cost note below. A `staticImage` plane draws its pools, and the rest of its
 lighting, into a lit copy of its texture: one extra bitmap the texture's size, rebuilt only when
-the lights change, so it costs nothing per frame - unless a light changes every frame, which
-rebuilds it every frame. A `color` plane, and a point light with no `range`, fall back to measuring
+its tint or a pool on it changes, so it costs nothing per frame. A light that changes every frame
+near it, or a point light with no `range` (whose light depends on where the camera is), rebuilds it
+every such frame. Pools would show over a texture's transparent areas, so set
+`bakesLightPools = false` on a decal that has any. A `color` plane, and a point light with no `range`, fall back to measuring
 the light on the plane right under the camera, so the ground brightens as you walk toward a lamp
 instead. Unlike other drawables, a plane with no lights isn't shaded at all.
 

@@ -14,7 +14,9 @@ whole town orange.
 - Goal: no frame cost over today's uniform tint.
 - Non-goal: changing `tiledImage` planes. A texel in a repeating tile stands for many world
   spots, so pools can't be baked into it; they keep drawing per redraw.
-- Non-goal: per-light opt-in. Every shaded `staticImage` plane gets this.
+- Non-goal: per-light opt-in. Every shaded `staticImage` plane gets this, except one with
+  `bakesLightPools = false` (added after review: pools would show over a decal's transparent
+  areas, and Roku can't mask by alpha).
 - Anti-goal: a visible lighting difference between baked and the tiled planes' pools.
 
 ## Approaches (measured on device, 2026-11-15)
@@ -42,7 +44,8 @@ Both look the same. Mark picked baked.
   (ambient, directional, point lights with no `range`), then each ranged point light's pool drawn
   over it in texture space (`worldPointToTexel()` for the centre, `radius / texelScale` for the
   size), using the existing pool gradients and `getLightPoolRGBA()`.
-- The lit copy is keyed by `rendererObj.lightingVersion` and the source size, and allocated
+- The lit copy is keyed by what it shows (the tint, the source size and each pool's placement
+  and colour, changed after review from `lightingVersion`), and allocated
   fresh on each rebuild (Roku queues draws, so a bitmap read this frame can't be redrawn).
 - With the lighting in the texture, the composite is blitted untinted (`hasBakedLighting`), and a
   lighting change forces a full redraw rather than the tiled pools-only redraw.
