@@ -530,6 +530,14 @@ For fog that fades things out without a skyline - a dungeon fading to black, say
 `fog.silhouetteReach = 1`: fading objects and walls still fade into the fog colour, but nothing
 is drawn past the draw distance.
 
+With fog on, the draw distance stays at the camera's `maxDrawDistance` at every
+[render quality](/render-quality) level, so the fog's edge, the skyline and every fade stay put
+while the level changes: the level only changes how cheaply things inside it are drawn. To have
+the draw distance shrink at lower levels again for the speed, set `fog.followsQuality = true`;
+changes then ease in over `fog.qualityTransitionSeconds` (default 4) instead of the camera's
+`drawDistanceTransitionSeconds` (unless that's 0, which still applies them at once), so the fog
+creeps in rather than jumps.
+
 All fog is drawn before the objects it's behind. Lower `fog.silhouetteStartAlpha` (default 1)
 to start the boxes and the fog under walls later in the fade band: cheaper, but they appear
 with a step where they start.
