@@ -20,20 +20,27 @@ climbs back to it, on `snapDrawDistance()`, and never exceeds what was actually 
 `getCachedImageKeepDistance()` returns it while it's past the current distance and the gates
 above hold, else 0.
 
-**Kept object.** On a frame its fade alpha comes out below 1, an object is kept when all hold:
-- it drew last frame, fully opaque (fade alpha 1), alone (not in an overlap cluster), with the
-  same geometry and projection, and isn't newly enabled
+**Kept object.** On a frame its fade alpha comes out below the alpha it was last drawn with, an
+object is kept when all hold:
+- it drew last frame (at any fade above 0), alone (not in an overlap cluster), with the same
+  geometry and projection, and isn't newly enabled
 - its nearest bounding point is within the keep distance
 - it has a cheap picture for this frame:
-  - **replay** (any type with draw replay: images, models): its blit was captured at full fade,
+  - **replay** (any type with draw replay: images, models): its blit was captured at that fade,
     with the same lights and fill colour, and the object hasn't moved relative to the camera (or
     its camera-locked pose still matches)
   - **impostor** (models with `useImpostor` that cast fog silhouettes): the capture is at least
     the current quality, its lights still fit, and the fit to this frame's box corners is within
     the impostor limits and lands on the canvas
 
-A kept object's `distanceFadeAlpha` is pinned to 1, so fog silhouettes skip it and it draws over
-the backdrop, fully opaque. It never becomes an occluder. Its draw only ever repeats the replay
+A kept object's `distanceFadeAlpha` is frozen at the alpha it was last drawn with, so the frame
+looks as it did before the drop: it draws over the backdrop at that fade, and its fog box (if it
+casts one) stays at 1 - that alpha behind it, as before. An object that was fully opaque gets no
+box. It never becomes an occluder.
+
+Freezing rather than pinning to 1 came from the device: thirdPerson's fade band is wide, so at
+Ultra the town's tower and far huts are already drawn at alpha 0.6-0.98 over fog. Keeping only
+fully opaque objects kept none of them; pinning them to 1 would make them pop more solid. Its draw only ever repeats the replay
 blit or blits the impostor; if neither works it drops back to its real fade for that frame (and
 then culls or fades as today). It's re-checked whenever its fade is recomputed (it or the camera
 moved, the distance changed) and each frame while kept. A kept impostor blit drawn with the
@@ -47,7 +54,10 @@ quality and canvas position force it).
 
 ## Cost
 
-- Still camera: a kept object costs one replayed blit; the box it replaces cost one `DrawRect`.
+- Still camera: a kept object costs one replayed blit on top of the fog it already had (a solid
+  box without the keep, a 1 - alpha box with it). On device, thirdPerson's town at Medium after
+  a drop from Ultra: 48.1 fps kept vs 49.2 without (~0.5 ms), the price of the picture not
+  changing. Orbiting: 9.1 vs 9.0, neutral.
   The keep check runs only on frames its fade is recomputed, plus a few field reads while kept.
 - Moving camera: the impostor check projects the box's 8 corners, which the silhouette box
   projected anyway, plus a fit and one blit. Hence only for casters: for a non-caster it would
@@ -65,14 +75,16 @@ cached raster.
 ## Tests
 
 `RendererFogKeep.spec.bs`: keep distance easing (set on drop, cleared on recovery, snap, gates);
-a still image past the reduced distance keeps drawing opaque and gets no silhouette box; it drops
+a still image past the reduced distance keeps drawing and gets no silhouette box; one that was
+fading keeps its fade and its box as they were; it drops
 once its replay goes stale (fill colour change); no keep with fog off or the flag off; objects that
 were faded before the drop aren't kept; a moving impostor caster is kept (an exact-policy occluder
 too, since a kept picture never occludes) and a non-caster isn't; a kept impostor goes to fog once
 the view turns past its limit.
 
-Checked on the simulator (127.0.0.1): thirdPerson's town runs, still and moving, with no crash.
-The simulator sits at Basic, so it never steps between levels: the step-down itself wasn't seen.
+Checked on the simulator (127.0.0.1): no crash, still and moving. On the device (Roku at
+192.168.41.102), thirdPerson's town pinned at Ultra and dropped to Medium after 15 s: with the keep
+the tower and back huts look as they did at Ultra, without it they sink into fog.
 
 ## Needs a device
 

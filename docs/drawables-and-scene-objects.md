@@ -531,8 +531,8 @@ with a step where they start.
 
 When the draw distance drops, as it does when [render quality](/render-quality) steps down,
 objects it leaves behind that already have a picture still right for the view keep drawing it,
-fully opaque and without a fog box, instead of fading into fog (`fog.keepCachedImages`, on by
-default). A still object keeps repeating its last frame; while the camera moves, a fog-casting
+at the fade they had, instead of fading further into fog (`fog.keepCachedImages`, on by
+default). The frame looks as it did before the drop. A still object keeps repeating its last frame; while the camera moves, a fog-casting
 model keeps its impostor (`DrawableModel.useImpostor`). Either goes to fog as soon as its picture
 would need redrawing (it moves, the view turns too far, its lights or colour change), and nothing
 is kept past where it was drawn before the drop. Walls aren't kept: their far strips turn to fog
