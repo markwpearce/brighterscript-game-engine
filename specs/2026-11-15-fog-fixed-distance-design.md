@@ -21,11 +21,11 @@ capped), whatever the quality level. The renderer treats fog on exactly like
 moving together:
 
 - object fade band (`drawDistanceFadeFraction`): models, images and walls fade on one curve of
-  world distance, so they always agree (fixes (a))
+  world distance, so they always agree (walls no longer fade while models stay)
 - backdrop top, silhouette reach (`silhouetteReach` x a fixed distance: fixes #533's skyline)
 - plane draw distance
 - an object's fade depends only on where it is, so redrawing its picture can't change how fogged
-  it looks (fixes (c))
+  it looks (no building snapping to a fog box when it redraws)
 
 With fog off nothing changes: the draw distance follows quality and eases, as today. There's
 nothing to hide its edge, so a shorter one is the cheapest lever there.
