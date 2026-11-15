@@ -418,11 +418,16 @@ directional and ambient light it evenly - its cached drawing is just tinted as i
 costs nothing extra. On a `tiledImage` plane, a point light with a `range` casts a pool of light on
 the ground beneath it, as wide as its range reaches and fading out toward the edge. Pools are
 blended over the texture (Roku can't multiply one image into another), so a bright pool fades the
-texture toward the light's color; `lightPoolOpacity` (0.6 by default) caps how far, so the ground
+texture toward the light's color; `lightPoolOpacity` (0.4 by default) caps how far, so the ground
 still shows through. While a pool is in view, a light change redraws the plane rather than just
-re-tinting it - see the cost note below. A `staticImage` or `color` plane, and a point light with
-no `range`, fall back to measuring the light on the plane right under the camera, so the ground
-brightens as you walk toward a lamp instead. Unlike other drawables, a plane with no lights isn't shaded at all.
+re-tinting it - see the cost note below. A `staticImage` plane draws its pools, and the rest of its
+lighting, into a lit copy of its texture: one extra bitmap the texture's size, rebuilt only when
+its tint or a pool on it changes, so it costs nothing per frame. A light that changes every frame
+near it, or a point light with no `range` (whose light depends on where the camera is), rebuilds it
+every such frame. Pools would show over a texture's transparent areas, so set
+`bakesLightPools = false` on a decal that has any. A `color` plane, and a point light with no `range`, fall back to measuring
+the light on the plane right under the camera, so the ground brightens as you walk toward a lamp
+instead. Unlike other drawables, a plane with no lights isn't shaded at all.
 
 Billboard characters take lights the same way. A sprite in a camera-facing draw mode
 (`axisAligned`, `directScaled`, `directToCamera`) has no surface of its own, so with `isShaded`
