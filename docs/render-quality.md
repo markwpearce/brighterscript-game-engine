@@ -106,10 +106,6 @@ Ground planes (`DrawablePlane`) are the exception: they always draw out to your
 `maxDrawDistance` (capped per device), whatever the level, so the horizon never
 jumps when the level changes. Only other objects are culled closer or further.
 
-With [fog](/drawables-and-scene-objects) on, a step down doesn't fog out what's already drawn:
-objects the shorter distance leaves behind keep their current picture until it would need
-redrawing (`fog.keepCachedImages`), so the skyline doesn't flicker as the level moves.
-
 ## Change what a level does
 
 ```brighterscript

@@ -184,16 +184,6 @@ namespace BGE
     ' visible) to 0 (at or past the draw distance). Applied on top of `Drawable.alpha`.
     distanceFadeAlpha as float = 1.0
 
-    ' Renderer-internal: drawing a picture it already has past a dropped draw distance, its fade
-    ' frozen at the alpha it was drawn with (see BGE.Fog.keepCachedImages and
-    ' updateKeepPastDrawDistance())
-    keptPastDrawDistance as boolean = false
-    ' Renderer-internal: update() worked distanceFadeAlpha out again this frame
-    fadeRecomputedThisFrame as boolean = false
-    private wasKeptPastDrawDistance as boolean = false
-    ' Renderer-internal: the fade alpha last frame drew at, 0 if it didn't draw
-    lastDrawFadeAlpha as float = 0
-
     ' Bounding points computed for this frame's fade, reused by the frustum check.
     private boundingPointsThisFrame as BGE.Math.Vector[] = invalid
 
@@ -458,13 +448,8 @@ namespace BGE
         m.depthPosition = m.getPositionForCameraDistance(sceneObjDrawMode)
         m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.depthPosition)
       end if
-      m.wasKeptPastDrawDistance = m.keptPastDrawDistance
-      m.fadeRecomputedThisFrame = false
       ' a re-enabled object missed every update while disabled, and a resize moves its corners
       if m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or cameraObj.farDistanceChangedThisFrame()
-        ' the renderer decides again whether to keep it (see updateKeepPastDrawDistance())
-        m.keptPastDrawDistance = false
-        m.fadeRecomputedThisFrame = true
         if cameraObj.fadesWithDistance() and m.participatesInDistanceFade()
           ' nearest bounding point, so a large object near the camera doesn't fade by its far end
           m.distanceFadeAlpha = cameraObj.getDistanceFadeAlphaForPoints(m.getBoundingPointsThisFrame(cameraObj))
@@ -505,8 +490,6 @@ namespace BGE
     ' so the frame it's re-enabled is seen as its first frame since being enabled.
     sub markSkippedWhileDisabled()
       m.wasEnabledLastFrame = false
-      m.keptPastDrawDistance = false
-      m.lastDrawFadeAlpha = 0
     end sub
 
     ' Called by Renderer instead of draw() for an object it skips because it's behind the
@@ -522,7 +505,6 @@ namespace BGE
       m.lastFrameWasCulled = true
       m.visibility = BGE.VisibilityState.offCamera
       m.lastFrameDidDraw = false
-      m.lastDrawFadeAlpha = 0
       m.isFirstFrameSinceEnabled = false
     end sub
 
@@ -538,7 +520,6 @@ namespace BGE
       m.lastGeometryVersion = m.drawable.geometryVersion
       m.isFirstFrameSinceEnabled = false
       m.lastFrameDidDraw = false
-      m.lastDrawFadeAlpha = 0
       m.hasValidCanvasPosition = false
       m.lastFrameWasCulled = false
       m.visibility = BGE.VisibilityState.occluded
@@ -639,20 +620,12 @@ namespace BGE
       if m.lastFrameWasCulled and not m.depthChangedThisFrame and not m.isFirstFrameSinceEnabled and m.lastGeometryVersion = m.drawable.geometryVersion and m.lastProjectionVersion = cam.projectionVersion and not cam.farDistanceChangedThisFrame()
         ' Still culled: nothing that isPotentiallyOnScreen() below would look at has changed
         m.lastFrameDidDraw = false
-        m.lastDrawFadeAlpha = 0
         m.framesWithoutDraw++
         if m.framesWithoutDraw = m.releaseCachedDrawingsAfterFrames
           m.releaseCachedDrawings()
         end if
         m.lastQualityVersion = rendererObj.qualityVersion
         return
-      end if
-      if m.keptPastDrawDistance
-        if m.drawKept(rendererObj)
-          return
-        end if
-        ' its picture didn't hold after all: draw as it would have without the keep
-        m.dropKeep(cam)
       end if
       if invalid <> m.replayBlit
         ' Last frame drew one blit and nothing that shapes it has changed: repeat it, which
@@ -667,7 +640,6 @@ namespace BGE
           end if
           if invalid <> m.replayBlit and rendererObj.replayBlit(m.replayBlit)
             m.replayedLastDraw = true
-            m.lastDrawFadeAlpha = m.distanceFadeAlpha
             m.afterDraw()
             m.lastFrameWasCulled = false
             m.visibility = BGE.VisibilityState.visible
@@ -763,9 +735,7 @@ namespace BGE
       m.lastFrameDidDraw = didDraw
       if didDraw
         m.framesWithoutDraw = 0
-        m.lastDrawFadeAlpha = m.distanceFadeAlpha
       else
-        m.lastDrawFadeAlpha = 0
         m.framesWithoutDraw++
         if m.framesWithoutDraw = m.releaseCachedDrawingsAfterFrames
           m.releaseCachedDrawings()
@@ -983,122 +953,6 @@ namespace BGE
     protected function getCameraLockedReplayPose(cameraObj as Camera, drawMode as SceneObjectDrawMode) as float[]
       return invalid
     end function
-
-    ' Renderer-internal: decides, before anything draws, whether this object keeps drawing the
-    ' picture it already has though the draw distance has dropped below it (see
-    ' BGE.Fog.keepCachedImages). Call it each frame it's kept, and each frame update()
-    ' recomputed its fade to below 1.
-    '
-    ' @param {Renderer} rendererObj
-    ' @param {float} keepDistance the camera's getCachedImageKeepDistance(), 0 for none
-    ' @return {boolean} true if whether it's kept changed since last frame
-    function updateKeepPastDrawDistance(rendererObj as Renderer, keepDistance as float) as boolean
-      cam = rendererObj.camera
-      keep = keepDistance > 0 and m.lastDrawFadeAlpha > 0 and m.clusterMemberCount = 1 and not m.isFirstFrameSinceEnabled and m.lastGeometryVersion = m.drawable.geometryVersion and m.lastProjectionVersion = cam.projectionVersion
-      ' only something that moved, or a changed distance, can take it out of reach
-      if keep and m.fadeRecomputedThisFrame
-        keep = cam.getNearestForwardDistance(m.getBoundingPointsThisFrame(cam)) <= keepDistance
-      end if
-      if keep
-        keep = m.canKeepCachedImage(rendererObj)
-      end if
-      if keep
-        ' frozen at the fade it was drawn with, so the frame looks as it did before the drop
-        m.keptPastDrawDistance = true
-        m.distanceFadeAlpha = m.lastDrawFadeAlpha
-      else if m.keptPastDrawDistance
-        m.dropKeep(cam)
-      end if
-      return keep <> m.wasKeptPastDrawDistance
-    end function
-
-    ' Whether this frame can draw what it drew before without new work, while kept past the draw
-    ' distance: the last blit repeated as it was. Overrides may add other cheap pictures, drawn
-    ' by drawKeptImage().
-    '
-    ' @param {Renderer} rendererObj
-    ' @return {boolean}
-    protected function canKeepCachedImage(rendererObj as Renderer) as boolean
-      if invalid = m.replayBlit
-        return false
-      end if
-      if m.replayFade = m.lastDrawFadeAlpha and m.lastLightingVersion = rendererObj.lightingVersion and m.drawable.getFillColorRGBA() = m.replayFillColor
-        if not m.depthChangedThisFrame or (invalid <> m.replayPose and m.cameraLockedReplayMatches(rendererObj.camera))
-          return true
-        end if
-      end if
-      ' stale, as draw() would also find
-      m.replayBlit = invalid
-      return false
-    end function
-
-    ' Draws the cheap picture canKeepCachedImage() found, when it isn't the replayed blit.
-    '
-    ' @param {Renderer} rendererObj
-    ' @return {boolean} true if it drew
-    protected function drawKeptImage(rendererObj as Renderer) as boolean
-      return false
-    end function
-
-    ' A kept object's draw: its last blit again or drawKeptImage(), at its frozen fade. Never redraws.
-    private function drawKept(rendererObj as Renderer) as boolean
-      drew = false
-      blit = m.replayBlit
-      if invalid <> blit and m.replayFade = m.distanceFadeAlpha
-        key = m.getDrawReplayKey()
-        if key <> m.replayKey
-          blit = m.getReplayBlitForNewKey(blit)
-          m.replayBlit = blit
-          m.replayKey = key
-        end if
-        if invalid <> blit and rendererObj.replayBlit(blit)
-          drew = true
-          m.replayedLastDraw = true
-        end if
-      end if
-      if not drew
-        ' the old blit no longer matches; a still frame's new picture is repeated from then on
-        m.replayBlit = invalid
-        capture = m.drawReplayEnabled and not m.depthChangedThisFrame
-        if capture
-          rendererObj.beginBlitCapture()
-        end if
-        drew = m.drawKeptImage(rendererObj)
-        if capture
-          captured = rendererObj.endBlitCapture()
-          if drew and invalid <> captured
-            m.replayBlit = captured
-            m.replayPose = invalid
-            m.replayFade = m.distanceFadeAlpha
-            m.replayFillColor = m.drawable.getFillColorRGBA()
-            m.replayKey = m.getDrawReplayKey()
-          end if
-        end if
-      end if
-      if not drew
-        return false
-      end if
-      m.afterDraw()
-      m.lastFrameWasCulled = false
-      m.lastFrameDidDraw = true
-      m.lastDrawFadeAlpha = m.distanceFadeAlpha
-      m.visibility = BGE.VisibilityState.visible
-      m.framesWithoutDraw = 0
-      m.isFirstFrameSinceEnabled = false
-      ' its next normal draw projects again rather than trusting where this picture was
-      m.hasValidCanvasPosition = false
-      return true
-    end function
-
-    ' Stops keeping this object past the draw distance and gives it back its real fade.
-    private sub dropKeep(cameraObj as Camera)
-      m.keptPastDrawDistance = false
-      if cameraObj.fadesWithDistance() and m.participatesInDistanceFade()
-        m.distanceFadeAlpha = cameraObj.getDistanceFadeAlphaForPoints(m.getBoundingPointsThisFrame(cameraObj))
-      else
-        m.distanceFadeAlpha = 1.0
-      end if
-    end sub
 
     ' Whether replayPose still describes this frame (see getCameraLockedReplayPose())
     '
@@ -1324,7 +1178,7 @@ namespace BGE
     ' @param {Renderer} rendererObj
     ' @return {boolean}
     protected function canOccludeThisFrame(rendererObj as Renderer) as boolean
-      if not m.isOccluder or not m.isEnabled() or m.distanceFadeAlpha < 1 or m.keptPastDrawDistance or m.drawable.alpha < 255
+      if not m.isOccluder or not m.isEnabled() or m.distanceFadeAlpha < 1 or m.drawable.alpha < 255
         return false
       end if
       ' Renderer skips drawing anything whose depth point is behind the camera
