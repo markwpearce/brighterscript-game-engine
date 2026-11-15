@@ -529,6 +529,15 @@ All fog is drawn before the objects it's behind. Lower `fog.silhouetteStartAlpha
 to start the boxes and the fog under walls later in the fade band: cheaper, but they appear
 with a step where they start.
 
+When the draw distance drops, as it does when [render quality](/render-quality) steps down,
+objects it leaves behind that already have a picture still right for the view keep drawing it,
+fully opaque and without a fog box, instead of fading into fog (`fog.keepCachedImages`, on by
+default). A still object keeps repeating its last frame; while the camera moves, a fog-casting
+model keeps its impostor (`DrawableModel.useImpostor`). Either goes to fog as soon as its picture
+would need redrawing (it moves, the view turns too far, its lights or colour change), and nothing
+is kept past where it was drawn before the drop. Walls aren't kept: their far strips turn to fog
+as before.
+
 The fog fields are read every frame, so you can change them live. `examples/rendererTest`'s Fog
 demo (`--param demo=fog`) cycles fog off / backdrop / backdrop + silhouettes, and
 `demo=fog-benchmark` times each.
