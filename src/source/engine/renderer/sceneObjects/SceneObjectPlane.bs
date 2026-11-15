@@ -104,6 +104,11 @@ namespace BGE
     ' A staticImage's region stretched by getTextureStretch(), for a non-square scale
     private stretchedSourceRegion as roRegion = invalid
     private stretchedSourceKey as string = ""
+    ' A shaded staticImage's lit texture (see getBakedSourceRegion()), and what it was built for
+    private bakedSourceRegion as roRegion = invalid
+    private bakedSourceKey as string = ""
+    private lightBakeCount as integer = 0
+    private bakedLightPoolCount as integer = 0
     ' Physical/logical pixel ratio: 1.0 until logical size exceeds getMaxSuperTextureDimension()'s
     ' budget, then tiles downscale and every pixel-space consumer must apply this factor.
     private superTextureScale as float = 1.0
@@ -189,6 +194,9 @@ namespace BGE
       if isTiled and not needsFullRedraw and m.lightingChangedThisDraw
         pools = m.getVisibleLightPools(rendererObj)
       end if
+      if m.bakesLights() and m.lightingChangedThisDraw
+        needsFullRedraw = true
+      end if
       redrawPoolsOnly = false
       if not needsFullRedraw and m.lightingChangedThisDraw and (m.hasBakedLighting or pools.count() > 0)
         ' Baked-in lighting needs a redraw to change, as does a pool coming into view.
@@ -272,6 +280,10 @@ namespace BGE
         end if
       else
         sourceRegion = m.getStaticSourceRegion(rendererObj)
+        if invalid <> sourceRegion and m.bakesLights() and rendererObj.hasLights()
+          sourceRegion = m.getBakedSourceRegion(rendererObj, sourceRegion)
+          m.hasBakedLighting = invalid <> sourceRegion
+        end if
         if invalid = sourceRegion
           return false
         end if
@@ -388,6 +400,78 @@ namespace BGE
       return m.lightPoolsDrawn.count()
     end function
 
+    ' How many times a staticImage plane's lit texture has been built. Public for tests/telemetry only.
+    '
+    ' @return {integer}
+    function getLightBakeCount() as integer
+      return m.lightBakeCount
+    end function
+
+    ' How many light pools the current lit texture shows. Public for tests/telemetry only.
+    '
+    ' @return {integer}
+    function getBakedLightPoolCount() as integer
+      return m.bakedLightPoolCount
+    end function
+
+    ' The light pools that reach a `width` x `height` texture, placed in its texels. Public
+    ' for tests only.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {float} width
+    ' @param {float} height
+    ' @return {BGE.PlaneLightPoolPlacement[]}
+    function getBakedLightPools(rendererObj as BGE.Renderer, width as float, height as float) as PlaneLightPoolPlacement[]
+      placements = [] as PlaneLightPoolPlacement[]
+      texelScale = m.getTexelScale()
+      for each pool in BGE.Lighting.getPlaneLightPools(rendererObj.getPreparedLights(), m.drawable.plane.point, m.getVisibleNormal(rendererObj.camera))
+        rgba = m.getLightPoolRGBA(pool)
+        centre = m.worldPointToTexel(pool.center)
+        radius = pool.radius / texelScale
+        if rgba <> 0 and centre.x + radius > 0 and centre.x - radius < width and centre.y + radius > 0 and centre.y - radius < height
+          placements.push({pool: pool, x: centre.x - radius, y: centre.y - radius, width: 2 * radius, height: 2 * radius, rgba: rgba})
+        end if
+      end for
+      return placements
+    end function
+
+    ' `source` lit in texture space: tinted by the uniform lights, with each ranged point
+    ' light's pool drawn in. Kept until the lights or the source's size change.
+    '
+    ' @param {BGE.Renderer} rendererObj
+    ' @param {roRegion} source
+    ' @return {roRegion} invalid if it couldn't be allocated
+    private function getBakedSourceRegion(rendererObj as BGE.Renderer, source as roRegion) as roRegion
+      width = source.GetWidth()
+      height = source.GetHeight()
+      key = `${rendererObj.lightingVersion}:${width}x${height}`
+      if invalid <> m.bakedSourceRegion and key = m.bakedSourceKey
+        return m.bakedSourceRegion
+      end if
+      ' A new bitmap each time: Roku queues draws, so one read this frame can't be redrawn.
+      m.bakedSourceRegion = invalid
+      bmp = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+      if invalid = bmp
+        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; width; "x"; height; " lit texture - skipping this plane this frame"
+        return invalid
+      end if
+      bmp.Clear(&h00000000)
+      rendererObj.drawObjectTo(bmp, 0, 0, source, m.getLightTintRGBA(rendererObj))
+      pools = m.getBakedLightPools(rendererObj, width, height)
+      for each placement in pools
+        gradient = m.getLightPoolGradient(placement.pool.heightRatio)
+        if invalid <> gradient
+          size = gradient.GetWidth()
+          rendererObj.drawScaledObjectTo(bmp, placement.x, placement.y, placement.width / size, placement.height / size, gradient, placement.rgba)
+        end if
+      end for
+      m.bakedSourceRegion = CreateObject("roRegion", bmp, 0, 0, width, height)
+      m.bakedSourceKey = key
+      m.lightBakeCount++
+      m.bakedLightPoolCount = pools.count()
+      return m.bakedSourceRegion
+    end function
+
     ' Whether `pools` are close enough to the ones already drawn - within the quality
     ' level's `planeLightPoolMaxDriftPixels` and `planeLightPoolMaxLightChange` - to keep
     ' the cached drawing.
@@ -448,10 +532,20 @@ namespace BGE
     end sub
 
     ' Whether ranged point lights are drawn as pools on this plane rather than sampled
-    ' under the camera. A color fill has no top-down bitmap to draw them into, and a
-    ' static decal's transparent edges would show them, so both keep the uniform sample.
+    ' under the camera. A color fill has no texture to draw them into, so it keeps the
+    ' uniform sample.
     private function usesLightPools() as boolean
+      return m.drawsPoolsPerFrame() or m.bakesLights()
+    end function
+
+    ' A tiled plane's texel stands for many places, so its pools go in the top-down bitmap.
+    private function drawsPoolsPerFrame() as boolean
       return m.drawable.isShaded and m.drawable.fillMode = PlaneFillMode.tiledImage
+    end function
+
+    ' A static decal's texel is one place, so its lighting is drawn into the texture.
+    private function bakesLights() as boolean
+      return m.drawable.isShaded and m.drawable.fillMode = PlaneFillMode.staticImage
     end function
 
     ' The light pools that overlap the plane's top-down bitmap, placed in its pixels.
@@ -460,7 +554,7 @@ namespace BGE
     ' @return {BGE.PlaneLightPoolPlacement[]}
     private function getVisibleLightPools(rendererObj as BGE.Renderer) as PlaneLightPoolPlacement[]
       placements = [] as PlaneLightPoolPlacement[]
-      if not m.usesLightPools() or not rendererObj.hasLights() or invalid = m.prePerspectiveBmp or invalid = m.perspectivePoints
+      if not m.drawsPoolsPerFrame() or not rendererObj.hasLights() or invalid = m.prePerspectiveBmp or invalid = m.perspectivePoints
         return placements
       end if
       bmpWidth = m.prePerspectiveBmp.GetWidth()

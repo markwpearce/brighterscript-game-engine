@@ -332,7 +332,7 @@ namespace tests
       m.assertEqual(&hFFFFFFFF, sceneObj.getLightTintRGBA(m.renderer))
     end function
 
-    @it("leave ranged point lights out of a tiled plane's tint, to draw them as pools")
+    @it("leave ranged point lights out of a shaded plane's tint, to draw them as pools")
     function _()
       tile = CreateObject("roBitmap", {width: 8, height: 8, alphaEnable: true})
       plane = new BGE.DrawablePlane(m.entity, CreateObject("roRegion", tile, 0, 0, 8, 8), {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.tiledImage, isShaded: true, ambientBrightness: 0})
@@ -341,10 +341,65 @@ namespace tests
       m.renderer.addLight(new BGE.PointLight(m.v(0, 40, 0), 100))
       m.renderer.updateLighting()
       m.assertEqual(&h000000FF, sceneObj.getLightTintRGBA(m.renderer))
-      ' a static decal has no pools, so the lamp is sampled under the camera as before
       decal = new BGE.DrawablePlane(m.entity, CreateObject("roRegion", tile, 0, 0, 8, 8), {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.staticImage, isShaded: true, ambientBrightness: 0})
       decalObj = new BGE.SceneObjectPlane("decal", decal)
-      m.assertNotEqual(&h000000FF, decalObj.getLightTintRGBA(m.renderer))
+      m.assertEqual(&h000000FF, decalObj.getLightTintRGBA(m.renderer))
+    end function
+
+    @it("bake a lamp's pool into a static decal's texture, in texels")
+    function _()
+      ' 30 up with a range of 50: a 40-unit pool, 20 texels at scale 2, centred on texel (42, 27)
+      sceneObj = m.drawDecalWithLamp(m.v(20, 30, -10))
+      pools = sceneObj.getBakedLightPools(m.renderer, 64, 64)
+      m.assertEqual(1, pools.count())
+      m.assertEqual(22, cint(pools[0].x))
+      m.assertEqual(7, cint(pools[0].y))
+      m.assertEqual(40, cint(pools[0].width))
+      m.assertEqual(40, cint(pools[0].height))
+    end function
+
+    @it("leave a pool off a static decal's texture when it doesn't reach it")
+    function _()
+      sceneObj = m.drawDecalWithLamp(m.v(5000, 30, 0))
+      m.assertEqual(0, sceneObj.getBakedLightPools(m.renderer, 64, 64).count())
+    end function
+
+    @it("bake a static decal's lights once, not every frame")
+    function _()
+      sceneObj = m.drawDecalWithLamp(m.v(0, 30, -80))
+      m.drawStillFrame(sceneObj)
+      m.moveCameraAndDraw(sceneObj)
+      m.assertEqual(1, sceneObj.getLightBakeCount())
+      m.assertEqual(1, sceneObj.getBakedLightPoolCount())
+    end function
+
+    @it("rebake a static decal when a light changes")
+    function _()
+      sceneObj = m.drawDecalWithLamp(m.v(0, 30, -80))
+      m.drawStillFrame(sceneObj)
+      m.lamp.position = m.v(10, 30, -80)
+      m.renderer.updateLighting()
+      sceneObj.draw(m.renderer)
+      m.assertEqual(2, sceneObj.getLightBakeCount())
+    end function
+
+    @it("blit a baked static decal untinted")
+    function _()
+      m.renderer.addLight(new BGE.AmbientLight(BGE.ColorsRGB.White, 0.5))
+      sceneObj = m.drawDecalWithLamp(m.v(0, 30, -80))
+      m.assertNotEqual(-1, sceneObj.getLightTintRGBA(m.renderer))
+      m.assertEqual(-1, sceneObj.getCompositeTintRGBA(m.renderer))
+    end function
+
+    @it("leave an unshaded or unlit static decal unbaked")
+    function _()
+      unshaded = m.drawDecalWithLamp(m.v(0, 30, -80), false)
+      m.assertEqual(0, unshaded.getLightBakeCount())
+      m.assertEqual(-1, unshaded.getCompositeTintRGBA(m.renderer))
+      m.renderer.clearLights()
+      m.renderer.updateLighting()
+      unlit = m.drawDecal(true)
+      m.assertEqual(0, unlit.getLightBakeCount())
     end function
 
     @it("draw a pool where a lamp reaches a tiled plane in view")
@@ -426,6 +481,38 @@ namespace tests
       camera.checkMovement()
       sceneObj.update(camera)
     end sub
+
+    ' Moves the camera a little and draws, so the plane redraws everything.
+    private sub moveCameraAndDraw(sceneObj as BGE.SceneObjectPlane)
+      camera = m.renderer.camera as BGE.Camera3d
+      camera.position.x = camera.position.x + 1
+      camera.checkMovement()
+      sceneObj.update(camera)
+      sceneObj.draw(m.renderer)
+    end sub
+
+    ' A 64x64 static decal at scale 2 with a lamp of range 50 at `lampPosition`, drawn once.
+    private function drawDecalWithLamp(lampPosition as BGE.Math.Vector, isShaded = true as boolean) as BGE.SceneObjectPlane
+      m.lamp = new BGE.PointLight(lampPosition, 50)
+      m.renderer.addLight(m.lamp)
+      m.renderer.updateLighting()
+      return m.drawDecal(isShaded)
+    end function
+
+    ' A 64x64 static decal at scale 2 seen from above and ahead, drawn once.
+    private function drawDecal(isShaded as boolean) as BGE.SceneObjectPlane
+      texture = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: true})
+      plane = new BGE.DrawablePlane(m.entity, CreateObject("roRegion", texture, 0, 0, 64, 64), {normal: m.v(0, 1, 0), point: m.v(0, 0, 0)}, {fillMode: BGE.PlaneFillMode.staticImage, isShaded: isShaded, scale: m.v(2, 2, 1)})
+      sceneObj = new BGE.SceneObjectPlane("decal", plane)
+      camera = m.renderer.camera as BGE.Camera3d
+      camera.position = m.v(0, 50, 0)
+      camera.setTarget(m.v(0, 38, -100))
+      camera.maxDrawDistance = 200
+      camera.checkMovement()
+      sceneObj.update(camera)
+      sceneObj.draw(m.renderer)
+      return sceneObj
+    end function
 
     ' A shaded tiled ground seen from above and ahead, drawn once with a lamp at `lampPosition`.
     private function drawTiledPlaneWithLamp(lampPosition as BGE.Math.Vector) as BGE.SceneObjectPlane
