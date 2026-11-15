@@ -510,7 +510,7 @@ walls = new BGE.DrawableWalls(m, segments, textures, {castsFogSilhouette: true})
 That does three things:
 
 - **The backdrop.** The strip of screen from where the ground ends up to `backdropHeight` at the
-  draw distance is filled with the fog colour, behind everything. Objects fading out across the
+  draw distance, or the horizon if that's lower, is filled with the fog colour, behind everything. Objects fading out across the
   fade band (see above) now fade into fog rather than sky.
 - **Silhouettes.** A drawable with `castsFogSilhouette` keeps blocking the sky past the draw
   distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured box over its
@@ -520,6 +520,10 @@ That does three things:
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
   their real outline past the draw distance as flat fog-coloured strips, with solid fog under
   them across the fade band, so a fading wall and its fog add up to fully opaque.
+
+For fog that fades things out without a skyline - a dungeon fading to black, say - set
+`fog.silhouetteReach = 1`: fading objects and walls still fade into the fog colour, but nothing
+is drawn past the draw distance.
 
 All fog is drawn before the objects it's behind. Lower `fog.silhouetteStartAlpha` (default 1)
 to start the boxes and the fog under walls later in the fade band: cheaper, but they appear
