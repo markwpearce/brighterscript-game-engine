@@ -40,6 +40,26 @@ namespace BGE
     optional probeBackoffSeconds as float
     ' Step up two levels at once when average fps >= targetFps * this; 0 disables (default 2.0)
     optional stepUpJumpFraction as float
+    ' Seconds the camera must stay still before quality climbs faster; 0 disables (default 0.2)
+    optional stillCameraSeconds as float
+    ' Seconds ignored after a level change while the camera is still (default 0.1)
+    optional stillSettleSeconds as float
+    ' Seconds of frames a still camera needs before stepping up (default 0.2)
+    optional stillSampleSeconds as float
+  end interface
+
+  ' A scene's own render quality settings (`GameScene.qualityOptions`), in force while it's the
+  ' current scene. Every field is optional; leave one out to use the game's.
+  interface SceneQualityOptions extends roAssociativeArray
+    ' Frame rate to hold in this scene, instead of `enableAdaptiveQuality()`'s
+    optional targetFps as float
+    ' Lowest level adaptive quality may choose in this scene
+    optional minLevel as integer
+    ' Highest level adaptive quality may choose in this scene
+    optional maxLevel as integer
+    ' Draw out to the camera's `maxDrawDistance` at every level, so the view never reaches
+    ' farther or nearer when the level changes (default false)
+    optional fixedDrawDistance as boolean
   end interface
 
   ' Chooses a render quality level from measured frame times. `Game` runs one for
@@ -63,6 +83,9 @@ namespace BGE
     probeFailWindowSeconds as float = 1.5
     probeBackoffSeconds as float = 10
     stepUpJumpFraction as float = 2.0
+    stillCameraSeconds as float = 0.2
+    stillSettleSeconds as float = 0.1
+    stillSampleSeconds as float = 0.2
 
     private samples as float[] = []
     private sampleTime as float = 0
@@ -74,9 +97,14 @@ namespace BGE
     private lastProbeLevel as integer = -1
     ' clock times of recent hitches
     private hitchTimes as float[] = []
-    ' level (as string) -> clock time it may be retried / its current backoff length
+    ' backoffKey() -> clock time it may be retried / its current backoff length
     private backoffUntil as roAssociativeArray = {}
     private backoffLength as roAssociativeArray = {}
+    ' seconds the camera has been still, whether that's long enough to count, and the level
+    ' in use when it stopped (returned to when it moves again)
+    private stillTime as float = 0
+    private isStill as boolean = false
+    private movingLevel as integer = -1
 
     ' @param {BGE.AdaptiveQualityOptions} [options={}] - any subset of the options
     sub new(options = {} as AdaptiveQualityOptions)
@@ -132,7 +160,72 @@ namespace BGE
       if options.DoesExist("stepUpJumpFraction")
         m.stepUpJumpFraction = options.stepUpJumpFraction
       end if
+      if options.DoesExist("stillCameraSeconds")
+        m.stillCameraSeconds = options.stillCameraSeconds
+      end if
+      if options.DoesExist("stillSettleSeconds")
+        m.stillSettleSeconds = options.stillSettleSeconds
+      end if
+      if options.DoesExist("stillSampleSeconds")
+        m.stillSampleSeconds = options.stillSampleSeconds
+      end if
     end sub
+
+    ' Sets the frame rate and range to hold, e.g. for a scene with its own. Backoffs are
+    ' forgotten, since a level that failed elsewhere says little here.
+    '
+    ' @param {float} targetFps
+    ' @param {integer} minLevel - a `BGE.RenderQualityLevel` value
+    ' @param {integer} maxLevel - a `BGE.RenderQualityLevel` value
+    sub setTarget(targetFps as float, minLevel as integer, maxLevel as integer)
+      m.targetFps = targetFps
+      m.minLevel = minLevel
+      m.maxLevel = maxLevel
+      m.backoffUntil = {}
+      m.backoffLength = {}
+      m.movingLevel = -1
+    end sub
+
+    ' Feed whether the camera moved this frame, before update(). Returns the level to use: the
+    ' one that held while moving, when the camera starts moving after a still spell raised it.
+    '
+    ' @param {float} dt
+    ' @param {boolean} moved - whether the camera moved or turned this frame
+    ' @param {integer} currentLevel - the level currently applied
+    ' @return {integer}
+    function noteCamera(dt as float, moved as boolean, currentLevel as integer) as integer
+      if m.stillCameraSeconds <= 0
+        return currentLevel
+      end if
+      if not moved
+        m.stillTime += dt
+        if not m.isStill and m.stillTime >= m.stillCameraSeconds
+          m.isStill = true
+          m.movingLevel = currentLevel
+          ' frames from while it moved say nothing about the still view
+          m.resetWindow()
+        end if
+        return currentLevel
+      end if
+      m.stillTime = 0
+      if not m.isStill
+        return currentLevel
+      end if
+      m.isStill = false
+      m.resetWindow()
+      level = currentLevel
+      if m.movingLevel >= m.minLevel and m.movingLevel < currentLevel
+        level = m.movingLevel
+        m.timeSinceStepDown = 0
+      end if
+      m.movingLevel = -1
+      return level
+    end function
+
+    ' @return {boolean} whether the controller is treating the camera as still
+    function isCameraStill() as boolean
+      return m.isStill
+    end function
 
     ' Feed one frame's duration; returns the level to use (currentLevel if no change).
     '
@@ -164,13 +257,22 @@ namespace BGE
       while m.sampleTime > m.windowSeconds and m.samples.count() > 1
         m.sampleTime -= m.samples.shift()
       end while
-      ' need at least half a window before trusting the average
-      if m.sampleTime < m.windowSeconds * 0.5
+      ' need at least half a window before trusting the average, or a short sample to step up
+      ' while still
+      trusted = m.sampleTime >= m.windowSeconds * 0.5
+      if not trusted and not (m.isStill and m.sampleTime >= m.stillSampleSeconds)
         return currentLevel
       end if
 
       avgFps = m.samples.count() / m.sampleTime
       upThreshold = BGE.Math.Min(m.targetFps * m.stepUpHeadroomFraction, m.maxMeasurableFps * 0.97)
+
+      if m.isStill and avgFps >= upThreshold
+        return m.stepUpStill(avgFps, currentLevel)
+      end if
+      if not trusted
+        return currentLevel
+      end if
 
       if avgFps < m.targetFps * m.stepDownBelowFraction
         m.headroomTime = 0
@@ -196,6 +298,34 @@ namespace BGE
       return currentLevel
     end function
 
+    ' A still camera reuses cached draws, so step straight up as far as the headroom suggests:
+    ' a level per doubling of the frame rate over the target, or to the top at the display's
+    ' refresh, where the real headroom can't be measured.
+    private function stepUpStill(avgFps as float, currentLevel as integer) as integer
+      newLevel = currentLevel
+      if avgFps >= m.maxMeasurableFps * 0.97
+        newLevel = m.maxLevel
+      else
+        newLevel = currentLevel + 1
+        bar = m.targetFps * 2
+        while avgFps >= bar and newLevel < m.maxLevel
+          newLevel++
+          bar = bar * 2
+        end while
+      end if
+      ' the highest level not in backoff
+      while newLevel > currentLevel and m.isInBackoff(newLevel)
+        newLevel--
+      end while
+      if newLevel <= currentLevel
+        return currentLevel
+      end if
+      m.headroomTime = 0
+      m.timeSinceStepUp = 0
+      m.lastProbeLevel = newLevel
+      return newLevel
+    end function
+
     ' Call after a new level has been applied: clears the average and waits out the
     ' settle period so one-off rebuild costs don't count against the new level.
     sub notifyLevelChanged()
@@ -214,6 +344,10 @@ namespace BGE
       m.timeSinceStepDown = 0
       m.headroomTime = 0
       m.hitchTimes = []
+      ' a level the still view can't hold, moving won't either
+      if m.movingLevel >= currentLevel
+        m.movingLevel = currentLevel - 1
+      end if
       return currentLevel - 1
     end function
 
@@ -235,15 +369,26 @@ namespace BGE
       m.sampleTime = 0
       m.headroomTime = 0
       m.settleRemaining = m.settleSeconds
+      if m.isStill
+        m.settleRemaining = m.stillSettleSeconds
+      end if
     end sub
 
     private function isInBackoff(level as integer) as boolean
-      key = level.toStr()
+      key = m.backoffKey(level)
       return m.backoffUntil.DoesExist(key) and m.clock < m.backoffUntil[key]
     end function
 
+    ' A level that fails while moving can still hold with a still camera, so each keeps its own
+    private function backoffKey(level as integer) as string
+      if m.isStill
+        return "s" + level.toStr()
+      end if
+      return level.toStr()
+    end function
+
     private sub markProbeFailed(level as integer)
-      key = level.toStr()
+      key = m.backoffKey(level)
       length = m.probeBackoffSeconds
       if m.backoffLength.DoesExist(key)
         length = m.backoffLength[key] * 2

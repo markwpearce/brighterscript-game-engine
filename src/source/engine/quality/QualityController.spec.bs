@@ -32,6 +32,23 @@ namespace tests
       return level
     end function
 
+    ' Like simulate(), with the camera still (or moving) each frame, as RenderQualityManager feeds it.
+    private function simulateCamera(controller as BGE.QualityController, level as integer, fps as float, seconds as float, moved as boolean) as integer
+      dt = 1.0 / fps
+      frames = cint(seconds * fps)
+      for i = 1 to frames
+        newLevel = controller.noteCamera(dt, moved, level)
+        if newLevel = level
+          newLevel = controller.update(dt, level)
+        end if
+        if newLevel <> level
+          level = newLevel
+          controller.notifyLevelChanged()
+        end if
+      end for
+      return level
+    end function
+
     ' Most tests below pin the original (slower) timings so their hand-worked frame
     ' counts stay valid; this group covers the shipped defaults.
     @describe("defaults")
@@ -255,6 +272,89 @@ namespace tests
       m.assertEqual(BGE.RenderQualityLevel.medium, level)
       level = m.simulate(c, level, 60, 3)
       m.assertEqual(BGE.RenderQualityLevel.high, level)
+    end function
+
+    @describe("still camera (#519)")
+
+    @it("climbs to the top within a second of the camera stopping at the display's refresh")
+    function _()
+      c = new BGE.QualityController()
+      ' moving at the target: holds low
+      level = m.simulateCamera(c, BGE.RenderQualityLevel.low, 20, 2, true)
+      m.assertEqual(BGE.RenderQualityLevel.low, level)
+      ' 0.2s to count as still, 0.1s settle, 0.2s sample
+      level = m.simulateCamera(c, level, 60, 1.0, false)
+      m.assertEqual(BGE.RenderQualityLevel.ultra, level)
+    end function
+
+    @it("steps a level per doubling of the frame rate over the target")
+    function _()
+      c = new BGE.QualityController({targetFps: 10})
+      ' 45fps: 4.5x the target, so up by 3 at once
+      level = m.simulateCamera(c, BGE.RenderQualityLevel.basic, 45, 0.6, false)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+    end function
+
+    @it("doesn't climb past maxLevel")
+    function _()
+      c = new BGE.QualityController({maxLevel: BGE.RenderQualityLevel.medium})
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulateCamera(c, BGE.RenderQualityLevel.low, 60, 1.0, false))
+    end function
+
+    @it("returns to the level that held while moving when the camera moves again")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulateCamera(c, BGE.RenderQualityLevel.low, 60, 1.0, false)
+      m.assertEqual(BGE.RenderQualityLevel.ultra, level)
+      m.assertTrue(c.isCameraStill())
+      m.assertEqual(BGE.RenderQualityLevel.low, c.noteCamera(1.0 / 60, true, level))
+      m.assertFalse(c.isCameraStill())
+    end function
+
+    @it("keeps a level stepped down to while still when the camera moves again")
+    function _()
+      c = new BGE.QualityController()
+      level = m.simulateCamera(c, BGE.RenderQualityLevel.high, 10, 1.5, false)
+      m.assertTrue(level < BGE.RenderQualityLevel.high)
+      m.assertEqual(level, c.noteCamera(0.1, true, level))
+    end function
+
+    @it("doesn't treat a camera that moves every frame as still")
+    function _()
+      c = new BGE.QualityController()
+      ' the moving-camera timings: one level per 0.5s half window + 0.5s sustain
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulateCamera(c, BGE.RenderQualityLevel.low, 30, 0.9, true))
+      m.assertFalse(c.isCameraStill())
+    end function
+
+    @it("is off with stillCameraSeconds 0")
+    function _()
+      c = new BGE.QualityController({stillCameraSeconds: 0})
+      m.assertEqual(BGE.RenderQualityLevel.medium, m.simulateCamera(c, BGE.RenderQualityLevel.low, 30, 0.9, false))
+    end function
+
+    @it("doesn't hold a moving failure against a still camera")
+    function _()
+      c = new BGE.QualityController({stepUpJumpFraction: 0})
+      ' moving: probe high, fail it
+      level = m.simulateCamera(c, BGE.RenderQualityLevel.medium, 30, 1.2, true)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+      level = m.simulateCamera(c, level, 10, 0.8, true)
+      m.assertEqual(BGE.RenderQualityLevel.medium, level)
+      ' still: high is tried again straight away
+      level = m.simulateCamera(c, level, 30, 0.6, false)
+      m.assertEqual(BGE.RenderQualityLevel.high, level)
+    end function
+
+    @describe("setTarget")
+
+    @it("holds a new target and range")
+    function _()
+      c = new BGE.QualityController()
+      c.setTarget(10, BGE.RenderQualityLevel.low, BGE.RenderQualityLevel.high)
+      ' 15fps would step down against 20, but holds against 10, and climbs to the new max
+      m.assertEqual(BGE.RenderQualityLevel.high, m.simulate(c, BGE.RenderQualityLevel.medium, 15, 3))
+      m.assertEqual(BGE.RenderQualityLevel.low, m.simulate(c, BGE.RenderQualityLevel.low, 5, 3))
     end function
 
   end class
