@@ -499,6 +499,9 @@ shorter draw distance without looking like the world just ends. Turn it on with 
 camera.fog.enabled = true
 camera.fog.color = &h1C2842          ' RGB, like Drawable.color
 camera.fog.backdropHeight = 256      ' world units, at the draw distance
+' optional: a white image stretched over the backdrop and tinted the fog colour, e.g. one
+' that's clear at the top for a soft edge
+camera.fog.backdropRegion = mistRegion
 
 house = new BGE.DrawableModel(m, model, {isOccluder: true, castsFogSilhouette: true})
 walls = new BGE.DrawableWalls(m, segments, textures, {castsFogSilhouette: true})
@@ -511,12 +514,16 @@ That does three things:
   fade band (see above) now fade into fog rather than sky.
 - **Silhouettes.** A drawable with `castsFogSilhouette` keeps blocking the sky past the draw
   distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured box over its
-  bounding points. The box fades in as the object fades out: it starts once the object's fade
-  alpha drops below `fog.silhouetteStartAlpha` (default 0.5). Meant for buildings, towers and big
-  trees; small props aren't worth it.
+  bounding points. The box makes up the opacity the object has lost to the fade (1 - its fade
+  alpha), drawn behind it. Meant for buildings, towers and big trees; small props aren't worth
+  it.
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
-  their real outline past the draw distance as flat fog-coloured strips, crossfading in under
-  the textured strips late in the fade band.
+  their real outline past the draw distance as flat fog-coloured strips, with solid fog under
+  them across the fade band, so a fading wall and its fog add up to fully opaque.
+
+All fog is drawn before the objects it's behind. Lower `fog.silhouetteStartAlpha` (default 1)
+to start the boxes and the fog under walls later in the fade band: cheaper, but they appear
+with a step where they start.
 
 The fog fields are read every frame, so you can change them live. `examples/rendererTest`'s Fog
 demo (`--param demo=fog`) cycles fog off / backdrop / backdrop + silhouettes, and
