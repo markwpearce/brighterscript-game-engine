@@ -94,7 +94,9 @@ what suits your game at Medium.
 To keep the draw distance from changing with the level - walls in a maze that would
 otherwise reach farther or cut off nearer as the level moves - set `fixedDrawDistance`
 in a scene's `qualityOptions`: it draws out to `maxDrawDistance` at every level. Other
-settings still follow the level.
+settings still follow the level. A camera with [fog](/drawables-and-scene-objects) on does this
+anyway, unless `fog.followsQuality` is set: a fog edge that moves with the level looks like the
+game struggling.
 
 ```brighterscript
 m.qualityOptions = {fixedDrawDistance: true}
