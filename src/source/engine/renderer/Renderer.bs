@@ -38,12 +38,17 @@ namespace BGE
   const RendererResourceSize = 400
   const DEPTH_TIE_EPSILON = 0.5
 
-  ' Most bands (one `DrawRect` each) a triangle is filled with before the two-call exact fill
-  ' is cheaper. Measured the same on a Roku Ultra (rendererTest's "Triangle Fill Check") and
-  ' the simulator ("Static Geometry BSP Benchmark": 8 and 16 tied, 30 was 6% slower).
-  ' A cost break-even rather than a quality knob, so it isn't in RenderQualitySettings - the
-  ' quality trade is the band size while moving, `triangleQuickDrawStep`.
-  const TRIANGLE_SPAN_MAX_BANDS = 16
+  ' Most bands a triangle is filled with before the two-call exact fill is cheaper. On a Roku
+  ' Ultra (rendererTest's "Polygon Fill Benchmark", #539) a band cost ~14 us, the exact fill
+  ' ~0.35-0.45 ms. A cost break-even rather than a quality knob, so it isn't in
+  ' RenderQualitySettings - the quality trade is the band size while moving,
+  ' `triangleQuickDrawStep`.
+  const TRIANGLE_SPAN_MAX_BANDS = 24
+
+  ' Most bands per triangle of its fan a convex polygon is filled with (one `DrawRect` per
+  ' run of equal bands) before its triangles are cheaper. On a Roku Ultra (rendererTest's
+  ' "Polygon Fill Benchmark", #539) a band cost ~11 us and a triangle's exact fill ~0.4 ms.
+  const POLYGON_SPAN_BANDS_PER_TRIANGLE = 28
 
   ' A scene object id no other renderer has handed out. Shared across renderers, since one
   ' Drawable registered with two renderers keys its scene objects by id (issue #343).
@@ -411,13 +416,8 @@ namespace BGE
     end function
 
 
-    ' Filling this as a many-sided polygon (via drawPolygonTo's fan triangulation) leaves
-    ' visible seam lines radiating from the center, where each triangle's own blended edge
-    ' meets the still-transparent background of a neighboring triangle - fine for a single
-    ' opaque shape drawn once to a canvas, but visible here since every triangle shares
-    ' this bitmap's edges. A row-by-row scanline fill has no adjacent shapes to seam
-    ' against - each row is one flat, fully-opaque DrawRect - so it's used instead, even
-    ' though it's conceptually simpler than reusing the polygon fill machinery.
+    ' A row-by-row scanline fill: each row is one flat, fully-opaque DrawRect, so there are no
+    ' seams (a triangle fan seams where blended edges meet transparent background).
     private function createCircleResource() as ifDraw2d
       margin = 2
       radius = (RendererResourceSize / 2) - margin
@@ -2867,13 +2867,13 @@ namespace BGE
       return m.drawTransformedObjectTo(canvasDrawTo, x, y, scaleX, scaleY, -rotation, regionToDraw, rgba)
     end function
 
-    ' Fills the triangle with DrawRect bands when that's no dearer than the exact fill. A
-    ' band fill at 1px is as accurate as the exact one, so it's used
-    ' whether or not the object is moving; coarser bands, or skipping a tiny triangle, only
-    ' with allowQuickDraw.
+    ' Fills a convex polygon (or triangle) with DrawRect bands when it's at most `maxBands`
+    ' across, the break-even with its exact fill. A band fill at 1px is as accurate as the
+    ' exact one, so it's used whether or not the object is moving; coarser bands, or skipping
+    ' a tiny shape, only with allowQuickDraw.
     '
-    ' @return {boolean} true if the triangle was handled here
-    private function drawTriangleWithSpansIfCheaperTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw as boolean, bandAcrossY as dynamic) as boolean
+    ' @return {boolean} true if the shape was handled here
+    private function drawConvexWithSpansIfCheaperTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw as boolean, bandAcrossY as dynamic, maxBands as integer) as boolean
       bounds = BGE.Math.getBounds(points)
       params = m.triangleQuickDrawParams
       width = bounds[1].x - bounds[0].x
@@ -2889,13 +2889,13 @@ namespace BGE
       if bandAcrossY
         bandedSide = height
       end if
-      if bandedSide <= params.maxBands
-        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, 1, bandAcrossY)
+      if bandedSide <= maxBands
+        m.drawConvexPolygonAsSpansTo(canvasDrawTo, points, x, y, rgba, 1, bandAcrossY)
         return true
       end if
-      if allowQuickDraw and params.step > 1 and bandedSide <= params.maxBands * params.step
+      if allowQuickDraw and params.step > 1 and bandedSide <= maxBands * params.step
         m.lossyTriangleFillCount++
-        m.drawTriangleAsSpansTo(canvasDrawTo, points, x, y, rgba, params.step, bandAcrossY)
+        m.drawConvexPolygonAsSpansTo(canvasDrawTo, points, x, y, rgba, params.step, bandAcrossY)
         return true
       end if
       return false
@@ -2928,7 +2928,7 @@ namespace BGE
         return false
       end if
 
-      if m.drawTriangleWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw, bandAcrossY)
+      if m.drawConvexWithSpansIfCheaperTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw, bandAcrossY, m.triangleQuickDrawParams.maxBands)
         return true
       end if
       return m.drawTriangleExactTo(canvasDrawTo, points, x, y, rgba)
@@ -2977,19 +2977,92 @@ namespace BGE
       return m.drawPolygonTo(m.draw2d, points, x, y, rgba, allowQuickDraw)
     end function
 
+    ' Fills the convex hull of `points` with a flat color the cheapest way it can be done
+    ' well: `DrawRect` bands (`drawConvexPolygonAsSpansTo()`) when the polygon is short enough
+    ' across its narrower axis for its number of sides, else a fan of triangles
+    ' (`drawPolygonAsTrianglesTo()`). See `POLYGON_SPAN_BANDS_PER_TRIANGLE`.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the polygon's corners (any order: their hull is filled)
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {boolean} [allowQuickDraw=false] allow a coarser fill (or skipping a tiny
+    '   polygon) for something that's moving - see `getLossyTriangleFillCount()`
+    ' @return {boolean} true if anything was drawn (or deliberately skipped)
     function drawPolygonTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
-      if points.count() < 3
+      if invalid = canvasDrawTo or points.count() < 3
         return false
       end if
-
-      'return m.drawPolygonAsRectanglesTo(canvasDrawTo, points, x, y, rgba, {levelOffset: 0, levelOfDetail: 4})
-
-
       if points.count() = 3
         return m.drawTriangleTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
       end if
+      hull = points
+      ' QuickHull costs more than a 24-gon's span fill; most polygons are convex already
+      if not m.isStrictlyConvexInOrder(points)
+        hull = BGE.QuickHull.QuickHull(points)
+        if hull.count() < 3
+          return false
+        end if
+      end if
+      if m.drawConvexWithSpansIfCheaperTo(canvasDrawTo, hull, x, y, rgba, allowQuickDraw, invalid, (hull.count() - 2) * BGE.POLYGON_SPAN_BANDS_PER_TRIANGLE)
+        return true
+      end if
+      return m.drawPolygonAsTrianglesTo(canvasDrawTo, hull, x, y, rgba, allowQuickDraw)
+    end function
 
-      triangles = BGE.QuickHull.getTrianglesFromPoints(points, true)
+    ' Whether points go once round a convex polygon, either way, with no three in a line.
+    '
+    ' @param {BGE.Math.Vector[]} points
+    ' @return {boolean}
+    private function isStrictlyConvexInOrder(points as BGE.Math.Vector[]) as boolean
+      n = points.count()
+      turn = 0
+      yFlips = 0
+      prevDy = 0.0
+      for i = 0 to n - 1
+        a = points[i]
+        b = points[(i + 1) mod n]
+        c = points[(i + 2) mod n]
+        dx = b.x - a.x
+        dy = b.y - a.y
+        cross = dx * (c.y - b.y) - dy * (c.x - b.x)
+        if cross > 0
+          if turn < 0
+            return false
+          end if
+          turn = 1
+        else if cross < 0
+          if turn > 0
+            return false
+          end if
+          turn = -1
+        else
+          return false
+        end if
+        ' a star turns one way too, but goes up and down more than once
+        if dy <> 0
+          if prevDy <> 0 and (dy > 0) <> (prevDy > 0)
+            yFlips++
+          end if
+          prevDy = dy
+        end if
+      end for
+      return yFlips <= 2
+    end function
+
+    ' Fills a convex polygon as a fan of triangles from its first corner, each with
+    ' `drawTriangleTo()`.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the polygon's corners in order around it
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {boolean} [allowQuickDraw=false] see `drawTriangleTo()`
+    ' @return {boolean} true
+    function drawPolygonAsTrianglesTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean) as boolean
+      triangles = BGE.QuickHull.getTrianglesFromPoints(points, false)
       bandAcrossY = m.shouldBandAcrossY(points)
       didDraw = true
       for each tri in triangles
@@ -2997,6 +3070,7 @@ namespace BGE
       end for
       return didDraw
     end function
+
 
 
     function drawPolygonAsRectangles(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, options = {levelOffset: 0, levelOfDetail: 2} as LevelOfDetailOptions) as boolean
@@ -3060,12 +3134,11 @@ namespace BGE
     end function
 
 
-    ' Fills a triangle with one `DrawRect` per band of `bandSize` pixels, banding across
-    ' whichever axis of its bounding box is shorter (fewest rects) unless `bandAcrossY` says
-    ' which. Each band's span is the triangle's cross-section at the band's middle, so the
-    ' fill has no gaps. Two triangles sharing an edge (a quad) neither overlap nor leave a
-    ' seam as long as they band across the same axis - pass the same `bandAcrossY` for both.
-    ' Edges come out stepped by up to `bandSize` pixels.
+    ' Fills a triangle with `DrawRect` bands of `bandSize` pixels (see
+    ' `drawConvexPolygonAsSpansTo()`), banding across whichever axis of its bounding box is
+    ' shorter (fewest rects) unless `bandAcrossY` says which. Two triangles sharing an edge (a
+    ' quad) neither overlap nor leave a seam as long as they band across the same axis - pass
+    ' the same `bandAcrossY` for both. Edges come out stepped by up to `bandSize` pixels.
     '
     ' @param {ifDraw2d} canvasDrawTo
     ' @param {BGE.Math.Vector[]} points the triangle's 3 corners
@@ -3077,34 +3150,106 @@ namespace BGE
     '   invalid to pick by the triangle's own shape
     ' @return {boolean} true if anything was drawn
     function drawTriangleAsSpansTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize = 1 as integer, bandAcrossY = invalid as dynamic) as boolean
-      if invalid = canvasDrawTo or invalid = points or points.count() <> 3
+      if invalid = points or points.count() <> 3
         return false
+      end if
+      return m.drawConvexPolygonAsSpansTo(canvasDrawTo, points, x, y, rgba, bandSize, bandAcrossY) > 0
+    end function
+
+
+    ' Fills a convex polygon with one `DrawRect` per band of `bandSize` pixels (bands with the
+    ' same span merge into one rect), banding across whichever axis of its bounding box is
+    ' shorter unless `bandAcrossY` says which. Each band's span is the polygon's cross-section
+    ' at the band's middle, so at 1px it's as accurate as the exact fill; edges come out
+    ' stepped by up to `bandSize` pixels. Bands off the canvas are skipped.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the polygon's corners in order around it (e.g. from
+    '   `BGE.QuickHull.QuickHull()`)
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {integer} [bandSize=1] band thickness in pixels
+    ' @param {dynamic} [bandAcrossY=invalid] true for horizontal bands, false for vertical,
+    '   invalid to pick by the polygon's own shape
+    ' @return {integer} rects drawn
+    function drawConvexPolygonAsSpansTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize = 1 as integer, bandAcrossY = invalid as dynamic) as integer
+      n = points.count()
+      if invalid = canvasDrawTo or n < 3
+        return 0
       end if
       if bandSize < 1
         bandSize = 1
       end if
-      ' Work in (u, v) where v is the banded axis.
-      if invalid = bandAcrossY
-        bandAcrossY = m.shouldBandAcrossY(points)
-      end if
-      u = []
-      v = []
+      ' bounds, inlined (called per polygon per frame)
+      minX = points[0].x
+      maxX = minX
+      minY = points[0].y
+      maxY = minY
       for each p in points
-        if bandAcrossY
-          u.push(p.x + x)
-          v.push(p.y + y)
-        else
-          u.push(p.y + y)
-          v.push(p.x + x)
+        if p.x < minX
+          minX = p.x
+        else if p.x > maxX
+          maxX = p.x
+        end if
+        if p.y < minY
+          minY = p.y
+        else if p.y > maxY
+          maxY = p.y
         end if
       end for
-      minV = BGE.Math.Min(v[0], BGE.Math.Min(v[1], v[2]))
-      maxV = BGE.Math.Max(v[0], BGE.Math.Max(v[1], v[2]))
+      if invalid = bandAcrossY
+        bandAcrossY = (maxY - minY) <= (maxX - minX)
+      end if
+      ' Work in (u, v) where v is the banded axis.
+      u = []
+      v = []
+      top = 0
+      if bandAcrossY
+        for i = 0 to n - 1
+          u.push(points[i].x + x)
+          v.push(points[i].y + y)
+          if points[i].y < points[top].y
+            top = i
+          end if
+        end for
+        minV = minY + y
+        maxV = maxY + y
+        canvasV = canvasDrawTo.GetHeight()
+      else
+        for i = 0 to n - 1
+          u.push(points[i].y + y)
+          v.push(points[i].x + x)
+          if points[i].x < points[top].x
+            top = i
+          end if
+        end for
+        minV = minX + x
+        maxV = maxX + x
+        canvasV = canvasDrawTo.GetWidth()
+      end if
 
-      drewAny = false
-      ' On a shared grid, so neighbouring triangles' bands line up along their shared edge
+      ' On a shared grid, like drawTriangleAsSpansTo()
       bandStart = Int(minV / bandSize) * bandSize
-      while bandStart < maxV
+      if bandStart < 0
+        bandStart = 0
+      end if
+      bandEnd = maxV
+      if bandEnd > canvasV
+        bandEnd = canvasV
+      end if
+
+      ' two chains walk down from the top corner, one each way round
+      aI = top
+      aN = (top + 1) mod n
+      bI = top
+      bN = (top + n - 1) mod n
+      rects = 0
+      pendStart = 0
+      pendEnd = -1
+      pendV = 0
+      pendLen = 0
+      while bandStart < bandEnd
         sampleV = bandStart + bandSize / 2.0
         if sampleV > maxV
           sampleV = (bandStart + maxV) / 2.0
@@ -3112,43 +3257,69 @@ namespace BGE
         if sampleV < minV
           sampleV = (minV + BGE.Math.Min(bandStart + bandSize, maxV)) / 2.0
         end if
-        spanMin = 1e9
-        spanMax = -1e9
-        j = 2
-        for i = 0 to 2
-          vi = v[i]
-          vj = v[j]
-          if (vi <= sampleV and vj >= sampleV) or (vj <= sampleV and vi >= sampleV)
-            if vi = vj
-              crossU = BGE.Math.Min(u[i], u[j])
-              spanMin = BGE.Math.Min(spanMin, crossU)
-              spanMax = BGE.Math.Max(spanMax, BGE.Math.Max(u[i], u[j]))
-            else
-              crossU = u[i] + (sampleV - vi) / (vj - vi) * (u[j] - u[i])
-              spanMin = BGE.Math.Min(spanMin, crossU)
-              spanMax = BGE.Math.Max(spanMax, crossU)
-            end if
-          end if
-          j = i
-        end for
-        startU = Int(spanMin + 0.5)
-        endU = Int(spanMax + 0.5)
-        if endU <= startU and spanMax >= spanMin
+        steps = 0
+        while v[aN] < sampleV and steps < n
+          aI = aN
+          aN = (aN + 1) mod n
+          steps++
+        end while
+        steps = 0
+        while v[bN] < sampleV and steps < n
+          bI = bN
+          bN = (bN + n - 1) mod n
+          steps++
+        end while
+        dv = v[aN] - v[aI]
+        if dv > 0
+          ua = u[aI] + (sampleV - v[aI]) / dv * (u[aN] - u[aI])
+        else
+          ua = u[aN]
+        end if
+        dv = v[bN] - v[bI]
+        if dv > 0
+          ub = u[bI] + (sampleV - v[bI]) / dv * (u[bN] - u[bI])
+        else
+          ub = u[bN]
+        end if
+        if ua > ub
+          t = ua
+          ua = ub
+          ub = t
+        end if
+        startU = Int(ua + 0.5)
+        endU = Int(ub + 0.5)
+        if endU <= startU
           ' a sliver thinner than a pixel still gets one
           endU = startU + 1
         end if
-        if endU > startU
-          if bandAcrossY
-            canvasDrawTo.DrawRect(startU, bandStart, endU - startU, bandSize, rgba)
-          else
-            canvasDrawTo.DrawRect(bandStart, startU, bandSize, endU - startU, rgba)
+        if startU = pendStart and endU = pendEnd
+          pendLen += bandSize
+        else
+          if pendLen > 0
+            if bandAcrossY
+              canvasDrawTo.DrawRect(pendStart, pendV, pendEnd - pendStart, pendLen, rgba)
+            else
+              canvasDrawTo.DrawRect(pendV, pendStart, pendLen, pendEnd - pendStart, rgba)
+            end if
+            rects++
           end if
-          m.drawCallsLastFrame++
-          drewAny = true
+          pendStart = startU
+          pendEnd = endU
+          pendV = bandStart
+          pendLen = bandSize
         end if
         bandStart += bandSize
       end while
-      return drewAny
+      if pendLen > 0
+        if bandAcrossY
+          canvasDrawTo.DrawRect(pendStart, pendV, pendEnd - pendStart, pendLen, rgba)
+        else
+          canvasDrawTo.DrawRect(pendV, pendStart, pendLen, pendEnd - pendStart, rgba)
+        end if
+        rects++
+      end if
+      m.drawCallsLastFrame += rects
+      return rects
     end function
 
 

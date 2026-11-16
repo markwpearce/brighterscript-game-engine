@@ -23,6 +23,7 @@ Docs: `specs/renderer-notes.md` (lighting, walls, quad columns), `docs/render-qu
 - Quad columns (`renderer/quadColumns/`): textured quads/sprites/text/model faces as power-of-two texel columns; still objects draw once into a temp bitmap.
 - `SceneObjectPlane` (`fillMode` `color`/`tiledImage`/`staticImage`) and `SceneObjectSkybox` handle roll by rendering unrolled then rotating.
 - `drawWorldPolyline/Circle/Arc/Bar` draw world-space debug shapes (`drawWorldBar` takes RGBA).
+- Flat fills: `drawPolygonTo()` fills the convex hull (skips QuickHull when the points are already convex in order) and `drawTriangleTo()` a triangle, each as `DrawRect` bands (`drawConvexPolygonAsSpansTo()`) or exact triangles (two `DrawTransformedObject` each), whichever is cheaper by `POLYGON_SPAN_BANDS_PER_TRIANGLE`/`TRIANGLE_SPAN_MAX_BANDS` (rendererTest `polygon-fill-benchmark`, #539). Fog's `hullRects()` fills unions of polygons without overlap, a different job; it's ~2x dearer per rect.
 
 ## Device gotchas (headless brs-engine can't see these)
 - Never pass negative scale with nonzero rotation to a native draw — Roku only mirrors at rotation 0.
