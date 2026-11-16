@@ -525,9 +525,10 @@ That does three things:
   quality level sets. An image is outlined by its corners. `fog.silhouetteHulls = false`
   draws up to three screen boxes per model instead: fewer draws, a looser outline.
   Across the fade band the silhouette is drawn behind the object, making up the opacity it
-  has lost `fog.silhouetteOpacityLead` times over (default 4), so the object and its fog stay
-  opaque and the sky doesn't show through. With boxes, lower it to 1, or the box shows round
-  the object early in the fade. Meant for buildings, towers and big trees; small props aren't
+  has lost `fog.silhouetteOpacityLead` times over (default 1). At 1 a fading object and its
+  fog are up to a quarter see-through mid-fade; for solid buildings outlined by their points,
+  4 keeps the sky from showing through. Keep it at 1 for see-through casters (a tree image)
+  or box silhouettes, or the silhouette shows round them early in the fade. Meant for buildings, towers and big trees; small props aren't
   worth it.
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
   their real outline past the draw distance as flat fog-coloured strips, with solid fog under

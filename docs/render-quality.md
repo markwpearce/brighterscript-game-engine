@@ -138,9 +138,9 @@ Override it like any other field, e.g. `{wallStripWidth: 6}` at Medium. Halving 
 width roughly doubles the walls' cost, which is why High sits at 6 between Medium's 8 and Ultra's 4.
 
 Fog silhouettes (`Camera3d.fog`, see [Drawables](/drawables-and-scene-objects)) are filled in
-bands `fogSilhouetteBand` pixels tall. Upright edges cost nothing extra; each sloped edge, a
-pitched roof say, costs about one rect per band it spans, so smaller bands follow it more
-closely for more draws.
+bands `fogSilhouetteBand` pixels tall (at least 1). An edge costs a new rect each time it
+crosses a pixel column, so near-upright walls cost little; a sloped edge, a pitched roof say,
+costs about one rect per band it spans, so smaller bands follow it more closely for more draws.
 
 | Level  | `fogSilhouetteBand` |
 | ------ | ------------------- |

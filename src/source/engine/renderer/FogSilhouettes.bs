@@ -7,6 +7,8 @@ namespace BGE.FogSilhouettes
   ' A slice whose footprint is under this fraction of the one below starts a new part
   const SHRINK = 0.5
   const MAX_PARTS = 3
+  ' Most points a part is outlined by: more are cut down to the extremes (see extremePoints())
+  const MAX_HULL_POINTS = 42
 
   ' Splits a model into a few boxes by height, where its footprint shrinks sharply (a tower on a
   ' nave), for its fog silhouette. Each box covers every face reaching into its height range, so
@@ -194,7 +196,7 @@ namespace BGE.FogSilhouettes
   ' @param {float[]} boxes [x0, y0, x1, y1] per box, each with x1 > x0 and y1 > y0
   ' @param {float[]} out [x, y, w, h] per rect is appended
   sub mergeRects(boxes as float[], out as float[])
-    count = boxes.count() / 4
+    count = boxes.count() \ 4
     if count = 1
       out.append([boxes[0], boxes[1], boxes[2] - boxes[0], boxes[3] - boxes[1]])
       return
@@ -285,7 +287,8 @@ namespace BGE.FogSilhouettes
             below = true
           end if
         end for
-        if not (above and below)
+        ' (a flat model is one part, lo = hi, holding every face)
+        if lo < hi and not (above and below)
           continue for
         end if
         for i = 0 to n - 1
@@ -302,9 +305,51 @@ namespace BGE.FogSilhouettes
           end for
         end for
       end for
+      if pts.count() > MAX_HULL_POINTS * 3
+        pts = extremePoints(pts)
+      end if
       result.push(pts)
     end for
     return result
+  end function
+
+  ' The points furthest along each of a fixed set of directions (the 26 of a cube's faces,
+  ' edges and corners, and 16 round the horizon), so a detailed part costs at most
+  ' MAX_HULL_POINTS a frame. Its outline can then sit a little inside the true one.
+  function extremePoints(pts as float[]) as float[]
+    dirs = [] as float[]
+    for dx = -1 to 1
+      for dy = -1 to 1
+        for dz = -1 to 1
+          if dx <> 0 or dy <> 0 or dz <> 0
+            dirs.append([dx, dy, dz])
+          end if
+        end for
+      end for
+    end for
+    for i = 0 to 15
+      a = (i + 0.5) * BGE.Math.PI / 8
+      dirs.append([Cos(a), 0, Sin(a)])
+    end for
+    kept = {}
+    out = [] as float[]
+    for d = 0 to dirs.count() - 1 step 3
+      best = -1
+      bestDot = -1.0e30
+      for i = 0 to pts.count() - 1 step 3
+        dot = pts[i] * dirs[d] + pts[i + 1] * dirs[d + 1] + pts[i + 2] * dirs[d + 2]
+        if dot > bestDot
+          bestDot = dot
+          best = i
+        end if
+      end for
+      key = best.toStr()
+      if not kept.DoesExist(key)
+        kept[key] = true
+        out.append([pts[best], pts[best + 1], pts[best + 2]])
+      end if
+    end for
+    return out
   end function
 
   sub addPoint(pts as float[], seen as roAssociativeArray, x as float, y as float, z as float)
@@ -318,7 +363,7 @@ namespace BGE.FogSilhouettes
 
   ' The convex hull of [x, y, ...] points (monotone chain), as [x, y, ...] in order
   function convexHull(xy as float[]) as float[]
-    n = xy.count() / 2
+    n = xy.count() \ 2
     idx = [] as integer[]
     for i = 0 to n - 1
       ' insertion sort by x, then y
@@ -378,12 +423,15 @@ namespace BGE.FogSilhouettes
         end if
       end for
     end for
+    ' whole pixels, so an edge leaning less than one per band carries its rect on down
     if yMin < 0
       yMin = 0
     end if
+    yMin = int(yMin)
     if yMax > h
       yMax = h
     end if
+    yMax = -int(-yMax)
     prevSpans = [] as float[]
     prevRects = [] as integer[]
     top = yMin
@@ -397,7 +445,7 @@ namespace BGE.FogSilhouettes
         ' the polygon's x extent between top and bottom: its edges at both, and any vertex between
         x0 = 1.0e30
         x1 = -1.0e30
-        n = poly.count() / 2
+        n = poly.count() \ 2
         for e = 0 to n - 1
           ax = poly[e * 2]
           ay = poly[e * 2 + 1]
@@ -411,17 +459,25 @@ namespace BGE.FogSilhouettes
               x1 = ax
             end if
           end if
-          for each y in [top, bottom]
-            if (ay < y and by > y) or (ay > y and by < y)
-              x = ax + (bx - ax) * (y - ay) / (by - ay)
-              if x < x0
-                x0 = x
-              end if
-              if x > x1
-                x1 = x
-              end if
+          ' where the edge crosses the band's top and bottom
+          if (ay < top and by > top) or (ay > top and by < top)
+            x = ax + (bx - ax) * (top - ay) / (by - ay)
+            if x < x0
+              x0 = x
             end if
-          end for
+            if x > x1
+              x1 = x
+            end if
+          end if
+          if (ay < bottom and by > bottom) or (ay > bottom and by < bottom)
+            x = ax + (bx - ax) * (bottom - ay) / (by - ay)
+            if x < x0
+              x0 = x
+            end if
+            if x > x1
+              x1 = x
+            end if
+          end if
         end for
         if x0 < 0
           x0 = 0
@@ -430,6 +486,8 @@ namespace BGE.FogSilhouettes
           x1 = w
         end if
         if x1 > x0
+          x0 = int(x0)
+          x1 = -int(-x1)
           k = 0
           while k < spans.count() and spans[k] < x0
             k += 2
