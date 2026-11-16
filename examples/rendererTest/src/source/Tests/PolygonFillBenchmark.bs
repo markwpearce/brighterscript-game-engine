@@ -1,0 +1,197 @@
+' Times the ways Renderer can fill a flat convex polygon (#539), for typical shapes:
+'
+'   triangles - the fan of triangles (drawPolygonAsTrianglesTo, exact at rest)
+'   hullRects - BGE.FogSilhouettes.hullRects()'s band rects, then DrawRect each
+'   span      - drawConvexPolygonAsSpansTo(), one DrawRect per run of equal bands
+'   auto      - drawPolygonTo() / drawTriangleTo(), which pick between them
+'
+'   exact     - drawTriangleExactTo() (triangles only)
+'
+' "Quick" suffixes pass allowQuickDraw (coarse while moving). Each case runs in its own frame
+' (the watchdog), draws into an offscreen bitmap and Finish()es it, so queued GPU work is
+' counted. Every iteration uses a differently rotated shape. Prints `POLYFILL` console lines
+' (ms per fill, and rects per fill where the method reports them) and a summary on screen,
+' then a fill check: the triangle fill, 1px spans and coarse spans side by side.
+class PolygonFillBenchmark extends RendererTest
+
+  private iterations = 30
+
+  private shapeNames as string[] = []
+  private shapes as roArray = []
+  private polygonMethods as string[] = ["triangles", "trianglesQuick", "hullRects1", "hullRects4", "span1", "span4", "auto", "autoQuick"]
+  private triangleMethods as string[] = ["exact", "span1", "auto", "autoQuick"]
+  ' [shape index, method] per case
+  private cases as roArray = []
+  private caseIndex = 0
+  private target as roBitmap = invalid
+  private rendererRef as BGE.Renderer = invalid
+  private resultLines as string[] = []
+  private rows as roAssociativeArray = {}
+
+  sub new()
+    super("Polygon Fill Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+    m.addShape("tri 20", 3, 12)
+    m.addShape("tri 40", 3, 24)
+    m.addShape("tri 80", 3, 48)
+    m.addShape("quad 60", 4, 42)
+    m.addShape("quad 240", 4, 170)
+    m.addShape("pentagon 60", 5, 30)
+    m.addShape("pentagon 300", 5, 150)
+    m.addShape("circle24 40", 24, 20)
+    m.addShape("circle24 120", 24, 60)
+    m.addShape("circle24 300", 24, 150)
+    m.cases = []
+    for s = 0 to m.shapes.count() - 1
+      methods = m.polygonMethods
+      if m.shapes[s][0].count() = 6
+        methods = m.triangleMethods
+      end if
+      for each method in methods
+        m.cases.push([s, method])
+      end for
+    end for
+    m.caseIndex = 0
+    m.resultLines = ["running..."]
+    print "=== Polygon Fill Benchmark (ms per fill, " + Str(m.iterations).trim() + " rotations) ==="
+  end sub
+
+  ' One rotation per iteration, as [x, y, ...] floats; radius r around the canvas middle
+  private sub addShape(name as string, sides as integer, r as float)
+    rotations = []
+    for i = 0 to m.iterations - 1
+      theta = BGE.Math.DegreesToRadians(i * 1.7)
+      pts = [] as float[]
+      for s = 0 to sides - 1
+        a = theta + 2 * BGE.Math.PI * s / sides
+        pts.push(640 + r * cos(a))
+        pts.push(360 + r * sin(a))
+      end for
+      rotations.push(pts)
+    end for
+    m.shapeNames.push(name)
+    m.shapes.push(rotations)
+  end sub
+
+  override sub update(dt as float)
+    if m.caseIndex >= m.cases.count()
+      return
+    end if
+    testCase = m.cases[m.caseIndex]
+    m.caseIndex++
+    shapeIdx = testCase[0]
+    method = testCase[1]
+    ms = m.runCase(m.shapes[shapeIdx], method)
+    name = m.shapeNames[shapeIdx]
+    ' on screen, just the old fill against what drawPolygonTo()/drawTriangleTo() pick now
+    if method = "triangles" or method = "exact" or method = "auto"
+      row = m.rows[name]
+      if invalid = row
+        row = name + ":"
+      end if
+      m.rows[name] = row + " " + method + " " + ms + " ms"
+    end if
+    print "POLYFILL " + name + " " + method + " " + ms
+    if m.caseIndex >= m.cases.count()
+      m.resultLines = []
+      for each shapeName in m.shapeNames
+        m.resultLines.push(m.rows[shapeName])
+      end for
+      print "=== end ==="
+    else
+      m.resultLines = [`running ${m.caseIndex}/${m.cases.count()}`]
+    end if
+  end sub
+
+  private function toVectors(pts as float[]) as BGE.Math.Vector[]
+    points = [] as BGE.Math.Vector[]
+    for i = 0 to pts.count() - 1 step 2
+      points.push(BGE.Math.VectorOps.create(pts[i], pts[i + 1]))
+    end for
+    return points
+  end function
+
+  private function runCase(rotations as roArray, method as string) as string
+    renderer = m.rendererRef
+    target = m.target
+    color = &h33CCFFFF
+    timer = CreateObject("roTimespan")
+    rectCount = 0
+    timer.Mark()
+    for each pts in rotations
+      if method = "triangles" or method = "trianglesQuick"
+        hull = BGE.QuickHull.QuickHull(m.toVectors(pts))
+        renderer.drawPolygonAsTrianglesTo(target, hull, 0, 0, color, method = "trianglesQuick")
+      else if method = "hullRects1" or method = "hullRects4"
+        band = 1.0
+        if method = "hullRects4"
+          band = 4.0
+        end if
+        rects = [] as float[]
+        BGE.FogSilhouettes.hullRects([pts], band, 1280, 720, rects)
+        rectCount += rects.count() \ 4
+        for r = 0 to rects.count() - 1 step 4
+          target.DrawRect(rects[r], rects[r + 1], rects[r + 2], rects[r + 3], color)
+        end for
+      else if method = "span1" or method = "span4"
+        bandSize = 1
+        if method = "span4"
+          bandSize = 4
+        end if
+        points = m.toVectors(pts)
+        if points.count() > 3
+          points = BGE.QuickHull.QuickHull(points)
+        end if
+        rectCount += renderer.drawConvexPolygonAsSpansTo(target, points, 0, 0, color, bandSize)
+      else if method = "exact"
+        renderer.drawTriangleExactTo(target, m.toVectors(pts), 0, 0, color)
+      else if method = "auto" or method = "autoQuick"
+        renderer.drawPolygonTo(target, m.toVectors(pts), 0, 0, color, method = "autoQuick")
+      end if
+    end for
+    target.Finish()
+    ms = timer.TotalMilliseconds() / m.iterations
+    result = Str(ms).trim()
+    if rectCount > 0
+      result = result + "(" + Str(rectCount \ m.iterations).trim() + "r)"
+    end if
+    return result
+  end function
+
+  override sub draw(renderer as BGE.Renderer)
+    y = 80
+    for each line in m.resultLines
+      renderer.drawText(line, 140, y, BGE.Colors.White)
+      y += 28
+    end for
+    if m.caseIndex < m.cases.count()
+      return
+    end if
+    ' left to right: the triangle fill, 1px spans, coarse spans - pentagon, circle, triangle
+    for col = 0 to 2
+      rowY = 405
+      for each shape in [m.shapes[5][7], m.shapes[8][3], m.shapes[2][11]]
+        points = [] as BGE.Math.Vector[]
+        for i = 0 to shape.count() - 1 step 2
+          ' shapes are centred on (640, 360)
+          points.push(BGE.Math.VectorOps.create(shape[i] - 640 + 300 + col * 340, shape[i + 1] - 360 + rowY))
+        end for
+        if col = 0
+          renderer.drawPolygonAsTrianglesTo(renderer.getDraw2d(), BGE.QuickHull.QuickHull(points), 0, 0, &h33CCFFFF)
+        else
+          bandSize = 1
+          if col = 2
+            bandSize = 4
+          end if
+          renderer.drawConvexPolygonAsSpansTo(renderer.getDraw2d(), BGE.QuickHull.QuickHull(points), 0, 0, &hFFCC33FF, bandSize)
+        end if
+        rowY += 95
+      end for
+    end for
+  end sub
+
+end class

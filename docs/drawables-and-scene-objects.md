@@ -46,7 +46,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `DrawableCircle`      | `SceneObjectCircle`      | A filled and/or outlined circle - foreshortens into an ellipse when oriented in 3D. |
 | `DrawableSphere`      | `SceneObjectCircle`      | A `DrawableCircle` that always renders as an undistorted circle, regardless of camera angle. |
 | `DrawableOrientedSprite` | `SceneObjectImage`   | A `Sprite` that swaps its active animation based on the camera's angle to the entity, faking a Doom-style billboard sprite. |
-| `DrawablePolygon`     | `SceneObjectPolygon`     | An arbitrary filled or outlined polygon.                                    |
+| `DrawablePolygon`     | `SceneObjectPolygon`     | A filled (its convex hull) or outlined polygon.                             |
 | `DrawableLine`        | `SceneObjectLine`        | A single line segment between two points.                                   |
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
