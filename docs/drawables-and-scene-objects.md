@@ -519,7 +519,9 @@ That does three things:
   fade band (see above) now fade into fog rather than sky.
 - **Silhouettes.** A drawable with `castsFogSilhouette` keeps blocking the sky past the draw
   distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured box over its
-  bounding points. The box makes up the opacity the object has lost to the fade (1 - its fade
+  bounding points. A model gets up to three boxes stacked up its height instead, split where
+  its footprint shrinks sharply, so a tower on a long nave doesn't block the sky beside the
+  tower. The boxes make up the opacity the object has lost to the fade (1 - its fade
   alpha), drawn behind it. Meant for buildings, towers and big trees; small props aren't worth
   it.
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep

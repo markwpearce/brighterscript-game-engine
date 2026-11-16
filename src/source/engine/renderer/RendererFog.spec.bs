@@ -1,5 +1,6 @@
 import "../../math/vector.bs"
 import "../drawables/DrawableRectangle.bs"
+import "../drawables/Model3d.bs"
 import "../Game.bs"
 import "../GameEntity.bs"
 import "cameras/Camera3d.bs"
@@ -120,6 +121,43 @@ namespace tests
       entity.updateTransformationMatrix()
       drawable = new BGE.DrawableRectangle(entity, 400, 600, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace, castsFogSilhouette: casts})
       return drawable.addToRenderer(m.renderer)
+    end function
+
+    ' The 12 triangles of an axis-aligned box
+    private function boxFaces(loX as float, loY as float, loZ as float, hiX as float, hiY as float, hiZ as float) as BGE.Model3dFace[]
+      c = []
+      for each y in [loY, hiY]
+        for each z in [loZ, hiZ]
+          for each x in [loX, hiX]
+            c.push(BGE.Math.VectorOps.create(x, y, z))
+          end for
+        end for
+      end for
+      quads = [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4], [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]]
+      faces = [] as BGE.Model3dFace[]
+      for each q in quads
+        faces.push(BGE.Model3dFaceOps.create([c[q[0]], c[q[1]], c[q[2]]]))
+        faces.push(BGE.Model3dFaceOps.create([c[q[0]], c[q[2]], c[q[3]]]))
+      end for
+      return faces
+    end function
+
+    ' A 400 square nave 200 tall with a 100 square tower 600 tall in its middle, on the ground at
+    ' depth -z, as a fog-casting model
+    private function newChapel(z as float) as BGE.DrawableModel
+      entity = new BGE.GameEntity(m.game, {name: "chapel", isStatic: true})
+      entity.position = BGE.Math.VectorOps.create(0, 0, z)
+      entity.updateTransformationMatrix()
+      faces = m.boxFaces(-200, 0, -200, 200, 200, 200)
+      faces.append(m.boxFaces(-50, 0, -50, 50, 600, 50))
+      drawable = new BGE.DrawableModel(entity, new BGE.Model3d(faces), {castsFogSilhouette: true})
+      drawable.addToRenderer(m.renderer)
+      return drawable
+    end function
+
+    ' The fog rects drawn last frame, [x, y, w, h] each
+    private function fogRects() as float[]
+      return (m.renderer as object).fogBoxes
     end function
 
     @describe("silhouettes")
@@ -298,6 +336,55 @@ namespace tests
       m.camera.orientation = BGE.Math.VectorOps.create(0, -1, 0)
       m.renderFrames()
       m.assertEqual(0, m.renderer.fogSilhouettesDrawnLastFrame)
+    end function
+
+    @it("draws a tower-on-nave model as two rects past the draw distance")
+    function _()
+      m.turnOnFog(0)
+      m.newChapel(-1500)
+      m.renderFrames()
+      m.assertEqual(2, m.renderer.fogSilhouettesDrawnLastFrame)
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 250))
+      ' beside the tower, above the nave
+      m.assertEqual(&h000000FF, m.pixelAt(720, 250))
+    end function
+
+    @it("gives every rect of a fading model the same alpha")
+    function _()
+      m.turnOnFog(0)
+      m.newChapel(-1150)
+      m.renderFrames()
+      rgbas = m.renderer.getFogSilhouetteRgbas()
+      m.assertEqual(2, rgbas.count())
+      m.assertEqual(rgbas[0], rgbas[1])
+      alpha = rgbas[0] and &hFF
+      m.assertTrue(alpha > 0 and alpha < 255, `alpha ${alpha}`)
+    end function
+
+    @it("works the parts out again after invalidateGeometry")
+    function _()
+      m.turnOnFog(0)
+      chapel = m.newChapel(-1500)
+      m.renderFrames()
+      m.assertEqual(2, m.renderer.fogSilhouettesDrawnLastFrame)
+      chapel.model = new BGE.Model3d(m.boxFaces(-200, 0, -200, 200, 200, 200))
+      chapel.invalidateGeometry()
+      m.renderFrames()
+      m.assertEqual(1, m.renderer.fogSilhouettesDrawnLastFrame)
+    end function
+
+    @it("follows a scaled and offset model")
+    function _()
+      m.turnOnFog(0)
+      chapel = m.newChapel(-1500)
+      chapel.scale = BGE.Math.createScaleVector(2)
+      chapel.offset = BGE.Math.VectorOps.create(0, 0, 100)
+      m.renderFrames()
+      ' the tower's rect is first: 200 wide, its near face at depth 1300
+      rects = m.fogRects()
+      m.assertEqual(8, rects.count())
+      expected = 200 * 640 / 1300
+      m.assertTrue(Abs(rects[2] - expected) <= 1, `width ${rects[2]}, expected ${expected}`)
     end function
 
     @it("forgets a removed caster")
