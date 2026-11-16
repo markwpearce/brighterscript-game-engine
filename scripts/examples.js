@@ -8,8 +8,8 @@
 //
 // Each task is just a shell command run inside every examples/<name>/
 // directory in turn. A failure in one example does NOT stop the others (or
-// later steps in the same example) from running - this matches the original
-// scripts, which never checked exit codes either.
+// later steps in the same example) from running, but the script exits 1 at the
+// end if any step failed, so CI catches it.
 //
 // Examples run CONCURRENTLY (a fixed-size worker pool, not all-at-once) since
 // steps like `npm install` are mostly I/O/network-bound and every example
@@ -17,6 +17,9 @@
 // was previously the slowest part of the Validate workflow, running 19
 // installs back to back one at a time. Override the pool size with the
 // EXAMPLES_CONCURRENCY env var (e.g. for a constrained local machine).
+//
+// EXAMPLES_SHARD=<i>/<n> runs only every n-th example starting at the i-th
+// (1-based), so CI can split a task across n runners (#523).
 // Each example's own output is buffered and flushed as one block when it
 // finishes, rather than streamed live, so concurrent processes' output
 // doesn't interleave line-by-line into an unreadable mess.
@@ -39,12 +42,26 @@ const TASKS = {
   'ropm-install': [{ command: 'ropm', args: ['install'] }]
 };
 
+const failures = [];
+
 function listExampleDirs() {
-  return fs
+  const dirs = fs
     .readdirSync(EXAMPLES_DIR, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
+  const shard = process.env.EXAMPLES_SHARD;
+  if (!shard) {
+    return dirs;
+  }
+  const match = /^(\d+)\/(\d+)$/.exec(shard);
+  const index = match ? Number(match[1]) : 0;
+  const count = match ? Number(match[2]) : 0;
+  if (index < 1 || index > count) {
+    console.error(`EXAMPLES_SHARD must be <i>/<n> with 1 <= i <= n, got "${shard}"`);
+    process.exit(1);
+  }
+  return dirs.filter((_, i) => i % count === index - 1);
 }
 
 // Runs one step and resolves with its combined stdout/stderr instead of
@@ -63,6 +80,7 @@ function runStep(exampleDir, { command, args }) {
     child.on('close', (code) => {
       if (code !== 0) {
         output += `  (exited with status ${code} - continuing with the next example)\n`;
+        failures.push(exampleDir);
       }
       resolve(output);
     });
@@ -108,6 +126,10 @@ async function main() {
   }
 
   await runWithConcurrency(exampleDirs, CONCURRENCY, (exampleDir) => runExample(exampleDir, task));
+  if (failures.length > 0) {
+    console.error(`\n${taskName} failed in: ${[...new Set(failures)].join(', ')}`);
+    process.exit(1);
+  }
 }
 
 main();
