@@ -18,6 +18,7 @@ Topic rules live in `.claude/rules/` and load when you touch matching files. Bef
 - No single-line `if` (bslint `inline-if-style: never`).
 - **Always `import` files whose symbols you use** — SceneGraph component scopes aren't ambient (`cannot-find-name`).
 - **Real types**, not `as object`/`as dynamic`: classes, `interface X extends roAssociativeArray`, native types, typed casts. Options bags are interfaces with `optional` fields (iterate `.Keys()`). `sub(...)` callback types need `as void`. No `invalid` in unions — use `as dynamic`. Cast computed integers to enums.
+- **`continue for` after an inner loop in the same loop body crashed on device** ("non-numeric array index"; headless tests pass). Use an `if` block instead.
 - **`=` between two objects crashes at runtime** (Type Mismatch; bsc misses it, casts don't help). Compare an id/scalar.
 - **bsc self-reference bug**: a namespace function returning, or method param typed as, a class from the same file can corrupt types in that file. Move it to another file or type the param `as object`.
 - Doc comments (`'` JSDoc, `@param`/`@return`) are for consumers; rationale goes in short inline comments.
