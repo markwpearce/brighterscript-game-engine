@@ -61,10 +61,12 @@ namespace BGE
     ' The fog the shading was worked out for (-1 colour for none)
     private shadeFogColor as integer = -1
     private shadeFogStart as float = -1.0
-    ' Per segment, its columns (invalid for a missing texture)
+    ' Per segment, its columns at each mip level (invalid for a missing texture)
     private segmentColumns = [] as dynamic[]
-    ' Per segment, tiles along it (0 for one stretched copy) and 1 / column height
+    ' Per segment, tiles along it (0 for one stretched copy), full-size texture columns along
+    ' it, and 1 / column height
     private segmentTiles = [] as float[]
+    private segmentTexels = [] as float[]
     private segmentInvHeights = [] as float[]
     ' Lit colors per segment and side ("index*2+side"), one per light bucket along it, kept
     ' until the lights or the shading inputs change
@@ -148,6 +150,7 @@ namespace BGE
         m.view.setSegments(d.segments, d.getBsp())
         m.segmentColumns = []
         m.segmentTiles = []
+        m.segmentTexels = []
         m.segmentInvHeights = []
         m.lightCache = {}
         m.viewGeometryVersion = d.geometryVersion
@@ -374,18 +377,22 @@ namespace BGE
       segs = d.segments
       columns = m.segmentColumns
       for i = columns.count() to segs.count() - 1
-        segColumns = d.getColumns(segs[i].texture, segs[i].tileCount)
-        columns.push(segColumns)
+        segLevels = d.getMipColumns(segs[i].texture, segs[i].tileCount)
+        columns.push(segLevels)
         tiles = 0.0
         if segs[i].tileWidth > 0
           tiles = segs[i].length / segs[i].tileWidth
         end if
         m.segmentTiles.push(tiles)
         invHeight = 1.0
-        if invalid <> segColumns
+        texels = 0.0
+        if invalid <> segLevels
+          full = segLevels[0]
           ' every column is cut from one texture, so they share its height
-          invHeight = 1.0 / segColumns[0].GetHeight()
+          invHeight = 1.0 / full[0].GetHeight()
+          texels = full.count() * BGE.Math.Max(tiles, 1)
         end if
+        m.segmentTexels.push(texels)
         m.segmentInvHeights.push(invHeight)
       end for
 
@@ -422,26 +429,34 @@ namespace BGE
       pAlong = view.pieceAlong
       pDepth = view.pieceDepth
       pLength = view.pieceLength
+      pX = view.pieceX
+      pWidth = view.pieceWidth
       segTiles = m.segmentTiles
+      segTexels = m.segmentTexels
       segInvHeights = m.segmentInvHeights
       shaded = d.isShaded
       lastSegment = -1
       shades = invalid
       lastBucket = 0
-      segColumns = invalid
-      columnCount = 0
+      segLevels = invalid
+      lastLevel = 0
+      texels = 0.0
+      dudx = 0.0
+      pieceCount = view.pieceCount
       tiles = 0.0
       invHeight = 1.0
-      for k = 0 to view.pieceCount - 1
+      for k = 0 to pieceCount - 1
         n = pSeg[k]
         u = pAlong[k]
         if n <> lastSegment
           lastSegment = n
-          segColumns = columns[n]
-          columnCount = 0
-          if invalid <> segColumns
-            columnCount = segColumns.count()
+          segLevels = columns[n]
+          lastLevel = -1
+          if invalid <> segLevels
+            lastLevel = segLevels.count() - 1
           end if
+          texels = segTexels[n]
+          dudx = 0.0
           tiles = segTiles[n]
           invHeight = segInvHeights[n]
           if shaded
@@ -474,7 +489,35 @@ namespace BGE
           end if
           rgbas[k] = shade
           ' the texture column, picked here so drawing is just the draw call
-          if columnCount > 0
+          if lastLevel >= 0
+            ' how far along the wall each pixel across is, from a neighbouring strip of it (else
+            ' the last one's)
+            x = pX[k]
+            j = k + 1
+            if j >= pieceCount or pSeg[j] <> n or Abs(pX[j] - x) < 0.5
+              j = k - 1
+            end if
+            if j >= 0 and pSeg[j] = n and Abs(pX[j] - x) >= 0.5
+              dudx = (pAlong[j] - u) / (pX[j] - x)
+            end if
+            ' sample the strip's middle, not its left edge
+            width = pWidth[k]
+            u += dudx * width * 0.5
+            if u < 0
+              u = 0.0
+            else if u > 1
+              u = 1.0
+            end if
+            ' the coarsest level that still has a column or more per strip, so no column is
+            ' skipped outright
+            span = Abs(dudx) * width * texels
+            level = 0
+            while span >= 1.5 and level < lastLevel
+              span *= 0.5
+              level++
+            end while
+            levelColumns = segLevels[level]
+            columnCount = levelColumns.count()
             if tiles > 0
               along = u * tiles
               u = along - int(along)
@@ -483,7 +526,7 @@ namespace BGE
             if ci >= columnCount
               ci = columnCount - 1
             end if
-            pColumn[k] = segColumns[ci]
+            pColumn[k] = levelColumns[ci]
             pScaleY[k] = pLength[k] * invHeight
           else
             pColumn[k] = invalid

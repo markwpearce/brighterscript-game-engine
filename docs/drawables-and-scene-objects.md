@@ -1053,7 +1053,10 @@ walls.addToRenderer(renderer)
 Segments are in world space. Each texture is one copy as tiled on a wall: `tileWidth` world
 units across, and `tileHeight` up (rounded so a whole number of copies fits). Copies stacked up
 a wall are drawn into one tall column texture (at most `maxColumnHeight` pixels; taller walls
-stretch fewer copies), so a strip is always one draw. Replace walls with `setSegments()` (also
+stretch fewer copies), so a strip is always one draw. Far off, where one strip covers several
+of the texture's columns, it draws from a narrower copy whose columns average them, so the
+pattern doesn't shimmer as you move toward or away from a wall (`mipmapped`, on by default; it
+costs about twice the texture's memory). Replace walls with `setSegments()` (also
 after changing them in place) and textures with `setTextures()`. `color`, `alpha` and `flash()` work as on other drawables.
 
 How it draws (`BGE.WallsView`): nothing is raycast. The segments go into a 2D BSP when set

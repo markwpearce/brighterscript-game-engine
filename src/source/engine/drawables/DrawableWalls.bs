@@ -55,8 +55,16 @@ namespace BGE
     ' Tallest stacked column texture built, in pixels; taller walls stretch fewer copies.
     maxColumnHeight as integer = 2048
 
+    ' Strips wider than a texture column draw from a coarser copy, each column the average of
+    ' those it covers, so the pattern doesn't shimmer as the walls move nearer or farther.
+    ' Off draws every strip from the full-size texture. Call invalidateGeometry() after
+    ' changing it.
+    mipmapped as boolean = true
+
     ' "name x tileCount" to 1px column regions, built on first use.
     private columnsByKey as roAssociativeArray
+    ' "name x tileCount" to each mip level's columns, level 0 first, built on first use.
+    private mipsByKey as roAssociativeArray
 
     ' @param {BGE.GameEntity} owner
     ' @param {BGE.WallSegment[]} segments
@@ -70,6 +78,7 @@ namespace BGE
       m.bsp = new BGE.WallsBsp(segments)
       m.textures = textures
       m.columnsByKey = {}
+      m.mipsByKey = {}
     end sub
 
     ' Replaces the walls and builds their BSP now. That takes a while for thousands of walls,
@@ -99,6 +108,7 @@ namespace BGE
     sub setTextures(textures as roAssociativeArray)
       m.textures = textures
       m.columnsByKey = {}
+      m.mipsByKey = {}
       m.invalidateGeometry()
     end sub
 
@@ -119,6 +129,31 @@ namespace BGE
         return invalid
       end if
       return columns
+    end function
+
+    ' A texture's columns at each mip level: level 0 is getColumns(), and each level after has
+    ' half as many (rounded up), each the average of two from the level before, as tall as
+    ' level 0 and pre-translated the same. Down to one column, or level 0 alone when
+    ' `mipmapped` is off. Invalid if there's no such texture.
+    '
+    ' @param {string} name texture name
+    ' @param {integer} tileCount copies stacked up the wall
+    ' @return {dynamic} roRegion[][] or invalid
+    function getMipColumns(name as string, tileCount as integer) as dynamic
+      columns = m.getColumns(name, tileCount)
+      if invalid = columns
+        return invalid
+      end if
+      if not m.mipmapped
+        return [columns]
+      end if
+      key = name + "x" + tileCount.toStr()
+      levels = m.mipsByKey[key]
+      if invalid = levels
+        levels = m.buildMipLevels(columns)
+        m.mipsByKey[key] = levels
+      end if
+      return levels
     end function
 
     override function addToRenderer(rendererObj as Renderer) as BGE.SceneObject
@@ -163,6 +198,41 @@ namespace BGE
         columns.push(column)
       end for
       return columns
+    end function
+
+    ' Halves the columns until one is left: each new column is the left one drawn, then the
+    ' right at half alpha over it (a box filter; scaled draws into bitmaps don't filter on
+    ' device).
+    private function buildMipLevels(columns as roRegion[]) as dynamic[]
+      levels = [columns] as dynamic[]
+      height = columns[0].GetHeight()
+      previous = columns
+      while previous.count() > 1
+        count = previous.count()
+        width = (count + 1) \ 2
+        bitmap = CreateObject("roBitmap", {width: width, height: height, alphaEnable: true})
+        if invalid = bitmap
+          exit while
+        end if
+        ' columns are pre-translated up by their height
+        for c = 0 to width - 1
+          bitmap.DrawObject(c, height, previous[c * 2])
+          if c * 2 + 1 < count
+            bitmap.DrawScaledObject(c, height, 1, 1, previous[c * 2 + 1], &hFFFFFF80)
+          end if
+        end for
+        bitmap.Finish()
+        bitmap.SetAlphaEnable(false)
+        level = [] as roRegion[]
+        for c = 0 to width - 1
+          column = CreateObject("roRegion", bitmap, c, 0, 1, height)
+          column.SetPreTranslation(0, -height)
+          level.push(column)
+        end for
+        levels.push(level)
+        previous = level
+      end while
+      return levels
     end function
 
   end class
