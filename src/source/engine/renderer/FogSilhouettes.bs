@@ -362,33 +362,56 @@ namespace BGE.FogSilhouettes
     pts.append([x, y, z])
   end sub
 
-  ' The convex hull of [x, y, ...] points (monotone chain), as [x, y, ...] in order
-  function convexHull(xy as float[]) as float[]
-    n = xy.count() \ 2
-    idx = [] as integer[]
+  ' The convex hull of points (monotone chain), as [x, y, ...] in order
+  '
+  ' @param {float[]} pts x, y first in each `stride` values (2 for [x, y, ...])
+  function convexHull(pts as float[], stride = 2 as integer) as float[]
+    n = pts.count() \ stride
+    ' sorted by x then y natively, as whole-pixel x (+-4096) and y (+-2048) and the index
+    ' packed in a 31-bit integer (so at most 64 points: MAX_HULL_POINTS keeps parts under it)
+    if n > 64
+      n = 64
+    end if
+    keys = [] as integer[]
     for i = 0 to n - 1
-      ' insertion sort by x, then y
-      j = idx.count()
-      idx.push(i)
-      while j > 0 and (xy[idx[j - 1] * 2] > xy[i * 2] or (xy[idx[j - 1] * 2] = xy[i * 2] and xy[idx[j - 1] * 2 + 1] > xy[i * 2 + 1]))
-        idx[j] = idx[j - 1]
-        j--
-      end while
-      idx[j] = i
+      x = int(pts[i * stride]) + 4096
+      y = int(pts[i * stride + 1]) + 2048
+      if x > 8191
+        x = 8191
+      else if x < 0
+        x = 0
+      end if
+      if y > 4095
+        y = 4095
+      else if y < 0
+        y = 0
+      end if
+      keys.push(x * 262144 + y * 64 + i)
+    end for
+    keys.Sort()
+    xs = [] as float[]
+    ys = [] as float[]
+    for each key in keys
+      i = key and 63
+      xs.push(pts[i * stride])
+      ys.push(pts[i * stride + 1])
     end for
     hull = [] as integer[]
     for pass = 0 to 1
       start = hull.count()
       for k = 0 to n - 1
-        i = idx[k]
+        i = k
         if pass = 1
-          i = idx[n - 1 - k]
+          i = n - 1 - k
         end if
+        px = xs[i]
+        py = ys[i]
         while hull.count() - start >= 2
           o = hull[hull.count() - 2]
           a = hull[hull.count() - 1]
-          cross = (xy[a * 2] - xy[o * 2]) * (xy[i * 2 + 1] - xy[o * 2 + 1]) - (xy[a * 2 + 1] - xy[o * 2 + 1]) * (xy[i * 2] - xy[o * 2])
-          if cross <= 0
+          ox = xs[o]
+          oy = ys[o]
+          if (xs[a] - ox) * (py - oy) - (ys[a] - oy) * (px - ox) <= 0
             hull.pop()
           else
             exit while
@@ -400,111 +423,253 @@ namespace BGE.FogSilhouettes
     end for
     poly = [] as float[]
     for each i in hull
-      poly.push(xy[i * 2])
-      poly.push(xy[i * 2 + 1])
+      poly.push(xs[i])
+      poly.push(ys[i])
     end for
     return poly
   end function
 
-  ' Fills the union of convex polygons with rects in bands `band` px tall, none
-  ' overlapping, clamped to the frame. A band covers each polygon's widest extent within it, so
-  ' nothing is left uncovered.
+  ' Fills the union of convex polygons with rects, none overlapping, clamped to the frame. Bands
+  ' break at the polygons' corners and step down each leaning edge in stairs at most `band` px
+  ' tall and across, on one grid so the sides' steps line up. A band covers each
+  ' polygon's widest extent within it, so nothing is left uncovered.
   '
   ' @param {roArray} polys [x, y, ...] each, from convexHull()
   sub hullRects(polys as roArray, band as float, w as float, h as float, out as float[])
+    ' per polygon: its rows, and its two sides from top corner to bottom corner as xs and ys
+    ' (side 2p and 2p + 1), each walked down the bands from sideAt
+    polyLo = [] as float[]
+    polyHi = [] as float[]
+    sideXs = []
+    sideYs = []
+    sideAt = [] as integer[]
+    cuts = [] as float[]
+    ' leaning edges step on one grid from the top row, so their steps line up
     yMin = 1.0e30
-    yMax = -1.0e30
     for each poly in polys
       for i = 1 to poly.count() - 1 step 2
         if poly[i] < yMin
           yMin = poly[i]
         end if
-        if poly[i] > yMax
-          yMax = poly[i]
-        end if
       end for
     end for
-    ' whole pixels, so an edge leaning less than one per band carries its rect on down
     if yMin < 0
       yMin = 0
     end if
-    yMin = int(yMin)
+    yMin = int(yMin) * 1.0
+    yMax = -1.0e30
+    for each poly in polys
+      n = poly.count() \ 2
+      iTop = 0
+      iBot = 0
+      for e = 0 to n - 1
+        ax = poly[e * 2]
+        ay = poly[e * 2 + 1]
+        bx = poly[((e + 1) mod n) * 2]
+        by = poly[((e + 1) mod n) * 2 + 1]
+        if ay < poly[iTop * 2 + 1]
+          iTop = e
+        end if
+        if ay > poly[iBot * 2 + 1]
+          iBot = e
+        end if
+        cuts.push(int(ay) * 1.0)
+        dy = Abs(by - ay)
+        ' steps a whole number of bands tall and at most a band across
+        bands = -int(-dy / band)
+        lean = -int(-Abs(bx - ax) / band)
+        if lean < bands and lean > 0
+          stride = band * (-int(-bands / lean))
+        else
+          stride = band
+        end if
+        if lean > 0 and dy > stride
+          ' (only on the frame)
+          top = ay
+          if by < ay
+            top = by
+          end if
+          edgeEnd = top + dy
+          if edgeEnd > h
+            edgeEnd = h
+          end if
+          if top < yMin
+            top = yMin
+          end if
+          y = yMin + (int((top - yMin) / stride) + 1) * stride
+          while y < edgeEnd
+            cuts.push(y)
+            y += stride
+          end while
+        end if
+      end for
+      lo = poly[iTop * 2 + 1]
+      hi = poly[iBot * 2 + 1]
+      polyLo.push(lo)
+      polyHi.push(hi)
+      if hi > yMax
+        yMax = hi
+      end if
+      for dir = 1 to -1 step -2
+        xs = [] as float[]
+        ys = [] as float[]
+        i = iTop
+        xs.push(poly[i * 2])
+        ys.push(poly[i * 2 + 1])
+        while i <> iBot
+          i = (i + dir + n) mod n
+          xs.push(poly[i * 2])
+          ys.push(poly[i * 2 + 1])
+        end while
+        sideXs.push(xs)
+        sideYs.push(ys)
+        sideAt.push(0)
+      end for
+    end for
+    ' whole pixels, so an edge leaning less than one per band carries its rect on down
     if yMax > h
       yMax = h
     end if
-    yMax = -int(-yMax)
+    yMax = -int(-yMax) * 1.0
+    if yMax <= yMin
+      return
+    end if
+    cuts.Sort()
+    ' breaks closer than this to the last are dropped (corners just off the grid)
+    minGap = band / 2
+    if minGap < 1
+      minGap = 1
+    end if
     prevSpans = [] as float[]
     prevRects = [] as integer[]
+    ' one polygon: one span a band, carried on down while it's the same
+    single = polys.count() = 1
+    prevX0 = -1.0
+    prevX1 = -1.0
+    prevRect = -1
     top = yMin
+    c = 0
+    cutCount = cuts.count()
     while top < yMax
-      bottom = top + band
-      if bottom > yMax
-        bottom = yMax
-      end if
+      bottom = yMax
+      while c < cutCount
+        y = cuts[c]
+        c++
+        if y >= top + minGap
+          if y < yMax
+            bottom = y
+          end if
+          exit while
+        end if
+      end while
       spans = [] as float[]
-      for each poly in polys
-        ' the polygon's x extent between top and bottom: its edges at both, and any vertex between
-        x0 = 1.0e30
-        x1 = -1.0e30
-        n = poly.count() \ 2
-        for e = 0 to n - 1
-          ax = poly[e * 2]
-          ay = poly[e * 2 + 1]
-          bx = poly[((e + 1) mod n) * 2]
-          by = poly[((e + 1) mod n) * 2 + 1]
-          if ay >= top and ay <= bottom
-            if ax < x0
-              x0 = ax
-            end if
-            if ax > x1
-              x1 = ax
-            end if
+      spanned = false
+      for p = 0 to polys.count() - 1
+        lo = polyLo[p]
+        hi = polyHi[p]
+        ' (a polygon with no height has nothing to fill, and one-point sides)
+        if lo < bottom and hi > top and hi > lo
+          ' the polygon's x extent between top and bottom (within its own rows): each side's x
+          ' at both, and its corners between
+          tt = top
+          if tt < lo
+            tt = lo
           end if
-          ' where the edge crosses the band's top and bottom
-          if (ay < top and by > top) or (ay > top and by < top)
-            x = ax + (bx - ax) * (top - ay) / (by - ay)
+          bb = bottom
+          if bb > hi
+            bb = hi
+          end if
+          x0 = 1.0e30
+          x1 = -1.0e30
+          for s = p * 2 to p * 2 + 1
+            xs = sideXs[s]
+            ys = sideYs[s]
+            last = ys.count() - 1
+            ' the segment holding tt
+            k = sideAt[s]
+            while k < last - 1 and ys[k + 1] <= tt
+              k++
+            end while
+            sideAt[s] = k
+            x = xs[k]
+            if ys[k + 1] > ys[k]
+              x = x + (xs[k + 1] - x) * (tt - ys[k]) / (ys[k + 1] - ys[k])
+            end if
             if x < x0
               x0 = x
             end if
             if x > x1
               x1 = x
             end if
-          end if
-          if (ay < bottom and by > bottom) or (ay > bottom and by < bottom)
-            x = ax + (bx - ax) * (bottom - ay) / (by - ay)
+            j = k + 1
+            while j < last and ys[j] < bb
+              x = xs[j]
+              if x < x0
+                x0 = x
+              end if
+              if x > x1
+                x1 = x
+              end if
+              j++
+            end while
+            ' the segment holding bb
+            x = xs[j]
+            if bb < ys[j] and ys[j] > ys[j - 1]
+              x = xs[j - 1] + (x - xs[j - 1]) * (bb - ys[j - 1]) / (ys[j] - ys[j - 1])
+            end if
             if x < x0
               x0 = x
             end if
             if x > x1
               x1 = x
             end if
+          end for
+          if x0 < 0
+            x0 = 0
           end if
-        end for
-        if x0 < 0
-          x0 = 0
-        end if
-        if x1 > w
-          x1 = w
-        end if
-        if x1 > x0
-          x0 = int(x0)
-          x1 = -int(-x1)
-          k = 0
-          while k < spans.count() and spans[k] < x0
-            k += 2
-          end while
-          insertSpan(spans, k, x0, x1)
+          if x1 > w
+            x1 = w
+          end if
+          if x1 > x0
+            ' kept floats, as insertSpan() makes them
+            x0 = int(x0) * 1.0
+            x1 = -int(-x1) * 1.0
+            if single
+              spanned = true
+              if prevRect >= 0 and x0 = prevX0 and x1 = prevX1
+                out[prevRect + 3] = out[prevRect + 3] + (bottom - top)
+              else
+                prevRect = out.count()
+                prevX0 = x0
+                prevX1 = x1
+                out.push(x0)
+                out.push(top)
+                out.push(x1 - x0)
+                out.push(bottom - top)
+              end if
+            else if spans.count() = 0
+              spans.push(x0)
+              spans.push(x1)
+            else
+              k = 0
+              while k < spans.count() and spans[k] < x0
+                k += 2
+              end while
+              insertSpan(spans, k, x0, x1)
+            end if
+          end if
         end if
       end for
-      if spans.count() = 0
+      if single
+        if not spanned
+          prevRect = -1
+        end if
+      else if spans.count() = 0
         prevSpans.Clear()
         prevRects.Clear()
       else
-        rects = emitBand(spans, top, bottom, prevSpans, prevRects, out)
-        prevRects.Clear()
-        prevRects.append(rects)
-        prevSpans.Clear()
-        prevSpans.append(spans)
+        prevRects = emitBand(spans, top, bottom, prevSpans, prevRects, out)
+        prevSpans = spans
       end if
       top = bottom
     end while
