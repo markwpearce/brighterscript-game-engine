@@ -1,0 +1,289 @@
+import "../drawables/Model3d.bs"
+
+namespace BGE.FogSilhouettes
+
+  ' Height slices a model is cut into when looking for its parts
+  const SLICES = 8
+  ' A slice whose footprint is under this fraction of the one below starts a new part
+  const SHRINK = 0.5
+  const MAX_PARTS = 3
+
+  ' Splits a model into a few boxes by height, where its footprint shrinks sharply (a tower on a
+  ' nave), for its fog silhouette. Each box covers every face reaching into its height range, so
+  ' the boxes never cut into the model.
+  '
+  ' @param {BGE.Model3dFace[]} faces in model space
+  ' @return {float[]} [loX, loY, loZ, hiX, hiY, hiZ] per part, bottom first; empty for no faces
+  function modelParts(faces as BGE.Model3dFace[]) as float[]
+    parts = [] as float[]
+    n = faces.count()
+    if n = 0
+      return parts
+    end if
+    ' each face's extent
+    fx0 = [] as float[]
+    fx1 = [] as float[]
+    fy0 = [] as float[]
+    fy1 = [] as float[]
+    fz0 = [] as float[]
+    fz1 = [] as float[]
+    y0 = 1.0e30
+    y1 = -1.0e30
+    for each face in faces
+      lx = 1.0e30
+      ly = 1.0e30
+      lz = 1.0e30
+      hx = -1.0e30
+      hy = -1.0e30
+      hz = -1.0e30
+      for each v in face.vertices
+        if v.x < lx
+          lx = v.x
+        end if
+        if v.x > hx
+          hx = v.x
+        end if
+        if v.y < ly
+          ly = v.y
+        end if
+        if v.y > hy
+          hy = v.y
+        end if
+        if v.z < lz
+          lz = v.z
+        end if
+        if v.z > hz
+          hz = v.z
+        end if
+      end for
+      fx0.push(lx)
+      fx1.push(hx)
+      fy0.push(ly)
+      fy1.push(hy)
+      fz0.push(lz)
+      fz1.push(hz)
+      if ly < y0
+        y0 = ly
+      end if
+      if hy > y1
+        y1 = hy
+      end if
+    end for
+    if y0 > y1
+      ' faces with no vertices
+      return parts
+    end if
+    sliceHeight = (y1 - y0) / SLICES
+    if sliceHeight <= 0
+      parts.append(boundsOf(fx0, fx1, fz0, fz1, y0, y1))
+      return parts
+    end if
+
+    ' the current part's footprint and height
+    px0 = 1.0e30
+    px1 = -1.0e30
+    pz0 = 1.0e30
+    pz1 = -1.0e30
+    partLo = y0
+    lastArea = -1.0
+    lastSlice = -1
+    for s = 0 to SLICES - 1
+      sLo = y0 + s * sliceHeight
+      sHi = sLo + sliceHeight
+      if s = SLICES - 1
+        sHi = y1
+      end if
+      sx0 = 1.0e30
+      sx1 = -1.0e30
+      sz0 = 1.0e30
+      sz1 = -1.0e30
+      for i = 0 to n - 1
+        a = fy0[i]
+        b = fy1[i]
+        inSlice = false
+        if a = b
+          ' flat: only the slice holding it (the top slice includes its top)
+          inSlice = a >= sLo and (a < sHi or (s = SLICES - 1 and a <= sHi))
+        else
+          inSlice = b > sLo and a < sHi
+        end if
+        if inSlice
+          if fx0[i] < sx0
+            sx0 = fx0[i]
+          end if
+          if fx1[i] > sx1
+            sx1 = fx1[i]
+          end if
+          if fz0[i] < sz0
+            sz0 = fz0[i]
+          end if
+          if fz1[i] > sz1
+            sz1 = fz1[i]
+          end if
+        end if
+      end for
+      if sx0 <= sx1
+        area = (sx1 - sx0) * (sz1 - sz0)
+        if lastArea > 0 and area < SHRINK * lastArea and parts.count() < (MAX_PARTS - 1) * 6
+          ' the cut goes at the highest face top in the last slice of the part below
+          prevLo = y0 + lastSlice * sliceHeight
+          cut = prevLo + sliceHeight
+          best = -1.0e30
+          for i = 0 to n - 1
+            top = fy1[i]
+            if top >= prevLo and top <= cut and top > best
+              best = top
+            end if
+          end for
+          if best > -1.0e30
+            cut = best
+          end if
+          parts.append([px0, partLo, pz0, px1, cut, pz1])
+          partLo = cut
+          px0 = sx0
+          px1 = sx1
+          pz0 = sz0
+          pz1 = sz1
+        else
+          if sx0 < px0
+            px0 = sx0
+          end if
+          if sx1 > px1
+            px1 = sx1
+          end if
+          if sz0 < pz0
+            pz0 = sz0
+          end if
+          if sz1 > pz1
+            pz1 = sz1
+          end if
+        end if
+        lastArea = area
+        lastSlice = s
+      end if
+    end for
+    parts.append([px0, partLo, pz0, px1, y1, pz1])
+    return parts
+  end function
+
+  function boundsOf(fx0 as float[], fx1 as float[], fz0 as float[], fz1 as float[], y0 as float, y1 as float) as float[]
+    lx = 1.0e30
+    hx = -1.0e30
+    lz = 1.0e30
+    hz = -1.0e30
+    for i = 0 to fx0.count() - 1
+      if fx0[i] < lx
+        lx = fx0[i]
+      end if
+      if fx1[i] > hx
+        hx = fx1[i]
+      end if
+      if fz0[i] < lz
+        lz = fz0[i]
+      end if
+      if fz1[i] > hz
+        hz = fz1[i]
+      end if
+    end for
+    return [lx, y0, lz, hx, y1, hz]
+  end function
+
+  ' Turns screen boxes into rects covering the same pixels with none overlapping, so a
+  ' translucent fill doesn't darken where the boxes overlap.
+  '
+  ' @param {float[]} boxes [x0, y0, x1, y1] per box, each with x1 > x0 and y1 > y0
+  ' @param {float[]} out [x, y, w, h] per rect is appended
+  sub mergeRects(boxes as float[], out as float[])
+    count = boxes.count() / 4
+    if count = 1
+      out.append([boxes[0], boxes[1], boxes[2] - boxes[0], boxes[3] - boxes[1]])
+      return
+    end if
+    edges = [] as float[]
+    for i = 0 to count - 1
+      edges.push(boxes[i * 4 + 1])
+      edges.push(boxes[i * 4 + 3])
+    end for
+    edges.Sort()
+    ' the last band's merged spans and the index of each one's rect in out
+    prevSpans = [] as float[]
+    prevRects = [] as integer[]
+    for e = 0 to edges.count() - 2
+      top = edges[e]
+      bottom = edges[e + 1]
+      if bottom > top
+        spans = [] as float[]
+        for i = 0 to count - 1
+          b = i * 4
+          if boxes[b + 1] <= top and boxes[b + 3] >= bottom
+            ' insert in x0 order, merging spans that touch
+            x0 = boxes[b]
+            k = 0
+            while k < spans.count() and spans[k] < x0
+              k += 2
+            end while
+            insertSpan(spans, k, x0, boxes[b + 2])
+          end if
+        end for
+        if spans.count() = 0
+          prevSpans.Clear()
+          prevRects.Clear()
+        else if sameSpans(spans, prevSpans)
+          for each r in prevRects
+            out[r + 3] = out[r + 3] + (bottom - top)
+          end for
+        else
+          prevRects.Clear()
+          for k = 0 to spans.count() - 1 step 2
+            prevRects.push(out.count())
+            out.append([spans[k], top, spans[k + 1] - spans[k], bottom - top])
+          end for
+          prevSpans.Clear()
+          prevSpans.append(spans)
+        end if
+      end if
+    end for
+  end sub
+
+  ' Inserts [x0, x1] at pair index k of sorted spans, merging any it touches
+  sub insertSpan(spans as float[], k as integer, x0 as float, x1 as float)
+    merged = [] as float[]
+    for i = 0 to spans.count() - 1 step 2
+      if i = k
+        merged.push(x0)
+        merged.push(x1)
+      end if
+      merged.push(spans[i])
+      merged.push(spans[i + 1])
+    end for
+    if k >= spans.count()
+      merged.push(x0)
+      merged.push(x1)
+    end if
+    spans.Clear()
+    for i = 0 to merged.count() - 1 step 2
+      n = spans.count()
+      if n > 0 and merged[i] <= spans[n - 1]
+        if merged[i + 1] > spans[n - 1]
+          spans[n - 1] = merged[i + 1]
+        end if
+      else
+        spans.push(merged[i])
+        spans.push(merged[i + 1])
+      end if
+    end for
+  end sub
+
+  function sameSpans(a as float[], b as float[]) as boolean
+    if a.count() <> b.count()
+      return false
+    end if
+    for i = 0 to a.count() - 1
+      if a[i] <> b[i]
+        return false
+      end if
+    end for
+    return true
+  end function
+
+end namespace
