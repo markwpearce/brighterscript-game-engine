@@ -137,6 +137,19 @@ coarser (a fine stair-step along wall feet and tops).
 Override it like any other field, e.g. `{wallStripWidth: 6}` at Medium. Halving the strip
 width roughly doubles the walls' cost, which is why High sits at 6 between Medium's 8 and Ultra's 4.
 
+Fog silhouettes (`Camera3d.fog`, see [Drawables](/drawables-and-scene-objects)) are filled
+with rects stepping down each edge in stairs at most `fogSilhouetteBand` pixels tall and across
+(at least 1). A near-upright wall costs a rect or two; a sloped edge, a pitched roof say, costs
+about one rect per band it spans, so smaller bands follow it more closely for more draws.
+
+| Level  | `fogSilhouetteBand` |
+| ------ | ------------------- |
+| Basic  | 8                   |
+| Low    | 6                   |
+| Medium | 4                   |
+| High   | 3                   |
+| Ultra  | 2                   |
+
 Past `wallLodDistanceFraction` of the current draw distance, walls draw one strip per two rays,
 twice as wide: far walls are small on screen, and each strip costs about the same however big
 it is. Every ray still closes exactly, so hiding and floors are unchanged.

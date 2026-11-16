@@ -9,7 +9,7 @@ namespace tests
 
     ' The 12 triangles of an axis-aligned box
     private function boxFaces(loX as float, loY as float, loZ as float, hiX as float, hiY as float, hiZ as float) as BGE.Model3dFace[]
-      c = []
+      c = [] as BGE.Math.Vector[]
       for each y in [loY, hiY]
         for each z in [loZ, hiZ]
           for each x in [loX, hiX]
@@ -25,6 +25,16 @@ namespace tests
         faces.push(BGE.Model3dFaceOps.create([c[q[0]], c[q[2]], c[q[3]]]))
       end for
       return faces
+    end function
+
+    ' Whether [x, y, z, ...] holds this point
+    private function hasPoint(points as float[], x as float, y as float, z as float) as boolean
+      for i = 0 to points.count() - 1 step 3
+        if points[i] = x and points[i + 1] = y and points[i + 2] = z
+          return true
+        end if
+      end for
+      return false
     end function
 
     private function tri(a as BGE.Math.Vector, b as BGE.Math.Vector, c as BGE.Math.Vector) as BGE.Model3dFace
@@ -84,6 +94,189 @@ namespace tests
       v = BGE.Math.VectorOps.create
       faces = [m.tri(v(0, 2, 0), v(10, 2, 0), v(0, 2, 10)), m.tri(v(10, 2, 0), v(10, 2, 10), v(0, 2, 10))]
       m.assertEqual([0.0, 2.0, 0.0, 10.0, 2.0, 10.0], BGE.FogSilhouettes.modelParts(faces))
+    end function
+
+    @describe("modelPartPoints")
+
+    @it("keeps a pointed roof's apex")
+    function _()
+      faces = m.boxFaces(0, 0, 0, 10, 6, 10)
+      v = BGE.Math.VectorOps.create
+      apex = v(5, 9, 5)
+      corners = [v(0, 6, 0), v(10, 6, 0), v(10, 6, 10), v(0, 6, 10)]
+      for i = 0 to 3
+        faces.push(m.tri(corners[i], corners[(i + 1) mod 4], apex))
+      end for
+      parts = BGE.FogSilhouettes.modelParts(faces)
+      points = BGE.FogSilhouettes.modelPartPoints(faces, parts)
+      m.assertEqual(1, points.count())
+      m.assertTrue(m.hasPoint(points[0], 5, 9, 5), "the apex")
+      ' 8 box corners and the apex
+      m.assertEqual(27, points[0].count())
+    end function
+
+    @it("leaves the nave's roof out of the tower's part, and cuts the tower's walls at it")
+    function _()
+      faces = m.boxFaces(0, 0, 0, 20, 6, 40)
+      faces.append(m.boxFaces(0, 0, 0, 6, 20, 6))
+      points = BGE.FogSilhouettes.modelPartPoints(faces, BGE.FogSilhouettes.modelParts(faces))
+      m.assertEqual(2, points.count())
+      m.assertFalse(m.hasPoint(points[1], 20, 6, 40), "a nave roof corner in the tower's part")
+      m.assertTrue(m.hasPoint(points[1], 6, 6, 6), "the tower wall cut at the nave's top")
+      m.assertTrue(m.hasPoint(points[0], 20, 6, 40), "a nave roof corner in the nave's part")
+    end function
+
+    @it("keeps a flat model's points")
+    function _()
+      v = BGE.Math.VectorOps.create
+      faces = [m.tri(v(0, 2, 0), v(10, 2, 0), v(0, 2, 10)), m.tri(v(10, 2, 0), v(10, 2, 10), v(0, 2, 10))]
+      points = BGE.FogSilhouettes.modelPartPoints(faces, BGE.FogSilhouettes.modelParts(faces))
+      m.assertEqual(12, points[0].count())
+    end function
+
+    @it("keeps at most 42 points a part, the extremes among them")
+    function _()
+      ' a 64-sided drum, 10 tall
+      faces = [] as BGE.Model3dFace[]
+      v = BGE.Math.VectorOps.create
+      sides = 64
+      for i = 0 to sides - 1
+        a0 = 2 * BGE.Math.PI * i / sides
+        a1 = 2 * BGE.Math.PI * (i + 1) / sides
+        p0 = v(100 * Cos(a0), 0, 100 * Sin(a0))
+        p1 = v(100 * Cos(a1), 0, 100 * Sin(a1))
+        q0 = v(100 * Cos(a0), 10, 100 * Sin(a0))
+        q1 = v(100 * Cos(a1), 10, 100 * Sin(a1))
+        faces.push(m.tri(p0, p1, q1))
+        faces.push(m.tri(p0, q1, q0))
+      end for
+      points = BGE.FogSilhouettes.modelPartPoints(faces, BGE.FogSilhouettes.modelParts(faces))
+      m.assertEqual(1, points.count())
+      m.assertTrue(points[0].count() <= 42 * 3, `${points[0].count() / 3} points`)
+      m.assertTrue(m.hasPoint(points[0], 100, 10, 0), "the +x top corner")
+    end function
+
+    @describe("convexHull")
+
+    @it("drops points inside the hull")
+    function _()
+      hull = BGE.FogSilhouettes.convexHull([0.0, 0.0, 10.0, 0.0, 5.0, 5.0, 10.0, 10.0, 0.0, 10.0])
+      m.assertEqual(8, hull.count())
+      for i = 0 to hull.count() - 1 step 2
+        m.assertFalse(hull[i] = 5.0 and hull[i + 1] = 5.0, "the inside point")
+      end for
+    end function
+
+    @it("drops collinear and repeated points")
+    function _()
+      hull = BGE.FogSilhouettes.convexHull([0.0, 0.0, 5.0, 0.0, 10.0, 0.0, 10.0, 10.0, 10.0, 10.0, 0.0, 10.0])
+      m.assertEqual(8, hull.count())
+    end function
+
+    @it("hulls [x, y, depth] points and orders points sharing an x")
+    function _()
+      ' a square, its left side's corners given bottom first
+      hull = BGE.FogSilhouettes.convexHull([0.0, 10.0, 5.0, 0.0, 0.0, 5.0, 10.0, 0.0, 5.0, 10.0, 10.0, 5.0, 5.0, 5.0, 5.0], 3)
+      m.assertEqual(8, hull.count())
+      for i = 0 to hull.count() - 1 step 2
+        m.assertFalse(hull[i] = 5.0 and hull[i + 1] = 5.0, "the inside point")
+      end for
+    end function
+
+    @it("orders points past the packed key range exactly")
+    function _()
+      ' a square right of x = 4096, given out of order, with a point inside
+      hull = BGE.FogSilhouettes.convexHull([5000.0, 0.0, 6000.0, 100.0, 5500.0, 50.0, 6000.0, 0.0, 5000.0, 100.0])
+      m.assertEqual(8, hull.count())
+      for i = 0 to hull.count() - 1 step 2
+        m.assertFalse(hull[i] = 5500.0, "the inside point")
+      end for
+    end function
+
+    @it("keeps every point past 64")
+    function _()
+      pts = [] as float[]
+      for i = 0 to 95
+        pts.push(10.0 + (i mod 10))
+        pts.push(10.0 + (i \ 10))
+      end for
+      ' the square's corners last
+      pts.append([0.0, 0.0, 100.0, 0.0, 100.0, 100.0, 0.0, 100.0])
+      hull = BGE.FogSilhouettes.convexHull(pts)
+      m.assertEqual(8, hull.count())
+      for i = 0 to hull.count() - 1
+        m.assertTrue(hull[i] = 0.0 or hull[i] = 100.0, "a corner")
+      end for
+    end function
+
+    @describe("hullRects")
+
+    @it("fills a rectangle as one rect")
+    function _()
+      out = [] as float[]
+      BGE.FogSilhouettes.hullRects([[10.0, 20.0, 50.0, 20.0, 50.0, 60.0, 10.0, 60.0]], 4, 1280, 720, out)
+      m.assertEqual([10.0, 20.0, 40.0, 40.0], out)
+    end function
+
+    @it("widens band by band down a triangle, never narrower than it")
+    function _()
+      out = [] as float[]
+      ' apex at (100, 0), base from 80 to 120 at y 8
+      BGE.FogSilhouettes.hullRects([[100.0, 0.0, 120.0, 8.0, 80.0, 8.0]], 4, 1280, 720, out)
+      m.assertEqual([90.0, 0.0, 20.0, 4.0, 80.0, 4.0, 40.0, 4.0], out)
+    end function
+
+    @it("clamps to the frame")
+    function _()
+      out = [] as float[]
+      BGE.FogSilhouettes.hullRects([[-30.0, -10.0, 50.0, -10.0, 50.0, 30.0, -30.0, 30.0]], 4, 1280, 720, out)
+      m.assertEqual([0.0, 0.0, 50.0, 30.0], out)
+    end function
+
+    @it("joins overlapping outlines without overlapping rects")
+    function _()
+      out = [] as float[]
+      BGE.FogSilhouettes.hullRects([[0.0, 0.0, 40.0, 0.0, 40.0, 8.0, 0.0, 8.0], [20.0, 0.0, 60.0, 0.0, 60.0, 8.0, 20.0, 8.0]], 4, 1280, 720, out)
+      m.assertEqual([0.0, 0.0, 60.0, 8.0], out)
+    end function
+
+    @it("draws nothing for an outline off the frame")
+    function _()
+      out = [] as float[]
+      BGE.FogSilhouettes.hullRects([[-80.0, 10.0, -20.0, 10.0, -20.0, 50.0, -80.0, 50.0]], 4, 1280, 720, out)
+      m.assertEqual(0, out.count())
+    end function
+
+    @it("merges a slightly leaning edge into a few rects")
+    function _()
+      out = [] as float[]
+      ' 5 px of lean over 100 rows, as a camera tilted a little down makes of a wall
+      BGE.FogSilhouettes.hullRects([[10.0, 0.0, 50.0, 0.0, 55.0, 100.0, 15.0, 100.0]], 4, 1280, 720, out)
+      m.assertTrue(out.count() / 4 <= 8, `${out.count() / 4} rects`)
+    end function
+
+    @it("keeps an edge leaning under a band in all as one rect")
+    function _()
+      out = [] as float[]
+      ' 4 px of lean over 100 rows, at 4 px bands
+      BGE.FogSilhouettes.hullRects([[10.0, 0.0, 50.0, 0.0, 54.0, 100.0, 14.0, 100.0]], 4, 1280, 720, out)
+      m.assertEqual([10.0, 0.0, 44.0, 100.0], out)
+    end function
+
+    @it("steps a steep edge a band across at a time")
+    function _()
+      out = [] as float[]
+      ' 12 px of lean over 120 rows: 3 steps of 40, not 30 of 4
+      BGE.FogSilhouettes.hullRects([[10.0, 0.0, 50.0, 0.0, 50.0, 120.0, -2.0, 120.0]], 4, 1280, 720, out)
+      m.assertEqual(12, out.count())
+      m.assertEqual(40.0, out[3])
+    end function
+
+    @it("skips an outline with no height among others")
+    function _()
+      out = [] as float[]
+      BGE.FogSilhouettes.hullRects([[0.0, 0.0, 40.0, 0.0, 40.0, 20.0, 0.0, 20.0], [50.0, 10.0, 60.0, 10.0, 70.0, 10.0]], 4, 1280, 720, out)
+      m.assertEqual([0.0, 0.0, 40.0, 20.0], out)
     end function
 
     @describe("mergeRects")

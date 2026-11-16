@@ -7,6 +7,8 @@ namespace BGE.FogSilhouettes
   ' A slice whose footprint is under this fraction of the one below starts a new part
   const SHRINK = 0.5
   const MAX_PARTS = 3
+  ' Most points a part is outlined by: more are cut down to the extremes (see extremePoints())
+  const MAX_HULL_POINTS = 42
 
   ' Splits a model into a few boxes by height, where its footprint shrinks sharply (a tower on a
   ' nave), for its fog silhouette. Each box covers every face reaching into its height range, so
@@ -195,7 +197,7 @@ namespace BGE.FogSilhouettes
   ' @param {float[]} boxes [x0, y0, x1, y1] per box, each with x1 > x0 and y1 > y0
   ' @param {float[]} out [x, y, w, h] per rect is appended
   sub mergeRects(boxes as float[], out as float[])
-    count = boxes.count() / 4
+    count = boxes.count() \ 4
     if count = 1
       out.append([boxes[0], boxes[1], boxes[2] - boxes[0], boxes[3] - boxes[1]])
       return
@@ -206,7 +208,7 @@ namespace BGE.FogSilhouettes
       edges.push(boxes[i * 4 + 3])
     end for
     edges.Sort()
-    ' the last band's merged spans and the index of each one's rect in out
+    ' the last band's pieces and the index of each one's rect in out
     prevSpans = [] as float[]
     prevRects = [] as integer[]
     for e = 0 to edges.count() - 2
@@ -226,24 +228,471 @@ namespace BGE.FogSilhouettes
             insertSpan(spans, k, x0, boxes[b + 2])
           end if
         end for
-        if spans.count() = 0
-          prevSpans.Clear()
-          prevRects.Clear()
-        else if sameSpans(spans, prevSpans)
-          for each r in prevRects
-            out[r + 3] = out[r + 3] + (bottom - top)
-          end for
-        else
-          prevRects.Clear()
-          for k = 0 to spans.count() - 1 step 2
-            prevRects.push(out.count())
-            out.append([spans[k], top, spans[k + 1] - spans[k], bottom - top])
-          end for
-          prevSpans.Clear()
-          prevSpans.append(spans)
-        end if
+        rects = emitBand(spans, top, bottom, prevSpans, prevRects, out)
+        prevSpans = spans
+        prevRects = rects
       end if
     end for
+  end sub
+
+  ' Appends a band's pieces to out: a piece the same as one in the band above carries that
+  ' rect on down, the rest start new rects.
+  '
+  ' @return {integer[]} each piece's rect index in out
+  function emitBand(spans as float[], top as float, bottom as float, prevSpans as float[], prevRects as integer[], out as float[]) as integer[]
+    rects = [] as integer[]
+    for k = 0 to spans.count() - 1 step 2
+      x0 = spans[k]
+      x1 = spans[k + 1]
+      above = -1
+      for j = 0 to prevSpans.count() - 1 step 2
+        if prevSpans[j] = x0 and prevSpans[j + 1] = x1
+          above = prevRects[j \ 2]
+        end if
+      end for
+      if above >= 0
+        out[above + 3] = out[above + 3] + (bottom - top)
+        rects.push(above)
+      else
+        rects.push(out.count())
+        out.append([x0, top, x1 - x0, bottom - top])
+      end if
+    end for
+    return rects
+  end function
+
+  ' Each part's points for its outline (see Fog.silhouetteHulls) - the faces' vertices inside the
+  ' part's height range and where their edges cross its top and bottom, deduped.
+  '
+  ' @param {BGE.Model3dFace[]} faces in model space
+  ' @param {float[]} parts from modelParts()
+  ' @return {roArray} per part, [x, y, z, ...] in model space
+  function modelPartPoints(faces as BGE.Model3dFace[], parts as float[]) as roArray
+    result = []
+    for p = 0 to parts.count() - 1 step 6
+      lo = parts[p + 1]
+      hi = parts[p + 4]
+      pts = [] as float[]
+      seen = {}
+      for each face in faces
+        verts = face.vertices
+        n = verts.count()
+        ' a face only reaching a cut belongs to the part on its other side
+        above = false
+        below = false
+        for each v in verts
+          if v.y > lo
+            above = true
+          end if
+          if v.y < hi
+            below = true
+          end if
+        end for
+        ' (a flat model is one part, lo = hi, holding every face). No `continue for` here: after
+        ' the loop above, it crashed on device.
+        if lo = hi or (above and below)
+          for i = 0 to n - 1
+            a = verts[i]
+            b = verts[(i + 1) mod n]
+            if a.y >= lo and a.y <= hi
+              addPoint(pts, seen, a.x, a.y, a.z)
+            end if
+            if (a.y < lo and b.y > lo) or (a.y > lo and b.y < lo)
+              t = (lo - a.y) / (b.y - a.y)
+              addPoint(pts, seen, a.x + (b.x - a.x) * t, lo, a.z + (b.z - a.z) * t)
+            end if
+            if (a.y < hi and b.y > hi) or (a.y > hi and b.y < hi)
+              t = (hi - a.y) / (b.y - a.y)
+              addPoint(pts, seen, a.x + (b.x - a.x) * t, hi, a.z + (b.z - a.z) * t)
+            end if
+          end for
+        end if
+      end for
+      if pts.count() > MAX_HULL_POINTS * 3
+        pts = extremePoints(pts)
+      end if
+      result.push(pts)
+    end for
+    return result
+  end function
+
+  ' The points furthest along each of a fixed set of directions (the 26 of a cube's faces,
+  ' edges and corners, and 16 round the horizon), so a detailed part costs at most
+  ' MAX_HULL_POINTS a frame. Its outline can then sit a little inside the true one.
+  function extremePoints(pts as float[]) as float[]
+    dirs = [] as float[]
+    for dx = -1 to 1
+      for dy = -1 to 1
+        for dz = -1 to 1
+          if dx <> 0 or dy <> 0 or dz <> 0
+            dirs.append([dx, dy, dz])
+          end if
+        end for
+      end for
+    end for
+    for i = 0 to 15
+      a = (i + 0.5) * BGE.Math.PI / 8
+      dirs.append([Cos(a), 0, Sin(a)])
+    end for
+    kept = {}
+    out = [] as float[]
+    for d = 0 to dirs.count() - 1 step 3
+      best = -1
+      bestDot = -1.0e30
+      for i = 0 to pts.count() - 1 step 3
+        dot = pts[i] * dirs[d] + pts[i + 1] * dirs[d + 1] + pts[i + 2] * dirs[d + 2]
+        if dot > bestDot
+          bestDot = dot
+          best = i
+        end if
+      end for
+      key = best.toStr()
+      if not kept.DoesExist(key)
+        kept[key] = true
+        out.append([pts[best], pts[best + 1], pts[best + 2]])
+      end if
+    end for
+    return out
+  end function
+
+  sub addPoint(pts as float[], seen as roAssociativeArray, x as float, y as float, z as float)
+    key = `${x},${y},${z}`
+    if seen.DoesExist(key)
+      return
+    end if
+    seen[key] = true
+    pts.append([x, y, z])
+  end sub
+
+  ' The convex hull of points (monotone chain), as [x, y, ...] in order
+  '
+  ' @param {float[]} pts x, y first in each `stride` values (2 for [x, y, ...])
+  function convexHull(pts as float[], stride = 2 as integer) as float[]
+    n = pts.count() \ stride
+    xs = [] as float[]
+    ys = [] as float[]
+    if n <= 64
+      ' roughly sorted natively first: whole-pixel x (+-4096) and y (+-2048) and the index
+      ' packed in a 31-bit integer (so at most 64 points: MAX_HULL_POINTS keeps parts under it)
+      keys = [] as integer[]
+      for i = 0 to n - 1
+        x = int(pts[i * stride]) + 4096
+        y = int(pts[i * stride + 1]) + 2048
+        if x > 8191
+          x = 8191
+        else if x < 0
+          x = 0
+        end if
+        if y > 4095
+          y = 4095
+        else if y < 0
+          y = 0
+        end if
+        keys.push(x * 262144 + y * 64 + i)
+      end for
+      keys.Sort()
+      for each key in keys
+        i = key and 63
+        xs.push(pts[i * stride])
+        ys.push(pts[i * stride + 1])
+      end for
+    else
+      for i = 0 to n - 1
+        xs.push(pts[i * stride])
+        ys.push(pts[i * stride + 1])
+      end for
+    end if
+    ' exact x then y order, which the chain needs: the keys miss sub-pixel and clamped
+    ' differences, so this insertion pass only moves a few
+    for k = 1 to n - 1
+      px = xs[k]
+      py = ys[k]
+      j = k - 1
+      while j >= 0 and (xs[j] > px or (xs[j] = px and ys[j] > py))
+        xs[j + 1] = xs[j]
+        ys[j + 1] = ys[j]
+        j--
+      end while
+      xs[j + 1] = px
+      ys[j + 1] = py
+    end for
+    hull = [] as integer[]
+    for pass = 0 to 1
+      start = hull.count()
+      for k = 0 to n - 1
+        i = k
+        if pass = 1
+          i = n - 1 - k
+        end if
+        px = xs[i]
+        py = ys[i]
+        while hull.count() - start >= 2
+          o = hull[hull.count() - 2]
+          a = hull[hull.count() - 1]
+          ox = xs[o]
+          oy = ys[o]
+          if (xs[a] - ox) * (py - oy) - (ys[a] - oy) * (px - ox) <= 0
+            hull.pop()
+          else
+            exit while
+          end if
+        end while
+        hull.push(i)
+      end for
+      hull.pop()
+    end for
+    poly = [] as float[]
+    for each i in hull
+      poly.push(xs[i])
+      poly.push(ys[i])
+    end for
+    return poly
+  end function
+
+  ' Fills the union of convex polygons with rects, none overlapping, clamped to the frame. Bands
+  ' break at the polygons' corners and step down each leaning edge in stairs at most `band` px
+  ' tall and across, on one grid so the sides' steps line up. A band covers each
+  ' polygon's widest extent within it, so nothing is left uncovered.
+  '
+  ' @param {roArray} polys [x, y, ...] each, from convexHull()
+  sub hullRects(polys as roArray, band as float, w as float, h as float, out as float[])
+    ' per polygon: its rows, and its two sides from top corner to bottom corner as xs and ys
+    ' (side 2p and 2p + 1), each walked down the bands from sideAt
+    polyLo = [] as float[]
+    polyHi = [] as float[]
+    sideXs = []
+    sideYs = []
+    sideAt = [] as integer[]
+    cuts = [] as float[]
+    ' leaning edges step on one grid from the top row, so their steps line up
+    yMin = 1.0e30
+    for each poly in polys
+      for i = 1 to poly.count() - 1 step 2
+        if poly[i] < yMin
+          yMin = poly[i]
+        end if
+      end for
+    end for
+    if yMin < 0
+      yMin = 0
+    end if
+    yMin = int(yMin) * 1.0
+    yMax = -1.0e30
+    for each poly in polys
+      n = poly.count() \ 2
+      iTop = 0
+      iBot = 0
+      for e = 0 to n - 1
+        ax = poly[e * 2]
+        ay = poly[e * 2 + 1]
+        bx = poly[((e + 1) mod n) * 2]
+        by = poly[((e + 1) mod n) * 2 + 1]
+        if ay < poly[iTop * 2 + 1]
+          iTop = e
+        end if
+        if ay > poly[iBot * 2 + 1]
+          iBot = e
+        end if
+        cuts.push(int(ay) * 1.0)
+        dy = Abs(by - ay)
+        ' steps a whole number of bands tall and at most a band across
+        bands = -int(-dy / band)
+        lean = -int(-Abs(bx - ax) / band)
+        if lean < bands and lean > 0
+          stride = band * (-int(-bands / lean))
+        else
+          stride = band
+        end if
+        if lean > 0 and dy > stride
+          ' (only on the frame)
+          top = ay
+          if by < ay
+            top = by
+          end if
+          edgeEnd = top + dy
+          if edgeEnd > h
+            edgeEnd = h
+          end if
+          if top < yMin
+            top = yMin
+          end if
+          y = yMin + (int((top - yMin) / stride) + 1) * stride
+          while y < edgeEnd
+            cuts.push(y)
+            y += stride
+          end while
+        end if
+      end for
+      lo = poly[iTop * 2 + 1]
+      hi = poly[iBot * 2 + 1]
+      polyLo.push(lo)
+      polyHi.push(hi)
+      if hi > yMax
+        yMax = hi
+      end if
+      for dir = 1 to -1 step -2
+        xs = [] as float[]
+        ys = [] as float[]
+        i = iTop
+        xs.push(poly[i * 2])
+        ys.push(poly[i * 2 + 1])
+        while i <> iBot
+          i = (i + dir + n) mod n
+          xs.push(poly[i * 2])
+          ys.push(poly[i * 2 + 1])
+        end while
+        sideXs.push(xs)
+        sideYs.push(ys)
+        sideAt.push(0)
+      end for
+    end for
+    ' whole pixels, so an edge leaning less than one per band carries its rect on down
+    if yMax > h
+      yMax = h
+    end if
+    yMax = -int(-yMax) * 1.0
+    if yMax <= yMin
+      return
+    end if
+    cuts.Sort()
+    ' breaks closer than this to the last are dropped (corners just off the grid)
+    minGap = band / 2
+    if minGap < 1
+      minGap = 1
+    end if
+    prevSpans = [] as float[]
+    prevRects = [] as integer[]
+    ' one polygon: one span a band, carried on down while it's the same
+    single = polys.count() = 1
+    prevX0 = -1.0
+    prevX1 = -1.0
+    prevRect = -1
+    top = yMin
+    c = 0
+    cutCount = cuts.count()
+    while top < yMax
+      bottom = yMax
+      while c < cutCount
+        y = cuts[c]
+        c++
+        if y >= top + minGap
+          if y < yMax
+            bottom = y
+          end if
+          exit while
+        end if
+      end while
+      spans = [] as float[]
+      spanned = false
+      for p = 0 to polys.count() - 1
+        lo = polyLo[p]
+        hi = polyHi[p]
+        ' (a polygon with no height has nothing to fill, and one-point sides)
+        if lo < bottom and hi > top and hi > lo
+          ' the polygon's x extent between top and bottom (within its own rows): each side's x
+          ' at both, and its corners between
+          tt = top
+          if tt < lo
+            tt = lo
+          end if
+          bb = bottom
+          if bb > hi
+            bb = hi
+          end if
+          x0 = 1.0e30
+          x1 = -1.0e30
+          for s = p * 2 to p * 2 + 1
+            xs = sideXs[s]
+            ys = sideYs[s]
+            last = ys.count() - 1
+            ' the segment holding tt
+            k = sideAt[s]
+            while k < last - 1 and ys[k + 1] <= tt
+              k++
+            end while
+            sideAt[s] = k
+            x = xs[k]
+            if ys[k + 1] > ys[k]
+              x = x + (xs[k + 1] - x) * (tt - ys[k]) / (ys[k + 1] - ys[k])
+            end if
+            if x < x0
+              x0 = x
+            end if
+            if x > x1
+              x1 = x
+            end if
+            j = k + 1
+            while j < last and ys[j] < bb
+              x = xs[j]
+              if x < x0
+                x0 = x
+              end if
+              if x > x1
+                x1 = x
+              end if
+              j++
+            end while
+            ' the segment holding bb
+            x = xs[j]
+            if bb < ys[j] and ys[j] > ys[j - 1]
+              x = xs[j - 1] + (x - xs[j - 1]) * (bb - ys[j - 1]) / (ys[j] - ys[j - 1])
+            end if
+            if x < x0
+              x0 = x
+            end if
+            if x > x1
+              x1 = x
+            end if
+          end for
+          if x0 < 0
+            x0 = 0
+          end if
+          if x1 > w
+            x1 = w
+          end if
+          if x1 > x0
+            ' kept floats, as insertSpan() makes them
+            x0 = int(x0) * 1.0
+            x1 = -int(-x1) * 1.0
+            if single
+              spanned = true
+              if prevRect >= 0 and x0 = prevX0 and x1 = prevX1
+                out[prevRect + 3] = out[prevRect + 3] + (bottom - top)
+              else
+                prevRect = out.count()
+                prevX0 = x0
+                prevX1 = x1
+                out.push(x0)
+                out.push(top)
+                out.push(x1 - x0)
+                out.push(bottom - top)
+              end if
+            else if spans.count() = 0
+              spans.push(x0)
+              spans.push(x1)
+            else
+              k = 0
+              while k < spans.count() and spans[k] < x0
+                k += 2
+              end while
+              insertSpan(spans, k, x0, x1)
+            end if
+          end if
+        end if
+      end for
+      if single
+        if not spanned
+          prevRect = -1
+        end if
+      else if spans.count() = 0
+        prevSpans.Clear()
+        prevRects.Clear()
+      else
+        prevRects = emitBand(spans, top, bottom, prevSpans, prevRects, out)
+        prevSpans = spans
+      end if
+      top = bottom
+    end while
   end sub
 
   ' Inserts [x0, x1] at pair index k of sorted spans, merging any it touches
@@ -274,17 +723,5 @@ namespace BGE.FogSilhouettes
       end if
     end for
   end sub
-
-  function sameSpans(a as float[], b as float[]) as boolean
-    if a.count() <> b.count()
-      return false
-    end if
-    for i = 0 to a.count() - 1
-      if a[i] <> b[i]
-        return false
-      end if
-    end for
-    return true
-  end function
 
 end namespace

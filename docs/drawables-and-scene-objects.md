@@ -518,12 +518,18 @@ That does three things:
   draw distance, or the horizon if that's lower, is filled with the fog colour, behind everything. Objects fading out across the
   fade band (see above) now fade into fog rather than sky.
 - **Silhouettes.** A drawable with `castsFogSilhouette` keeps blocking the sky past the draw
-  distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured box over its
-  bounding points. A model gets up to three boxes stacked up its height instead, split where
-  its footprint shrinks sharply, so a tower on a long nave doesn't block the sky beside the
-  tower. The boxes make up the opacity the object has lost to the fade (1 - its fade
-  alpha), drawn behind it. Meant for buildings, towers and big trees; small props aren't worth
-  it.
+  distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured shape. A model
+  is outlined by its own points, split up its height where its footprint shrinks sharply, so
+  a tower on a long nave doesn't block the sky beside the tower and a pointed roof stays
+  pointed; the outline is filled with rects in stairs at most `fogSilhouetteBand` pixels tall
+  and across, which the render quality level sets. An image is outlined by its corners. `fog.silhouetteHulls = false`
+  draws up to three screen boxes per model instead: fewer draws, a looser outline.
+  Across the fade band the silhouette is drawn behind the object, making up the opacity it
+  has lost `fog.silhouetteOpacityLead` times over (default 1). At 1 a fading object and its
+  fog are up to a quarter see-through mid-fade; for solid buildings outlined by their points,
+  4 keeps the sky from showing through. Keep it at 1 for see-through casters (a tree image)
+  or box silhouettes, or the silhouette shows round them early in the fade. Meant for buildings, towers and big trees; small props aren't
+  worth it.
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
   their real outline past the draw distance as flat fog-coloured strips, with solid fog under
   them across the fade band, so a fading wall and its fog add up to fully opaque.
