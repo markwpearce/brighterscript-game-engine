@@ -518,12 +518,17 @@ That does three things:
   draw distance, or the horizon if that's lower, is filled with the fog colour, behind everything. Objects fading out across the
   fade band (see above) now fade into fog rather than sky.
 - **Silhouettes.** A drawable with `castsFogSilhouette` keeps blocking the sky past the draw
-  distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured box over its
-  bounding points. A model gets up to three boxes stacked up its height instead, split where
-  its footprint shrinks sharply, so a tower on a long nave doesn't block the sky beside the
-  tower. The boxes make up the opacity the object has lost to the fade (1 - its fade
-  alpha), drawn behind it. Meant for buildings, towers and big trees; small props aren't worth
-  it.
+  distance, out to `fog.silhouetteReach` times it (default 2), as a fog-coloured shape. A model
+  is outlined by its own points, split up its height where its footprint shrinks sharply, so
+  a tower on a long nave doesn't block the sky beside the tower and a pointed roof stays
+  pointed; the outline is filled in bands `fogSilhouetteBand` pixels tall, which the render
+  quality level sets. An image is outlined by its corners. `fog.silhouetteHulls = false`
+  draws up to three screen boxes per model instead: fewer draws, a looser outline.
+  Across the fade band the silhouette is drawn behind the object, making up the opacity it
+  has lost `fog.silhouetteOpacityLead` times over (default 4), so the object and its fog stay
+  opaque and the sky doesn't show through. With boxes, lower it to 1, or the box shows round
+  the object early in the fade. Meant for buildings, towers and big trees; small props aren't
+  worth it.
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
   their real outline past the draw distance as flat fog-coloured strips, with solid fog under
   them across the fade band, so a fading wall and its fog add up to fully opaque.
