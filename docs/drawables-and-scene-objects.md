@@ -524,6 +524,8 @@ That does three things:
   tower. The boxes make up the opacity the object has lost to the fade (1 - its fade
   alpha), drawn behind it. Meant for buildings, towers and big trees; small props aren't worth
   it.
+  Set `fog.silhouetteRegion` to an image that's clear at the top (it can be the backdrop's) to
+  soften the boxes' top edges against the sky.
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
   their real outline past the draw distance as flat fog-coloured strips, with solid fog under
   them across the fade band, so a fading wall and its fog add up to fully opaque.
