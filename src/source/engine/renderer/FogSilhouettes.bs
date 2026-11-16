@@ -205,7 +205,7 @@ namespace BGE.FogSilhouettes
       edges.push(boxes[i * 4 + 3])
     end for
     edges.Sort()
-    ' the last band's merged spans and the index of each one's rect in out
+    ' the last band's pieces and the index of each one's rect in out
     prevSpans = [] as float[]
     prevRects = [] as integer[]
     for e = 0 to edges.count() - 2
@@ -225,24 +225,230 @@ namespace BGE.FogSilhouettes
             insertSpan(spans, k, x0, boxes[b + 2])
           end if
         end for
-        if spans.count() = 0
-          prevSpans.Clear()
-          prevRects.Clear()
-        else if sameSpans(spans, prevSpans)
-          for each r in prevRects
-            out[r + 3] = out[r + 3] + (bottom - top)
-          end for
-        else
-          prevRects.Clear()
-          for k = 0 to spans.count() - 1 step 2
-            prevRects.push(out.count())
-            out.append([spans[k], top, spans[k + 1] - spans[k], bottom - top])
-          end for
-          prevSpans.Clear()
-          prevSpans.append(spans)
-        end if
+        rects = emitBand(spans, top, bottom, prevSpans, prevRects, out)
+        prevSpans = spans
+        prevRects = rects
       end if
     end for
+  end sub
+
+  ' Appends a band's pieces to out: a piece the same as one in the band above carries that
+  ' rect on down, the rest start new rects.
+  '
+  ' @return {integer[]} each piece's rect index in out
+  function emitBand(spans as float[], top as float, bottom as float, prevSpans as float[], prevRects as integer[], out as float[]) as integer[]
+    rects = [] as integer[]
+    for k = 0 to spans.count() - 1 step 2
+      x0 = spans[k]
+      x1 = spans[k + 1]
+      above = -1
+      for j = 0 to prevSpans.count() - 1 step 2
+        if prevSpans[j] = x0 and prevSpans[j + 1] = x1
+          above = prevRects[j \ 2]
+        end if
+      end for
+      if above >= 0
+        out[above + 3] = out[above + 3] + (bottom - top)
+        rects.push(above)
+      else
+        rects.push(out.count())
+        out.append([x0, top, x1 - x0, bottom - top])
+      end if
+    end for
+    return rects
+  end function
+
+  ' Each part's points for its outline (see Fog.silhouetteHulls) - the faces' vertices inside the
+  ' part's height range and where their edges cross its top and bottom, deduped.
+  '
+  ' @param {BGE.Model3dFace[]} faces in model space
+  ' @param {float[]} parts from modelParts()
+  ' @return {roArray} per part, [x, y, z, ...] in model space
+  function modelPartPoints(faces as BGE.Model3dFace[], parts as float[]) as roArray
+    result = []
+    for p = 0 to parts.count() - 1 step 6
+      lo = parts[p + 1]
+      hi = parts[p + 4]
+      pts = [] as float[]
+      seen = {}
+      for each face in faces
+        verts = face.vertices
+        n = verts.count()
+        ' a face only reaching a cut belongs to the part on its other side
+        above = false
+        below = false
+        for each v in verts
+          if v.y > lo
+            above = true
+          end if
+          if v.y < hi
+            below = true
+          end if
+        end for
+        if not (above and below)
+          continue for
+        end if
+        for i = 0 to n - 1
+          a = verts[i]
+          b = verts[(i + 1) mod n]
+          if a.y >= lo and a.y <= hi
+            addPoint(pts, seen, a.x, a.y, a.z)
+          end if
+          for each cut in [lo, hi]
+            if (a.y < cut and b.y > cut) or (a.y > cut and b.y < cut)
+              t = (cut - a.y) / (b.y - a.y)
+              addPoint(pts, seen, a.x + (b.x - a.x) * t, cut, a.z + (b.z - a.z) * t)
+            end if
+          end for
+        end for
+      end for
+      result.push(pts)
+    end for
+    return result
+  end function
+
+  sub addPoint(pts as float[], seen as roAssociativeArray, x as float, y as float, z as float)
+    key = `${x},${y},${z}`
+    if seen.DoesExist(key)
+      return
+    end if
+    seen[key] = true
+    pts.append([x, y, z])
+  end sub
+
+  ' The convex hull of [x, y, ...] points (monotone chain), as [x, y, ...] in order
+  function convexHull(xy as float[]) as float[]
+    n = xy.count() / 2
+    idx = [] as integer[]
+    for i = 0 to n - 1
+      ' insertion sort by x, then y
+      j = idx.count()
+      idx.push(i)
+      while j > 0 and (xy[idx[j - 1] * 2] > xy[i * 2] or (xy[idx[j - 1] * 2] = xy[i * 2] and xy[idx[j - 1] * 2 + 1] > xy[i * 2 + 1]))
+        idx[j] = idx[j - 1]
+        j--
+      end while
+      idx[j] = i
+    end for
+    hull = [] as integer[]
+    for pass = 0 to 1
+      start = hull.count()
+      for k = 0 to n - 1
+        i = idx[k]
+        if pass = 1
+          i = idx[n - 1 - k]
+        end if
+        while hull.count() - start >= 2
+          o = hull[hull.count() - 2]
+          a = hull[hull.count() - 1]
+          cross = (xy[a * 2] - xy[o * 2]) * (xy[i * 2 + 1] - xy[o * 2 + 1]) - (xy[a * 2 + 1] - xy[o * 2 + 1]) * (xy[i * 2] - xy[o * 2])
+          if cross <= 0
+            hull.pop()
+          else
+            exit while
+          end if
+        end while
+        hull.push(i)
+      end for
+      hull.pop()
+    end for
+    poly = [] as float[]
+    for each i in hull
+      poly.push(xy[i * 2])
+      poly.push(xy[i * 2 + 1])
+    end for
+    return poly
+  end function
+
+  ' Fills the union of convex polygons with rects in bands `band` px tall, none
+  ' overlapping, clamped to the frame. A band covers each polygon's widest extent within it, so
+  ' nothing is left uncovered.
+  '
+  ' @param {roArray} polys [x, y, ...] each, from convexHull()
+  sub hullRects(polys as roArray, band as float, w as float, h as float, out as float[])
+    yMin = 1.0e30
+    yMax = -1.0e30
+    for each poly in polys
+      for i = 1 to poly.count() - 1 step 2
+        if poly[i] < yMin
+          yMin = poly[i]
+        end if
+        if poly[i] > yMax
+          yMax = poly[i]
+        end if
+      end for
+    end for
+    if yMin < 0
+      yMin = 0
+    end if
+    if yMax > h
+      yMax = h
+    end if
+    prevSpans = [] as float[]
+    prevRects = [] as integer[]
+    top = yMin
+    while top < yMax
+      bottom = top + band
+      if bottom > yMax
+        bottom = yMax
+      end if
+      spans = [] as float[]
+      for each poly in polys
+        ' the polygon's x extent between top and bottom: its edges at both, and any vertex between
+        x0 = 1.0e30
+        x1 = -1.0e30
+        n = poly.count() / 2
+        for e = 0 to n - 1
+          ax = poly[e * 2]
+          ay = poly[e * 2 + 1]
+          bx = poly[((e + 1) mod n) * 2]
+          by = poly[((e + 1) mod n) * 2 + 1]
+          if ay >= top and ay <= bottom
+            if ax < x0
+              x0 = ax
+            end if
+            if ax > x1
+              x1 = ax
+            end if
+          end if
+          for each y in [top, bottom]
+            if (ay < y and by > y) or (ay > y and by < y)
+              x = ax + (bx - ax) * (y - ay) / (by - ay)
+              if x < x0
+                x0 = x
+              end if
+              if x > x1
+                x1 = x
+              end if
+            end if
+          end for
+        end for
+        if x0 < 0
+          x0 = 0
+        end if
+        if x1 > w
+          x1 = w
+        end if
+        if x1 > x0
+          k = 0
+          while k < spans.count() and spans[k] < x0
+            k += 2
+          end while
+          insertSpan(spans, k, x0, x1)
+        end if
+      end for
+      if spans.count() = 0
+        prevSpans.Clear()
+        prevRects.Clear()
+      else
+        rects = emitBand(spans, top, bottom, prevSpans, prevRects, out)
+        prevRects.Clear()
+        prevRects.append(rects)
+        prevSpans.Clear()
+        prevSpans.append(spans)
+      end if
+      top = bottom
+    end while
   end sub
 
   ' Inserts [x0, x1] at pair index k of sorted spans, merging any it touches
@@ -273,17 +479,5 @@ namespace BGE.FogSilhouettes
       end if
     end for
   end sub
-
-  function sameSpans(a as float[], b as float[]) as boolean
-    if a.count() <> b.count()
-      return false
-    end if
-    for i = 0 to a.count() - 1
-      if a[i] <> b[i]
-        return false
-      end if
-    end for
-    return true
-  end function
 
 end namespace

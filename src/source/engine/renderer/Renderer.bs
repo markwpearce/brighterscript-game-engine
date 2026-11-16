@@ -206,6 +206,10 @@ namespace BGE
     ' the camera's projectionVersion: field of view and frame size
     private fogKeyProjection as integer = -1
     private fogKeyEnabledCount as integer = -1
+    private fogKeyHullBand as float = -1.0
+    private fogKeyLead as float = -1.0
+    ' one caster's outline polygons, reused
+    private fogPolys = []
     ' Per caster as of the last frame, fogKeyStride values: depth point x, y, z, geometry
     ' version, transform version, then its world matrix's 3x3 turn and scale, row by row
     private fogKeyPositions = [] as float[]
@@ -1333,6 +1337,12 @@ namespace BGE
       projection = cam.projectionVersion
       repeat = m.fogBoxesValid and not anyMoved and not cam.motionChecker.movedLastFrame and not cam.farDistanceChangedThisFrame()
       repeat = repeat and color = m.fogKeyColor and fog.silhouetteReach = m.fogKeyReach and start = m.fogKeyStart and fraction = m.fogKeyFraction and projection = m.fogKeyProjection and enabledCount = m.fogKeyEnabledCount
+      ' 0 for boxes
+      hullBand = 0.0
+      if fog.silhouetteHulls
+        hullBand = m.qualitySettings.fogSilhouetteBand
+      end if
+      repeat = repeat and hullBand = m.fogKeyHullBand and fog.silhouetteOpacityLead = m.fogKeyLead
       if not repeat
         m.fogKeyColor = color
         m.fogKeyReach = fog.silhouetteReach
@@ -1340,6 +1350,8 @@ namespace BGE
         m.fogKeyFraction = fraction
         m.fogKeyProjection = projection
         m.fogKeyEnabledCount = enabledCount
+        m.fogKeyHullBand = hullBand
+        m.fogKeyLead = fog.silhouetteOpacityLead
         m.fogBoxesValid = true
         m.workOutFogBoxes(cam)
       end if
@@ -1377,6 +1389,7 @@ namespace BGE
       far = cam.getCurrentDrawDistance()
       reach = far * fog.silhouetteReach
       start = fog.silhouetteStartAlpha
+      lead = fog.silhouetteOpacityLead
       fades = cam.drawDistanceFadeFraction > 0
       base = fog.color << 8
       w = cam.frameSize.x
@@ -1399,10 +1412,14 @@ namespace BGE
           else
             alpha = 1.0
           end if
-          ' the opacity it has lost
+          ' the opacity it has lost, made up faster by the lead
           alphaByte = 0
           if alpha < start
-            alphaByte = int((1 - alpha) * 255)
+            lost = (1 - alpha) * lead
+            if lost > 1
+              lost = 1
+            end if
+            alphaByte = int(lost * 255)
           end if
           if alphaByte > 0
             projected++
@@ -1411,8 +1428,34 @@ namespace BGE
             partBoxes = m.fogPartBoxes
             partBoxes.Clear()
             behind = false
-            for each points in sceneObj.getFogSilhouetteParts(cam)
+            hullBand = m.fogKeyHullBand
+            polys = m.fogPolys
+            polys.Clear()
+            partPoints = invalid
+            if hullBand > 0
+              partPoints = sceneObj.getFogSilhouetteHullPoints(cam)
+            else
+              partPoints = sceneObj.getFogSilhouetteParts(cam)
+            end if
+            for each points in partPoints
               cam.projectPointsWithDepth(points, out, true)
+              if hullBand > 0
+                xy = [] as float[]
+                for i = 0 to out.count() - 1 step 3
+                  if out[i + 2] = BGE.PROJECTED_BEHIND_CAMERA_DEPTH
+                    behind = true
+                    exit for
+                  end if
+                  xy.push(out[i])
+                  xy.push(out[i + 1])
+                end for
+                if behind
+                  exit for
+                end if
+                if xy.count() >= 6
+                  polys.push(BGE.FogSilhouettes.convexHull(xy))
+                end if
+              end if
               x0 = 1.0e30
               y0 = 1.0e30
               x1 = -1.0e30
@@ -1459,7 +1502,14 @@ namespace BGE
                 partBoxes.push(y1)
               end if
             end for
-            if not behind and partBoxes.count() > 0
+            if not behind and hullBand > 0 and polys.count() > 0
+              before = boxes.count()
+              BGE.FogSilhouettes.hullRects(polys, hullBand, w, h, boxes)
+              rgba = base + alphaByte
+              for r = before to boxes.count() - 1 step 4
+                rgbas.push(rgba)
+              end for
+            else if not behind and partBoxes.count() > 0
               before = boxes.count()
               BGE.FogSilhouettes.mergeRects(partBoxes, boxes)
               rgba = base + alphaByte
