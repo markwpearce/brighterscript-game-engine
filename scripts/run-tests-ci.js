@@ -21,7 +21,8 @@ const ROOT_DIR = path.join(__dirname, '..');
 // ./test-build) - lets an example with its own bsconfig.test.json reuse this runner.
 const BUILD_DIR = path.resolve(ROOT_DIR, process.argv[2] || 'test-build');
 const OUT_DIR = path.join(ROOT_DIR, 'out');
-const ZIP_NAME = 'bge-tests.zip';
+// Named after the build dir, so shards running at once (run-tests-sharded.js) don't share a zip
+const ZIP_NAME = `bge-tests-${path.basename(BUILD_DIR)}.zip`;
 // CI runners are far slower than a dev machine: 2200+ specs take ~165-180s there
 // (~30s locally), and a run that's just slow looks like a hang (#427). Keep real
 // margin above the CI time, and raise it as the suite grows.
