@@ -101,6 +101,25 @@ end sub
 See [Loading Assets](/loading-assets) for custom loading work, loading screens and background
 loading.
 
+### Laying out UI
+
+UI widgets in `game.gameUi` draw on their own canvas, `game.uiCanvas`, not the game canvas. Unless
+you pass `uiWidth`/`uiHeight` to `new BGE.Game()`, `uiCanvas` is the size of the screen (e.g.
+1920x1080 on an FHD TV), so UI text stays sharp whatever size the game canvas is. Size and place
+widgets from `game.uiCanvas`, not `game.canvas`, or they drift on screens that aren't the game
+canvas's size:
+
+```
+width = m.game.uiCanvas.getWidth()
+height = m.game.uiCanvas.getHeight()
+label.customPosition = true
+label.customX = width * 0.1 ' title-safe: at least 10% in from every edge
+label.customY = height * 0.1
+```
+
+To lay out UI in fixed pixels instead, pass a UI size: `new BGE.Game(1280, 720, 1280, 720)` scales
+a 1280x720 `uiCanvas` up to the screen.
+
 ## Adding a sprite to an entity
 
 A `GameEntity` doesn't draw anything on its own - you attach a `Drawable` to it, almost always from

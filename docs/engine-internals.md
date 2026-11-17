@@ -275,11 +275,9 @@ follow-up. See `examples/ui/src/source/Scenes/PopupSelectScene.bs` for a working
 
 ### Text entry via ECP keyboard
 
-`BGE.UI.TextInput` is a focusable single-line text entry widget driven entirely by the platform's own
-text-entry mechanism — no virtual keyboard is drawn by the engine. A player needs a connected Roku mobile
-app (or equivalent remote-control extension supporting on-screen text input) to actually type; the local
-game code receives individual characters through the standard `onECPKeyboard(char as integer)` dispatch,
-the same mechanism that powers Roku's built-in `roKeyboardScreen` component.
+`BGE.UI.TextInput` is a focusable single-line text entry widget. Characters come from the Roku mobile app's
+keyboard (or any ECP client) through the standard `onECPKeyboard(char as integer)` dispatch, or from a
+`BGE.UI.Keyboard` on-screen keyboard (see below), so a player can type with just the remote.
 
 ```brightscript
 textInput = new BGE.UI.TextInput(game)
@@ -327,6 +325,44 @@ See `examples/ui/src/source/Scenes/TextInputScene.bs` for a working demo. ECP-de
 by any client speaking the ECP protocol, including a real connected controller or companion app — are
 verified end-to-end on real hardware by automated testing; the specific behavior of a real mobile app's
 on-screen-keyboard backspace key has not been separately confirmed.
+
+### On-screen keyboard
+
+Roku's own keyboards are SceneGraph-only, so `BGE.UI.Keyboard` draws one for `roScreen` games. Set it on
+a `TextInput` and OK on the field opens it; the d-pad moves a highlighted key and OK presses it:
+
+```brightscript
+keyboard = new BGE.UI.Keyboard(game) ' alphabetical layout by default
+keyboard.customPosition = true
+keyboard.customX = uiWidth * 0.11
+keyboard.customY = uiHeight * 0.47
+keyboard.width = uiWidth * 0.5
+keyboard.height = uiHeight * 0.41
+textInput.keyboard = keyboard
+```
+
+Or open it yourself with `keyboard.show(container, textInput)`; `hide()` removes it and refocuses the field.
+
+| Remote | While the keyboard is open |
+| --- | --- |
+| D-pad | Move the highlight (it wraps; Up/Down land on the nearest key) |
+| OK | Press the highlighted key |
+| Back | Cancel: restore the text from when it opened, fire `onCancel` |
+| Play, or the Done key | Hide, fire `onDone`, then the field's `onSubmit` |
+| Replay | Delete |
+| Fast-forward | Space |
+
+Mobile-app typing still reaches the field while the keyboard is open. In `pointer` focus mode, moving the
+cursor onto a key highlights it.
+
+Layouts: `BGE.UI.createAlphabeticalKeyboardLayout()` (default), `createQwertyKeyboardLayout()` and
+`createCompactKeyboardLayout()` (A–Z and 0–9 only, for arcade-style name entry); pass one to
+`new BGE.UI.Keyboard(game, layout)` or assign `keyboard.layout`. The first two have a Shift page and a
+symbols page. For your own layout, fill a `KeyboardLayout`'s `pages` with `KeyboardRow`s of `KeyboardKey`s
+(`createKeyboardCharRow()` builds a row from a string).
+
+The key grid is baked into a bitmap whenever the page, size, layout or theme colours change, so a frame
+only draws that bitmap and the highlighted key (about 0.4 ms on an Ultra, 0.7 ms on an Express).
 
 ## Collision, concretely
 

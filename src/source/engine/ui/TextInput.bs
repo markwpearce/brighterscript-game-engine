@@ -3,19 +3,17 @@ import "../Game.bs"
 import "../GameInput.bs"
 import "../../math/math.bs"
 import "../../utils/strings.bs"
+import "Keyboard.bs"
 import "Style.bs"
 import "UiWidget.bs"
 
 namespace BGE.UI
 
   ' A focusable single-line text entry widget. Characters arrive via
-  ' onECPKeyboard() (Roku's mobile-app on-screen keyboard sends individual
-  ' characters this way - see Game.bs's existing onECPKeyboard dispatch,
-  ' which already reaches every UiContainer child unconditionally, same as
-  ' onInput()). Left/Right (while focused) move the caret, a keyboard's
-  ' Backspace deletes before it, and OK or a keyboard's Enter fires onSubmit. No on-screen virtual keyboard is drawn by this widget - it
-  ' relies entirely on the platform's own text-entry mechanism delivering
-  ' onECPKeyboard() characters.
+  ' onECPKeyboard() (Roku's mobile-app keyboard sends individual characters
+  ' this way), or from a BGE.UI.Keyboard on-screen keyboard - set `keyboard`
+  ' so OK opens one. Left/Right (while focused) move the caret, a keyboard's
+  ' Backspace deletes before it, and OK or a keyboard's Enter fires onSubmit.
   class TextInput extends UiWidget
 
     ' Current text content.
@@ -28,6 +26,11 @@ namespace BGE.UI
     maxLength as integer = 0
     ' Text shown (dimmed) when text is empty and this widget isn't focused.
     placeholder as string = ""
+    ' Optional on-screen keyboard: when set, OK opens it (in this input's container) instead of
+    ' firing onSubmit, and its Done fires onSubmit.
+    keyboard as BGE.UI.Keyboard = invalid
+    ' True while an on-screen keyboard types into this - draws the caret even when unfocused.
+    editing as boolean = false
 
     ' Called after any edit (insert/delete) - function(input as TextInput) as void
     onChanged as function or dynamic
@@ -69,16 +72,20 @@ namespace BGE.UI
         return
       end if
 
-      ' text can be replaced from outside (e.g. clearing it in onSubmit)
-      ' without cursorIndex following, and Left()/Mid() with an out-of-range
-      ' start silently misbehave rather than erroring - clamp before any edit.
-      m.cursorIndex = m.clampCursorIndex(m.cursorIndex)
-
       if char = 8 ' backspace (ASCII BS)
         m.deleteBeforeCursor()
-        return
+      else
+        m.insertChar(char)
       end if
+    end sub
 
+    ' Inserts a character at the caret and fires onChanged. Dropped once maxLength is reached.
+    '
+    ' @param {integer} char - character code
+    sub insertChar(char as integer)
+      ' text can be replaced from outside (e.g. clearing it in onSubmit) without cursorIndex
+      ' following, and Left()/Mid() with an out-of-range start misbehave silently
+      m.cursorIndex = m.clampCursorIndex(m.cursorIndex)
       if m.maxLength > 0 and Len(m.text) >= m.maxLength
         return
       end if
@@ -88,7 +95,15 @@ namespace BGE.UI
       m.fireChanged()
     end sub
 
-    private sub deleteBeforeCursor()
+    ' Fires onSubmit.
+    sub submit()
+      if m.onSubmit <> invalid
+        m.onSubmit(m)
+      end if
+    end sub
+
+    ' Deletes the character before the caret and fires onChanged.
+    sub deleteBeforeCursor()
       m.cursorIndex = m.clampCursorIndex(m.cursorIndex)
       if m.cursorIndex > 0
         m.text = Left(m.text, m.cursorIndex - 1) + Mid(m.text, m.cursorIndex + 1)
@@ -154,11 +169,15 @@ namespace BGE.UI
       return cint(BGE.Math.Clamp(index, 0, Len(m.text)))
     end function
 
-    ' Fires onSubmit on OK press (and Enter, via handleInput()).
+    ' Fires onSubmit on OK press (and Enter, via handleInput()), or opens `keyboard` when set.
     override sub onClick()
-      if m.onSubmit <> invalid
-        m.onSubmit(m)
+      if m.keyboard <> invalid and m.parentContainer <> invalid
+        if not m.keyboard.isShown()
+          m.keyboard.show(m.parentContainer as BGE.UI.UiContainer, m)
+        end if
+        return
       end if
+      m.submit()
     end sub
 
     ' Draws the background/border (matching Select's pattern), the current
@@ -205,7 +224,7 @@ namespace BGE.UI
         end if
       end if
 
-      if m.focused
+      if m.focused or m.editing
         caretX = textX + m.drawableText.font.GetOneLineWidth(Left(m.text, m.cursorIndex), BGE.TEXT_MAX_LINE_SIZE)
         m.canvas.renderer.drawRectangle(caretX, textY, 2, m.drawableText.font.GetOneLineHeight(), theme.foregroundColor)
       end if
