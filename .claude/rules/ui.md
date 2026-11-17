@@ -11,3 +11,4 @@ paths:
 - `debugUi` never captures input and is never blocked by another capture.
 - Widgets register for focus when added to any focus-enabled container: build modal panels fresh on show, tear down on hide (`BGE.UI.MessagePanel` does).
 - Theme via `Game.defaultTheme` or `UiContainer.theme`.
+- Lay out `gameUi` widgets from `Game.uiCanvas` (screen-sized by default), never `Game.canvas`.
