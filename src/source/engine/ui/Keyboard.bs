@@ -35,7 +35,14 @@ namespace BGE.UI
     ' Pixels between keys.
     keyGap as float = 4.0
 
+    ' Test accessor: how many times the key grid has been baked.
+    gridBuildCount as integer = 0
+
     private textBeforeShow as string = ""
+    ' Every key, unhighlighted, drawn once per page/size/layout/theme - drawing ~35 keys a frame
+    ' measured 3 ms on an Ultra and 4.8 ms on an Express
+    private gridBitmap as dynamic = invalid
+    private gridCacheKey as string = ""
     private repeatThrottle as BGE.UI.RepeatThrottle = new BGE.UI.RepeatThrottle()
     private labelTexts as roAssociativeArray
     private lastPointerX as float = -1.0
@@ -55,12 +62,14 @@ namespace BGE.UI
       m.labelTexts.SetModeCaseSensitive()
     end sub
 
-    ' Adds the keyboard to `parent`, focuses it and starts typing into `target`. Cancel restores
-    ' the target's text from now.
+    ' Adds the keyboard to `parent`, focuses it and starts typing into `target`, on the first page
+    ' with the first key highlighted. Cancel restores the target's text from now.
     '
     ' @param {BGE.UI.UiContainer} parent
     ' @param {BGE.UI.TextInput} target
     sub show(parent as BGE.UI.UiContainer, target as BGE.UI.TextInput)
+      m.layout.setPage(0)
+      m.layout.setCursor(0, 0)
       m.target = target
       m.textBeforeShow = target.text
       target.editing = true
@@ -210,39 +219,64 @@ namespace BGE.UI
         return
       end if
       theme = m.resolveTheme(parent)
-      m.canvas.renderer.drawRectangle(m.position.x, m.position.y, m.width, m.height, m.backgroundRGBA)
+      m.ensureGrid(theme)
+      renderer = m.canvas.renderer
+      renderer.drawTransformedObject(m.position.x, m.position.y, 1.0, 1.0, 0, m.gridBitmap)
 
+      rect = m.getKeyRect(m.layout.row, m.layout.column)
+      x = m.position.x + rect.x
+      y = m.position.y + rect.y
+      if m.focused
+        renderer.drawRectangle(x - 2, y - 2, rect.w + 4, rect.h + 4, theme.focusedBorderColor)
+      end if
+      m.drawKeyTo(renderer.getDraw2d(), theme, m.layout.currentKey(), x, y, rect.w, rect.h, theme.hoveredBackgroundColor)
+    end sub
+
+    ' Bakes every key (unhighlighted) into gridBitmap if the page, size, layout or theme changed.
+    private sub ensureGrid(theme as BGE.UI.Theme)
+      width = cint(m.width)
+      height = cint(m.height)
+      cacheKey = `${m.layout.id}|${m.layout.pageIndex}|${width}x${height}|${theme.backgroundColor}|${theme.foregroundColor}|${m.backgroundRGBA}`
+      if m.gridBitmap <> invalid and cacheKey = m.gridCacheKey
+        return
+      end if
+      ' a fresh bitmap each time: Roku queues draws, so redrawing into one already drawn from could blank it
+      bitmap = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+      bitmap.Clear(m.backgroundRGBA)
+      page = m.layout.currentPage()
+      for r = 0 to page.rows.count() - 1
+        for c = 0 to page.rows[r].keys.count() - 1
+          rect = m.getKeyRect(r, c)
+          m.drawKeyTo(bitmap, theme, page.rows[r].keys[c], rect.x, rect.y, rect.w, rect.h, theme.backgroundColor)
+        end for
+      end for
+      m.gridBitmap = bitmap
+      m.gridCacheKey = cacheKey
+      m.gridBuildCount++
+    end sub
+
+    ' A key's rectangle relative to the keyboard's top left, gaps applied.
+    private function getKeyRect(row as integer, column as integer) as roAssociativeArray
       page = m.layout.currentPage()
       unitWidth = m.width / page.getWidthUnits()
       rowHeight = m.height / page.rows.count()
       gap = m.keyGap
-      for r = 0 to page.rows.count() - 1
-        keyRow = page.rows[r]
-        left = keyRow.indent
-        for c = 0 to keyRow.keys.count() - 1
-          key = keyRow.keys[c]
-          isHighlighted = r = m.layout.row and c = m.layout.column
-          m.drawKey(theme, key, m.position.x + left * unitWidth + gap / 2, m.position.y + r * rowHeight + gap / 2, key.width * unitWidth - gap, rowHeight - gap, isHighlighted)
-          left += key.width
-        end for
-      end for
-    end sub
+      return {
+        x: m.layout.keyLeft(row, column) * unitWidth + gap / 2,
+        y: row * rowHeight + gap / 2,
+        w: page.rows[row].keys[column].width * unitWidth - gap,
+        h: rowHeight - gap
+      }
+    end function
 
-    private sub drawKey(theme as BGE.UI.Theme, key as BGE.UI.KeyboardKey, x as float, y as float, w as float, h as float, isHighlighted as boolean)
+    private sub drawKeyTo(draw2d as ifDraw2d, theme as BGE.UI.Theme, key as BGE.UI.KeyboardKey, x as float, y as float, w as float, h as float, color as integer)
       renderer = m.canvas.renderer
-      color = theme.backgroundColor
-      if isHighlighted
-        color = theme.hoveredBackgroundColor
-        if m.focused
-          renderer.drawRectangle(x - 2, y - 2, w + 4, h + 4, theme.focusedBorderColor)
-        end if
-      end if
-      renderer.drawRectangle(x, y, w, h, color)
+      renderer.drawRectangleTo(draw2d, x, y, w, h, color)
       text = m.getLabelText(key.label, theme)
       textImage = text.getTextImage()
       if textImage <> invalid
         size = text.getDrawnSize()
-        renderer.drawTransformedObject(x + (w - size.width) / 2, y + (h - size.height) / 2, 1.0, 1.0, 0, textImage)
+        renderer.drawTransformedObjectTo(draw2d, x + (w - size.width) / 2, y + (h - size.height) / 2, 1.0, 1.0, 0, textImage)
       end if
     end sub
 
