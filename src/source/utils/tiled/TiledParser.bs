@@ -30,9 +30,10 @@ namespace BGE.Tiled
   ' Parses a Tiled JSON map that's already in memory - see parseMapFile().
   '
   ' @param {string} json - the map file's contents
-  ' @param {string} baseDir - folder the map lives in, for resolving image and tileset paths; "" leaves them as written
+  ' @param {string} baseDir - folder (or URL) the map lives in, for resolving image and tileset paths; "" leaves them as written
+  ' @param {roAssociativeArray} [tilesets] - resolved .tsj path -> its parsed JSON (see listExternalTilesets()); when given, external tilesets come only from here instead of being read
   ' @return {BGE.Tiled.TiledMap} the map, or invalid
-  function parseMapJson(json as string, baseDir as string) as BGE.Tiled.TiledMap
+  function parseMapJson(json as string, baseDir as string, tilesets = invalid as dynamic) as BGE.Tiled.TiledMap
     raw = ParseJson(json)
     if GetInterface(raw, "ifAssociativeArray") = invalid
       logError("not a JSON object")
@@ -60,7 +61,7 @@ namespace BGE.Tiled
     } as BGE.Tiled.TiledMap
 
     for each rawTileset in getArray(raw, "tilesets")
-      tileset = parseTilesetEntry(rawTileset, baseDir)
+      tileset = parseTilesetEntry(rawTileset, baseDir, tilesets)
       if tileset = invalid
         return invalid
       end if
@@ -71,6 +72,59 @@ namespace BGE.Tiled
       return invalid
     end if
     return map
+  end function
+
+  ' The external .tsj tilesets a map names, resolved against baseDir, once each and in order -
+  ' for loading them before parseMapJson(). XML (.tsx) tilesets are left out; parsing reports them.
+  '
+  ' @param {string} json - the map file's contents
+  ' @param {string} baseDir - folder (or URL) the map lives in
+  ' @return {string[]} paths or URLs
+  function listExternalTilesets(json as string, baseDir as string) as string[]
+    paths = [] as string[]
+    raw = ParseJson(json)
+    if GetInterface(raw, "ifAssociativeArray") = invalid
+      return paths
+    end if
+    seen = {}
+    for each entry in getArray(raw, "tilesets")
+      source = ""
+      if GetInterface(entry, "ifAssociativeArray") <> invalid
+        source = getString(entry, "source", "")
+      end if
+      if source <> "" and LCase(Right(source, 4)) <> ".tsx"
+        path = BGE.Urls.joinPath(baseDir, source)
+        if seen[path] = invalid
+          seen[path] = true
+          paths.push(path)
+        end if
+      end if
+    end for
+    return paths
+  end function
+
+  ' Every image a map's tilesets use (spritesheet images and image-collection tile images),
+  ' once each - for loading them before layerToTileSpecs().
+  '
+  ' @param {BGE.Tiled.TiledMap} map
+  ' @return {string[]} paths or URLs, as resolved by the parser
+  function listTiledMapImages(map as BGE.Tiled.TiledMap) as string[]
+    images = [] as string[]
+    seen = {}
+    for each tileset in map.tilesets
+      if tileset.image <> "" and seen[tileset.image] = invalid
+        seen[tileset.image] = true
+        images.push(tileset.image)
+      end if
+      for each tileId in tileset.tiles
+        tileImage = tileset.tiles[tileId].image
+        if tileImage <> "" and seen[tileImage] = invalid
+          seen[tileImage] = true
+          images.push(tileImage)
+        end if
+      end for
+    end for
+    return images
   end function
 
   sub insertByFirstGid(tilesets as roArray, tileset as BGE.Tiled.TiledTileset)
@@ -84,7 +138,7 @@ namespace BGE.Tiled
   end sub
 
   ' A map's `tilesets` entry: either a whole tileset, or {firstgid, source} pointing at a file.
-  function parseTilesetEntry(raw as roAssociativeArray, baseDir as string) as BGE.Tiled.TiledTileset
+  function parseTilesetEntry(raw as roAssociativeArray, baseDir as string, suppliedTilesets = invalid as dynamic) as BGE.Tiled.TiledTileset
     firstGid = getInt(raw, "firstgid", 1)
     source = getString(raw, "source", "")
     if source = ""
@@ -95,10 +149,14 @@ namespace BGE.Tiled
       return invalid
     end if
     path = BGE.Urls.joinPath(baseDir, source)
-    content = ReadAsciiFile(path)
     rawTileset = invalid
-    if content <> ""
-      rawTileset = ParseJson(content)
+    if suppliedTilesets <> invalid
+      rawTileset = suppliedTilesets[path]
+    else
+      content = ReadAsciiFile(path)
+      if content <> ""
+        rawTileset = ParseJson(content)
+      end if
     end if
     if GetInterface(rawTileset, "ifAssociativeArray") = invalid
       logError("can't read tileset " + path)
