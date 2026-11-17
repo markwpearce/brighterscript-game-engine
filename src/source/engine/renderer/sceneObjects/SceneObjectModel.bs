@@ -105,6 +105,17 @@ namespace BGE
     private canvasFacesStale as boolean = false
     ' this frame's impostor kind, for tests and profiling: "" or "rotate"
     private impostorKindThisFrame as string = ""
+    ' #556 strip impostor: strips drawn this frame, the strip regions (kept until their queued
+    ' draws have run), and projection buffers
+    private impostorStripsThisFrame as integer = 0
+    ' why this frame didn't reuse the capture, "" if it did or wasn't moving; and the last
+    ' strip fit's error against what it was allowed, for profiling
+    private impostorMissReason as string = ""
+    private impostorStripResidual as float = -1.0
+    private impostorStripAllowed as float = -1.0
+    private impostorStripRegions as object[] = []
+    private stripProjected as float[] = []
+    private stripEdgeProjected as float[] = []
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -317,12 +328,265 @@ namespace BGE
       samples.triangleSkipSize = rendererObj.qualitySettings.triangleSkipSize
       samples.triangleQuickDrawStep = rendererObj.qualitySettings.triangleQuickDrawStep
       samples.lights = m.snapshotLights(rendererObj)
+      samples.rollDegrees = (rendererObj.camera as Camera3d).rollDegrees
       samples.canvasBounds = m.modelCanvasBounds
       samples.canvasSamplePoints = m.modelCanvasSamplePoints
       samples.clipped = m.facesClippedThisDraw
       samples.clipRect = m.faceClipRect
+      if m.drawable.useImpostorStrips
+        start = 0
+        if rendererObj.profileStages
+          start = rendererObj.getProfileClockMs()
+        end if
+        m.captureStripHints(rendererObj, samples)
+        if rendererObj.profileStages
+          rendererObj.addStageMs("stripCapture", rendererObj.getProfileClockMs() - start)
+        end if
+      end if
       m.impostorCapture = samples
     end sub
+
+    ' What a strip impostor (#556) fits to later: the vertices of the faces facing the camera
+    ' (the ones in the capture) and either evenly spaced knots across them or the box's
+    ' visible vertical edges - the two outermost on screen and the nearest, the crease.
+    private sub captureStripHints(rendererObj as BGE.Renderer, capture as roAssociativeArray)
+      camera = rendererObj.camera as Camera3d
+      front = [] as BGE.Math.Vector[]
+      xs = [] as float[]
+      ys = [] as float[]
+      if m.meshCameraValid
+        ' the drawn faces' vertices, once each, where the redraw just projected them
+        seen = {}
+        corners = m.meshCorners
+        for each face in m.modelCanvasFaces
+          c = face.faceIndex * 3
+          for j = c to c + 2
+            index = corners[j]
+            key = index.toStr()
+            if not seen.DoesExist(key)
+              seen[key] = true
+              point = m.meshCanvas[index]
+              front.push(m.meshWorld[index])
+              xs.push(point.x)
+              ys.push(point.y)
+            end if
+          end for
+        end for
+      else
+        for each worldFace in m.modelWorldFaces
+          if getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal) > 0.0001
+            for each vert in worldFace.vertices
+              front.push(vert)
+            end for
+          end if
+        end for
+        if front.count() >= 3 and camera.projectPointsWithDepth(front, m.stripProjected)
+          for i = 0 to front.count() - 1
+            xs.push(m.stripProjected[i * 3])
+            ys.push(m.stripProjected[i * 3 + 1])
+          end for
+        end if
+      end if
+      if xs.count() < 3
+        return
+      end if
+      capture.frontWorld = front
+      capture.frontXs = xs
+      capture.frontYs = ys
+      knots = m.drawable.impostorStripKnots
+      if knots >= 2
+        lo = BGE.Math.arrayMin(xs)
+        hi = BGE.Math.arrayMax(xs)
+        knotX = [] as float[]
+        for k = 0 to knots - 1
+          knotX.push(lo + (hi - lo) * k / (knots - 1))
+        end for
+        capture.knotX = knotX
+        return
+      end if
+      if m.modelWorldBounds.count() <> 2
+        return
+      end if
+      low = m.modelWorldBounds[0]
+      high = m.modelWorldBounds[1]
+      edges = [] as BGE.Math.Vector[]
+      for each x in [low.x, high.x]
+        for each z in [low.z, high.z]
+          edges.push(BGE.Math.VectorOps.create(x, high.y, z))
+          edges.push(BGE.Math.VectorOps.create(x, low.y, z))
+        end for
+      end for
+      if not camera.projectPointsWithDepth(edges, m.stripEdgeProjected)
+        return
+      end if
+      leftmost = 0
+      rightmost = 0
+      nearest = 0
+      nearestDistance = 1000000000.0
+      for e = 0 to 3
+        x = m.stripEdgeProjected[e * 6]
+        if x < m.stripEdgeProjected[leftmost * 6]
+          leftmost = e
+        end if
+        if x > m.stripEdgeProjected[rightmost * 6]
+          rightmost = e
+        end if
+        distance = BGE.Math.VectorOps.length(BGE.Math.VectorOps.subtract(edges[e * 2], camera.position))
+        if distance < nearestDistance
+          nearestDistance = distance
+          nearest = e
+        end if
+      end for
+      edgeWorld = [] as BGE.Math.Vector[]
+      edgeXs = [] as float[]
+      edgeYs = [] as float[]
+      for e = 0 to 3
+        if e = leftmost or e = rightmost or e = nearest
+          for i = e * 2 to e * 2 + 1
+            edgeWorld.push(edges[i])
+            edgeXs.push(m.stripEdgeProjected[i * 3])
+            edgeYs.push(m.stripEdgeProjected[i * 3 + 1])
+          end for
+        end if
+      end for
+      capture.edgeWorld = edgeWorld
+      capture.edgeXs = edgeXs
+      capture.edgeYs = edgeYs
+    end sub
+
+    ' attemptImpostorStrips(), timed as the stripFitHit or stripFitMiss stage while the renderer
+    ' profiles stages.
+    private function timeImpostorStrips(renderObj as Renderer, capture as roAssociativeArray, diagonal as float, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      if not renderObj.profileStages
+        return m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+      end if
+      start = renderObj.getProfileClockMs()
+      details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+      stage = "stripFitMiss"
+      if invalid <> details
+        stage = "stripFitHit"
+      end if
+      renderObj.addStageMs(stage, renderObj.getProfileClockMs() - start)
+      return details
+    end function
+
+    ' The strip redraw of the capture that fits this frame, or invalid. The details returned
+    ' only place the bitmap's origin; drawReusedTempBitmap() draws the strips from capture.fit.
+    private function attemptImpostorStrips(renderObj as Renderer, capture as roAssociativeArray, diagonal as float, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      region = m.getTempBitmapRegion()
+      if capture.clipped or invalid = capture.frontWorld or invalid = region
+        return m.missImpostor("stripsClipped")
+      end if
+      camera = renderObj.camera as Camera3d
+      if not camera.projectPointsWithDepth(capture.frontWorld, m.stripProjected)
+        return m.missImpostor("stripsProject")
+      end if
+      toX = [] as float[]
+      toY = [] as float[]
+      for i = 0 to capture.frontWorld.count() - 1
+        toX.push(m.stripProjected[i * 3])
+        toY.push(m.stripProjected[i * 3 + 1])
+      end for
+      drawable = m.drawable
+      fit = BGE.ImpostorFit.unusable()
+      if invalid <> capture.knotX
+        fit = BGE.ImpostorFit.fitColumns(capture.knotX, capture.frontXs, capture.frontYs, toX, toY, drawable.impostorStripPerspective)
+      else if invalid <> capture.edgeWorld and camera.projectPointsWithDepth(capture.edgeWorld, m.stripEdgeProjected)
+        edgeX = [] as float[]
+        edgeY = [] as float[]
+        for i = 0 to capture.edgeWorld.count() - 1
+          edgeX.push(m.stripEdgeProjected[i * 3])
+          edgeY.push(m.stripEdgeProjected[i * 3 + 1])
+        end for
+        fit = BGE.ImpostorFit.fitColumnsToEdges(capture.edgeXs, capture.edgeYs, edgeX, edgeY, drawable.impostorStripPerspective)
+        if invalid <> fit.params
+          fit.residual = BGE.ImpostorFit.columnsResidual(fit.params, capture.frontXs, capture.frontYs, toX, toY)
+        end if
+      end if
+      p = fit.params
+      if invalid = p
+        return m.missImpostor("stripsFit")
+      end if
+      settings = renderObj.qualitySettings
+      allowed = drawable.impostorStripMaxError
+      if allowed <= 0
+        allowed = m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode) * drawable.impostorStripErrorScale
+      end if
+      m.impostorStripResidual = fit.residual
+      m.impostorStripAllowed = allowed
+      if fit.residual > allowed
+        return m.missImpostor("stripsError")
+      end if
+      ' no column, or stretch of the bitmap between knots, may grow or shrink past the limit
+      maxSize = settings.modelImpostorMaxSizeChange
+      for j = 0 to p.knotX.count() - 1
+        if p.scale[j] > maxSize or p.scale[j] * maxSize < 1
+          return m.missImpostor("stripsScale")
+        end if
+        if j > 0
+          stretch = (p.x[j] - p.x[j - 1]) / (p.knotX[j] - p.knotX[j - 1])
+          if stretch > maxSize or stretch * maxSize < 1
+            return m.missImpostor("stripsStretch")
+          end if
+        end if
+      end for
+      top = capture.originY
+      cuts = BGE.ImpostorFit.columnStripCuts(p, capture.originX, region.GetWidth(), top, top + region.GetHeight(), drawable.impostorStripStepPx, drawable.impostorStripWidth)
+      if cuts.count() - 1 > drawable.impostorStripMaxStrips
+        return m.missImpostor("stripsCount")
+      end if
+      capture.fit = {kind: "strips", params: p, residual: fit.residual, cuts: cuts}
+      return {origin: BGE.ImpostorFit.mapColumns(p, capture.originX, capture.originY), rotation: 0, scaleX: 1, scaleY: 1}
+    end function
+
+    ' A strip impostor frame draws the capture as strips (see attemptImpostorStrips()); any
+    ' other reuse is the single blit.
+    protected override function drawReusedTempBitmap(rendererObj as BGE.Renderer, details as TransformTempBitmapDetails, region as roRegion, blitColor as integer) as boolean
+      capture = m.impostorCapture
+      if invalid = capture or invalid = capture.fit or capture.fit.kind <> "strips"
+        return super.drawReusedTempBitmap(rendererObj, details, region, blitColor)
+      end if
+      start = 0
+      if rendererObj.profileStages
+        start = rendererObj.getProfileClockMs()
+      end if
+      p = capture.fit.params
+      cuts = capture.fit.cuts
+      bitmap = region.GetBitmap()
+      height = region.GetHeight()
+      top = capture.originY
+      bottom = top + height
+      m.impostorStripRegions = []
+      drew = false
+      for i = 0 to cuts.count() - 2
+        x0 = cuts[i]
+        x1 = cuts[i + 1]
+        a = capture.originX + x0
+        b = capture.originX + x1
+        middle = (a + b) * 0.5
+        leftX = BGE.ImpostorFit.mapColumns(p, a, top).x
+        rightX = BGE.ImpostorFit.mapColumns(p, b, top).x
+        stripTop = BGE.ImpostorFit.mapColumns(p, middle, top)
+        stripBottom = BGE.ImpostorFit.mapColumns(p, middle, bottom)
+        ' a 1px overlap with the next strip hides seams
+        scaleX = (rightX - leftX + 1) / (x1 - x0)
+        scaleY = (stripBottom.y - stripTop.y) / height
+        if scaleX > 0 and scaleY > 0
+          strip = CreateObject("roRegion", bitmap, x0, 0, x1 - x0, height)
+          m.impostorStripRegions.push(strip)
+          if rendererObj.drawTransformedObject(leftX, stripTop.y, scaleX, scaleY, 0, strip, blitColor)
+            drew = true
+          end if
+        end if
+      end for
+      ' several draws: nothing a single-blit replay could repeat
+      rendererObj.cancelBlitCapture()
+      m.impostorStripsThisFrame = cuts.count() - 1
+      if rendererObj.profileStages
+        rendererObj.addStageMs("stripDraw", rendererObj.getProfileClockMs() - start)
+      end if
+      return drew
+    end function
 
     ' The frustum test passes a big box near the camera that only straddles the view's
     ' corners, which would then project every face just to find them all off the canvas.
@@ -384,9 +648,14 @@ namespace BGE
         ys.push(m.impostorProjected[i * 3 + 1])
         BGE.Math.VectorOps.plusEquals(centre, points[i])
       end for
-      direction = BGE.Math.VectorOps.subtract(BGE.Math.VectorOps.scale(centre, 1.0 / points.count()), rendererObj.camera.position)
+      centre = BGE.Math.VectorOps.scale(centre, 1.0 / points.count())
+      direction = BGE.Math.VectorOps.subtract(centre, rendererObj.camera.position)
       BGE.Math.VectorOps.normalize(direction)
-      return {xs: xs, ys: ys, direction: direction}
+      ' the same direction relative to where the camera looks: turning the camera moves the model
+      ' across the view, and a capture from near the edge is skewed by the projection
+      viewDirection = BGE.Math.Matrix44.multVecMatrix(centre, rendererObj.camera.worldToCamera)
+      BGE.Math.VectorOps.normalize(viewDirection)
+      return {xs: xs, ys: ys, direction: direction, viewDirection: viewDirection}
     end function
 
     ' The blit of the captured rendering that fits this frame, or invalid: a scale and
@@ -394,35 +663,77 @@ namespace BGE
     private function attemptImpostor(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       capture = m.impostorCapture
       if invalid = capture or m.drawsOccluderExactly()
-        return invalid
+        return m.missImpostor("noCapture")
       end if
       ' the box fit only follows the camera - a model turning in place can keep the same box
       if capture.transformVersion <> m.transformVersion or capture.geometryVersion <> m.drawable.geometryVersion or capture.drawMode <> drawMode
-        return invalid
+        return m.missImpostor("changed")
       end if
       samples = m.projectImpostorSamples(renderObj)
       if invalid = samples
-        return invalid
+        return m.missImpostor("project")
       end if
       settings = renderObj.qualitySettings
       ' which faces show, and their shading, depend on the direction the model is seen from
       cosine = BGE.Math.VectorOps.dotProduct(samples.direction, capture.direction)
       diagonal = m.getVisibleDiagonal(renderObj, samples.xs, samples.ys)
-      if cosine >= Cos(BGE.Math.DegreesToRadians(settings.modelImpostorMaxAngleDegrees))
-        fit = BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, samples.xs, samples.ys)
+      ' with strips as the middle tier, the single blit may hand over to them sooner
+      useStrips = m.drawable.useImpostorStrips
+      blitAngle = settings.modelImpostorMaxAngleDegrees
+      blitError = m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode)
+      if useStrips
+        if m.drawable.impostorBlitMaxAngleDegrees > 0
+          blitAngle = m.drawable.impostorBlitMaxAngleDegrees
+        end if
+        blitError *= m.drawable.impostorBlitErrorScale
+      end if
+      blitCosine = cosine
+      if useStrips
+        ' and the single blit hands over once the model has moved across the view
+        blitCosine = BGE.Math.Min(cosine, BGE.Math.VectorOps.dotProduct(samples.viewDirection, capture.viewDirection))
+      end if
+      if blitCosine >= Cos(BGE.Math.DegreesToRadians(blitAngle))
+        rollChanged = Abs((renderObj.camera as Camera3d).rollDegrees - capture.rollDegrees) > 0.01
+        if m.drawable.impostorBlitRollOnly and not rollChanged
+          ' turning or moving without rolling leaves verticals vertical: don't tilt the blit
+          fit = BGE.ImpostorFit.fitScaleTranslate(capture.xs, capture.ys, samples.xs, samples.ys)
+          if invalid <> fit.params
+            fit.params = BGE.ImpostorFit.scaleTranslateAsRotateScale(fit.params)
+          end if
+        else
+          fit = BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, samples.xs, samples.ys)
+        end if
         p = fit.params
         ' its change in size on screen, closing in or backing away
         maxSize = settings.modelImpostorMaxSizeChange
-        if invalid <> p and BGE.Math.Max(p.scaleX, p.scaleY) <= maxSize and BGE.Math.Min(p.scaleX, p.scaleY) * maxSize >= 1 and fit.residual <= m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode)
+        if invalid <> p and BGE.Math.Max(p.scaleX, p.scaleY) <= maxSize and BGE.Math.Min(p.scaleX, p.scaleY) * maxSize >= 1 and fit.residual <= blitError
           if capture.clipped and not m.clipRectStillCoversCanvas(renderObj, capture.clipRect, p)
-            return invalid
+            return m.missImpostor("clipped")
           end if
           capture.fit = {kind: "rotate", params: p, residual: fit.residual}
           origin = BGE.ImpostorFit.mapRotateScale(p, capture.originX, capture.originY)
           ' DrawTransformedObject turns counterclockwise on screen, the fit's angle clockwise (y down)
           return {origin: origin, rotation: -p.rotation, scaleX: p.scaleX, scaleY: p.scaleY}
         end if
+        if useStrips
+          return m.timeImpostorStrips(renderObj, capture, diagonal, drawMode)
+        end if
+        return m.missImpostor("fit")
       end if
+      ' strips can follow a bigger turn than the single blit, up to their own limit
+      stripAngle = m.drawable.impostorStripMaxAngleDegrees
+      if stripAngle <= 0
+        stripAngle = settings.modelImpostorMaxAngleDegrees
+      end if
+      if useStrips and cosine >= Cos(BGE.Math.DegreesToRadians(stripAngle))
+        return m.timeImpostorStrips(renderObj, capture, diagonal, drawMode)
+      end if
+      return m.missImpostor("angle")
+    end function
+
+    ' Records why this frame's impostor attempt failed (for profiling) and returns invalid.
+    private function missImpostor(reason as string) as TransformTempBitmapDetails
+      m.impostorMissReason = reason
       return invalid
     end function
 
@@ -801,6 +1112,10 @@ namespace BGE
       end if
       m.impostorThisFrame = invalid
       m.impostorKindThisFrame = ""
+      m.impostorStripsThisFrame = 0
+      m.impostorMissReason = ""
+      m.impostorStripResidual = -1.0
+      m.impostorStripAllowed = -1.0
       m.keepImpostorThroughQualityDrop(rendererObj)
       keptThroughLightChange = m.keepImpostorThroughSmallLightChange(rendererObj)
       ' overlap clusters draw per face, from faces this would leave unprojected
@@ -812,6 +1127,8 @@ namespace BGE
           m.canvasFacesStale = true
           return true
         end if
+      else if m.drawable.useImpostor and m.objMovedInRelationToCamera(rendererObj.camera)
+        m.impostorMissReason = "notReusable"
       end if
       projected = m.projectCanvasFaces(rendererObj, drawMode)
       if keptThroughLightChange
@@ -919,6 +1236,13 @@ namespace BGE
         for each corner in [[lo.x, lo.y], [hi.x, lo.y], [hi.x, hi.y], [lo.x, hi.y]]
           corners.push(m.mapByImpostorFit(capture, corner[0], corner[1]))
         end for
+        if capture.fit.kind = "strips"
+          ' the strips bend at the knots, so bound those too
+          for each knotX in capture.fit.params.knotX
+            corners.push(m.mapByImpostorFit(capture, knotX, lo.y))
+            corners.push(m.mapByImpostorFit(capture, knotX, hi.y))
+          end for
+        end if
         m.modelCanvasBounds.push(BGE.Math.VectorOps.copy(corners[0]))
         m.modelCanvasBounds.push(BGE.Math.VectorOps.copy(corners[0]))
         for each corner in corners
@@ -934,6 +1258,9 @@ namespace BGE
 
     ' Where this frame's impostor fit takes a canvas point of the captured rendering.
     private function mapByImpostorFit(capture as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
+      if capture.fit.kind = "strips"
+        return BGE.ImpostorFit.mapColumns(capture.fit.params, x, y)
+      end if
       return BGE.ImpostorFit.mapRotateScale(capture.fit.params, x, y)
     end function
 
@@ -1312,6 +1639,22 @@ namespace BGE
     ' @return {string}
     function getImpostorKindThisFrame() as string
       return m.impostorKindThisFrame
+    end function
+
+    ' How many strips the impostor drew this frame (#556), 0 unless it drew strips. For
+    ' tests and profiling.
+    '
+    ' @return {integer}
+    function getImpostorStripsThisFrame() as integer
+      return m.impostorStripsThisFrame
+    end function
+
+    ' Why the impostor didn't reuse its capture this frame ("" if it did, or nothing moved),
+    ' and the last strip fit's error and allowance (-1 if none). For profiling.
+    '
+    ' @return {roAssociativeArray} {reason, stripResidual, stripAllowed}
+    function getImpostorMissThisFrame() as roAssociativeArray
+      return {reason: m.impostorMissReason, stripResidual: m.impostorStripResidual, stripAllowed: m.impostorStripAllowed}
     end function
 
     ' For tests/telemetry only - exposes attemptTransformTempBitmap()'s result without

@@ -263,3 +263,171 @@ bitmap again for the impostor to capture. Spinning in place, 4 cubes with an imp
 53.5 to 46.2 ms (42.1 without one) and 9 cubes from 114.9 to 101.7 ms (94.7). With the camera
 orbiting, the rotate-only impostor takes 17.6 / 28.6 / 19.5 ms for the three scenes, against
 35.6 / 81.6 / 74.9 ms without one.
+
+## Vertical strips with hint points (#556 spike)
+
+Idea: when one rotate-scale map misses, redraw the capture as vertical strips, Doom style.
+Capture x maps to current x, and each column gets its own vertical scale and offset, all
+linear in capture x between knots. That's exact for vertical walls under a camera that only
+turns and moves, so it should catch the two faces either side of the near corner turning
+opposite ways, which a single map can't. `BGE.ImpostorFit` gained `fitColumnsToEdges()` (knots
+from vertical edges' tops and bottoms), `fitColumns()` (least squares for given knots),
+`mapColumns()`, `columnsResidual()` and `columnStripCount()` (strips needed to keep each
+strip's single scale within a step of the warp).
+
+`profile=impostor` now also runs "front" variants. Each measures error on the vertices of the
+faces that faced the camera at capture, since only those are in the bitmap. `front-rot` is a
+single rotate-scale blit; `strip-edge` tries that, then strips hinted by the world box's
+visible vertical edges (the two outermost on screen plus the nearest, which is the crease);
+`strip-lsq` uses the same knots but least-squares fits the strips to every front vertex (an
+upper bound - it projects every vertex, which defeats the point). Strips are costed at 0.4ms
+each (one region `DrawScaledObject`, from the draw2d benchmark's ~2.5k/sec), with a 1px strip
+step.
+
+First run headlessly in brs-cli (the path is frame-indexed and these are pure geometry), then
+rerun on a Roku Ultra: every row matched to within a few percent, so the table holds for both.
+The device's 8px rows ran slightly higher on strips (strip-lsq max 23). Share of moving frames:
+
+| variant | tolerance | single blit | strips (avg / max) | redraw | est. ms/frame (vs 13) |
+| --- | --- | --- | --- | --- | --- |
+| box (today) | 1px | 7% | - | 93% | 12.2 |
+| box (today) | 2px | 16% | - | 84% | 11.0 |
+| box (today) | 4px | 27% | - | 72% | 9.5 |
+| box (today) | 8px | 51% | - | 50% | 6.7 |
+| front-rot | 1px | 6% | - | 94% | 12.3 |
+| front-rot | 2px | 17% | - | 83% | 10.9 |
+| front-rot | 4px | 30% | - | 70% | 9.3 |
+| front-rot | 8px | 52% | - | 48% | 6.5 |
+| strip-edge | 1px | 6% | 0% | 94% | 12.3 |
+| strip-edge | 2px | 17% | 1% (3 / 3) | 82% | 10.8 |
+| strip-edge | 4px | 27% | 6% (4.1 / 6) | 67% | 9.0 |
+| strip-edge | 8px | 50% | 4% (7.2 / 11) | 46% | 6.4 |
+| strip-lsq | 1px | 5% | 3% (2.8 / 4) | 92% | 12.0 |
+| strip-lsq | 2px | 12% | 13% (3.7 / 7) | 74% | 9.9 |
+| strip-lsq | 4px | 23% | 15% (6 / 13) | 62% | 8.5 |
+| strip-lsq | 8px | 35% | 27% (9.3 / 17) | 38% | 6.2 |
+
+- Box-edge hints barely help: at most 6% more frames reuse, ~0.3ms of the chapel's 13ms.
+- Even the impractical least-squares bound saves ~1ms at 2px, where it reuses 9 more frames in
+  100. At the 1-2px that wouldn't show, ~75-90% of moving frames still redraw.
+- The strip counts climb with tolerance (avg 4-9, up to 17), so a looser strip pays back much
+  of what it saves.
+
+The column model isn't what fails. The error is still parallax inside the model (the steeple,
+roof and porch sit at different depths from the walls the box edges hint), and along this path
+the camera moves enough a frame that it shows within a frame or two - the same finding as the
+scale fit above. So strips aren't worth building for the chapel. They'd fit a wide, boxy, mostly
+vertical model seen from a camera turning more than moving; the fits and the probe stay for
+measuring one.
+
+### Prototype: drawing the strips (#556)
+
+`DrawableModel.useImpostorStrips` (off by default) tries strips when the single blit misses,
+tuned by `impostorStripStepPx`, `impostorStripWidth`, `impostorStripKnots` (0 = box-edge
+hints, N = N evenly spaced knots least-squares fitted to the visible vertices),
+`impostorStripMaxError`, `impostorStripMaxStrips` and `impostorStripMaxAngleDegrees` (strips
+may be tried past the single blit's view-angle limit). Each strip is a region of the capture
+drawn with `DrawTransformedObject` (no rotation), 1px wider to hide seams. terrain and
+thirdPerson take them as deep links (`strips=1 stripKnots=3 stripAngle=20 ...`); terrain's
+profiler also prints what the chapel's impostor did each moving frame and why it missed.
+
+Terrain chapel, Medium (the device's seeded level), moving frames:
+
+| config | single blit | strips (avg strips) | redraw | main miss reasons |
+| --- | --- | --- | --- | --- |
+| strips off | 79% | - | 21% | view angle 39 of 49 |
+| box edges | 78% | 1% (10.5) | 21% | view angle 39 |
+| box edges, stripAngle 20 | 75% | 5% (11.6) | 20% | strip error 38 (31px vs 25px allowed) |
+| 5 knots, stripAngle 20 | 79% | 0% | 21% | stretch/scale 30, unfittable segment 17 |
+| 3 knots, stripAngle 20 | 57% | 26% (15.4) | 17% | strip error 30 |
+
+The real impostor's error allowance (a fraction of the model's size on screen) is far looser
+than the probe's 1-8px, so the single blit already covers ~79%. Strips cut redraws by at most
+4 points, and each strip frame costs ~15 draws instead of one; keeping a capture alive longer
+also makes the single blit fit less often.
+
+thirdPerson town, `orbit=0.4 perf=phases`, Basic (quality=0), Roku Ultra, ms per frame (last
+4 PERF samples of a 50s run):
+
+| config | frame ms | fps |
+| --- | --- | --- |
+| strips off | 81.8 / 82.0 (two runs) | 12.2 |
+| strips=1 (box edges) | 85.4 | 11.7 |
+| strips=1 stripKnots=3 stripAngle=20 | 88.2 | 11.3 |
+
+Strips make the orbit 3.5-6ms slower, mostly from attempting a strip fit (projecting the
+visible vertices, fitting) on every frame the single blit misses, paid even when refused.
+
+Split per frame (`perf=1` stages): capturing the hints ~2.2ms (≈1.6 captures a frame), fit
+attempts ~1.2ms, strip draws ~0.3-0.4ms. Reusing the mesh's projected corners for the hints and
+inlining the fit loops cut the overhead to +2.1ms (box edges) and +1.7ms (3 knots).
+
+#### A middle tier, and the view-direction limit
+
+Strips are meant to sit between the single blit and a redraw, so `impostorBlitErrorScale` /
+`impostorBlitMaxAngleDegrees` shrink the single blit's allowance and `impostorStripErrorScale`
+widens the strips' (deep links `blitScale`, `blitAngle`, `stripScale`). Terrain chapel, Basic:
+
+| config | single blit | strips (avg strips) | redraw | moving ms |
+| --- | --- | --- | --- | --- |
+| strips off | 92% | - | 8% | 48.5 |
+| 3 knots, stripAngle 20 | 90% | 3% (28) | 7% | 48.3 |
+| + blitScale 0.5, stripScale 1.5 | 33% | 61% (21) | 6% | 50.4 |
+| + blitScale 0.3, stripScale 2 | 21% | 73% (19) | 6% | 50.4 |
+| + stripStep 3 | 7% | 90% (11) | 3% | 49.4 |
+
+A capture taken at the edge of the view and reused straight ahead leans (thirdPerson's gate):
+the rotate fit absorbs the perspective as a tilt. With strips on, the single blit is now also
+limited by the change in the model's direction in camera space (`projectImpostorSamples`'
+`viewDirection`), so a turn hands over to strips, which are exact for a camera turn without
+pitch. `impostorBlitRollOnly` (deep link `blitRoll`, off) only rotates the blit when the camera
+rolled.
+
+thirdPerson orbit, Basic, A/B against main (two interleaved runs each, avg frame ms):
+
+| build / config | frame ms |
+| --- | --- |
+| main | 81.7 / 81.5 |
+| before the view-direction limit: 3 knots, stripAngle 20 | 84.0 |
+| before: + blitScale 0.3, stripScale 2, stripStep 3 | 91.7 |
+| view-direction limit: 3 knots, stripAngle 20 | 90.3 |
+| view-direction limit: + blitAngle 4 | 97.5 |
+
+Every frame strips replace a single blit costs more (a dozen-plus draws instead of one); they
+only pay off where they replace a redraw, and at Basic redraws are already rare (6-8%). The view
+limit fixes the lean but costs ~6ms more on the orbit. Strips stay off by default.
+
+#### Perspective between hint points
+
+The first prototype interpolated each hint's x, vertical scale and offset linearly in capture
+x. Along a flat wall turning in perspective, current x is a projective function of capture x
+(the far end squeezes), so features slid along walls and the error grew with the turn. With the
+camera only turning and moving (no pitch), a column's vertical scale is its depth at capture
+over its depth now, so the fitted scales already carry the depths: `1 / scale` and
+`offset / scale` are linear in capture x, and current x is the knots' x weighted by
+`(1 - t) / scale0` and `t / scale1`. `ImpostorFit.makeColumnsProjective()` /
+`fitColumns(..., projective)` / `fitColumnsToEdges(..., projective)`; the least-squares fit
+solves the vertical map backwards (capture y from current y is linear in the unknowns), then x
+with the perspective weights. Exact for flat walls between hints; no depths are captured.
+`DrawableModel.impostorStripPerspective` (default true; deep link `stripLinear=1` for the
+linear fit).
+
+Headless, a 4x4-subdivided cube orbited 10 degrees at 180 units: linear strips leave 3.4px,
+perspective strips 1.4px (the capture's vertices are rounded to whole pixels; that's the floor).
+At 15-20 degrees that close, the strip stretch limit (`modelImpostorMaxSizeChange`, 1.4x at
+Medium) refuses the strips before their error does.
+
+On device (perspective strips are the default; `stripLinear=1` is the first fit):
+
+| run | perspective | linear |
+| --- | --- | --- |
+| thirdPerson orbit, Basic, 3 knots, stripAngle 25 (main 84.9ms) | 93.7ms | 93.9ms |
+| chapel, Basic, 3 knots: blit / strips / redraw | 91 / 2 / 7% | 90 / 3 / 7% |
+| chapel, Basic, box edges | 92 / 1 / 7% | 91 / 2 / 7% |
+| chapel, Medium, 3 knots | 78 / 11 / 10% | 80 / 10 / 10% |
+
+No change: the strip fits the chapel refuses miss by 45-80px against a 40-64px allowance, far
+more than the few pixels perspective accounts for. Most of that error isn't the interpolation
+between hints, so something the column model can't represent at all dominates - the likely
+suspects are parts at different depths in one column (tower in front of nave, parallax as the
+camera moves), sloped roofs, and camera pitch.

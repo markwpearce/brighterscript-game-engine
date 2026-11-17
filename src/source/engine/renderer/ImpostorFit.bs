@@ -167,6 +167,15 @@ namespace BGE.ImpostorFit
     return {residual: residual, params: {a: a, b: b, c: c, d: d, e: e, f: f}}
   end function
 
+  ' fitScaleTranslate()'s params as fitRotateScale() would give them, with no rotation, so
+  ' mapRotateScale() and the same blit can use either.
+  '
+  ' @param {roAssociativeArray} params a fitScaleTranslate() result's params
+  ' @return {roAssociativeArray}
+  function scaleTranslateAsRotateScale(params as roAssociativeArray) as roAssociativeArray
+    return {rotation: 0.0, scaleX: params.scaleX, scaleY: params.scaleY, fromCentreX: 0.0, fromCentreY: 0.0, toCentreX: params.offsetX, toCentreY: params.offsetY}
+  end function
+
   ' Where fitRotateScale()'s params take the point (x, y).
   '
   ' @param {roAssociativeArray} params a fitRotateScale() result's params
@@ -179,6 +188,455 @@ namespace BGE.ImpostorFit
     sx = (x - params.fromCentreX) * params.scaleX
     sy = (y - params.fromCentreY) * params.scaleY
     return BGE.Math.VectorOps.create(c * sx - s * sy + params.toCentreX, s * sx + c * sy + params.toCentreY)
+  end function
+
+  ' Builds a column warp - the captured bitmap redrawn as vertical strips (#556) - from
+  ' vertical edges of the model: capture x maps to current x, and each column is scaled and
+  ' shifted vertically, all linear in capture x between the edges. Exact for vertical walls
+  ' when the camera only turns and moves. Params: knotX (capture x, increasing), x (current
+  ' x), offset and scale (current y = offset + scale * capture y) at each knot. The residual
+  ' is 0; measure one with columnsResidual(). A projective warp interpolates between knots
+  ' with perspective (see makeColumnsProjective()), exact for flat walls between edges.
+  '
+  ' @param {float[]} fromX each edge's top then bottom captured x, edge after edge
+  ' @param {float[]} fromY
+  ' @param {float[]} toX the same points' current x
+  ' @param {float[]} toY
+  ' @param {boolean} projective
+  ' @return {BGE.ImpostorFit.FitResult}
+  function fitColumnsToEdges(fromX as float[], fromY as float[], toX as float[], toY as float[], projective = false as boolean) as FitResult
+    knots = [] as roAssociativeArray[]
+    for i = 0 to fromX.count() - 2 step 2
+      height = fromY[i + 1] - fromY[i]
+      if height = 0
+        return unusable()
+      end if
+      scale = (toY[i + 1] - toY[i]) / height
+      knots.push({
+        knotX: (fromX[i] + fromX[i + 1]) * 0.5,
+        x: (toX[i] + toX[i + 1]) * 0.5,
+        offset: toY[i] - scale * fromY[i],
+        scale: scale
+      })
+    end for
+    ' insertion sort by capture x - only a handful of edges
+    sorted = [] as roAssociativeArray[]
+    for each knot in knots
+      at = sorted.count()
+      while at > 0 and sorted[at - 1].knotX > knot.knotX
+        at--
+      end while
+      sorted.push(knot)
+      for j = sorted.count() - 1 to at + 1 step -1
+        sorted[j] = sorted[j - 1]
+      end for
+      sorted[at] = knot
+    end for
+    params = {knotX: [] as float[], x: [] as float[], offset: [] as float[], scale: [] as float[]}
+    for each knot in sorted
+      params.knotX.push(knot.knotX)
+      params.x.push(knot.x)
+      params.offset.push(knot.offset)
+      params.scale.push(knot.scale)
+    end for
+    if not columnsUsable(params)
+      return unusable()
+    end if
+    if projective
+      makeColumnsProjective(params)
+    end if
+    return {residual: 0.0, params: params}
+  end function
+
+  ' Makes a column warp interpolate with perspective between knots. With the camera only
+  ' turning and moving, a column's vertical scale is its depth then over its depth now, so
+  ' along a flat wall 1 / scale and offset / scale are linear in capture x, and current x
+  ' moves by weights of 1 / scale - no depths needed. Adds q (1 / scale) and g (offset / scale).
+  '
+  ' @param {roAssociativeArray} params a column warp's params, every scale above 0
+  sub makeColumnsProjective(params as roAssociativeArray)
+    q = [] as float[]
+    g = [] as float[]
+    for j = 0 to params.knotX.count() - 1
+      q.push(1 / params.scale[j])
+      g.push(params.offset[j] / params.scale[j])
+    end for
+    params.q = q
+    params.g = g
+    params.projective = true
+  end sub
+
+  ' Fits a column warp (see fitColumnsToEdges()) with the given knots by least squares. A
+  ' projective warp fits the vertical map backwards (capture y from current y is linear in
+  ' its unknowns), then x with perspective weights.
+  '
+  ' @param {float[]} knotX capture x of each knot, increasing
+  ' @param {float[]} fromX
+  ' @param {float[]} fromY
+  ' @param {float[]} toX
+  ' @param {float[]} toY
+  ' @param {boolean} projective
+  ' @return {BGE.ImpostorFit.FitResult}
+  function fitColumns(knotX as float[], fromX as float[], fromY as float[], toX as float[], toY as float[], projective = false as boolean) as FitResult
+    k = knotX.count()
+    n = fromX.count()
+    if k < 2 or n < 2 * k
+      return unusable()
+    end if
+    ' linear: current y = offset + scale * capture y at the hat weights; projective: capture y =
+    ' q * current y - g. Either way 2k unknowns, with the known y centred for conditioning.
+    knownY = fromY
+    solvedY = toY
+    if projective
+      knownY = toY
+      solvedY = fromY
+    end if
+    yMean = mean(knownY)
+    yNormal = zeros(4 * k * k)
+    yRhs = zeros(2 * k)
+    ' unrolled: four terms for y (offset and scale at each end)
+    last = k - 2
+    k2 = 2 * k
+    for i = 0 to n - 1
+      x = fromX[i]
+      s = 0
+      while s < last and x >= knotX[s + 1]
+        s++
+      end while
+      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
+      w0 = 1 - t
+      y = knownY[i] - yMean
+      v = solvedY[i]
+      q2 = w0 * y
+      q3 = t * y
+      i0 = s
+      i1 = s + 1
+      i2 = k + s
+      i3 = k + s + 1
+      yRhs[i0] += w0 * v
+      yRhs[i1] += t * v
+      yRhs[i2] += q2 * v
+      yRhs[i3] += q3 * v
+      r0 = i0 * k2
+      r1 = i1 * k2
+      r2 = i2 * k2
+      r3 = i3 * k2
+      yNormal[r0 + i0] += w0 * w0
+      yNormal[r0 + i1] += w0 * t
+      yNormal[r0 + i2] += w0 * q2
+      yNormal[r0 + i3] += w0 * q3
+      yNormal[r1 + i0] += t * w0
+      yNormal[r1 + i1] += t * t
+      yNormal[r1 + i2] += t * q2
+      yNormal[r1 + i3] += t * q3
+      yNormal[r2 + i0] += q2 * w0
+      yNormal[r2 + i1] += q2 * t
+      yNormal[r2 + i2] += q2 * q2
+      yNormal[r2 + i3] += q2 * q3
+      yNormal[r3 + i0] += q3 * w0
+      yNormal[r3 + i1] += q3 * t
+      yNormal[r3 + i2] += q3 * q2
+      yNormal[r3 + i3] += q3 * q3
+    end for
+    ys = solveLinear(yNormal, yRhs, 2 * k)
+    if ys.count() = 0
+      return unusable()
+    end if
+    params = {knotX: knotX, x: [] as float[], offset: [] as float[], scale: [] as float[]}
+    q = [] as float[]
+    g = [] as float[]
+    for j = 0 to k - 1
+      slope = ys[k + j]
+      intercept = ys[j] - slope * yMean
+      if projective
+        if slope <= 0
+          return unusable()
+        end if
+        q.push(slope)
+        g.push(-intercept)
+        params.scale.push(1 / slope)
+        params.offset.push(-intercept / slope)
+      else
+        params.scale.push(slope)
+        params.offset.push(intercept)
+      end if
+    end for
+    ' x from k weights: the hat weights, or with perspective the hat weights times q, normalised
+    xNormal = zeros(k * k)
+    xRhs = zeros(k)
+    for i = 0 to n - 1
+      x = fromX[i]
+      s = 0
+      while s < last and x >= knotX[s + 1]
+        s++
+      end while
+      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
+      w0 = 1 - t
+      w1 = t
+      if projective
+        w0 = w0 * q[s]
+        w1 = w1 * q[s + 1]
+        d = w0 + w1
+        w0 = w0 / d
+        w1 = w1 / d
+      end if
+      u = toX[i]
+      xRhs[s] += w0 * u
+      xRhs[s + 1] += w1 * u
+      xNormal[s * k + s] += w0 * w0
+      xNormal[s * k + s + 1] += w0 * w1
+      xNormal[(s + 1) * k + s] += w0 * w1
+      xNormal[(s + 1) * k + s + 1] += w1 * w1
+    end for
+    xs = solveLinear(xNormal, xRhs, k)
+    if xs.count() = 0
+      return unusable()
+    end if
+    params.x = xs
+    if projective
+      params.q = q
+      params.g = g
+      params.projective = true
+    end if
+    if not columnsUsable(params)
+      return unusable()
+    end if
+    return {residual: columnsResidual(params, fromX, fromY, toX, toY), params: params}
+  end function
+
+  ' Where a column warp's params take the point (x, y). Past the first or last knot, the
+  ' nearest segment carries on.
+  '
+  ' @param {roAssociativeArray} params a column warp's params
+  ' @param {float} x
+  ' @param {float} y
+  ' @return {BGE.Math.Vector}
+  function mapColumns(params as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
+    knotX = params.knotX
+    segment = columnSegment(knotX, x)
+    t = (x - knotX[segment]) / (knotX[segment + 1] - knotX[segment])
+    if params.projective = true
+      w0 = (1 - t) * params.q[segment]
+      w1 = t * params.q[segment + 1]
+      d = projectiveDenominator(w0 + w1, params.q[segment], params.q[segment + 1])
+      mappedX = (w0 * params.x[segment] + w1 * params.x[segment + 1]) / d
+      g = params.g[segment] + t * (params.g[segment + 1] - params.g[segment])
+      return BGE.Math.VectorOps.create(mappedX, (g + y) / d)
+    end if
+    mappedX = params.x[segment] + t * (params.x[segment + 1] - params.x[segment])
+    offset = params.offset[segment] + t * (params.offset[segment + 1] - params.offset[segment])
+    scale = params.scale[segment] + t * (params.scale[segment + 1] - params.scale[segment])
+    return BGE.Math.VectorOps.create(mappedX, offset + scale * y)
+  end function
+
+  ' The farthest a column warp puts any point from where it is now, in pixels.
+  '
+  ' @param {roAssociativeArray} params
+  ' @param {float[]} fromX
+  ' @param {float[]} fromY
+  ' @param {float[]} toX
+  ' @param {float[]} toY
+  ' @return {float}
+  function columnsResidual(params as roAssociativeArray, fromX as float[], fromY as float[], toX as float[], toY as float[]) as float
+    ' mapColumns(), inlined - this runs over every visible vertex each frame
+    knotX = params.knotX
+    knotMapX = params.x
+    offsets = params.offset
+    scales = params.scale
+    last = knotX.count() - 2
+    worst = 0.0
+    if params.projective = true
+      qs = params.q
+      gs = params.g
+      for i = 0 to fromX.count() - 1
+        x = fromX[i]
+        s = 0
+        while s < last and x >= knotX[s + 1]
+          s++
+        end while
+        t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
+        w0 = (1 - t) * qs[s]
+        w1 = t * qs[s + 1]
+        d = w0 + w1
+        if d <= 0
+          return 1000000.0
+        end if
+        dx = (w0 * knotMapX[s] + w1 * knotMapX[s + 1]) / d - toX[i]
+        dy = (gs[s] + t * (gs[s + 1] - gs[s]) + fromY[i]) / d - toY[i]
+        squared = dx * dx + dy * dy
+        if squared > worst
+          worst = squared
+        end if
+      end for
+      return Sqr(worst)
+    end if
+    for i = 0 to fromX.count() - 1
+      x = fromX[i]
+      s = 0
+      while s < last and x >= knotX[s + 1]
+        s++
+      end while
+      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
+      dx = knotMapX[s] + t * (knotMapX[s + 1] - knotMapX[s]) - toX[i]
+      dy = offsets[s] + t * (offsets[s + 1] - offsets[s]) + (scales[s] + t * (scales[s + 1] - scales[s])) * fromY[i] - toY[i]
+      squared = dx * dx + dy * dy
+      if squared > worst
+        worst = squared
+      end if
+    end for
+    return Sqr(worst)
+  end function
+
+  ' A projective warp's denominator, kept positive past the outer knots, where it can reach
+  ' 0 before the bitmap's edge.
+  function projectiveDenominator(d as float, q0 as float, q1 as float) as float
+    floor = 0.25 * BGE.Math.Min(q0, q1)
+    if d < floor
+      return floor
+    end if
+    return d
+  end function
+
+  ' How many vertical strips draw a column warp so that no column lands more than maxStep
+  ' pixels from the warp, given the captured bitmap's top and bottom y. Each strip is one
+  ' scaled blit with a single vertical scale and offset, taken at its middle.
+  '
+  ' @param {roAssociativeArray} params
+  ' @param {float} top
+  ' @param {float} bottom
+  ' @param {float} maxStep
+  ' @return {integer}
+  function columnStripCount(params as roAssociativeArray, top as float, bottom as float, maxStep as float) as integer
+    strips = 0
+    for j = 0 to params.knotX.count() - 2
+      strips += columnSegmentStrips(params, j, top, bottom, maxStep)
+    end for
+    return strips
+  end function
+
+  ' How many strips knot segment j needs - see columnStripCount().
+  function columnSegmentStrips(params as roAssociativeArray, j as integer, top as float, bottom as float, maxStep as float) as integer
+    deltaOffset = params.offset[j + 1] - params.offset[j]
+    deltaScale = params.scale[j + 1] - params.scale[j]
+    change = BGE.Math.Max(Abs(deltaOffset + deltaScale * top), Abs(deltaOffset + deltaScale * bottom))
+    ' a strip's middle value is at most half its change from either edge
+    if change <= 2 * maxStep
+      return 1
+    end if
+    return Int(change / (2 * maxStep) + 0.999)
+  end function
+
+  ' Which pixel columns of the captured bitmap to cut it at for a column warp, from 0 to its
+  ' width. With stripWidth > 0 every strip is that wide; otherwise each knot segment is split
+  ' as columnStripCount() would, and the parts past the outer knots are a strip each.
+  '
+  ' @param {roAssociativeArray} params
+  ' @param {float} originX the bitmap's left edge, in capture x
+  ' @param {integer} width the bitmap's width
+  ' @param {float} top its top, in capture y
+  ' @param {float} bottom its bottom
+  ' @param {float} maxStep
+  ' @param {integer} stripWidth
+  ' @return {integer[]}
+  function columnStripCuts(params as roAssociativeArray, originX as float, width as integer, top as float, bottom as float, maxStep as float, stripWidth as integer) as integer[]
+    cuts = [0] as integer[]
+    if stripWidth > 0
+      x = stripWidth
+      while x < width
+        cuts.push(x)
+        x += stripWidth
+      end while
+    else
+      knotX = params.knotX
+      for j = 0 to knotX.count() - 2
+        strips = columnSegmentStrips(params, j, top, bottom, maxStep)
+        for s = 0 to strips
+          cut = Int(knotX[j] - originX + (knotX[j + 1] - knotX[j]) * s / strips + 0.5)
+          if cut > cuts[cuts.count() - 1] and cut < width
+            cuts.push(cut)
+          end if
+        end for
+      end for
+    end if
+    cuts.push(width)
+    return cuts
+  end function
+
+  ' A warp with knots out of order (an edge has passed another - a face has turned edge-on)
+  ' or a flipped or collapsed column can't be drawn as strips.
+  function columnsUsable(params as roAssociativeArray) as boolean
+    for j = 0 to params.knotX.count() - 1
+      if params.scale[j] <= 0
+        return false
+      end if
+      if j > 0
+        if params.knotX[j] - params.knotX[j - 1] < 0.5 or params.x[j] <= params.x[j - 1]
+          return false
+        end if
+      end if
+    end for
+    return params.knotX.count() >= 2
+  end function
+
+  ' The knot segment whose line x lies on: the first or last past either end.
+  function columnSegment(knotX as float[], x as float) as integer
+    last = knotX.count() - 2
+    for j = 0 to last - 1
+      if x < knotX[j + 1]
+        return j
+      end if
+    end for
+    return last
+  end function
+
+  ' Solves an n x n system (row-major matrix) by Gaussian elimination with partial pivoting,
+  ' or returns [] if it's singular. Overwrites matrix and rhs.
+  function solveLinear(matrix as float[], rhs as float[], n as integer) as float[]
+    for col = 0 to n - 1
+      pivot = col
+      for row = col + 1 to n - 1
+        if Abs(matrix[row * n + col]) > Abs(matrix[pivot * n + col])
+          pivot = row
+        end if
+      end for
+      if Abs(matrix[pivot * n + col]) < 0.000001
+        return []
+      end if
+      if pivot <> col
+        for c = 0 to n - 1
+          swap = matrix[col * n + c]
+          matrix[col * n + c] = matrix[pivot * n + c]
+          matrix[pivot * n + c] = swap
+        end for
+        swap = rhs[col]
+        rhs[col] = rhs[pivot]
+        rhs[pivot] = swap
+      end if
+      for row = col + 1 to n - 1
+        factor = matrix[row * n + col] / matrix[col * n + col]
+        for c = col to n - 1
+          matrix[row * n + c] -= factor * matrix[col * n + c]
+        end for
+        rhs[row] -= factor * rhs[col]
+      end for
+    end for
+    solution = zeros(n)
+    for row = n - 1 to 0 step -1
+      total = rhs[row]
+      for c = row + 1 to n - 1
+        total -= matrix[row * n + c] * solution[c]
+      end for
+      solution[row] = total / matrix[row * n + row]
+    end for
+    return solution
+  end function
+
+  function zeros(n as integer) as float[]
+    values = [] as float[]
+    for i = 1 to n
+      values.push(0.0)
+    end for
+    return values
   end function
 
   function fitAxis(fromValues as float[], toValues as float[]) as roAssociativeArray
