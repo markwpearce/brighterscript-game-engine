@@ -24,8 +24,8 @@ Two units:
 
 ## KeyboardLayout (`ui/KeyboardLayout.bs`)
 
-A key is `{label, kind, char, width}`. `kind` is a `KeyboardKeyKind` enum: `char`, `shift`,
-`symbols`, `space`, `backspace`, `done`. `width` is in grid units (letters are 1). A row has an
+A key is `{label, kind, char, width}`. `kind` is a `KeyboardKeyKind` enum: `char`, `space`,
+`backspace`, `done`, `page` (Shift, `&123` and `abc` are page keys with a target page). `width` is in grid units (letters are 1). A row has an
 optional `indent` in units (QWERTY's staggered rows).
 
 Built-in layouts, from `BGE.UI.createAlphabeticalKeyboardLayout()`,
@@ -72,7 +72,7 @@ the widget's bounds divided by the page's row count and each row's units, with a
 
 - `show(parent, target)`: remembers the target and its current text (for Cancel), adds itself
   to `parent`, and focuses itself (`FocusManager.focusWidget()`).
-- `hide(parent)`: removes itself and refocuses the target. Same build-on-show, tear-down-on-hide
+- `hide()`: removes itself from its container and refocuses the target. Same build-on-show, tear-down-on-hide
   rule as `MessagePanel`, so it doesn't stay focusable while hidden.
 
 Input while focused (`handleInput()`):
@@ -93,7 +93,7 @@ Pressing a key:
 
 - `char`/`space`: `target.insertChar()`
 - `backspace`: `target.deleteBeforeCursor()`
-- `shift`/`symbols`: switch page
+- `page`: switch to its target page
 - `done`: hide, call `onDone`, then the target's `onSubmit`
 
 Cancel restores the remembered text (cursor at the end), hides, then calls `onCancel`.
