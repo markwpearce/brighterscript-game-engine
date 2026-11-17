@@ -12,3 +12,4 @@ paths:
 - Widgets register for focus when added to any focus-enabled container: build modal panels fresh on show, tear down on hide (`BGE.UI.MessagePanel` does).
 - Theme via `Game.defaultTheme` or `UiContainer.theme`.
 - `BGE.UI.Keyboard` is one focusable widget running its own grid navigation (it consumes the d-pad so focus can't leave); it types through `TextInput.insertChar()`/`deleteBeforeCursor()` and bakes its key grid into a bitmap.
+- Lay out `gameUi` widgets from `Game.uiCanvas` (screen-sized by default), never `Game.canvas`.
