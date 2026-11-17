@@ -10,3 +10,7 @@ connections to Python, so allow it when prompted, or use
 Credits: `fonts/Audiowide-Regular.ttf` is Audiowide by Astigmatic (SIL Open Font License, see
 `fonts/OFL.txt`). `music/victory.mp3` is "Medieval: Victory Theme" by RandomMind (CC0,
 https://opengameart.org/content/medieval-victory-theme).
+
+`maps/meadow.tmj` is a small Tiled map whose tileset (`maps/meadow.tsj`) is a separate file and
+whose tileset image is `images/meadow-tiles.png`, so `loadTiledMap()` has to fetch all three
+relative to the map's URL.
