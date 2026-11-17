@@ -10,16 +10,34 @@ class PerfLog
   private frames as integer = 0
   private stageTotals as roAssociativeArray = {}
   private stageCounts as roAssociativeArray = {}
+  ' Impostor outcomes over the interval (#556): models with an impostor, refreshed each interval
+  private impostorModels as object[] = []
+  private impostorCounts as roAssociativeArray = {}
+  private runId as string = ""
+  ' Frame times over the interval, and the most redraws in one frame, for spikes
+  private frameTimes as float[] = []
+  private maxRedrawsInFrame as integer = 0
+  ' The frames after the camera starts moving from still (MOVE lines): ms and quality level
+  private stillSeconds as float = 0
+  private moveTrace as string[] = []
+  private moveTraceFrames as integer = 0
 
-  sub new(rendererObj as BGE.Renderer, stages = true as boolean)
+  sub new(rendererObj as BGE.Renderer, stages = true as boolean, runId = "" as string)
     m.renderer = rendererObj
+    m.runId = runId
     rendererObj.profileStages = stages
+    m.resetImpostorCounts()
+    if runId <> ""
+      print `PERF start ${runId}`
+    end if
   end sub
 
   ' Adds last frame's stage times (render runs after the update this is called from)
-  sub update(dt as float)
+  sub update(dt as float, qualityLevel = -1 as integer)
+    m.traceMove(dt, qualityLevel)
     m.frames++
     m.elapsed += dt
+    m.frameTimes.push(dt * 1000)
     stageMs = m.renderer.getStageMsLastFrame()
     stageCounts = m.renderer.getStageCountsLastFrame()
     for each name in stageMs
@@ -30,6 +48,7 @@ class PerfLog
       m.stageTotals[name] += stageMs[name]
       m.stageCounts[name] += stageCounts[name]
     end for
+    m.countImpostors()
     if m.elapsed < m.intervalSeconds
       return
     end if
@@ -40,11 +59,127 @@ class PerfLog
       avgCount = m.stageCounts[name] / m.frames
       line += ` | ${name} ${avgMs.toStr()}ms x${avgCount.toStr()}`
     end for
+    line += m.describeSpikes() + m.describeImpostors()
+    if m.runId <> ""
+      line = `${line} | run ${m.runId}`
+    end if
     print line
+    m.findImpostorModels()
+    m.resetImpostorCounts()
+    m.frameTimes = []
+    m.maxRedrawsInFrame = 0
     m.elapsed = 0
     m.frames = 0
     m.stageTotals = {}
     m.stageCounts = {}
   end sub
+
+  ' Prints the first frames after the camera starts moving from a still spell of 1s or more.
+  ' Update runs before the frame's render, so dt is the last frame's time.
+  private sub traceMove(dt as float, qualityLevel as integer)
+    if m.moveTraceFrames > 0
+      m.moveTrace.push(`${Int(dt * 1000).toStr()}(L${qualityLevel.toStr()})`)
+      m.moveTraceFrames--
+      if m.moveTraceFrames = 0
+        print `MOVE after ${(Int(m.stillSeconds * 10) / 10).toStr()}s still: ${m.moveTrace.join(" ")} | run ${m.runId}`
+        m.stillSeconds = 0
+      end if
+      return
+    end if
+    if not m.renderer.camera.movedLastFrame()
+      m.stillSeconds += dt
+      return
+    end if
+    if m.stillSeconds >= 1
+      m.moveTrace = [`still L${qualityLevel.toStr()}:`]
+      m.moveTraceFrames = 10
+      return
+    end if
+    m.stillSeconds = 0
+  end sub
+
+  private sub resetImpostorCounts()
+    m.impostorCounts = {blit: 0, strips: 0, stripTotal: 0, redraw: 0, reasons: {}}
+  end sub
+
+  private sub findImpostorModels()
+    m.impostorModels = []
+    for each sceneObj in m.renderer.getSceneObjectsCopy()
+      candidate = sceneObj as dynamic
+      if invalid <> candidate.getImpostorKindThisFrame
+        m.impostorModels.push(candidate)
+      end if
+    end for
+  end sub
+
+  ' What each drawn impostor model did last frame: a single blit, strips or a redraw (with why)
+  private sub countImpostors()
+    counts = m.impostorCounts
+    redraws = counts.redraw
+    for each sceneObj in m.impostorModels
+      if sceneObj.didDrawLastFrame()
+        kind = sceneObj.getImpostorKindThisFrame()
+        if kind = "rotate"
+          counts.blit++
+        else if kind = "strips"
+          counts.strips++
+          counts.stripTotal += sceneObj.getImpostorStripsThisFrame()
+        else
+          reason = sceneObj.getImpostorMissThisFrame().reason
+          if reason <> ""
+            counts.redraw++
+            if invalid = counts.reasons[reason]
+              counts.reasons[reason] = 0
+            end if
+            counts.reasons[reason]++
+          end if
+        end if
+      end if
+    end for
+    m.maxRedrawsInFrame = BGE.Math.Max(m.maxRedrawsInFrame, counts.redraw - redraws)
+  end sub
+
+  ' Median, 90th percentile and longest frame, and how many frames ran over 1.5x the median
+  private function describeSpikes() as string
+    count = m.frameTimes.count()
+    if count = 0
+      return ""
+    end if
+    sorted = []
+    for each ms in m.frameTimes
+      sorted.push({ms: ms})
+    end for
+    sorted.SortBy("ms")
+    median = sorted[count \ 2].ms
+    p90 = sorted[BGE.Math.Min(count - 1, Int(count * 0.9))].ms
+    spikes = 0
+    for each ms in m.frameTimes
+      if ms > median * 1.5
+        spikes++
+      end if
+    end for
+    return ` | med ${Int(median).toStr()} p90 ${Int(p90).toStr()} max ${Int(sorted[count - 1].ms).toStr()} spikes ${spikes.toStr()}/${count.toStr()} maxRedraws ${m.maxRedrawsInFrame.toStr()}`
+  end function
+
+  private function describeImpostors() as string
+    counts = m.impostorCounts
+    total = counts.blit + counts.strips + counts.redraw
+    if total = 0
+      return ""
+    end if
+    line = ` | impostors x${(total / m.frames).toStr()}/frame blit ${m.percentOf(counts.blit, total)} strips ${m.percentOf(counts.strips, total)}`
+    if counts.strips > 0
+      line += ` (avg ${(Int(10 * counts.stripTotal / counts.strips + 0.5) / 10).toStr()})`
+    end if
+    line += ` redraw ${m.percentOf(counts.redraw, total)} why:`
+    for each reason in counts.reasons.Keys()
+      line += ` ${reason} ${counts.reasons[reason].toStr()}`
+    end for
+    return line
+  end function
+
+  private function percentOf(part as integer, whole as integer) as string
+    return Int(100.0 * part / whole + 0.5).toStr() + "%"
+  end function
 
 end class

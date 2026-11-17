@@ -431,3 +431,49 @@ more than the few pixels perspective accounts for. Most of that error isn't the 
 between hints, so something the column model can't represent at all dominates - the likely
 suspects are parts at different depths in one column (tower in front of nave, parallax as the
 camera moves), sloped roofs, and camera pitch.
+
+#### Tuning in play, and spikes (#557)
+
+thirdPerson's `perf=phases` line now also gives the impostor outcomes (share of drawn impostor
+frames that single-blit, draw strips or redraw, and why they missed), the frame-time spread
+(median, p90, max, frames over 1.5x the median) and the most redraws in one frame; `runid=`
+tags the lines. Roku Ultra, town orbit (`orbit=0.4`), Basic, `stripKnots=3 stripAngle=25
+blitAngleScale=0.75`, last 4 samples:
+
+| config | frame ms | p90 / max | blit / strips (avg) / redraw |
+| --- | --- | --- | --- |
+| strips off | 83-85 | ~101 / 105-130 | 73 / - / 27% |
+| stripStep 1.5 | 92-95 | ~110 / 114-151 | 25 / 48% (12.2) / 27% |
+| stripStep 2.5 | 90-94 | ~108 / 113-143 | 24 / 52% (10) / 25% |
+| stripStep 4 | 89-92 | ~105 / 115-134 | 25 / 50% (7.8) / 25% |
+| stripKnots 2, stripStep 2.5 | 89-91 | ~107 / 113-142 | 23 / 53% (9.5) / 24% |
+
+- Strips replace single blits, not redraws: the redraw share barely moves. Most refused strip
+  fits are `stripsClipped` (part of the model off the canvas edge), then `stripsError` and
+  `stripsCount`.
+- They look clearly better: with strips off, houses lean as the camera turns (the rotate fit
+  absorbing perspective as a tilt); with strips their verticals stay upright. Wider strips
+  (stripStep 4) show slight stair-stepping on roof edges at Basic.
+- A steady orbit doesn't spike (0-1 frames in ~35 over 1.5x the median), strips or not.
+
+The stutter is the camera starting to move from still. Stop-start orbit (`orbitPause=3,3`),
+adaptive quality, the first 10 moving frames (ms, level) after 3s still at Ultra:
+
+```
+191(L4) 349(L4) 275(L3) 168(L3) 188(L3) 219(L1) 89(L1) 104(L1) 101(L1) 134(L0)
+```
+
+The quality controller only heard about the move after the first frame drew (it runs after
+the buffer swap), then waited a settle and a sample before each step down, and frames over
+0.25s weren't counted at all. Now `QualityController` remembers the level in force while the
+camera last moved, and `RenderQualityManager.beforeDraw()` (called by `Game` after the update,
+before drawing) drops straight to it when the camera starts moving from still
+(`Camera.isMovingThisFrame()`); impostors keep their captures through a drop. Same run:
+
+```
+82(L0) 96(L0) 77(L0) 85(L0) 91(L0) 96(L0) 73(L0) 64(L0) 65(L0) 75(L0)
+```
+
+The first move after a scene starts has no moving level yet, so it still steps down as before.
+Climbing back to Ultra once still redraws up to ~11 models in one frame (170-380ms), which
+shows less since nothing moves.
