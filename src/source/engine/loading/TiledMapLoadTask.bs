@@ -1,0 +1,236 @@
+import "../../utils/tiled/TiledParser.bs"
+import "../../utils/tiled/TiledTypes.bs"
+import "../../utils/urls.bs"
+import "../Game.bs"
+import "AssetLoadTasks.bs"
+import "DownloadTask.bs"
+
+namespace BGE
+
+  ' The game bitmap name AssetLoader.loadTiledMap() stores a map's image under.
+  '
+  ' @param {string} mapName
+  ' @param {string} imagePath - the image's resolved path or URL
+  ' @return {string}
+  function getTiledMapBitmapName(mapName as string, imagePath as string) as string
+    return "tiled:" + mapName + ":" + imagePath
+  end function
+
+  ' Loads a Tiled map, its external .tsj tilesets and its images, over as many frames as it takes -
+  ' see AssetLoader.loadTiledMap().
+  class TiledMapLoadTask extends FileLoadTask
+
+    ' Makes the tileset and image downloads. Set by AssetLoader.
+    loader as BGE.AssetLoader = invalid
+    ' Options for those downloads. Set by AssetLoader.
+    downloadOptions as BGE.DownloadOptions
+
+    private game as BGE.Game
+    private mapName as string
+    private mapJson as string = ""
+    private baseDir as string = ""
+    ' resolved .tsj path -> its DownloadTask, until it's read into `tilesets`
+    private tilesetDownloads as roAssociativeArray
+    ' resolved .tsj path -> parsed tileset JSON
+    private tilesets as roAssociativeArray
+    private map as BGE.Tiled.TiledMap = invalid
+    private imagePaths as string[]
+    private imageTasks as BGE.BitmapLoadTask[]
+    private imageCount as integer = 0
+    private imageErrors as string[]
+    ' the map file itself was bad, so a downloaded copy shouldn't be kept
+    private jsonBad as boolean = false
+
+    sub new(game as BGE.Game, mapName as string, path as string)
+      super(path)
+      m.name = "tiled map " + path
+      m.game = game
+      m.mapName = mapName
+      m.downloadOptions = {}
+      m.tilesetDownloads = {}
+      m.tilesets = {}
+      m.imagePaths = []
+      m.imageTasks = []
+      m.imageErrors = []
+      ' the map is small next to its images
+      m.downloadShare = 0.1
+    end sub
+
+    override function loadFile(budgetMs as integer) as boolean
+      if m.mapJson = ""
+        if not m.readMap()
+          return true
+        end if
+      end if
+      if m.map = invalid
+        if not m.stepTilesets(budgetMs)
+          if m.error <> invalid
+            return true
+          end if
+          m.waitingForNextFrame = true
+          return false
+        end if
+        if not m.parseMap()
+          return true
+        end if
+      end if
+      if not m.stepImages(budgetMs)
+        m.waitingForNextFrame = true
+        return false
+      end if
+      if m.imageErrors.count() > 0
+        m.error = "tiled map " + m.mapName + " (" + m.source + "): " + m.imageErrors.Join("; ")
+        return true
+      end if
+      bitmaps = {}
+      for each imagePath in m.imagePaths
+        bitmaps[imagePath] = m.game.getBitmap(BGE.getTiledMapBitmapName(m.mapName, imagePath))
+      end for
+      m.map.name = m.mapName
+      m.map.bitmaps = bitmaps
+      m.game.addTiledMap(m.map)
+      return true
+    end function
+
+    override function getFileProgress() as float
+      if m.map = invalid
+        return 0.0
+      end if
+      if m.imageCount = 0
+        return 1.0
+      end if
+      return 0.1 + 0.9 * (m.imageCount - m.imageTasks.count()) / m.imageCount
+    end function
+
+    ' Bad only if the map file itself wasn't a map - a tileset or image failing doesn't make it bad.
+    override function isDownloadedFileBad() as boolean
+      return m.jsonBad
+    end function
+
+    ' Also releases the tileset downloads and image tasks.
+    override sub abort()
+      super.abort()
+      for each path in m.tilesetDownloads
+        m.tilesetDownloads[path].abort()
+      end for
+      m.tilesetDownloads = {}
+      for each imageTask in m.imageTasks
+        imageTask.abort()
+      end for
+      m.imageTasks = []
+    end sub
+
+    ' Reads the map file and starts on its external tilesets. Returns false with `error` set if it
+    ' can't be read.
+    private function readMap() as boolean
+      content = ""
+      if CreateObject("roFileSystem").Exists(m.path)
+        content = ReadAsciiFile(m.path)
+      end if
+      if content = ""
+        m.error = "tiled map not found: " + m.source
+        return false
+      end if
+      m.mapJson = content
+      ' the source, not the downloaded copy, so relative paths resolve against a URL
+      m.baseDir = BGE.Urls.parentFolder(m.source)
+      for each tilesetPath in BGE.Tiled.listExternalTilesets(content, m.baseDir)
+        if BGE.Urls.isUrl(tilesetPath)
+          m.tilesetDownloads[tilesetPath] = m.newDownload(tilesetPath)
+        else if not m.readTileset(tilesetPath, tilesetPath)
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    ' Steps the tileset downloads, reading each as it finishes. Returns true when all are read;
+    ' false while waiting, or with `error` set if one failed.
+    private function stepTilesets(budgetMs as integer) as boolean
+      timer = CreateObject("roTimespan")
+      for each tilesetPath in m.tilesetDownloads.Keys()
+        remainingMs = budgetMs - timer.TotalMilliseconds()
+        download = m.tilesetDownloads[tilesetPath]
+        if download.step(remainingMs)
+          m.tilesetDownloads.Delete(tilesetPath)
+          if download.error <> invalid
+            m.error = "tiled map " + m.mapName + ": can't read tileset " + tilesetPath + " (" + download.error + ")"
+            return false
+          end if
+          if not m.readTileset(tilesetPath, download.localPath)
+            return false
+          end if
+        end if
+      end for
+      return m.tilesetDownloads.count() = 0
+    end function
+
+    private function readTileset(tilesetPath as string, localPath as string) as boolean
+      parsed = invalid
+      content = ReadAsciiFile(localPath)
+      if content <> ""
+        parsed = ParseJson(content)
+      end if
+      if GetInterface(parsed, "ifAssociativeArray") = invalid
+        m.error = "tiled map " + m.mapName + ": can't read tileset " + tilesetPath
+        return false
+      end if
+      m.tilesets[tilesetPath] = parsed
+      return true
+    end function
+
+    ' Parses the map with its tilesets and creates the image tasks. Returns false with `error` set
+    ' if it isn't a map.
+    private function parseMap() as boolean
+      m.map = BGE.Tiled.parseMapJson(m.mapJson, m.baseDir, m.tilesets)
+      if m.map = invalid
+        m.jsonBad = true
+        m.error = "tiled map " + m.source + " can't be loaded (see the [BGE.Tiled] message)"
+        return false
+      end if
+      m.imagePaths = BGE.Tiled.listTiledMapImages(m.map)
+      for each imagePath in m.imagePaths
+        imageTask = new BGE.BitmapLoadTask(m.game, BGE.getTiledMapBitmapName(m.mapName, imagePath), imagePath)
+        if BGE.Urls.isUrl(imagePath)
+          imageTask.download = m.newDownload(imagePath)
+        end if
+        m.imageTasks.push(imageTask)
+      end for
+      m.imageCount = m.imageTasks.count()
+      return true
+    end function
+
+    ' Steps every unfinished image, sharing the budget (the first always gets a step). Returns
+    ' true when none are left.
+    private function stepImages(budgetMs as integer) as boolean
+      timer = CreateObject("roTimespan")
+      remainingTasks = [] as BGE.BitmapLoadTask[]
+      steppedAny = false
+      for each imageTask in m.imageTasks
+        remainingMs = budgetMs - timer.TotalMilliseconds()
+        if steppedAny and remainingMs <= 0
+          remainingTasks.push(imageTask)
+        else
+          steppedAny = true
+          if not imageTask.step(remainingMs)
+            remainingTasks.push(imageTask)
+          else if imageTask.error <> invalid
+            m.imageErrors.push(imageTask.error)
+          end if
+        end if
+      end for
+      m.imageTasks = remainingTasks
+      return m.imageTasks.count() = 0
+    end function
+
+    private function newDownload(url as string) as BGE.DownloadTask
+      if m.loader <> invalid
+        return m.loader.getDownloadTask(url, m.downloadOptions)
+      end if
+      task = new BGE.DownloadTask(url, m.downloadOptions)
+      return task
+    end function
+
+  end class
+
+end namespace

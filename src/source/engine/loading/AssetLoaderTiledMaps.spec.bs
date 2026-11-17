@@ -1,0 +1,131 @@
+import "pkg:/source/engine/loading/AssetLoader.bs"
+import "pkg:/source/engine/loading/AssetLoaderDownloads.spec.bs"
+import "pkg:/source/engine/loading/TextureLoader.spec.bs"
+import "pkg:/source/utils/tiled/TiledLayers.bs"
+
+namespace tests
+
+  @suite("BGE.AssetLoader Tiled maps")
+  class AssetLoaderTiledMapTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    loader as tests.ServedAssetLoader
+    textureLoader as tests.FakeTextureLoader
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.textureLoader = new tests.FakeTextureLoader()
+      m.game.textureLoader = m.textureLoader
+      m.loader = new tests.ServedAssetLoader(m.game)
+      fs = CreateObject("roFileSystem")
+      fs.CreateDirectory("tmp:/bge_tmap")
+      fs.CreateDirectory("tmp:/bge_tmap/art")
+      fs.CreateDirectory("tmp:/bge_tmap/tilesets")
+      fs.CreateDirectory("tmp:/bge_tmap/maps")
+      tests.writeAtlasSheet("tmp:/bge_tmap/art/ground.png", 32, 32)
+      WriteAsciiFile("tmp:/bge_tmap/tilesets/ground.tsj", FormatJson({type: "tileset", name: "ground", tilecount: 4, columns: 2, tilewidth: 16, tileheight: 16, image: "../art/ground.png", imagewidth: 32, imageheight: 32}))
+      WriteAsciiFile("tmp:/bge_tmap/maps/level.tmj", tests.tiledLoaderMapJson())
+    end function
+
+    @describe("loadTiledMap")
+
+    @it("loads a local map, its external tileset and its image")
+    function _()
+      m.loader.loadTiledMap("level", "tmp:/bge_tmap/maps/level.tmj")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      map = m.game.getTiledMap("level")
+      m.assertNotInvalid(map)
+      m.assertEqual("level", map.name)
+      m.assertEqual("ground", map.tilesets[0].name)
+      m.assertEqual(32, map.bitmaps["tmp:/bge_tmap/art/ground.png"].GetWidth())
+      m.assertEqual(1, m.textureLoader.requests.count())
+    end function
+
+    @it("gives layerToTileSpecs the loaded images")
+    function _()
+      m.loader.loadTiledMap("level", "tmp:/bge_tmap/maps/level.tmj")
+      tests.runLoader(m.loader)
+      map = m.game.getTiledMap("level")
+      tiles = BGE.Tiled.layerToTileSpecs(map, BGE.Tiled.getLayer(map, "ground"))
+      m.assertEqual(3, tiles.count())
+      m.assertEqual(32, tiles[0].region.GetBitmap().GetWidth())
+      m.assertEqual(1, m.textureLoader.requests.count())
+    end function
+
+    @it("downloads a URL map, and its tileset and image relative to it")
+    function _()
+      m.loader.files["https://example.com/maps/level.tmj"] = "tmp:/bge_tmap/maps/level.tmj"
+      m.loader.files["https://example.com/tilesets/ground.tsj"] = "tmp:/bge_tmap/tilesets/ground.tsj"
+      m.loader.files["https://example.com/art/ground.png"] = "tmp:/bge_tmap/art/ground.png"
+      m.loader.loadTiledMap("level", "https://example.com/maps/level.tmj")
+      tests.runLoader(m.loader)
+      m.assertEqual(0, m.loader.getErrors().count())
+      m.assertEqual(3, m.loader.requested.count())
+      m.assertEqual("https://example.com/maps/level.tmj", m.loader.requested[0])
+      m.assertEqual("https://example.com/tilesets/ground.tsj", m.loader.requested[1])
+      m.assertEqual("https://example.com/art/ground.png", m.loader.requested[2])
+      map = m.game.getTiledMap("level")
+      m.assertNotInvalid(map.bitmaps["https://example.com/art/ground.png"])
+    end function
+
+    @it("fails, naming the tileset, when it's missing")
+    function _()
+      CreateObject("roFileSystem").Delete("tmp:/bge_tmap/tilesets/ground.tsj")
+      task = m.loader.loadTiledMap("level", "tmp:/bge_tmap/maps/level.tmj")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertTrue(task.error.Instr("tmp:/bge_tmap/tilesets/ground.tsj") >= 0)
+      m.assertInvalid(m.game.getTiledMap("level"))
+    end function
+
+    @it("fails, naming the image, when it's missing")
+    function _()
+      CreateObject("roFileSystem").Delete("tmp:/bge_tmap/art/ground.png")
+      task = m.loader.loadTiledMap("level", "tmp:/bge_tmap/maps/level.tmj")
+      tests.runLoader(m.loader)
+      m.assertEqual(1, m.loader.getErrors().count())
+      m.assertTrue(task.error.Instr("ground.png") >= 0)
+      m.assertInvalid(m.game.getTiledMap("level"))
+    end function
+
+    @it("fails when the map is missing")
+    function _()
+      task = m.loader.loadTiledMap("level", "tmp:/bge_tmap/maps/nope.tmj")
+      tests.runLoader(m.loader)
+      m.assertTrue(task.error.Instr("tiled map not found: tmp:/bge_tmap/maps/nope.tmj") >= 0)
+    end function
+
+    @it("discards a downloaded map that isn't a map")
+    function _()
+      WriteAsciiFile("tmp:/bge_tmap/maps/bad.tmj", "not json")
+      m.loader.files["https://example.com/maps/bad.tmj"] = "tmp:/bge_tmap/maps/bad.tmj"
+      task = m.loader.loadTiledMap("level", "https://example.com/maps/bad.tmj")
+      tests.runLoader(m.loader)
+      m.assertTrue(task.error.Instr("discarded") >= 0)
+      m.assertInvalid(m.game.getTiledMap("level"))
+    end function
+
+    @describe("unloadTiledMap")
+
+    @it("forgets the map and unloads its images")
+    function _()
+      m.loader.loadTiledMap("level", "tmp:/bge_tmap/maps/level.tmj")
+      tests.runLoader(m.loader)
+      bitmapName = BGE.getTiledMapBitmapName("level", "tmp:/bge_tmap/art/ground.png")
+      m.assertNotInvalid(m.game.getBitmap(bitmapName))
+      m.game.unloadTiledMap("level")
+      m.assertInvalid(m.game.getTiledMap("level"))
+      m.assertInvalid(m.game.getBitmap(bitmapName))
+    end function
+
+  end class
+
+  ' A 3x1 map using ../tilesets/ground.tsj, with a "ground" layer of three tiles.
+  function tiledLoaderMapJson() as string
+    return FormatJson({type: "map", orientation: "orthogonal", infinite: false, width: 3, height: 1, tilewidth: 16, tileheight: 16,
+      tilesets: [{firstgid: 1, source: "../tilesets/ground.tsj"}],
+      layers: [{type: "tilelayer", id: 1, name: "ground", width: 3, height: 1, visible: true, opacity: 1, x: 0, y: 0, data: [1, 2, 3]}]})
+  end function
+
+end namespace
