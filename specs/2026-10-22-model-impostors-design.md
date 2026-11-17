@@ -504,3 +504,9 @@ canvas margin may draw strips as long as the warped clip rect still covers the f
 Strips now replace redraws too, for ~3-4ms over strips off, with upright verticals. The 48-point
 cap barely mattered here (few of the town's models have more). stripScale 2 showed only a slight
 bow along one house's base in screenshots.
+
+Strips are now on by default with the tuned values: `useImpostorStrips = true`,
+`impostorStripKnots = 3`, `impostorStripStepPx = 2.5`, `impostorStripMaxAngleDegrees = 25`,
+`impostorBlitAngleScale = 0.75`, `impostorStripErrorScale = 2`. They were tuned at Basic in the
+thirdPerson town; High/Ultra are untested, and moving them into `RenderQualityPresets` per level
+is still to do.
