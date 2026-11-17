@@ -333,6 +333,9 @@ namespace BGE
       samples.canvasSamplePoints = m.modelCanvasSamplePoints
       samples.clipped = m.facesClippedThisDraw
       samples.clipRect = m.faceClipRect
+      if not isBackFaceDrawMode(drawMode)
+        samples.hiddenPlanes = m.captureHiddenPlanes(rendererObj.camera.position)
+      end if
       if m.drawable.useImpostorStrips
         start = 0
         if rendererObj.profileStages
@@ -345,6 +348,74 @@ namespace BGE
       end if
       m.impostorCapture = samples
     end sub
+
+    ' The planes of the model's faces turned away from `eye`, as [nx, ny, nz, px, py, pz, area]
+    ' each (a point on the plane, the middle of its faces; area as a fraction of the model's whole
+    ' surface). Coplanar faces count once.
+    private function captureHiddenPlanes(eye as BGE.Math.Vector) as float[]
+      planes = {}
+      order = [] as string[]
+      total = 0.0
+      for each face in m.modelWorldFaces
+        v = face.vertices
+        if v.count() = 3
+          a = v[0]
+          b = v[1]
+          c = v[2]
+          ux = b.x - a.x
+          uy = b.y - a.y
+          uz = b.z - a.z
+          wx = c.x - a.x
+          wy = c.y - a.y
+          wz = c.z - a.z
+          cx = uy * wz - uz * wy
+          cy = uz * wx - ux * wz
+          cz = ux * wy - uy * wx
+          area = 0.5 * Sqr(cx * cx + cy * cy + cz * cz)
+          total += area
+          n = face.normal
+          if n.x * (eye.x - a.x) + n.y * (eye.y - a.y) + n.z * (eye.z - a.z) <= 0
+            ' coplanar faces share a key: the normal to ~1 degree, the offset to a unit
+            key = Int(n.x * 64 + 0.5).toStr() + "," + Int(n.y * 64 + 0.5).toStr() + "," + Int(n.z * 64 + 0.5).toStr() + "," + Int(n.x * a.x + n.y * a.y + n.z * a.z + 0.5).toStr()
+            plane = planes[key]
+            if invalid = plane
+              plane = {n: n, area: 0.0, x: 0.0, y: 0.0, z: 0.0}
+              planes[key] = plane
+              order.push(key)
+            end if
+            plane.area += area
+            plane.x += area * (a.x + b.x + c.x) / 3
+            plane.y += area * (a.y + b.y + c.y) / 3
+            plane.z += area * (a.z + b.z + c.z) / 3
+          end if
+        end if
+      end for
+      hidden = [] as float[]
+      for each key in order
+        plane = planes[key]
+        if plane.area > 0
+          hidden.append([plane.n.x, plane.n.y, plane.n.z, plane.x / plane.area, plane.y / plane.area, plane.z / plane.area, plane.area / total])
+        end if
+      end for
+      return hidden
+    end function
+
+    ' Whether any plane captureHiddenPlanes() found, at least minArea of the model, now faces
+    ' `eye`, past a sliver's worth (about a degree) so one turning edge-on doesn't flicker a redraw.
+    private function hiddenPlaneInView(eye as BGE.Math.Vector, planes as float[], minArea as float) as boolean
+      for i = 0 to planes.count() - 7 step 7
+        if planes[i + 6] >= minArea
+          rx = eye.x - planes[i + 3]
+          ry = eye.y - planes[i + 4]
+          rz = eye.z - planes[i + 5]
+          facing = planes[i] * rx + planes[i + 1] * ry + planes[i + 2] * rz
+          if facing > 0 and facing * facing > 0.0003 * (rx * rx + ry * ry + rz * rz)
+            return true
+          end if
+        end if
+      end for
+      return false
+    end function
 
     ' What a strip impostor (#556) fits to later: the vertices of the faces facing the camera
     ' (the ones in the capture) and either evenly spaced knots across them or the box's
@@ -669,6 +740,9 @@ namespace BGE
       if capture.transformVersion <> m.transformVersion or capture.geometryVersion <> m.drawable.geometryVersion or capture.drawMode <> drawMode
         return m.missImpostor("changed")
       end if
+      if m.drawable.impostorRedrawOnNewFace and invalid <> capture.hiddenPlanes and m.hiddenPlaneInView(renderObj.camera.position, capture.hiddenPlanes, m.drawable.impostorNewFaceMinArea)
+        return m.missImpostor("newFace")
+      end if
       samples = m.projectImpostorSamples(renderObj)
       if invalid = samples
         return m.missImpostor("project")
@@ -685,6 +759,7 @@ namespace BGE
         if m.drawable.impostorBlitMaxAngleDegrees > 0
           blitAngle = m.drawable.impostorBlitMaxAngleDegrees
         end if
+        blitAngle *= m.drawable.impostorBlitAngleScale
         blitError *= m.drawable.impostorBlitErrorScale
       end if
       blitCosine = cosine
