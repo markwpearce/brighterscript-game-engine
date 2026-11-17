@@ -113,7 +113,6 @@ namespace BGE
     private impostorMissReason as string = ""
     private impostorStripResidual as float = -1.0
     private impostorStripAllowed as float = -1.0
-    private impostorStripRegions as object[] = []
     private stripProjected as float[] = []
     private stripEdgeProjected as float[] = []
 
@@ -461,18 +460,31 @@ namespace BGE
       if xs.count() < 3
         return
       end if
+      if front.count() > m.drawable.impostorStripMaxPoints and m.drawable.impostorStripMaxPoints >= 3
+        ' every strip attempt projects and fits these, and a spread-out subset fits as well
+        stride = front.count() / m.drawable.impostorStripMaxPoints
+        keptWorld = [] as BGE.Math.Vector[]
+        keptX = [] as float[]
+        keptY = [] as float[]
+        for k = 0 to m.drawable.impostorStripMaxPoints - 1
+          i = Int(k * stride)
+          keptWorld.push(front[i])
+          keptX.push(xs[i])
+          keptY.push(ys[i])
+        end for
+        front = keptWorld
+        xs = keptX
+        ys = keptY
+      end if
       capture.frontWorld = front
       capture.frontXs = xs
       capture.frontYs = ys
       knots = m.drawable.impostorStripKnots
       if knots >= 2
-        lo = BGE.Math.arrayMin(xs)
-        hi = BGE.Math.arrayMax(xs)
-        knotX = [] as float[]
-        for k = 0 to knots - 1
-          knotX.push(lo + (hi - lo) * k / (knots - 1))
-        end for
-        capture.knotX = knotX
+        knotX = BGE.ImpostorFit.placeKnots(xs, knots)
+        if knotX.count() >= 2
+          capture.knotX = knotX
+        end if
         return
       end if
       if m.modelWorldBounds.count() <> 2
@@ -545,8 +557,8 @@ namespace BGE
     ' only place the bitmap's origin; drawReusedTempBitmap() draws the strips from capture.fit.
     private function attemptImpostorStrips(renderObj as Renderer, capture as roAssociativeArray, diagonal as float, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
       region = m.getTempBitmapRegion()
-      if capture.clipped or invalid = capture.frontWorld or invalid = region
-        return m.missImpostor("stripsClipped")
+      if invalid = capture.frontWorld or invalid = region
+        return m.missImpostor("stripsNoHints")
       end if
       camera = renderObj.camera as Camera3d
       if not camera.projectPointsWithDepth(capture.frontWorld, m.stripProjected)
@@ -606,6 +618,14 @@ namespace BGE
       if cuts.count() - 1 > drawable.impostorStripMaxStrips
         return m.missImpostor("stripsCount")
       end if
+      if capture.clipped
+        ' as the single blit: what the capture left out must stay off the canvas
+        clip = capture.clipRect
+        frame = renderObj.camera.frameSize
+        if invalid = clip or not BGE.ImpostorFit.columnsCoverFrame(p, clip.x0, clip.y0, clip.x1, clip.y1, frame.x, frame.y)
+          return m.missImpostor("stripsClipped")
+        end if
+      end if
       capture.fit = {kind: "strips", params: p, residual: fit.residual, cuts: cuts}
       return {origin: BGE.ImpostorFit.mapColumns(p, capture.originX, capture.originY), rotation: 0, scaleX: 1, scaleY: 1}
     end function
@@ -621,31 +641,29 @@ namespace BGE
       if rendererObj.profileStages
         start = rendererObj.getProfileClockMs()
       end if
-      p = capture.fit.params
       cuts = capture.fit.cuts
       bitmap = region.GetBitmap()
       height = region.GetHeight()
-      top = capture.originY
-      bottom = top + height
-      m.impostorStripRegions = []
+      placements = BGE.ImpostorFit.stripPlacements(capture.fit.params, capture.originX, cuts, capture.originY, height)
+      ' the strips' regions, kept with the capture: its knots are fixed, so the cuts mostly repeat
+      ' frame to frame (and Roku needs a source kept until its queued draws have run)
+      regions = capture.stripRegions
+      if invalid = regions
+        regions = {}
+        capture.stripRegions = regions
+      end if
       drew = false
       for i = 0 to cuts.count() - 2
-        x0 = cuts[i]
-        x1 = cuts[i + 1]
-        a = capture.originX + x0
-        b = capture.originX + x1
-        middle = (a + b) * 0.5
-        leftX = BGE.ImpostorFit.mapColumns(p, a, top).x
-        rightX = BGE.ImpostorFit.mapColumns(p, b, top).x
-        stripTop = BGE.ImpostorFit.mapColumns(p, middle, top)
-        stripBottom = BGE.ImpostorFit.mapColumns(p, middle, bottom)
-        ' a 1px overlap with the next strip hides seams
-        scaleX = (rightX - leftX + 1) / (x1 - x0)
-        scaleY = (stripBottom.y - stripTop.y) / height
-        if scaleX > 0 and scaleY > 0
-          strip = CreateObject("roRegion", bitmap, x0, 0, x1 - x0, height)
-          m.impostorStripRegions.push(strip)
-          if rendererObj.drawTransformedObject(leftX, stripTop.y, scaleX, scaleY, 0, strip, blitColor)
+        k = i * 4
+        if placements[k + 2] > 0
+          x0 = cuts[i]
+          key = x0.toStr() + "_" + cuts[i + 1].toStr()
+          strip = regions[key]
+          if invalid = strip
+            strip = CreateObject("roRegion", bitmap, x0, 0, cuts[i + 1] - x0, height)
+            regions[key] = strip
+          end if
+          if rendererObj.drawTransformedObject(placements[k], placements[k + 1], placements[k + 2], placements[k + 3], 0, strip, blitColor)
             drew = true
           end if
         end if

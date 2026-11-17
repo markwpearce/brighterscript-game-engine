@@ -477,3 +477,30 @@ before drawing) drops straight to it when the camera starts moving from still
 The first move after a scene starts has no moving level yet, so it still steps down as before.
 Climbing back to Ultra once still redraws up to ~11 models in one frame (170-380ms), which
 shows less since nothing moves.
+
+#### Cheaper strips that replace redraws (#557)
+
+More knots made it worse: at stripStep 2.5, 4/5/6 knots ran 95/98/101ms with 33/42/49%
+redraws, against 3 knots' 94ms and 25%. Evenly spaced knots asked low-poly props for more
+than their vertices could pin (fewer than 2 per knot) or left segments empty. Knots now sit
+at quantiles of the visible vertices' x, no more than they support (`ImpostorFit.placeKnots()`);
+5 knots still lose to 3, but no longer by failing to fit.
+
+Each strip frame cost ~1.2ms fitting and ~1.1ms drawing (~110µs a strip: a new roRegion and four
+`mapColumns()` calls). Now `ImpostorFit.stripPlacements()` maps each cut once in one loop, the
+strip regions are kept on the capture (its knots are fixed, so the cuts mostly repeat), a fit
+uses at most `impostorStripMaxPoints` (48) visible vertices, and a capture clipped to the
+canvas margin may draw strips as long as the warped clip rect still covers the frame
+(`ImpostorFit.columnsCoverFrame()`), as the single blit already could. Town orbit, Basic,
+`stripKnots=3 stripAngle=25 blitAngleScale=0.75 stripStep=2.5`:
+
+| build | frame ms | blit / strips / redraw | stripsClipped per 3s |
+| --- | --- | --- | --- |
+| strips off | 82-87 | 72 / - / 28% | - |
+| strips, before | 91-95 | 23 / 52 / 25% | ~22 |
+| strips, now | 87-90 | 22 / 58 / 19% | ~8 |
+| strips, now, stripScale 2 | 86-88 | 22 / 62 / 15% | ~9 |
+
+Strips now replace redraws too, for ~3-4ms over strips off, with upright verticals. The 48-point
+cap barely mattered here (few of the town's models have more). stripScale 2 showed only a slight
+bow along one house's base in screenshots.

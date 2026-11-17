@@ -266,6 +266,39 @@ namespace BGE.ImpostorFit
     params.projective = true
   end sub
 
+  ' Knots for fitColumns() at quantiles of the points' distinct x (to the half pixel), so each
+  ' segment has points to fit, and no more than the points support: two per knot.
+  '
+  ' @param {float[]} xs the points' x
+  ' @param {integer} count knots wanted
+  ' @return {float[]} increasing; fewer than 2 if the points can't support a warp
+  function placeKnots(xs as float[], count as integer) as float[]
+    sorted = [] as float[]
+    for each x in xs
+      sorted.push(Int(x * 2 + 0.5) / 2)
+    end for
+    sorted.Sort()
+    distinct = [] as float[]
+    for each x in sorted
+      if distinct.count() = 0 or x > distinct[distinct.count() - 1]
+        distinct.push(x)
+      end if
+    end for
+    count = BGE.Math.Min(count, BGE.Math.Min(xs.count() \ 2, distinct.count()))
+    knotX = [] as float[]
+    if count < 2
+      return knotX
+    end if
+    last = distinct.count() - 1
+    for k = 0 to count - 1
+      x = distinct[Int(k * last / (count - 1) + 0.5)]
+      if knotX.count() = 0 or x > knotX[knotX.count() - 1]
+        knotX.push(x)
+      end if
+    end for
+    return knotX
+  end function
+
   ' Fits a column warp (see fitColumnsToEdges()) with the given knots by least squares. A
   ' projective warp fits the vertical map backwards (capture y from current y is linear in
   ' its unknowns), then x with perspective weights.
@@ -427,6 +460,107 @@ namespace BGE.ImpostorFit
     offset = params.offset[segment] + t * (params.offset[segment + 1] - params.offset[segment])
     scale = params.scale[segment] + t * (params.scale[segment + 1] - params.scale[segment])
     return BGE.Math.VectorOps.create(mappedX, offset + scale * y)
+  end function
+
+  ' Where each strip between `cuts` (capture bitmap columns) lands: [left x, top y, x scale,
+  ' y scale] per strip, flat. Each cut's x is mapped once, and a strip's vertical scale and
+  ' offset are taken at its middle. x scale includes a 1px overlap with the next strip, which
+  ' hides seams. A strip that would flip or collapse gets 0 scales.
+  '
+  ' @param {roAssociativeArray} params a column warp's params
+  ' @param {float} originX the bitmap's left edge, in capture x
+  ' @param {integer[]} cuts from columnStripCuts()
+  ' @param {float} top the bitmap's top, in capture y
+  ' @param {float} height the bitmap's height
+  ' @return {float[]}
+  function stripPlacements(params as roAssociativeArray, originX as float, cuts as integer[], top as float, height as float) as float[]
+    ' mapColumns(), inlined: this runs for every strip drawn
+    knotX = params.knotX
+    knotMapX = params.x
+    last = knotX.count() - 2
+    projective = params.projective = true
+    qs = params.q
+    gs = params.g
+    offsets = params.offset
+    scales = params.scale
+    cutX = [] as float[]
+    for each cut in cuts
+      x = originX + cut
+      s = 0
+      while s < last and x >= knotX[s + 1]
+        s++
+      end while
+      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
+      if projective
+        w0 = (1 - t) * qs[s]
+        w1 = t * qs[s + 1]
+        d = projectiveDenominator(w0 + w1, qs[s], qs[s + 1])
+        cutX.push((w0 * knotMapX[s] + w1 * knotMapX[s + 1]) / d)
+      else
+        cutX.push(knotMapX[s] + t * (knotMapX[s + 1] - knotMapX[s]))
+      end if
+    end for
+    bottom = top + height
+    out = [] as float[]
+    for i = 0 to cuts.count() - 2
+      x = originX + (cuts[i] + cuts[i + 1]) * 0.5
+      s = 0
+      while s < last and x >= knotX[s + 1]
+        s++
+      end while
+      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
+      if projective
+        w0 = (1 - t) * qs[s]
+        w1 = t * qs[s + 1]
+        d = projectiveDenominator(w0 + w1, qs[s], qs[s + 1])
+        g = gs[s] + t * (gs[s + 1] - gs[s])
+        topY = (g + top) / d
+        bottomY = (g + bottom) / d
+      else
+        offset = offsets[s] + t * (offsets[s + 1] - offsets[s])
+        scale = scales[s] + t * (scales[s + 1] - scales[s])
+        topY = offset + scale * top
+        bottomY = offset + scale * bottom
+      end if
+      scaleX = (cutX[i + 1] - cutX[i] + 1) / (cuts[i + 1] - cuts[i])
+      scaleY = (bottomY - topY) / height
+      if scaleX <= 0 or scaleY <= 0
+        scaleX = 0
+        scaleY = 0
+      end if
+      out.append([cutX[i], topY, scaleX, scaleY])
+    end for
+    return out
+  end function
+
+  ' Whether a column warp keeps a capture's clip rect over the whole frame, so the parts the
+  ' capture left out stay off it. Columns stay vertical, and a column's top and bottom move
+  ' monotonically between knots, so the rect's sides and the knots inside it are enough.
+  '
+  ' @param {roAssociativeArray} params a column warp's params
+  ' @param {float} x0 the clip rect, in capture coordinates
+  ' @param {float} y0
+  ' @param {float} x1
+  ' @param {float} y1
+  ' @param {float} frameWidth
+  ' @param {float} frameHeight
+  ' @return {boolean}
+  function columnsCoverFrame(params as roAssociativeArray, x0 as float, y0 as float, x1 as float, y1 as float, frameWidth as float, frameHeight as float) as boolean
+    if mapColumns(params, x0, y0).x > 0 or mapColumns(params, x1, y0).x < frameWidth
+      return false
+    end if
+    xs = [x0, x1] as float[]
+    for each knot in params.knotX
+      if knot > x0 and knot < x1
+        xs.push(knot)
+      end if
+    end for
+    for each x in xs
+      if mapColumns(params, x, y0).y > 0 or mapColumns(params, x, y1).y < frameHeight
+        return false
+      end if
+    end for
+    return true
   end function
 
   ' The farthest a column warp puts any point from where it is now, in pixels.
