@@ -22,7 +22,7 @@ The helpers, all in the `BGE.TileMap` namespace unless noted:
 | Side-scroller collision (incl. one-way platforms) | `BGE.resolveAabbTileCollision()` |
 | Top-down movement against walls | `BGE.SolidWorld` |
 | Pick border/corner tiles from neighbours | `getEdgePiece3x3()`, `getNeighbourMask4()`, `getNeighbourMask8()`, `getBlobTileIndex()` |
-| Load a map made in Tiled | `BGE.Tiled.parseMapFile()` and friends |
+| Load a map made in Tiled | `loader.loadTiledMap()` or `BGE.Tiled.parseMapFile()`, and friends |
 
 `examples/platformer` (side-scrolling) and `examples/rpg` (top-down) use all
 of these; this guide follows how they do it.
@@ -370,6 +370,31 @@ if map = invalid
   ' the reason was printed: "[BGE.Tiled] ..."
 end if
 ```
+
+`parseMapFile()` reads local files, all at once. To load a map behind a
+loading screen, or from a URL, use the scene's loader instead (see
+[Loading Assets](/loading-assets)). It loads the map, its external `.tsj`
+tilesets and every tileset image over as many frames as it takes:
+
+```brighterscript
+override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+  loader.loadTiledMap("level1", "https://example.com/maps/level1.tmj")
+end sub
+
+override sub onCreate(args as roAssociativeArray)
+  map = m.game.getTiledMap("level1")
+  ' layerToTileSpecs() uses the images that came with it
+  tiles = BGE.Tiled.layerToTileSpecs(map, BGE.Tiled.getLayer(map, "ground"))
+end sub
+```
+
+Tilesets and images resolve relative to the file that names them, so a map at
+a URL fetches them from beside it, and downloads are cached like any other.
+The images are in `map.bitmaps` (path to bitmap). A map that won't load (or
+whose tileset or an image won't) fails the task and isn't registered, so
+`getTiledMap()` returns `invalid`. `game.unloadTiledMap("level1")` frees it and
+its images. `examples/platformer` loads level 1 this way, and
+`examples/loading`'s Remote assets scene downloads one.
 
 The map's layers are in `map.layers`, in Tiled's order. Layers inside a group
 are listed in the group's place, so `BGE.Tiled.getLayer(map, "ground")` finds
