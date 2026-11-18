@@ -489,6 +489,11 @@ its near end is well inside the draw distance. Set `Drawable.fadesWithDistance =
 something drawn at full strength wherever it is - for example a mist layer that stands at a
 fixed distance ahead of the camera, inside the fade band, to hide where the scene ends.
 
+Something that gives off light, like a torch flame or a lit window, should show through fog
+further than the things around it. `Drawable.fadeDistanceScale` fades a drawable (and stops
+drawing it) as if the draw distance were that many times as far: with `2`, a flame is still
+glowing at 1.5x the draw distance, over the fog backdrop, after its post has gone.
+
 A ground plane always reaches the farthest any quality level would draw objects (1.5x
 `maxDrawDistance` with the default presets), so objects fade out on the ground rather than
 past its edge, and the horizon doesn't move when the quality level changes. Past the
