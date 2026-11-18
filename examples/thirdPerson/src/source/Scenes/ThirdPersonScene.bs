@@ -3,6 +3,7 @@ import "../Entities/Knight.bs"
 import "../CombatDirector.bs"
 import "../Hud.bs"
 import "../PerfLog.bs"
+import "../Conversation.bs"
 
 ' What every playable scene shares: the knight, the chase camera, the HUD, the control hints and
 ' the debug toggle. Subclasses build their world in onCreate() and call addKnight() and
@@ -13,6 +14,14 @@ class ThirdPersonScene extends BGE.GameScene
   cameraRig as BGE.OrbitCamera
   director as CombatDirector = new CombatDirector()
   hud as Hud = new Hud()
+
+  ' People the knight can talk to (addTalker()), the one in reach, and the conversation if one's
+  ' going
+  talkers as Talker[] = []
+  talkTarget as Talker = invalid
+  conversation as Conversation = invalid
+  ' How far away, and how far either side of where he faces, someone can be talked to
+  talkReach as float = World.metres(2.4)
 
   ' Camera spin speed with no input (deep link `orbit`), for repeatable measurements
   autoOrbit as float = 0
@@ -48,9 +57,16 @@ class ThirdPersonScene extends BGE.GameScene
 
   ' The knight (heading in radians, 0 faces -z), and the particle bursts hits spray. Call before
   ' adding enemies: it starts a fresh CombatDirector, since scenes are reused and the last
-  ' visit's enemies are gone.
+  ' visit's enemies are gone. Forgets the last visit's talkers too, keeping any added this visit.
   protected sub addKnight(x as float, z as float, heading as float)
     m.director = new CombatDirector()
+    for i = m.talkers.Count() - 1 to 0 step -1
+      if not m.talkers[i].entity.isValid()
+        m.talkers.Delete(i)
+      end if
+    end for
+    m.talkTarget = invalid
+    m.conversation = invalid
     bursts = new BGE.ParticleBurstPool(m.game)
     m.game.addEntity(bursts)
     m.director.bursts = bursts
@@ -58,6 +74,79 @@ class ThirdPersonScene extends BGE.GameScene
     player = new Knight(m.game)
     m.game.addEntity(player, {x: x, z: z, heading: heading, director: m.director})
     m.knight = player
+  end sub
+
+  ' Someone the knight can walk up to and talk to (OK), starting the story at `node`
+  protected sub addTalker(entity as BGE.GameEntity, node as string, name as string)
+    m.talkers.push({entity: entity, node: node, name: name} as Talker)
+  end sub
+
+  ' Call first thing in onUpdate(), before the knight moves. Finds who's in reach, starts a
+  ' conversation on OK (instead of a swing), and runs one that's going. True while talking:
+  ' skip the rest of the scene's update then.
+  protected function updateTalk() as boolean
+    controls = m.game.controls
+    if invalid <> m.conversation
+      if m.conversation.isActive()
+        m.conversation.update(controls)
+        m.takeStoryPosts()
+        return true
+      end if
+      m.takeStoryPosts()
+      m.conversation = invalid
+      ' Still held this frame from the last line: don't swing at the air as it closes
+      m.knight.talking = controls.isActionPressed("attack") or controls.isActionPressed("dodge")
+      return m.knight.talking
+    end if
+    m.knight.talking = false
+    m.talkTarget = m.talkerInReach()
+    if invalid <> m.talkTarget and controls.isActionPressed("attack")
+      chat = new Conversation()
+      started = chat.start(m.talkTarget.node)
+      ' A node with nothing to say can still post (a blessing with no lines)
+      m.conversation = chat
+      m.takeStoryPosts()
+      if started
+        m.knight.talking = true
+        m.knight.faceToward(m.talkTarget.entity.position)
+        return true
+      end if
+      m.conversation = invalid
+    end if
+    return false
+  end function
+
+  ' The nearest talker in front of the knight and within talkReach, while he's free to talk
+  private function talkerInReach() as Talker
+    if not m.knight.isAlive() or (m.knight.state <> KnightState.idle and m.knight.state <> KnightState.run)
+      return invalid
+    end if
+    best = invalid
+    bestDistance = m.talkReach
+    for each talker in m.talkers
+      if talker.entity.isValid()
+        distance = BGE.Math.flatDistance(m.knight.position, talker.entity.position)
+        if distance < bestDistance
+          toward = BGE.Math.headingOf(BGE.Math.flatDirection(m.knight.position, talker.entity.position))
+          if Abs(BGE.Math.wrapAngle(toward - m.knight.rotation.y)) < BGE.Math.PI / 3
+            best = talker
+            bestDistance = distance
+          end if
+        end if
+      end if
+    end for
+    return best
+  end function
+
+  ' What the story asked the world to do
+  private sub takeStoryPosts()
+    for each name in m.conversation.posts
+      if name = "heal"
+        m.knight.health = m.knight.maxHealth
+        m.knight.stamina.refill()
+      end if
+    end for
+    m.conversation.posts = []
   end sub
 
   ' The town's fog, which the graveyard shares: buildings fade into it rather than turning
@@ -217,6 +306,11 @@ class ThirdPersonScene extends BGE.GameScene
     end for
 
     m.hud.draw(uiRenderObj, m.knight)
+    if invalid <> m.conversation
+      m.conversation.draw(uiRenderObj, font)
+    else if invalid <> m.talkTarget
+      uiRenderObj.DrawText(`OK / X: talk to ${m.talkTarget.name}`, center.x, center.y * 2 * 0.82, &hF0E0B0FF, font, "center")
+    end if
     if not m.knight.isAlive()
       uiRenderObj.DrawText("YOU DIED", center.x, center.y, &hC02828FF, font, "center")
     end if
