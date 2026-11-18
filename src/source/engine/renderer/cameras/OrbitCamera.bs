@@ -17,6 +17,8 @@ namespace BGE
     optional recenterSpeed as float
     optional lockTurnSpeed as float
     optional lockTilt as float
+    optional lockDeadZone as float
+    optional lockEase as float
     optional tiltSpeed as float
     optional minTilt as float
     optional maxTilt as float
@@ -72,8 +74,17 @@ namespace BGE
     lockTilt as float = 0
     ' The entity the camera keeps in view beyond the target, or invalid; see lockOn()
     lockTarget as BGE.GameEntity = invalid
+    ' Locked on, the camera doesn't turn while the entity is in the middle `lockDeadZone` of the
+    ' screen's width (0.2 = the middle 20%), so small moves don't turn the whole view. Once
+    ' outside, it turns back until the entity is within half of it. 0 keeps it centred.
+    lockDeadZone as float = 0
+    ' Locked on, turn by this fraction of the remaining angle per second (exponential ease:
+    ' quick when far off, slowing near the middle), up to lockTurnSpeed. 0 turns at lockTurnSpeed.
+    lockEase as float = 0
 
     protected recentering as boolean = false
+    ' Turning back toward a lockOn() entity that left the dead zone
+    protected lockRefocusing as boolean = false
 
     ' Places the camera straight away, behind the target unless options.heading says otherwise.
     '
@@ -101,6 +112,7 @@ namespace BGE
     sub lockOn(entity as BGE.GameEntity)
       m.lockTarget = entity
       m.recentering = false
+      m.lockRefocusing = false
     end sub
 
     ' Stops following a lockOn() entity; the camera stays where it is.
@@ -131,8 +143,7 @@ namespace BGE
         m.lockTarget = invalid
       end if
       if invalid <> m.lockTarget
-        toward = BGE.Math.headingOf(BGE.Math.flatDirection(m.target.position, m.lockTarget.position))
-        m.heading = BGE.Math.turnToward(m.heading, toward, m.lockTurnSpeed * dt)
+        m.turnTowardLockTarget(dt)
         lockTilt = BGE.Math.Clamp(m.lockTilt, m.minTilt, m.maxTilt)
         m.tilt = BGE.Math.turnToward(m.tilt, lockTilt, m.lockTurnSpeed * dt * 0.25)
         m.apply(dt)
@@ -152,6 +163,47 @@ namespace BGE
         m.recentering = Abs(BGE.Math.wrapAngle(behind - m.heading)) > 0.0001 or m.tilt <> 0
       end if
       m.apply(dt)
+    end sub
+
+    ' How far off the middle of the screen the lockOn() entity is, across: 0 in the middle, 1 at
+    ' the left or right edge, more when off screen. Measured on the ground from where the camera
+    ' is, so it ignores tilt.
+    '
+    ' @return {float}
+    function lockTargetScreenOffset() as float
+      if invalid = m.lockTarget
+        return 0
+      end if
+      bearing = BGE.Math.headingOf(BGE.Math.flatDirection(m.camera.position, m.lockTarget.position))
+      offAngle = Abs(BGE.Math.wrapAngle(bearing - m.heading))
+      if offAngle >= BGE.Math.HALF_PI
+        return 1000
+      end if
+      halfFov = BGE.Math.DegreesToRadians(m.camera.fieldOfViewDegrees) / 2
+      return Tan(offAngle) / Tan(halfFov)
+    end function
+
+    protected sub turnTowardLockTarget(dt as float)
+      ' lockDeadZone is a fraction of the screen width; offsets are fractions of half of it
+      offset = m.lockTargetScreenOffset()
+      if offset > m.lockDeadZone
+        m.lockRefocusing = true
+      else if offset <= m.lockDeadZone * 0.5
+        m.lockRefocusing = false
+      end if
+      if not m.lockRefocusing
+        return
+      end if
+      toward = BGE.Math.headingOf(BGE.Math.flatDirection(m.target.position, m.lockTarget.position))
+      maxStep = m.lockTurnSpeed * dt
+      if m.lockEase > 0
+        remaining = Abs(BGE.Math.wrapAngle(toward - m.heading))
+        maxStep = BGE.Math.Min(maxStep, remaining * (1 - Exp(-m.lockEase * dt)))
+      end if
+      m.heading = BGE.Math.wrapAngle(BGE.Math.turnToward(m.heading, toward, maxStep))
+      if Abs(BGE.Math.wrapAngle(toward - m.heading)) < 0.001
+        m.lockRefocusing = false
+      end if
     end sub
 
     ' The point the camera looks at: lookHeight above the target.

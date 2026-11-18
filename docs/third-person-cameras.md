@@ -81,6 +81,21 @@ end if
 
 Choosing the target and dropping it when it dies or gets away is up to the game.
 
+By default the camera turns to keep the locked entity right behind the target, so every step
+either takes turns the whole view, and a turning camera redraws the whole frame. Give it a
+`lockDeadZone` to let the entity wander round the middle of the screen instead: with
+`lockDeadZone: 0.2` the camera holds still while the entity is in the middle 20% of the screen's
+width (the player keeps facing it themselves), and only turns once it drifts out, until it's back
+within half of that. `lockEase` makes that turn an exponential ease, quick when the entity is far
+off and slowing as it nears the middle, still capped at `lockTurnSpeed`:
+
+```brighterscript
+m.orbit = new BGE.OrbitCamera(camera, m.player, {
+  lockDeadZone: 0.2, ' the middle 20% of the screen
+  lockEase: 4        ' turns 4x the remaining angle per second, so it slows near the middle
+})
+```
+
 Every option is also a public field, so you can change them while the game runs, e.g. pull the
 camera in for a cutscene. The defaults (all in world units) suit a world of about 32 units per
 metre: 4 m back, 1.75 m up, looking at 1.25 m.
@@ -95,6 +110,8 @@ metre: 4 m back, 1.75 m up, looking at 1.25 m.
 | `recenterSpeed` | 8 | Radians per second while recentering |
 | `lockTurnSpeed` | 6 | Radians per second while turning toward a `lockOn()` entity |
 | `lockTilt` | 0 | Tilt while locked on, radians (within `minTilt`/`maxTilt`) |
+| `lockDeadZone` | 0 | Middle fraction of the screen width a locked-on entity can move in without the camera turning |
+| `lockEase` | 0 | Locked on, turn this many times the remaining angle per second (up to `lockTurnSpeed`); 0 turns at `lockTurnSpeed` |
 | `minTilt` / `maxTilt` | -0.4 / 0.4 | Tilt limits, radians |
 | `heading` | target's `rotation.y` | The heading the camera looks along |
 | `boom` | `invalid` | A `BGE.CameraBoom` (see below) |
