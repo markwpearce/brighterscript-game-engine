@@ -1302,6 +1302,14 @@ the live population; once reached, further spawns (continuous or `burst()`) are 
 dropped until a slot frees up via natural expiry - a safety net against a runaway or
 misconfigured emitter, not something you need to size exactly.
 
+A line's length is in world units, but by default a rectangle's side is in canvas pixels and
+an image's scale is of its pixel size, so they stay the same size on the canvas whatever their
+distance, and cover more of the screen on a lower-resolution canvas. On a `Camera3d`, set
+`sizeInWorldUnits: true` to size them in world units instead (an image as one world unit per
+pixel, times its scale): they then shrink with distance and look the same at every canvas
+size, like the rest of the scene. On a `Camera2d` a world unit is a pixel, so it makes no
+difference there.
+
 The velocity spread only fans out in x/y. For a 3D spray, `burstCone()` fires particles in a
 cone around any direction, with optional upward lift:
 
@@ -1320,7 +1328,7 @@ m.game.addEntity(m.bursts)
 
 m.bursts.play(hitPoint, swingDirection, {
   shape: BGE.ParticleShape.Rectangle, count: 18,
-  startColor: &h8A1010, endColor: &h8A1010, startSize: 10, endSize: 3,
+  startColor: &h8A1010, endColor: &h8A1010, startSize: 2, endSize: 0.6, sizeInWorldUnits: true,
   lifetime: 0.5, spreadRadians: 0.6, speed: 100, speedSpread: 30, lift: 80,
   acceleration: BGE.Math.VectorOps.create(0, -400, 0)
 })

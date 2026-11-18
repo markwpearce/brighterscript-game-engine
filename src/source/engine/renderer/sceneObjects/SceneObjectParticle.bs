@@ -109,7 +109,10 @@ namespace BGE
       end for
       minPoint = BGE.Math.VectorOps.create(minX, minY, minZ)
       maxPoint = BGE.Math.VectorOps.create(maxX, maxY, maxZ)
-      pad = m.getCanvasRadius(maxSize) * m.getWorldUnitsPerPixel(cameraObj, minPoint, maxPoint)
+      pad = m.getCanvasRadius(maxSize)
+      if not m.drawable.sizeInWorldUnits
+        pad = pad * m.getWorldUnitsPerPixel(cameraObj, minPoint, maxPoint)
+      end if
       x0 = minPoint.x - pad
       x1 = maxPoint.x + pad
       y0 = minPoint.y - pad
@@ -131,8 +134,9 @@ namespace BGE
       return true
     end function
 
-    ' The furthest, in pixels, a particle of `size` can draw from its projected position.
-    ' A line's length is in world units, so it's already in the bounds.
+    ' The furthest a particle of `size` can draw from its projected position: in pixels, or
+    ' world units with sizeInWorldUnits. A line's length is in world units, so it's already
+    ' in the bounds.
     private function getCanvasRadius(size as float) as float
       shape = m.drawable.shape
       if shape = BGE.ParticleShape.Rectangle
@@ -171,6 +175,21 @@ namespace BGE
       return sqr(dx * dx + dy * dy + dz * dz) / camera3d.getFocalLength()
     end function
 
+    ' How many canvas pixels one world unit covers at `point`: 1 without perspective.
+    private function getPixelsPerWorldUnit(cameraObj as Camera, point as BGE.Math.Vector) as float
+      if not cameraObj.isPerspective()
+        return 1.0
+      end if
+      camera3d = cameraObj as BGE.Camera3d
+      forward = BGE.Math.VectorOps.getNormalizedCopy(camera3d.orientation)
+      camPos = camera3d.position
+      depth = (point.x - camPos.x) * forward.x + (point.y - camPos.y) * forward.y + ((point.z ?? 0.0) - (camPos.z ?? 0.0)) * forward.z
+      if depth <= 0
+        return 1.0
+      end if
+      return camera3d.getFocalLength() / depth
+    end function
+
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
       if m.drawable.shape = BGE.ParticleShape.Rectangle and rendererObj.camera.isPerspective()
         return m.drawRectanglesFast(rendererObj)
@@ -192,7 +211,27 @@ namespace BGE
         positions.push(particle.position)
       end for
       projected = m.fastProjected
-      (camera as BGE.Camera3d).projectPointsWithDepth(positions, projected, true)
+      camera3d = camera as BGE.Camera3d
+      camera3d.projectPointsWithDepth(positions, projected, true)
+      ' sizeInWorldUnits: pixels per world unit is focal length / view depth
+      inWorldUnits = m.drawable.sizeInWorldUnits
+      focal = 0.0
+      camX = 0.0
+      camY = 0.0
+      camZ = 0.0
+      fwdX = 0.0
+      fwdY = 0.0
+      fwdZ = 0.0
+      if inWorldUnits
+        focal = camera3d.getFocalLength()
+        camX = camera3d.position.x
+        camY = camera3d.position.y
+        camZ = camera3d.position.z
+        forward = BGE.Math.VectorOps.getNormalizedCopy(camera3d.orientation)
+        fwdX = forward.x
+        fwdY = forward.y
+        fwdZ = forward.z
+      end if
       didDrawAny = false
       i = -3
       for each particle in particles
@@ -224,6 +263,13 @@ namespace BGE
           alpha = 0
         end if
         size = particle.startSize + (particle.endSize - particle.startSize) * t
+        if inWorldUnits
+          p = particle.position
+          depth = (p.x - camX) * fwdX + (p.y - camY) * fwdY + ((p.z ?? 0.0) - camZ) * fwdZ
+          if depth > 0
+            size = size * focal / depth
+          end if
+        end if
         ' DrawPoint: a centred square, about twice as fast as DrawRect on device
         if fade > 0
           didDrawAny = rendererObj.drawSquare(projected[i], projected[i + 1], size, (red << 24) + (green << 16) + (blue << 8) + alpha) or didDrawAny
@@ -258,6 +304,10 @@ namespace BGE
         rgba = BGE.RGBAtoRGBA((color >> 16) and &hFF, (color >> 8) and &hFF, color and &hFF, alpha)
         rgba = BGE.RendererHelpers.applyAlphaFade(rgba, particleFade)
         size = BGE.Math.lerp(particle.startSize, particle.endSize, t)
+        ' a line's length is already in world units
+        if m.drawable.sizeInWorldUnits and m.drawable.shape <> BGE.ParticleShape.Line
+          size = size * m.getPixelsPerWorldUnit(rendererObj.camera, particle.position)
+        end if
 
         if m.drawable.shape = BGE.ParticleShape.Line
           didDrawAny = m.drawLineParticle(rendererObj, particle, canvasPos, size, rgba) or didDrawAny
