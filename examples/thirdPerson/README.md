@@ -68,6 +68,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - The town has a 33 m draw distance (`draw=<metres>` overrides it), its end hidden by the engine fog (`camera.fog`, set up in `ThirdPersonScene.useTownFog()`, which the graveyard shares): things fade into the fog colour rather than into the sky, and buildings and the town wall stay on the skyline as fog-coloured silhouettes past the draw distance. `fog=0` turns it off. Occlusion culling is off in the town (its open streets hide too little to pay for it; `occlusion=1` turns it on).
 - Every prop (`PropModel`) is `isStatic`, so it never checks collisions itself, and only the big buildings block the camera.
 - The town wall is four inward-facing `DrawableWall`s (`Entities/TownWall.bs`), since the knight never sees the outside: far cheaper than the `wall_segment` models. The corner towers and the gate are models.
+- `Dressing.bs` has the scenery the town and graveyard place the same way: picket fences, trees (`Y` in `town.txt`, `T` in the graveyard), torches on wall brackets, and the graveyard's stone lantern posts that hold its spirit flames.
 - Torches stand on a flat post image (`Torch`'s `post` arg, far cheaper than a model while the camera moves) or hang from `torch_wall` brackets (by the gate and the keep's door), the flame at the bracket's tip.
 - `Entities/Townsfolk.bs` stands a person, picked and turned by a number fixed per cell (most face the well); only those within 10 m of the camera play their idle loop, the rest hold one frame. `Town/TownsfolkTypes.bs` has each sheet's anchor and frames. `Entities/Pig.bs` ambles round the pen.
 
@@ -75,7 +76,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 
 - `src/models/props/`: the mausoleum, hut, well and fence, the town's walls, gate, tower, house, keep and torches, one 256×320 px texture atlas for all of them, and the gravestones. All procedural, from `tools/make-props.py` (`python3 tools/make-props.py`, needs Pillow and numpy), which writes them there.
 - `src/models/chapel/`: the chapel from `examples/terrain`.
-- `src/sprites/tree_<n>.webp`: five autumn trees. The originals are isometric sprites with a shadow drawn in; `node tools/trees.js <folder of Sprite_0N.png>` clears the shadow (near-black, at most half opaque), trims them and scales them to 320 px tall. Each trunk's foot is in `GraveyardScene.treeAnchors`, since some trees' low branches hang below it.
+- `src/sprites/tree_<n>.webp`: five autumn trees. The originals are isometric sprites with a shadow drawn in; `node tools/trees.js <folder of Sprite_0N.png>` clears the shadow (near-black, at most half opaque), trims them and scales them to 320 px tall. Each trunk's foot is in `Dressing.addTree()`, since some trees' low branches hang below it.
 
 ## Sprite sheets
 
