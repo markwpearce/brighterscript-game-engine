@@ -510,3 +510,14 @@ Strips are now on by default with the tuned values: `useImpostorStrips = true`,
 `impostorBlitAngleScale = 0.75`, `impostorStripErrorScale = 2`. They were tuned at Basic in the
 thirdPerson town; High/Ultra are untested, and moving them into `RenderQualityPresets` per level
 is still to do.
+
+## Pixel cap on the allowed error (thirdPerson wiggle)
+
+The allowed error is a fraction of the visible diagonal, so a model filling the canvas (a table in thirdPerson's
+keep, up close) was allowed 50-80 px of strip error and 25-40 px of blit error at Low/Medium. It drifted by 5-15 px,
+then snapped back on the next redraw: a visible wiggle. `modelImpostorMaxErrorPixels` caps both allowances
+(after `impostorBlitErrorScale` / `impostorStripErrorScale`): 16, 10, 6, 4, 2 px from Basic to Ultra.
+
+Cost, thirdPerson town orbit at Basic on the Ultra: ~90 ms a frame with no cap, ~101 ms with 16 px, ~109 ms with
+10 px (redraws 20% -> 35-40% -> 42-53%).
+
