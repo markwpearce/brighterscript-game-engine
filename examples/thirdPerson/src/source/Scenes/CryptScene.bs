@@ -2,13 +2,16 @@ import "../World.bs"
 import "../Entities/Torch.bs"
 import "../Entities/Prop.bs"
 import "../Entities/CryptDoorway.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/EnemyTypes.bs"
 import "../Crypt/CryptMap.bs"
 import "../SolidTracker.bs"
 import "../Crypt/CryptCameraBoom.bs"
 import "ThirdPersonScene.bs"
 
-' A torch-lit stone maze under the graveyard, laid out by CryptMap. Its exit leads back up to
-' the graveyard.
+' A torch-lit stone maze under the graveyard, laid out by CryptMap. Skeletons sleep in its
+' corridors until they see the knight, then find their way round the walls to him; the Crypt
+' Warden guards the altar at the far end. Its exit leads back up to the graveyard.
 class CryptScene extends ThirdPersonScene
 
   respawnSeconds as float = 3
@@ -17,6 +20,10 @@ class CryptScene extends ThirdPersonScene
   ' How far up the camera may tilt (radians), so it stays below the wall tops
   maxCameraTilt as float = 0.45
   walls as SolidTracker
+  ' Skeletons wake when the knight is this close and in sight
+  wakeDistance as float = World.metres(12)
+  ' The Warden wakes when he's this close: inside its hall
+  wardenWakeDistance as float = World.metres(8)
 
   private layout as CryptLayout
   ' Where the knight started, and respawns
@@ -24,6 +31,16 @@ class CryptScene extends ThirdPersonScene
   private lights as BGE.Light[] = []
   private deadSeconds as float = 0
   private leaving as boolean = false
+  ' For the undead: paths round the walls, and whether they can see the knight
+  private nav as BGE.NavGrid
+  private skeletonType as EnemyType = EnemyTypes.skeleton()
+  private wardenType as EnemyType = EnemyTypes.cryptWarden()
+  private skeletonSpots as CryptCell[] = []
+  private wardenSpot as CryptCell = invalid
+  private warden as Enemy = invalid
+  private showEnemies as boolean = true
+  ' Counts down while "the Warden falls" shows
+  private victorySeconds as float = 0
   private bitmapPaths as roAssociativeArray = {
     cryptFloor: "pkg:/sprites/crypt_floor.webp",
     cryptWall: "pkg:/sprites/crypt_wall.webp",
@@ -42,6 +59,7 @@ class CryptScene extends ThirdPersonScene
 
   override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
     loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    loader.loadSpriteAtlas(m.skeletonType.atlas, `pkg:/sprites/${m.skeletonType.atlas}.json`)
     for each name in m.bitmapPaths
       if m.game.Bitmaps[name] = invalid
         loader.loadBitmap(name, m.bitmapPaths[name])
@@ -53,6 +71,10 @@ class CryptScene extends ThirdPersonScene
     m.readCommonArgs(args)
     m.leaving = false
     m.deadSeconds = 0
+    m.victorySeconds = 0
+    m.warden = invalid
+    m.skeletonSpots = []
+    m.wardenSpot = invalid
     m.game.setBackgroundColor(&h000000FF)
     m.layout = CryptMap.parse(CryptMap.layout())
 
@@ -98,9 +120,51 @@ class CryptScene extends ThirdPersonScene
     camera.fog.enabled = true
     camera.fog.color = &h000000
     camera.fog.silhouetteReach = 1
-    m.walls = new SolidTracker(CryptMap.solidWorld(m.layout))
+    solids = CryptMap.solidWorld(m.layout)
+    m.walls = new SolidTracker(solids)
     m.walls.track(m.knight)
+    ' Grown by the Warden's body, the biggest, so paths keep every body clear of the walls
+    m.nav = new BGE.NavGrid(solids, {cellSize: World.metres(1), agentRadius: m.wardenType.bodyRadius})
+    ' Measuring: `enemies=0` leaves the undead out
+    m.showEnemies = args.enemies <> "0"
+    m.addUndead()
   end sub
+
+  ' A skeleton on each `u` and, until it has been killed, the Warden on `W`: all asleep, facing
+  ' the way in to their cell
+  private sub addUndead()
+    if not m.showEnemies
+      return
+    end if
+    for each cell in m.skeletonSpots
+      m.addEnemy(m.skeletonType, cell, m.wakeDistance)
+    end for
+    m.warden = invalid
+    if invalid <> m.wardenSpot and not m.isWardenSlain()
+      m.warden = m.addEnemy(m.wardenType, m.wardenSpot, m.wardenWakeDistance)
+    end if
+  end sub
+
+  private function addEnemy(kind as EnemyType, cell as CryptCell, wakeDistance as float) as Enemy
+    spot = CryptMap.cellCenter(m.layout, cell.col, cell.row)
+    foe = new Enemy(m.game)
+    m.game.addEntity(foe, {
+      type: kind,
+      director: m.director,
+      x: spot.x,
+      z: spot.z,
+      heading: m.openHeading(cell),
+      wakeDistance: wakeDistance,
+      nav: m.nav
+    })
+    m.walls.track(foe)
+    return foe
+  end function
+
+  ' Once killed, the Warden stays dead for the rest of the run, even after the knight dies
+  private function isWardenSlain() as boolean
+    return GetGlobalAA().cryptWardenSlain = true
+  end function
 
   ' Every wall from the same grid: one drawable however many walls there are
   private sub addWalls()
@@ -155,6 +219,10 @@ class CryptScene extends ThirdPersonScene
       m.game.addEntity(cryptProp, {x: spot.x, z: spot.z, bitmap: bitmap})
     else if cell.kind = "E"
       m.addDoorway(cell)
+    else if cell.kind = "u"
+      m.skeletonSpots.push(cell)
+    else if cell.kind = "W"
+      m.wardenSpot = cell
     end if
   end sub
 
@@ -211,19 +279,48 @@ class CryptScene extends ThirdPersonScene
     m.director.viewHeading = m.cameraRig.heading
     m.hud.update(dt, m.knight)
     m.director.update(dt)
+    m.updateWarden(dt)
     if not m.knight.isAlive()
+      ' Start over: the knight back at the start, the undead back in their places and asleep
       m.deadSeconds += dt
       if m.deadSeconds >= m.respawnSeconds
         m.deadSeconds = 0
+        m.director.clearEnemies()
+        m.walls.clear()
         start = CryptMap.cellCenter(m.layout, m.startCell.col, m.startCell.row)
         m.knight.respawn(start.x, start.z)
         m.walls.track(m.knight)
+        m.addUndead()
       end if
       return
     end if
     here = CryptMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
     if not m.leaving and here[0] = m.layout.exitCell.col and here[1] = m.layout.exitCell.row
       m.leaving = m.game.changeSceneWithFade("GraveyardScene", {from: "crypt"})
+    end if
+  end sub
+
+  ' Notices the Warden's death: remembered for the run, and announced
+  private sub updateWarden(dt as float)
+    if m.victorySeconds > 0
+      m.victorySeconds -= dt
+    end if
+    if invalid <> m.warden and not m.warden.isAlive()
+      GetGlobalAA().cryptWardenSlain = true
+      m.warden = invalid
+      m.victorySeconds = 5
+    end if
+  end sub
+
+  ' The Warden's health along the bottom once it wakes, and the banner when it falls
+  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
+    super.onDrawEnd(renderObj, uiRenderObj)
+    font = m.game.getFont("default")
+    if invalid <> m.warden and m.warden.isAwake() and m.knight.isAlive()
+      m.hud.drawBossBar(uiRenderObj, font, m.warden.name, m.warden.health / m.warden.maxHealth)
+    end if
+    if m.victorySeconds > 0 and m.knight.isAlive()
+      m.hud.drawBanner(uiRenderObj, font, "THE WARDEN FALLS", m.victorySeconds, 5)
     end if
   end sub
 
