@@ -1,6 +1,5 @@
 import "../World.bs"
 import "../Night.bs"
-import "../SolidTracker.bs"
 import "../Entities/Pig.bs"
 import "../Entities/PropModel.bs"
 import "../Entities/Torch.bs"
@@ -30,13 +29,7 @@ class TownScene extends ThirdPersonScene
   groundTexelScale as float = 4
   wallHeight as float = World.metres(6)
 
-  walls as SolidTracker
-
   private layout as TownLayout
-  private lights as BGE.Light[] = []
-  private startX as float = 0
-  private startZ as float = 0
-  private leaving as boolean = false
   ' The renderer's occlusion setting before the town changed it, put back when it ends
   private occlusionWas as boolean = true
   ' Where the well is, for the townsfolk to face
@@ -81,26 +74,20 @@ class TownScene extends ThirdPersonScene
   end sub
 
   override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
-    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    m.loadKnightAtlas(loader)
+    ' freed when the scene ends, so the townsfolk don't stay in memory through the graveyard
     for each kind in m.people
-      loader.loadSpriteAtlas(kind.atlas, `pkg:/sprites/${kind.atlas}.json`)
+      m.loadSceneAtlas(loader, kind.atlas)
     end for
-    loader.loadSpriteAtlas(m.pigType.atlas, `pkg:/sprites/${m.pigType.atlas}.json`)
-    for each paths in [m.sharedBitmapPaths, m.bitmapPaths, Dressing.treeBitmapPaths()]
-      for each name in paths
-        if m.game.Bitmaps[name] = invalid
-          loader.loadBitmap(name, paths[name])
-        end if
-      end for
-    end for
-    for each name in m.modelPaths
-      loader.load3dModel(name, m.modelPaths[name])
-    end for
+    m.loadSceneAtlas(loader, m.pigType.atlas)
+    m.loadSceneBitmaps(loader, m.sharedBitmapPaths, true)
+    m.loadSceneBitmaps(loader, m.bitmapPaths)
+    m.loadSceneBitmaps(loader, Dressing.treeBitmapPaths())
+    m.loadSceneModels(loader, m.modelPaths)
   end sub
 
   override sub onCreate(args as roAssociativeArray)
     m.readCommonArgs(args)
-    m.leaving = false
     ' Off: rebuilding the occlusion map costs about what it saves here, as the town's open
     ' streets hide little. `occlusion=1` turns it on.
     m.occlusionWas = m.game.canvas.renderer.occlusionCullingEnabled
@@ -117,7 +104,7 @@ class TownScene extends ThirdPersonScene
     m.addDrawable("Ground", ground)
     skyBmp = m.game.getBitmap("nightSky")
     m.addDrawable("Sky", new BGE.DrawableSkybox(m, CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())))
-    m.lights = Night.addLights(m.game)
+    m.addNightLights()
 
     solids = new BGE.SolidWorld()
     size = World.metres(TownMap.CELL_METRES)
@@ -146,42 +133,28 @@ class TownScene extends ThirdPersonScene
     end for
 
     gate = m.layout.gate
-    heading = 0
-    if args.from = "keep" and invalid <> m.keepDoor
+    heading = 0.0
+    at = m.parseAt(args)
+    if invalid <> at
+      ' Measuring: starts in another cell
+      spot = TownMap.cellCenter(m.layout, at.col, at.row)
+      heading = at.heading
+    else if args.from = "keep" and invalid <> m.keepDoor
       ' Out of the keep: a few metres from its door, facing away from it
       spot = BGE.Math.VectorOps.add(m.keepDoor, BGE.Math.VectorOps.scale(m.keepOut, World.metres(2.5)))
       heading = BGE.Math.headingOf(m.keepOut)
     else if args.from = "graveyard"
       ' Back from the graveyard: just inside the gate, facing into town
       spot = TownMap.cellCenter(m.layout, gate.col + (gate.cols - 1) / 2, gate.row - 2)
-    else if args.at <> invalid
-      ' Measuring: `at=<col>,<row>[,<heading in degrees>]` starts in another cell
-      colRow = args.at.split(",")
-      spot = TownMap.cellCenter(m.layout, colRow[0].toInt(), colRow[1].toInt())
-      if colRow.count() > 2
-        heading = BGE.Math.DegreesToRadians(colRow[2].toFloat())
-      end if
     else
       spot = TownMap.cellCenter(m.layout, startCell.col, startCell.row)
     end if
-    m.startX = spot.x
-    m.startZ = spot.z
-    m.addKnight(m.startX, m.startZ, heading)
+    m.addKnight(spot.x, spot.z, heading)
     ' Short, its end hidden by the fog: every building in view costs a lot to redraw while the
     ' camera moves. Buildings and the town wall stay on the skyline in the fog colour past it.
-    ' `draw=<metres>` overrides it, for measuring.
-    drawMetres = 33
-    if args.draw <> invalid and args.draw.toFloat() > 0
-      drawMetres = args.draw.toFloat()
-    end if
-    m.setUpCamera(World.metres(drawMetres), 0.5, 0)
-    ' `fog=0` turns the fog off
-    if (args.fog ?? "") <> "0"
-      m.useTownFog(args)
-    end if
-
-    m.walls = new SolidTracker(solids)
-    m.walls.track(m.knight)
+    m.setUpCamera(m.drawDistance(args, 33), 0.5, 0)
+    m.useTownFog(args)
+    m.useSolids(solids)
   end sub
 
   ' The wall round the town: a stone wall along the inside of each side (split round the gate),
@@ -281,8 +254,6 @@ class TownScene extends ThirdPersonScene
       end for
     end if
   end sub
-
-  ' A torch on a bracket fixed to a wall at x, z, facing out along `turn` (+z at 0)
 
   ' Straight runs of `f`, as in the graveyard: a picket fence along each, and a thin solid
   private sub addFences(solids as BGE.SolidWorld)
@@ -415,27 +386,12 @@ class TownScene extends ThirdPersonScene
   end sub
 
   override sub onDestroy()
+    super.onDestroy()
     m.game.canvas.renderer.occlusionCullingEnabled = m.occlusionWas
-    m.clearFog()
-    for each light in m.lights
-      m.game.removeLight(light)
-    end for
-    m.lights = []
-    for each paths in [m.bitmapPaths, Dressing.treeBitmapPaths()]
-      for each name in paths
-        m.game.unloadBitmap(name)
-      end for
-    end for
-    for each name in m.modelPaths
-      m.game.unload3dModel(name)
-    end for
   end sub
 
   override sub onUpdate(dt as float)
-    m.director.viewHeading = m.cameraRig.heading
-    m.hud.update(dt, m.knight)
-    m.director.update(dt)
-    if m.updateTalk() or m.leaving
+    if m.beginUpdate(dt)
       return
     end if
     if TownMap.isInGroup(m.layout, m.layout.gate, m.knight.position.x, m.knight.position.z)
@@ -444,10 +400,6 @@ class TownScene extends ThirdPersonScene
       ' Walked up to the keep's door: in
       m.leaving = m.game.changeSceneWithFade("InteriorScene", {place: "keep"})
     end if
-  end sub
-
-  protected override sub afterBodiesMoved(dt as float)
-    m.walls.resolve()
   end sub
 
 end class

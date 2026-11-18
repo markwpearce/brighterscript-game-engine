@@ -1,6 +1,5 @@
 import "../World.bs"
 import "../Dressing.bs"
-import "../SolidTracker.bs"
 import "../Entities/BoxProp.bs"
 import "../Entities/Torch.bs"
 import "../Entities/Townsfolk.bs"
@@ -17,14 +16,9 @@ class InteriorScene extends ThirdPersonScene
 
   ' World units per floor texel
   floorTexelScale as float = 2
-  ' How far up the camera may tilt (radians), so it stays below the ceiling it doesn't have
-  maxCameraTilt as float = 0.45
-  walls as SolidTracker
 
   private place as InteriorPlace
   private layout as InteriorLayout
-  private lights as BGE.Light[] = []
-  private leaving as boolean = false
   private bitmapPaths as roAssociativeArray = {
     cryptFloor: "pkg:/sprites/crypt_floor.webp",
     cryptWall: "pkg:/sprites/crypt_wall.webp"
@@ -43,23 +37,16 @@ class InteriorScene extends ThirdPersonScene
 
   override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
     m.place = Interiors.get(args.place ?? "keep")
-    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    m.loadKnightAtlas(loader)
     for each kind in m.peopleHere()
-      loader.loadSpriteAtlas(kind.atlas, `pkg:/sprites/${kind.atlas}.json`)
+      m.loadSceneAtlas(loader, kind.atlas)
     end for
-    for each name in m.bitmapPaths
-      if m.game.Bitmaps[name] = invalid
-        loader.loadBitmap(name, m.bitmapPaths[name])
-      end if
-    end for
-    for each name in m.modelPaths
-      loader.load3dModel(name, m.modelPaths[name])
-    end for
+    m.loadSceneBitmaps(loader, m.bitmapPaths)
+    m.loadSceneModels(loader, m.modelPaths)
   end sub
 
   override sub onCreate(args as roAssociativeArray)
     m.readCommonArgs(args)
-    m.leaving = false
     m.game.setBackgroundColor(&h000000FF)
     m.layout = InteriorMap.parse(m.place.layout)
 
@@ -71,9 +58,7 @@ class InteriorScene extends ThirdPersonScene
     floor.isShaded = true
     m.addDrawable("Floor", floor)
 
-    ambient = new BGE.AmbientLight(m.place.ambientColor, m.place.ambientIntensity)
-    m.game.addLight(ambient)
-    m.lights = [ambient]
+    m.addSceneLight(new BGE.AmbientLight(m.place.ambientColor, m.place.ambientIntensity))
 
     solids = InteriorMap.solidWorld(m.layout)
     m.addWalls()
@@ -86,23 +71,17 @@ class InteriorScene extends ThirdPersonScene
     door = m.layout.exits[0]
     inside = InteriorMap.cellCenter(m.layout, door.col + (m.layout.exits.Count() - 1) / 2, door.row - 1)
     heading = 0.0
-    if args.at <> invalid
-      ' Measuring: `at=<col>,<row>[,<heading in degrees>]` starts in another cell
-      colRow = args.at.split(",")
-      inside = InteriorMap.cellCenter(m.layout, colRow[0].toInt(), colRow[1].toInt())
-      if colRow.count() > 2
-        heading = BGE.Math.DegreesToRadians(colRow[2].toFloat())
-      end if
+    at = m.parseAt(args)
+    if invalid <> at
+      ' Measuring: starts in another cell
+      inside = InteriorMap.cellCenter(m.layout, at.col, at.row)
+      heading = at.heading
     end if
     m.addKnight(inside.x, inside.z, heading)
-    m.setUpCamera(World.metres(30), 0.5, m.maxCameraTilt)
-    ' Fading walls fade to black, as in the crypt; nothing is drawn past the draw distance
-    camera = m.game.canvas.renderer.camera as BGE.Camera3d
-    camera.fog.enabled = true
-    camera.fog.color = &h000000
-    camera.fog.silhouetteReach = 1
-    m.walls = new SolidTracker(solids)
-    m.walls.track(m.knight)
+    ' Long enough to see across the keep's hall from its door
+    m.setUpCamera(m.drawDistance(args, 30), 0.5, m.wallTopCameraTilt)
+    m.useDarkFog()
+    m.useSolids(solids)
   end sub
 
   ' Every wall from the grid, as one drawable: the crypt's stone, one 2 m tile to a cell
@@ -241,23 +220,6 @@ class InteriorScene extends ThirdPersonScene
     return person
   end function
 
-  override sub onDestroy()
-    m.clearFog()
-    for each light in m.lights
-      m.game.removeLight(light)
-    end for
-    m.lights = []
-    for each name in m.bitmapPaths
-      m.game.unloadBitmap(name)
-    end for
-    for each name in m.modelPaths
-      m.game.unload3dModel(name)
-    end for
-    for each kind in m.peopleHere()
-      m.game.unloadSpriteAtlas(kind.atlas)
-    end for
-  end sub
-
   ' The people standing in this place's layout (`L` the lord, `P` the priest)
   private function peopleHere() as TownsfolkType[]
     people = [] as TownsfolkType[]
@@ -278,10 +240,7 @@ class InteriorScene extends ThirdPersonScene
   end function
 
   override sub onUpdate(dt as float)
-    m.director.viewHeading = m.cameraRig.heading
-    m.hud.update(dt, m.knight)
-    m.director.update(dt)
-    if m.updateTalk() or m.leaving
+    if m.beginUpdate(dt)
       return
     end if
     here = InteriorMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
@@ -297,9 +256,5 @@ class InteriorScene extends ThirdPersonScene
   protected override function makeCameraBoom(args as roAssociativeArray) as BGE.CameraBoom
     return new InteriorCameraBoom(m.game, m.layout, args)
   end function
-
-  protected override sub afterBodiesMoved(dt as float)
-    m.walls.resolve()
-  end sub
 
 end class
