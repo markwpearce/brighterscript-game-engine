@@ -300,6 +300,16 @@ class Enemy extends Fighter
     distance = m.distanceTo(player)
     toPlayer = m.directionTo(player)
 
+    ' Backing off comes first: losing sight round a corner shouldn't cut the breather short
+    if m.state = EnemyState.retreat
+      if m.stateSeconds < m.retreatDuration
+        m.turnToward(player, dt)
+        m.moveBy(toPlayer, -m.type.speed * 0.6 * dt)
+        return
+      end if
+      m.setState(EnemyState.approach, "run")
+    end if
+
     way = m.wayRound(player, dt)
     if invalid <> way
       ' A wall between them: follow the path, facing where it's going
@@ -310,14 +320,6 @@ class Enemy extends Fighter
       return
     end if
     m.turnToward(player, dt)
-
-    if m.state = EnemyState.retreat
-      if m.stateSeconds < m.retreatDuration
-        m.moveBy(toPlayer, -m.type.speed * 0.6 * dt)
-        return
-      end if
-      m.setState(EnemyState.approach, "run")
-    end if
 
     if not m.director.mayStartAttack(m)
       ' Someone else's turn: circle at a distance, and flank afresh next turn
@@ -391,7 +393,7 @@ class Enemy extends Fighter
       end if
     end if
     if m.state = EnemyState.strike and m.stateSeconds >= attack.strikeSeconds
-      if not m.comboUsed and Rnd(0) < m.comboChance()
+      if not m.comboUsed and invalid <> player and player.isAlive() and Rnd(0) < m.comboChance()
         ' Straight into a second, quicker swing: dodging the first isn't the end of it
         m.comboUsed = true
         m.windupDuration = attack.windupSeconds / 2
@@ -471,9 +473,24 @@ class Enemy extends Fighter
     m.sightSeconds -= dt
     if m.sightSeconds <= 0
       m.sightSeconds = 0.25
-      m.seesPlayer = m.nav.hasLineOfSight(m.position.x, m.position.z, other.position.x, other.position.z)
+      from = m.openPointNear(m.position.x, m.position.z)
+      target = m.openPointNear(other.position.x, other.position.z)
+      m.seesPlayer = m.nav.hasLineOfSight(from.x, from.y, target.x, target.y)
     end if
     return m.seesPlayer
+  end function
+
+  ' The grid's walls are grown by the biggest body, so someone hugging a wall stands in a blocked
+  ' cell - and hasLineOfSight is always false from one. Moves such a point to the nearest open cell.
+  private function openPointNear(x as float, z as float) as BGE.NavPoint
+    if m.nav.isWalkable(x, z)
+      return {x: x, y: z}
+    end if
+    cell = m.nav.findNearestOpenCell(x, z, 2)
+    if invalid = cell
+      return {x: x, y: z}
+    end if
+    return m.nav.cellCenter(cell.col, cell.row)
   end function
 
   ' With a wall between it and `player`, the unit direction along a path round it; invalid when
@@ -481,10 +498,13 @@ class Enemy extends Fighter
   private function wayRound(player as Fighter, dt as float) as dynamic
     if invalid = m.nav or m.canSee(player, dt)
       m.path = []
+      ' Path at once when it next loses sight
+      m.repathSeconds = 0
       return invalid
     end if
     m.repathSeconds -= dt
-    if m.repathSeconds <= 0 or m.pathIndex >= m.path.Count()
+    ' Only on the timer: an empty or used-up path mustn't search again every frame
+    if m.repathSeconds <= 0
       m.repathSeconds = 0.5
       m.path = m.nav.findPath(m.position.x, m.position.z, player.position.x, player.position.z)
       m.pathIndex = 1
