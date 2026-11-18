@@ -653,8 +653,13 @@ separate `Renderer` for the game canvas and the UI canvas). It does three things
 
 1. **`updateSceneObjects()`** - recomputes world positions and camera-distance for every registered
    `SceneObject` (see "Per-object update", below).
-2. **Sort by depth** - `m.sceneObjects.sortBy("negDistanceFromCamera")`, so farther objects draw
-   first and nearer objects draw over them (simple painter's algorithm, no z-buffer).
+2. **Sort by depth** - by `negSortDepth` (a stable sort), so farther objects draw first and nearer
+   objects draw over them (simple painter's algorithm, no z-buffer). That's `negDistanceFromCamera`,
+   the depth along the view, unless `Camera.sortsByGroundDistance` is on: then it's the distance
+   ahead across the ground, ignoring height. Turn that on for a camera that tilts down at sprites
+   standing among tall props (a chase camera): along a tilted view a higher point counts as nearer,
+   so a tall prop's centre sorts in front of a sprite standing nearer than it. Overlap clusters
+   (`computeOverlapClusters`) still order their primitives by view depth.
 3. **Draw in two passes**: every `SceneObjectPlane` first, then every other enabled `SceneObject`
    whose `negDistanceFromCamera < 0` (i.e. in front of the camera). Planes are drawn first because
    they're meant to be a ground/floor - drawing them before anything else means normal
