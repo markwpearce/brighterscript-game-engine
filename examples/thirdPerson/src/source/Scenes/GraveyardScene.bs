@@ -1,6 +1,5 @@
 import "../World.bs"
 import "../Night.bs"
-import "../SolidTracker.bs"
 import "../Entities/Enemy.bs"
 import "../Entities/EnemyTypes.bs"
 import "../Entities/Pillar.bs"
@@ -9,6 +8,7 @@ import "../Entities/PropModel.bs"
 import "../Entities/Torch.bs"
 import "../Dressing.bs"
 import "../Graveyard/GraveyardMap.bs"
+import "../Town/TownMap.bs"
 import "ThirdPersonScene.bs"
 
 ' A building GraveyardScene places on a group of cells: its size in metres, and how far its .obj's
@@ -20,6 +20,8 @@ interface GraveyardBuilding extends roAssociativeArray
   depth as float
   ' The model's base runs from -depth/2 + centerZ to depth/2 + centerZ
   centerZ as float
+  ' Whether the camera boom pulls in front of it (default true): each blocker costs a ray test
+  optional blocksCamera as boolean
 end interface
 
 ' A fenced churchyard at night above the crypt, laid out by GraveyardMap: graves, trees, a chapel,
@@ -27,40 +29,31 @@ end interface
 ' among the graves until the knight comes near. The gap in the fence leads back to the town.
 class GraveyardScene extends ThirdPersonScene
 
-  respawnSeconds as float = 3
   ' World units per grass texel, as the field
   groundTexelScale as float = 2
   ' Skeletons wake when the knight is this close
   wakeDistance as float = World.metres(10)
 
-  walls as SolidTracker
-
   private layout as GraveyardLayout
-  private lights as BGE.Light[] = []
   private skeletonType as EnemyType = EnemyTypes.skeleton()
   private skeletonSpots as GraveyardCell[] = []
   ' The way in from the town (`@`)
   private gateCell as GraveyardCell
-  ' Where the knight started, and respawns
-  private startX as float = 0
-  private startZ as float = 0
   ' The middle of the chapel's doorway on its front wall (it faces +z)
   private chapelDoor as BGE.Math.Vector
   private showSkeletons as boolean = true
-  private deadSeconds as float = 0
-  private leaving as boolean = false
 
-  ' Bitmaps the field uses too, kept when the scene ends
+  ' Bitmaps other scenes use too (the field's grass, the town's props), kept when the scene ends
   private sharedBitmapPaths as roAssociativeArray = {
     grass: "pkg:/sprites/grass.webp",
-    nightSky: "pkg:/sprites/night_sky.webp"
+    nightSky: "pkg:/sprites/night_sky.webp",
+    propsAtlas: "pkg:/models/props/props_atlas.png"
   }
   ' Bitmaps only this scene uses, freed when it ends
   private bitmapPaths as roAssociativeArray = {
     graveSlab: "pkg:/models/props/grave_slab.png",
     graveCross: "pkg:/models/props/grave_cross.png",
     graveBroken: "pkg:/models/props/grave_broken.png",
-    propsAtlas: "pkg:/models/props/props_atlas.png",
     ' white, clear at the top and bottom: the fog backdrop's soft edges
     fog: "pkg:/sprites/fog.webp"
   }
@@ -79,24 +72,16 @@ class GraveyardScene extends ThirdPersonScene
   end sub
 
   override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
-    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
-    loader.loadSpriteAtlas(m.skeletonType.atlas, `pkg:/sprites/${m.skeletonType.atlas}.json`)
-    for each paths in [m.sharedBitmapPaths, m.bitmapPaths, Dressing.treeBitmapPaths()]
-      for each name in paths
-        if m.game.Bitmaps[name] = invalid
-          loader.loadBitmap(name, paths[name])
-        end if
-      end for
-    end for
-    for each name in m.modelPaths
-      loader.load3dModel(name, m.modelPaths[name])
-    end for
+    m.loadKnightAtlas(loader)
+    m.loadSceneAtlas(loader, m.skeletonType.atlas)
+    m.loadSceneBitmaps(loader, m.sharedBitmapPaths, true)
+    m.loadSceneBitmaps(loader, m.bitmapPaths)
+    m.loadSceneBitmaps(loader, Dressing.treeBitmapPaths())
+    m.loadSceneModels(loader, m.modelPaths)
   end sub
 
   override sub onCreate(args as roAssociativeArray)
     m.readCommonArgs(args)
-    m.leaving = false
-    m.deadSeconds = 0
     m.skeletonSpots = []
     ' The sky texture's zenith, for anything past its top
     m.game.setBackgroundColor(&h080E28FF)
@@ -111,7 +96,9 @@ class GraveyardScene extends ThirdPersonScene
     m.addDrawable("Ground", ground)
     skyBmp = m.game.getBitmap("nightSky")
     m.addDrawable("Sky", new BGE.DrawableSkybox(m, CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())))
-    m.lights = Night.addLights(m.game)
+    for each light in Night.addLights(m.game)
+      m.lights.push(light)
+    end for
 
     solids = new BGE.SolidWorld()
     size = World.metres(GraveyardMap.CELL_METRES)
@@ -122,7 +109,13 @@ class GraveyardScene extends ThirdPersonScene
       m.addCellContents(cell, solids)
     end for
 
-    if args.from = "chapel" and invalid <> m.chapelDoor
+    at = m.parseAt(args)
+    heading = 0.0
+    if invalid <> at
+      ' Measuring: starts in another cell
+      spot = GraveyardMap.cellCenter(m.layout, at.col, at.row)
+      heading = at.heading
+    else if args.from = "chapel" and invalid <> m.chapelDoor
       ' Out of the chapel: a few metres from its door, facing away from it
       spot = BGE.Math.VectorOps.add(m.chapelDoor, BGE.Math.VectorOps.create(0, 0, World.metres(2.5)))
       heading = BGE.Math.PI
@@ -132,28 +125,16 @@ class GraveyardScene extends ThirdPersonScene
       doorstep = m.layout.groups.D as GraveyardGroup
       spot = GraveyardMap.cellCenter(m.layout, doorstep.col + (doorstep.cols - 1) / 2, doorstep.row + doorstep.rows + 2)
       heading = BGE.Math.PI
-    else if args.from = "town" or args.at = invalid
+    else
       ' Through the gap in the fence from the town, or a fresh start: by the gate, facing in
       spot = GraveyardMap.cellCenter(m.layout, m.gateCell.col, m.gateCell.row)
-      heading = 0
-    else
-      ' Measuring: `at=<col>,<row>[,<heading in degrees>]` starts in another cell
-      colRow = args.at.split(",")
-      spot = GraveyardMap.cellCenter(m.layout, colRow[0].toInt(), colRow[1].toInt())
-      heading = 0
-      if colRow.count() > 2
-        heading = BGE.Math.DegreesToRadians(colRow[2].toFloat())
-      end if
     end if
-    m.startX = spot.x
-    m.startZ = spot.z
-    m.addKnight(m.startX, m.startZ, heading)
-    fadeFraction = 0.5
-    m.setUpCamera(World.metres(32), fadeFraction, 0)
+    m.addKnight(spot.x, spot.z, heading)
+    ' Short like the town's, its end hidden by the same fog: the chapel and trees cost a lot to
+    ' redraw while the camera moves
+    m.setUpCamera(m.drawDistance(args, 32), 0.5, 0)
     m.useTownFog(args)
-
-    m.walls = new SolidTracker(solids)
-    m.walls.track(m.knight)
+    m.useSolids(solids)
     ' Measuring: `enemies=0` leaves the skeletons out
     m.showSkeletons = args.enemies <> "0"
     m.addSkeletons()
@@ -174,7 +155,8 @@ class GraveyardScene extends ThirdPersonScene
       spot = GraveyardMap.cellCenter(m.layout, col, gate.row)
       post = new Pillar(m.game)
       width = World.metres(0.5)
-      m.game.addEntity(post, {x: spot.x, z: spot.z, width: width, height: World.metres(1.6)})
+      ' Static rectangles, like the lantern posts: too small to need blocking the camera
+      m.game.addEntity(post, {x: spot.x, z: spot.z, width: width, height: World.metres(1.6), style: "rect", blocksCamera: false})
       solids.addSolid(spot.x - width / 2, spot.z - width / 2, width, width)
     end for
   end sub
@@ -221,7 +203,8 @@ class GraveyardScene extends ThirdPersonScene
       height: World.metres(building.height),
       depth: depth,
       shiftZ: -World.metres(building.centerZ),
-      castsFog: true
+      castsFog: true,
+      blocksCamera: building.blocksCamera ?? true
     })
     solids.addSolid(center.x - width / 2, center.z - depth / 2, width, depth)
   end sub
@@ -231,20 +214,21 @@ class GraveyardScene extends ThirdPersonScene
     center = GraveyardMap.cellCenter(m.layout, cell.col, cell.row)
     jitter = World.metres(GraveyardMap.CELL_METRES) * 0.3
     if cell.kind = "g"
-      x = center.x + (m.cellRandom(cell, 1) - 0.5) * jitter
-      z = center.z + (m.cellRandom(cell, 2) - 0.5) * jitter
-      bitmap = m.graveBitmaps[Int(m.cellRandom(cell, 3) * m.graveBitmaps.Count())]
+      x = center.x + (TownMap.cellRandom(cell.col, cell.row, 1) - 0.5) * jitter
+      z = center.z + (TownMap.cellRandom(cell.col, cell.row, 2) - 0.5) * jitter
+      bitmap = m.graveBitmaps[Int(TownMap.cellRandom(cell.col, cell.row, 3) * m.graveBitmaps.Count())]
       grave = new Prop(m.game)
       ' The 32 x 48 px stones are drawn at 0.6 x 0.9 m
       m.game.addEntity(grave, {x: x, z: z, bitmap: bitmap, scale: World.metres(0.9) / 48})
       half = World.metres(0.3)
       solids.addSolid(x - half, z - half, half * 2, half * 2)
     else if cell.kind = "T"
-      x = center.x + (m.cellRandom(cell, 1) - 0.5) * jitter
-      z = center.z + (m.cellRandom(cell, 2) - 0.5) * jitter
-      Dressing.addTree(m.game, x, z, m.cellRandom(cell, 3), m.cellRandom(cell, 4), solids)
+      x = center.x + (TownMap.cellRandom(cell.col, cell.row, 1) - 0.5) * jitter
+      z = center.z + (TownMap.cellRandom(cell.col, cell.row, 2) - 0.5) * jitter
+      Dressing.addTree(m.game, x, z, TownMap.cellRandom(cell.col, cell.row, 3), TownMap.cellRandom(cell.col, cell.row, 4), solids)
     else if cell.kind = "W"
-      m.addBuilding(center, {model: "well", width: 1.8, height: 2.4, depth: 1.8, centerZ: 0} as GraveyardBuilding, solids)
+      ' Too low to need blocking the camera, as in the town
+      m.addBuilding(center, {model: "well", width: 1.8, height: 2.4, depth: 1.8, centerZ: 0, blocksCamera: false} as GraveyardBuilding, solids)
     else if cell.kind = "s"
       Dressing.addLanternPost(m.game, center.x, center.z, FlameKind.spirit, solids)
     else if cell.kind = "S"
@@ -253,12 +237,6 @@ class GraveyardScene extends ThirdPersonScene
       m.gateCell = cell
     end if
   end sub
-
-  ' A number in [0, 1) that's the same for a cell every time, different for each `salt`
-  private function cellRandom(cell as GraveyardCell, salt as integer) as float
-    value = Sin(cell.col * 12.9898 + cell.row * 78.233 + salt * 37.719) * 43758.5453
-    return value - Int(value)
-  end function
 
   ' A skeleton on each `S`, facing the gate, asleep until the knight comes near
   private sub addSkeletons()
@@ -276,44 +254,17 @@ class GraveyardScene extends ThirdPersonScene
         heading: BGE.Math.PI,
         wakeDistance: m.wakeDistance
       })
-      m.walls.track(skeleton)
+      m.trackBody(skeleton)
     end for
   end sub
 
-  override sub onDestroy()
-    m.clearFog()
-    for each light in m.lights
-      m.game.removeLight(light)
-    end for
-    m.lights = []
-    for each paths in [m.bitmapPaths, Dressing.treeBitmapPaths()]
-      for each name in paths
-        m.game.unloadBitmap(name)
-      end for
-    end for
-    for each name in m.modelPaths
-      m.game.unload3dModel(name)
-    end for
+  ' Start over: every skeleton back on its feet and asleep
+  protected override sub onRespawn()
+    m.addSkeletons()
   end sub
 
   override sub onUpdate(dt as float)
-    m.director.viewHeading = m.cameraRig.heading
-    m.hud.update(dt, m.knight)
-    m.director.update(dt)
-    if not m.knight.isAlive()
-      ' Start over: the knight back at the start, every skeleton back on its feet and asleep
-      m.deadSeconds += dt
-      if m.deadSeconds >= m.respawnSeconds
-        m.deadSeconds = 0
-        m.director.clearEnemies()
-        m.walls.clear()
-        m.knight.respawn(m.startX, m.startZ)
-        m.walls.track(m.knight)
-        m.addSkeletons()
-      end if
-      return
-    end if
-    if m.leaving
+    if m.beginUpdate(dt)
       return
     end if
     x = m.knight.position.x
@@ -326,10 +277,6 @@ class GraveyardScene extends ThirdPersonScene
       ' Walked up to the chapel's door: in
       m.leaving = m.game.changeSceneWithFade("InteriorScene", {place: "chapel"})
     end if
-  end sub
-
-  protected override sub afterBodiesMoved(dt as float)
-    m.walls.resolve()
   end sub
 
 end class

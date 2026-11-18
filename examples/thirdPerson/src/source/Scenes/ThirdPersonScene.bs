@@ -4,16 +4,48 @@ import "../CombatDirector.bs"
 import "../Hud.bs"
 import "../PerfLog.bs"
 import "../Conversation.bs"
+import "../SolidTracker.bs"
 
-' What every playable scene shares: the knight, the chase camera, the HUD, the control hints and
-' the debug toggle. Subclasses build their world in onCreate() and call addKnight() and
-' setUpCamera().
+' The `at=<col>,<row>[,<heading in degrees>]` deep link (see ThirdPersonScene.parseAt())
+interface AtCell
+  col as integer
+  row as integer
+  ' Radians, when given
+  heading as float
+  hasHeading as boolean
+end interface
+
+' What every playable scene shares: the knight, the chase camera, the HUD, the control hints,
+' the debug toggle, respawning, the walls bodies slide along, and the visit's lights and assets.
+' Subclasses load in onLoad() with loadSceneBitmaps()/loadSceneAtlas()/loadSceneModels(), build
+' their world in onCreate() and call addKnight() and setUpCamera(), start onUpdate() with
+' beginUpdate(), and call super.onDestroy().
 class ThirdPersonScene extends BGE.GameScene
 
   knight as Knight
   cameraRig as BGE.OrbitCamera
   director as CombatDirector = new CombatDirector()
   hud as Hud = new Hud()
+  ' Bodies slide along these (useSolids()); invalid in a scene with no walls
+  walls as SolidTracker = invalid
+  ' Seconds after a death before the knight is back where he started
+  respawnSeconds as float = 3
+  ' How far up the camera may tilt (radians) under the 4 m walls of the crypt and the interiors,
+  ' so it stays below their tops
+  wallTopCameraTilt as float = 0.45
+
+  ' Set once the scene has asked to change: nothing more to do this visit
+  protected leaving as boolean = false
+  ' Where addKnight() put him, and where he respawns
+  protected startX as float = 0
+  protected startZ as float = 0
+  protected deadSeconds as float = 0
+  ' This visit's lights, removed by onDestroy()
+  protected lights as BGE.Light[] = []
+  ' What this visit loaded, unloaded by onDestroy()
+  protected sceneBitmaps as string[] = []
+  protected sceneAtlases as string[] = []
+  protected sceneModels as string[] = []
 
   ' People the knight can talk to (addTalker()), the one in reach, and the conversation if one's
   ' going
@@ -73,18 +105,167 @@ class ThirdPersonScene extends BGE.GameScene
     end if
   end sub
 
-  ' The knight (heading in radians, 0 faces -z), and the particle bursts hits spray. Call before
-  ' adding enemies: it starts a fresh CombatDirector, since scenes are reused and the last
-  ' visit's enemies are gone. Forgets the last visit's talkers too, keeping any added this visit.
-  protected sub addKnight(x as float, z as float, heading as float)
-    m.director = new CombatDirector()
-    for i = m.talkers.Count() - 1 to 0 step -1
-      if not m.talkers[i].entity.isValid()
-        m.talkers.Delete(i)
+  ' The `at=<col>,<row>[,<heading in degrees>]` measuring deep link, or invalid. Where it's
+  ' given it wins over where a scene change would put the knight.
+  protected function parseAt(args as roAssociativeArray) as AtCell
+    if invalid = args.at
+      return invalid
+    end if
+    parts = args.at.split(",")
+    if parts.count() < 2
+      return invalid
+    end if
+    at = {col: parts[0].toInt(), row: parts[1].toInt(), heading: 0.0, hasHeading: parts.count() > 2} as AtCell
+    if at.hasHeading
+      at.heading = BGE.Math.DegreesToRadians(parts[2].toFloat())
+    end if
+    return at
+  end function
+
+  ' A scene's draw distance in world units: `draw=<metres>` (measuring) overrides `metres`
+  protected function drawDistance(args as roAssociativeArray, metres as float) as float
+    if args.draw <> invalid and args.draw.toFloat() > 0
+      metres = args.draw.toFloat()
+    end if
+    return World.metres(metres)
+  end function
+
+  ' Queues `paths` (name: path) that aren't loaded yet. Unless `shared`, they're this visit's and
+  ' onDestroy() frees them; shared ones (used by other scenes too) are kept.
+  protected sub loadSceneBitmaps(loader as BGE.AssetLoader, paths as roAssociativeArray, shared = false as boolean)
+    for each name in paths
+      if m.game.Bitmaps[name] = invalid
+        loader.loadBitmap(name, paths[name])
+      end if
+      if not shared
+        m.sceneBitmaps.push(name)
       end if
     end for
+  end sub
+
+  ' Queues pkg:/sprites/<name>.json for this visit; onDestroy() unloads it
+  protected sub loadSceneAtlas(loader as BGE.AssetLoader, name as string)
+    for each loaded in m.sceneAtlases
+      if loaded = name
+        return
+      end if
+    end for
+    m.sceneAtlases.push(name)
+    loader.loadSpriteAtlas(name, `pkg:/sprites/${name}.json`)
+  end sub
+
+  ' Queues `paths` (name: .obj path) for this visit; onDestroy() unloads them
+  protected sub loadSceneModels(loader as BGE.AssetLoader, paths as roAssociativeArray)
+    for each name in paths
+      loader.load3dModel(name, paths[name])
+      m.sceneModels.push(name)
+    end for
+  end sub
+
+  ' The knight's sprites, which every scene keeps
+  protected sub loadKnightAtlas(loader as BGE.AssetLoader)
+    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+  end sub
+
+  ' A light for this visit; onDestroy() removes it
+  protected sub addSceneLight(light as BGE.Light)
+    m.game.addLight(light)
+    m.lights.push(light)
+  end sub
+
+  ' Bodies slide along `solids` from now on, the knight's included (call after addKnight())
+  protected sub useSolids(solids as BGE.SolidWorld)
+    m.walls = new SolidTracker(solids)
+    m.walls.track(m.knight)
+  end sub
+
+  ' Keeps `entity` out of the walls, if the scene has any
+  protected sub trackBody(entity as Fighter)
+    if invalid <> m.walls
+      m.walls.track(entity)
+    end if
+  end sub
+
+  ' The end of a visit, even a change to this same scene (a new crypt level): the fog, lights,
+  ' talkers and this visit's assets go
+  override sub onDestroy()
+    m.clearFog()
+    ' held on to, the townsfolk would keep their sprites in memory after their atlases unload
+    m.talkers = []
     m.talkTarget = invalid
     m.conversation = invalid
+    for each light in m.lights
+      m.game.removeLight(light)
+    end for
+    m.lights = []
+    for each name in m.sceneBitmaps
+      m.game.unloadBitmap(name)
+    end for
+    for each name in m.sceneAtlases
+      m.game.unloadSpriteAtlas(name)
+    end for
+    for each name in m.sceneModels
+      m.game.unload3dModel(name)
+    end for
+    m.sceneBitmaps = []
+    m.sceneAtlases = []
+    m.sceneModels = []
+  end sub
+
+  ' The engine keeps a scene's own drawables when it changes to itself (#575), so a new crypt
+  ' level would keep the last one's floor and walls: drop them here
+  override sub onChangeScene(newScene as BGE.GameScene)
+    super.onChangeScene(newScene)
+    if newScene.name = m.name
+      for each drawableName in m.drawablesByName.Keys()
+        m.removeDrawable(drawableName)
+      end for
+    end if
+  end sub
+
+  ' Call first thing in onUpdate(). What every scene does each frame: the combat director, the
+  ' HUD, conversations and respawning. True when the rest of the scene's update should be
+  ' skipped: while he's dead or talking, or once the scene is leaving.
+  protected function beginUpdate(dt as float) as boolean
+    m.director.viewHeading = m.cameraRig.heading
+    m.hud.update(dt, m.knight)
+    m.director.update(dt)
+    if not m.knight.isAlive()
+      m.updateRespawn(dt)
+      return true
+    end if
+    return m.updateTalk() or m.leaving
+  end function
+
+  ' respawnSeconds after a death: no enemies, the knight back where he started, then onRespawn()
+  private sub updateRespawn(dt as float)
+    m.deadSeconds += dt
+    if m.deadSeconds < m.respawnSeconds
+      return
+    end if
+    m.deadSeconds = 0
+    m.director.clearEnemies()
+    if invalid <> m.walls
+      m.walls.clear()
+    end if
+    m.knight.respawn(m.startX, m.startZ)
+    m.trackBody(m.knight)
+    m.onRespawn()
+  end sub
+
+  ' After a respawn, e.g. to put the enemies back
+  protected sub onRespawn()
+  end sub
+
+  ' The knight (heading in radians, 0 faces -z), and the particle bursts hits spray. Call before
+  ' adding enemies: it starts a fresh CombatDirector, since scenes are reused and the last
+  ' visit's enemies are gone.
+  protected sub addKnight(x as float, z as float, heading as float)
+    m.startX = x
+    m.startZ = z
+    m.deadSeconds = 0
+    m.leaving = false
+    m.director = new CombatDirector()
     bursts = new BGE.ParticleBurstPool(m.game)
     m.game.addEntity(bursts)
     m.director.bursts = bursts
@@ -99,10 +280,9 @@ class ThirdPersonScene extends BGE.GameScene
     m.talkers.push({entity: entity, node: node, name: name} as Talker)
   end sub
 
-  ' Call first thing in onUpdate(), before the knight moves. Finds who's in reach, starts a
-  ' conversation on OK (instead of a swing), and runs one that's going. True while talking:
-  ' skip the rest of the scene's update then.
-  protected function updateTalk() as boolean
+  ' beginUpdate() calls this, before the knight moves. Finds who's in reach, starts a
+  ' conversation on OK (instead of a swing), and runs one that's going. True while talking.
+  private function updateTalk() as boolean
     controls = m.game.controls
     if invalid <> m.conversation
       if m.conversation.isActive()
@@ -171,7 +351,16 @@ class ThirdPersonScene extends BGE.GameScene
   ' see-through, and casters stay on the skyline past the draw distance. Its backdrop uses the
   ' scene's "fog" bitmap, when loaded. Measuring: `hull=0` gives the buildings box silhouettes
   ' instead of their outlines, `lead=<n>` sets Fog.silhouetteOpacityLead.
+  ' `fog=0` leaves it off, in both.
   protected sub useTownFog(args as roAssociativeArray)
+    ' kept for the whole run: walking through the gate doesn't carry launch args
+    globals = GetGlobalAA()
+    if args.fog <> invalid
+      globals.fogOff = args.fog = "0"
+    end if
+    if globals.fogOff = true
+      return
+    end if
     camera = m.game.canvas.renderer.camera as BGE.Camera3d
     camera.fog.enabled = true
     camera.fog.color = World.FOG_RGB
@@ -182,8 +371,6 @@ class ThirdPersonScene extends BGE.GameScene
     end if
     ' solid buildings: their fog makes up their faded opacity soon, so the sky never shows through
     camera.fog.silhouetteOpacityLead = 4
-    ' kept for the whole run: walking through the gate doesn't carry launch args
-    globals = GetGlobalAA()
     if args.hull <> invalid
       globals.fogHulls = args.hull <> "0"
     end if
@@ -198,8 +385,18 @@ class ThirdPersonScene extends BGE.GameScene
     end if
   end sub
 
+  ' Black fog for the walled places (crypt, interiors): fading walls fade to black rather than
+  ' showing the floor through them. Reach 1: nothing is drawn past the draw distance, where black
+  ' fog would only match the background.
+  protected sub useDarkFog()
+    camera = m.game.canvas.renderer.camera as BGE.Camera3d
+    camera.fog.enabled = true
+    camera.fog.color = &h000000
+    camera.fog.silhouetteReach = 1
+  end sub
+
   ' Puts a fresh, disabled fog on the camera, which all scenes share, so none inherits another's
-  ' settings. Call from onDestroy(): it also lets go of the region holding the fog bitmap.
+  ' settings. onDestroy() calls it: it also lets go of the region holding the fog bitmap.
   protected sub clearFog()
     camera = m.game.canvas.renderer.camera as BGE.Camera3d
     noFog = new BGE.Fog()
@@ -318,8 +515,11 @@ class ThirdPersonScene extends BGE.GameScene
     return m.orbitClock >= m.orbitStillSeconds
   end function
 
-  ' After bodies are pushed apart, before the camera moves
+  ' After bodies are pushed apart, before the camera moves: slides them back out of the walls
   protected sub afterBodiesMoved(dt as float)
+    if invalid <> m.walls
+      m.walls.resolve()
+    end if
   end sub
 
   ' The control hints, top right

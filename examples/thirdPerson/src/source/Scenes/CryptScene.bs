@@ -6,7 +6,6 @@ import "../Entities/Enemy.bs"
 import "../Entities/EnemyTypes.bs"
 import "../Crypt/CryptMap.bs"
 import "../Crypt/CryptLevels.bs"
-import "../SolidTracker.bs"
 import "../Crypt/CryptCameraBoom.bs"
 import "ThirdPersonScene.bs"
 
@@ -16,12 +15,8 @@ import "ThirdPersonScene.bs"
 ' Each level's `E` leads up (to the graveyard from the first) and its `D` down.
 class CryptScene extends ThirdPersonScene
 
-  respawnSeconds as float = 3
   ' World units per floor texel, as the field's grass
   floorTexelScale as float = 2
-  ' How far up the camera may tilt (radians), so it stays below the wall tops
-  maxCameraTilt as float = 0.45
-  walls as SolidTracker
   ' Skeletons wake when the knight is this close and in sight
   wakeDistance as float = World.metres(12)
   ' A boss wakes when he's this close: inside its hall
@@ -30,11 +25,6 @@ class CryptScene extends ThirdPersonScene
   level as integer = 1
 
   private layout as CryptLayout
-  ' Where the knight started, and respawns
-  private startCell as CryptCell
-  private lights as BGE.Light[] = []
-  private deadSeconds as float = 0
-  private leaving as boolean = false
   ' For the undead: paths round the walls, and whether they can see the knight
   private nav as BGE.NavGrid
   private levelInfo as CryptLevel
@@ -43,8 +33,6 @@ class CryptScene extends ThirdPersonScene
   ' Every cell an enemy starts on, boss included
   private enemySpots as CryptCell[] = []
   private boss as Enemy = invalid
-  ' Sprite atlases loaded for this level's enemies, unloaded on leaving
-  private enemyAtlases as string[] = []
   private showEnemies as boolean = true
   ' While the boss lives, a solid and a wall of spirit fire close the way down
   private sealSolidId as string = ""
@@ -73,26 +61,16 @@ class CryptScene extends ThirdPersonScene
     m.level = m.levelFrom(args)
     m.levelInfo = CryptLevels.get(m.level)
     m.enemyKinds = m.enemyKindsIn(m.levelInfo)
-    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
-    m.enemyAtlases = []
+    m.loadKnightAtlas(loader)
     for each key in m.enemyKinds
       kind = m.enemyKinds[key] as EnemyType
-      if not m.hasString(m.enemyAtlases, kind.atlas)
-        m.enemyAtlases.push(kind.atlas)
-        loader.loadSpriteAtlas(kind.atlas, `pkg:/sprites/${kind.atlas}.json`)
-      end if
+      m.loadSceneAtlas(loader, kind.atlas)
     end for
-    for each name in m.bitmapPaths
-      if m.game.Bitmaps[name] = invalid
-        loader.loadBitmap(name, m.bitmapPaths[name])
-      end if
-    end for
+    m.loadSceneBitmaps(loader, m.bitmapPaths)
   end sub
 
   override sub onCreate(args as roAssociativeArray)
     m.readCommonArgs(args)
-    m.leaving = false
-    m.deadSeconds = 0
     m.victorySeconds = 0
     m.titleSeconds = 4
     m.boss = invalid
@@ -112,9 +90,7 @@ class CryptScene extends ThirdPersonScene
     m.addDrawable("Floor", floor)
 
     ' Just enough cold light that unlit stone isn't pure black
-    ambient = new BGE.AmbientLight(m.levelInfo.ambientColor, m.levelInfo.ambientIntensity)
-    m.game.addLight(ambient)
-    m.lights = [ambient]
+    m.addSceneLight(new BGE.AmbientLight(m.levelInfo.ambientColor, m.levelInfo.ambientIntensity))
 
     m.addWalls()
     for each cell in m.layout.cells
@@ -135,25 +111,21 @@ class CryptScene extends ThirdPersonScene
     else
       heading = m.openHeading(start)
     end if
-    if args.at <> invalid
-      ' Measuring: `at=<col>,<row>` starts in another floor cell
-      colRow = args.at.split(",")
-      start = {col: colRow[0].toInt(), row: colRow[1].toInt(), kind: "."} as CryptCell
+    at = m.parseAt(args)
+    if invalid <> at
+      start = {col: at.col, row: at.row, kind: "."} as CryptCell
       heading = m.openHeading(start)
+      if at.hasHeading
+        heading = at.heading
+      end if
     end if
-    m.startCell = start
     startCenter = CryptMap.cellCenter(m.layout, start.col, start.row)
     m.addKnight(startCenter.x, startCenter.z, heading)
-    m.setUpCamera(World.metres(24), 0.5, m.maxCameraTilt)
-    ' Fading walls fade to black rather than showing the floor through them. Reach 1: nothing is
-    ' drawn past the draw distance, where black fog would only match the background.
-    camera = m.game.canvas.renderer.camera as BGE.Camera3d
-    camera.fog.enabled = true
-    camera.fog.color = &h000000
-    camera.fog.silhouetteReach = 1
+    ' Short: the maze's corridors turn every cell or two, so little past it would show
+    m.setUpCamera(m.drawDistance(args, 24), 0.5, m.wallTopCameraTilt)
+    m.useDarkFog()
     solids = CryptMap.solidWorld(m.layout)
-    m.walls = new SolidTracker(solids)
-    m.walls.track(m.knight)
+    m.useSolids(solids)
     ' Grown by the biggest body, so paths keep every body clear of the walls
     agentRadius = World.metres(0.4)
     for each key in m.enemyKinds
@@ -202,15 +174,6 @@ class CryptScene extends ThirdPersonScene
       end for
     end for
     return kinds
-  end function
-
-  private function hasString(items as string[], value as string) as boolean
-    for each item in items
-      if item = value
-        return true
-      end if
-    end for
-    return false
   end function
 
   ' The heading that walks out of a doorway cell into the maze
@@ -284,7 +247,7 @@ class CryptScene extends ThirdPersonScene
       wakeDistance: wakeDistance,
       nav: m.nav
     })
-    m.walls.track(foe)
+    m.trackBody(foe)
     return foe
   end function
 
@@ -399,41 +362,19 @@ class CryptScene extends ThirdPersonScene
   end function
 
   override sub onDestroy()
-    m.clearFog()
-    for each light in m.lights
-      m.game.removeLight(light)
-    end for
-    m.lights = []
-    for each name in m.bitmapPaths
-      m.game.unloadBitmap(name)
-    end for
-    for each atlas in m.enemyAtlases
-      m.game.unloadSpriteAtlas(atlas)
-    end for
-    m.enemyAtlases = []
+    super.onDestroy()
     m.sealFlames = []
   end sub
 
+  ' Start over: the undead back in their places and asleep
+  protected override sub onRespawn()
+    m.addUndead()
+  end sub
+
   override sub onUpdate(dt as float)
-    m.director.viewHeading = m.cameraRig.heading
-    m.hud.update(dt, m.knight)
-    m.director.update(dt)
+    skip = m.beginUpdate(dt)
     m.updateBoss(dt)
-    if not m.knight.isAlive()
-      ' Start over: the knight back at the start, the undead back in their places and asleep
-      m.deadSeconds += dt
-      if m.deadSeconds >= m.respawnSeconds
-        m.deadSeconds = 0
-        m.director.clearEnemies()
-        m.walls.clear()
-        start = CryptMap.cellCenter(m.layout, m.startCell.col, m.startCell.row)
-        m.knight.respawn(start.x, start.z)
-        m.walls.track(m.knight)
-        m.addUndead()
-      end if
-      return
-    end if
-    if m.leaving
+    if skip
       return
     end if
     here = CryptMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
@@ -501,9 +442,5 @@ class CryptScene extends ThirdPersonScene
   protected override function makeCameraBoom(args as roAssociativeArray) as BGE.CameraBoom
     return new CryptCameraBoom(m.game, m.layout, args)
   end function
-
-  protected override sub afterBodiesMoved(dt as float)
-    m.walls.resolve()
-  end sub
 
 end class
