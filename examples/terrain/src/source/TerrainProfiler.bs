@@ -37,6 +37,7 @@ class TerrainProfiler
   ' The path frame the camera is posed for, -1 before the first.
   private pathFrame = -1
   private stats as roAssociativeArray
+  private chapelImpostorCounts = {blit: 0, strips: 0, stripTotal: 0, stripMax: 0, redraw: 0, reasons: {}, stripFits: 0, stripResidualTotal: 0.0, stripAllowedTotal: 0.0}
 
   sub new(game as BGE.Game, profileStages = false as boolean, profileImpostor = false as boolean)
     m.game = game
@@ -90,6 +91,9 @@ class TerrainProfiler
     if m.profileStages
       m.addStageSamples(m.pathFrame, renderer)
     end if
+    if m.pathFrame < m.moveFrames and invalid <> m.getSegment(m.pathFrame)
+      m.countChapelImpostor()
+    end if
     if invalid <> m.impostorProbe and invalid <> m.getSegment(m.pathFrame)
       chapelEntity = m.game.getEntityByName("Chapel")
       if invalid <> chapelEntity
@@ -100,6 +104,68 @@ class TerrainProfiler
       end if
     end if
   end sub
+
+  ' What the chapel's impostor really did this moving frame (#556): a single blit, strips, or
+  ' a redraw (anything else).
+  private sub countChapelImpostor()
+    chapelEntity = m.game.getEntityByName("Chapel")
+    if invalid = chapelEntity
+      return
+    end if
+    sceneObjects = chapelEntity.getDrawable("chapel").getSceneObjects()
+    if sceneObjects.count() = 0
+      return
+    end if
+    sceneObj = sceneObjects[0] as BGE.SceneObjectModel
+    counts = m.chapelImpostorCounts
+    kind = sceneObj.getImpostorKindThisFrame()
+    if kind = "rotate"
+      counts.blit++
+    else if kind = "strips"
+      strips = sceneObj.getImpostorStripsThisFrame()
+      counts.strips++
+      counts.stripTotal += strips
+      counts.stripMax = BGE.Math.Max(counts.stripMax, strips)
+    else
+      counts.redraw++
+      miss = sceneObj.getImpostorMissThisFrame()
+      reason = miss.reason
+      if reason = ""
+        reason = "other"
+      end if
+      if invalid = counts.reasons[reason]
+        counts.reasons[reason] = 0
+      end if
+      counts.reasons[reason]++
+      if miss.stripResidual >= 0
+        counts.stripFits++
+        counts.stripResidualTotal += miss.stripResidual
+        counts.stripAllowedTotal += miss.stripAllowed
+      end if
+    end if
+  end sub
+
+  ' The chapel impostor's share of moving frames, for the config just run.
+  private function describeChapelImpostor() as string
+    counts = m.chapelImpostorCounts
+    frames = BGE.Math.Max(1, counts.blit + counts.strips + counts.redraw)
+    line = "chapel impostor: blit " + m.percentOf(counts.blit, frames) + " strips " + m.percentOf(counts.strips, frames)
+    if counts.strips > 0
+      line += " (avg " + (Int(10 * counts.stripTotal / counts.strips + 0.5) / 10).toStr() + " max " + counts.stripMax.toStr() + ")"
+    end if
+    line += " redraw " + m.percentOf(counts.redraw, frames) + " of " + frames.toStr() + " moving frames | why:"
+    for each reason in counts.reasons.Keys()
+      line += " " + reason + " " + counts.reasons[reason].toStr()
+    end for
+    if counts.stripFits > 0
+      line += " | missed strip fits: avg error " + (Int(10 * counts.stripResidualTotal / counts.stripFits + 0.5) / 10).toStr() + "px vs allowed " + (Int(10 * counts.stripAllowedTotal / counts.stripFits + 0.5) / 10).toStr() + "px"
+    end if
+    return line
+  end function
+
+  private function percentOf(part as integer, whole as integer) as string
+    return Int(100.0 * part / whole + 0.5).toStr() + "%"
+  end function
 
   ' Adds up each render stage's time (and count) over the segment, so averages are per frame.
   private sub addStageSamples(frame as integer, renderer as BGE.Renderer)
@@ -142,6 +208,7 @@ class TerrainProfiler
     renderer = m.game.canvas.renderer
     renderer.occlusionCullingEnabled = config.occlusion
     renderer.occluderDrawPolicy = config.policy
+    m.chapelImpostorCounts = {blit: 0, strips: 0, stripTotal: 0, stripMax: 0, redraw: 0, reasons: {}, stripFits: 0, stripResidualTotal: 0.0, stripAllowedTotal: 0.0}
     m.stats = {
       moving: {ms: [], drawCalls: [], occluded: [], occlusionMs: [], tests: [], stageMs: {}, stageCounts: {}, stageFrames: 0},
       still: {ms: [], drawCalls: [], occluded: [], occlusionMs: [], tests: [], stageMs: {}, stageCounts: {}, stageFrames: 0}
@@ -181,6 +248,7 @@ class TerrainProfiler
     line = m.configs[m.configIndex].name + ": moving " + m.describeSegment(moving) + " | still " + m.describeSegment(still)
     print "[terrain profile] " + line
     m.results.push(line)
+    print "[terrain profile] " + m.configs[m.configIndex].name + " " + m.describeChapelImpostor()
     if invalid <> m.impostorProbe
       for each probeLine in m.impostorProbe.describe()
         print "[terrain profile] impostor " + probeLine

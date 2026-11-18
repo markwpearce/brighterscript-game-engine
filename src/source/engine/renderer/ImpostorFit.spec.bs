@@ -89,6 +89,275 @@ namespace tests
       m.assertTrue(fit.residual < 20)
     end function
 
+    @describe("scaleTranslateAsRotateScale")
+
+    @it("maps points as the scale and offset fit does, with no rotation")
+    function _()
+      params = BGE.ImpostorFit.scaleTranslateAsRotateScale({scaleX: 1.5, scaleY: 0.8, offsetX: 20, offsetY: -10})
+      mapped = BGE.ImpostorFit.mapRotateScale(params, 100, 50)
+      m.assertTrue(Abs(mapped.x - 170) < 0.001, `x ${mapped.x}`)
+      m.assertTrue(Abs(mapped.y - 30) < 0.001, `y ${mapped.y}`)
+      m.assertEqual(params.rotation, 0.0)
+    end function
+
+    @describe("fitColumnsToEdges")
+
+    @it("is exact for two walls meeting at a crease turned in perspective")
+    function _()
+      ' edges at x 100, 200 (crease), 300; the crease grows, the left wall shrinks
+      fromX = [100.0, 100.0, 200.0, 200.0, 300.0, 300.0]
+      fromY = [100.0, 200.0, 80.0, 220.0, 100.0, 200.0]
+      warped = m.warpByEdges(fromX, fromY)
+      fit = BGE.ImpostorFit.fitColumnsToEdges(fromX, fromY, warped.x, warped.y)
+      m.assertNotInvalid(fit.params)
+      ' a point on the left wall, between the edges
+      fromInside = [150.0, 150.0]
+      fromInsideY = [100.0, 190.0]
+      inside = m.warpByEdges(fromInside, fromInsideY)
+      m.assertTrue(BGE.ImpostorFit.columnsResidual(fit.params, fromInside, fromInsideY, inside.x, inside.y) < 0.01)
+    end function
+
+    @it("orders the knots by captured x")
+    function _()
+      fromX = [300.0, 300.0, 100.0, 100.0]
+      fromY = [100.0, 200.0, 100.0, 200.0]
+      fit = BGE.ImpostorFit.fitColumnsToEdges(fromX, fromY, fromX, fromY)
+      m.assertEqual(fit.params.knotX[0], 100.0)
+      m.assertEqual(fit.params.knotX[1], 300.0)
+    end function
+
+    @it("refuses edges that have passed each other")
+    function _()
+      fromX = [100.0, 100.0, 300.0, 300.0]
+      fromY = [100.0, 200.0, 100.0, 200.0]
+      toX = [300.0, 300.0, 100.0, 100.0]
+      fit = BGE.ImpostorFit.fitColumnsToEdges(fromX, fromY, toX, fromY)
+      m.assertInvalid(fit.params)
+    end function
+
+    @describe("fitColumns")
+
+    @it("recovers a column warp by least squares")
+    function _()
+      edgesX = [100.0, 100.0, 200.0, 200.0, 300.0, 300.0]
+      edgesY = [100.0, 200.0, 80.0, 220.0, 100.0, 200.0]
+      fromX = [100.0, 100.0, 130.0, 160.0, 160.0, 200.0, 200.0, 240.0, 270.0, 270.0, 300.0, 300.0]
+      fromY = [100.0, 200.0, 150.0, 100.0, 190.0, 80.0, 220.0, 120.0, 100.0, 200.0, 100.0, 200.0]
+      warped = m.warpByEdges(fromX, fromY)
+      fit = BGE.ImpostorFit.fitColumns([100.0, 200.0, 300.0], fromX, fromY, warped.x, warped.y)
+      m.assertTrue(fit.residual < 0.05)
+      edges = m.warpByEdges(edgesX, edgesY)
+      exact = BGE.ImpostorFit.fitColumnsToEdges(edgesX, edgesY, edges.x, edges.y)
+      for j = 0 to 2
+        m.assertTrue(Abs(fit.params.scale[j] - exact.params.scale[j]) < 0.001)
+        m.assertTrue(Abs(fit.params.x[j] - exact.params.x[j]) < 0.01)
+      end for
+    end function
+
+    @it("needs points enough to pin every knot")
+    function _()
+      fit = BGE.ImpostorFit.fitColumns([100.0, 200.0, 300.0], [100.0, 150.0], [100.0, 100.0], [100.0, 150.0], [100.0, 100.0])
+      m.assertInvalid(fit.params)
+    end function
+
+    @describe("placeKnots (#557)")
+
+    @it("places knots at quantiles of the distinct x, so each segment has points")
+    function _()
+      ' most points bunched on the left: even spacing would leave 100-200 nearly empty
+      xs = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 200.0, 200.0, 200.0]
+      m.assertEqual(BGE.ImpostorFit.placeKnots(xs, 3), [0.0, 4.0, 200.0])
+    end function
+
+    @it("places no more knots than the points support")
+    function _()
+      ' 6 points support 3 knots; 2 distinct x support 2
+      m.assertEqual(BGE.ImpostorFit.placeKnots([0.0, 10.0, 20.0, 30.0, 40.0, 50.0], 5).count(), 3)
+      m.assertEqual(BGE.ImpostorFit.placeKnots([0.0, 0.0, 0.0, 50.0, 50.0, 50.0], 3), [0.0, 50.0])
+      m.assertEqual(BGE.ImpostorFit.placeKnots([0.0, 0.0, 0.0], 3).count(), 0)
+    end function
+
+    @describe("stripPlacements (#557)")
+
+    @it("places each strip where mapColumns() puts it")
+    function _()
+      params = {knotX: [100.0, 200.0, 300.0], x: [90.0, 200.0, 320.0], offset: [5.0, -12.0, 3.0], scale: [1.2, 0.8, 1.0]}
+      for each projective in [false, true]
+        if projective
+          BGE.ImpostorFit.makeColumnsProjective(params)
+        end if
+        cuts = [0, 10, 60, 110, 210, 220]
+        placements = BGE.ImpostorFit.stripPlacements(params, 90, cuts, 100, 100)
+        m.assertEqual(placements.count(), 20)
+        for i = 0 to cuts.count() - 2
+          left = BGE.ImpostorFit.mapColumns(params, 90 + cuts[i], 100).x
+          right = BGE.ImpostorFit.mapColumns(params, 90 + cuts[i + 1], 100).x
+          middle = 90 + (cuts[i] + cuts[i + 1]) * 0.5
+          top = BGE.ImpostorFit.mapColumns(params, middle, 100)
+          bottom = BGE.ImpostorFit.mapColumns(params, middle, 200)
+          k = i * 4
+          m.assertTrue(Abs(placements[k] - left) < 0.001, `strip ${i} left ${placements[k]} vs ${left}`)
+          m.assertTrue(Abs(placements[k + 1] - top.y) < 0.001, `strip ${i} top ${placements[k + 1]} vs ${top.y}`)
+          m.assertTrue(Abs(placements[k + 2] - (right - left + 1) / (cuts[i + 1] - cuts[i])) < 0.001, `strip ${i} scaleX`)
+          m.assertTrue(Abs(placements[k + 3] - (bottom.y - top.y) / 100) < 0.001, `strip ${i} scaleY`)
+        end for
+      end for
+    end function
+
+    @describe("columnsCoverFrame (#557)")
+
+    @it("covers the frame while the warped clip rect still reaches past every edge")
+    function _()
+      ' an unchanged warp keeps a clip rect 20px past a 100x100 frame over it
+      params = {knotX: [-20.0, 50.0, 120.0], x: [-20.0, 50.0, 120.0], offset: [0.0, 0.0, 0.0], scale: [1.0, 1.0, 1.0]}
+      m.assertTrue(BGE.ImpostorFit.columnsCoverFrame(params, -20, -20, 120, 120, 100, 100))
+    end function
+
+    @it("doesn't cover the frame once a side or a knot's column pulls inside it")
+    function _()
+      ' moved 30px right: the left edge comes on screen
+      moved = {knotX: [-20.0, 50.0, 120.0], x: [10.0, 80.0, 150.0], offset: [0.0, 0.0, 0.0], scale: [1.0, 1.0, 1.0]}
+      m.assertFalse(BGE.ImpostorFit.columnsCoverFrame(moved, -20, -20, 120, 120, 100, 100))
+      ' the middle column shrinks to 0.5x about the top: its bottom comes up to y 60
+      shrunk = {knotX: [-20.0, 50.0, 120.0], x: [-20.0, 50.0, 120.0], offset: [0.0, 10.0, 0.0], scale: [1.0, 0.5, 1.0]}
+      m.assertFalse(BGE.ImpostorFit.columnsCoverFrame(shrunk, -20, -20, 120, 120, 100, 100))
+    end function
+
+    @describe("columnSegmentStrips")
+
+    @it("is one strip per segment when nothing changes across it")
+    function _()
+      params = {knotX: [100.0, 200.0, 300.0], x: [90.0, 200.0, 310.0], offset: [5.0, 5.0, 5.0], scale: [1.1, 1.1, 1.1]}
+      m.assertEqual(BGE.ImpostorFit.columnSegmentStrips(params, 0, 100, 200, 1), 1)
+      m.assertEqual(BGE.ImpostorFit.columnSegmentStrips(params, 1, 100, 200, 1), 1)
+    end function
+
+    @it("adds strips as a segment's height changes")
+    function _()
+      ' the bottom (y 200) moves 20px across the segment: 10 strips at a 1px step
+      params = {knotX: [100.0, 200.0], x: [100.0, 200.0], offset: [0.0, 0.0], scale: [1.0, 1.1]}
+      m.assertEqual(BGE.ImpostorFit.columnSegmentStrips(params, 0, 100, 200, 1), 10)
+      m.assertEqual(BGE.ImpostorFit.columnSegmentStrips(params, 0, 100, 200, 4), 3)
+    end function
+
+    @describe("columnStripCuts")
+
+    @it("cuts at the knots, splitting each segment by how much it changes")
+    function _()
+      ' bitmap from x 90 to 310; knots at 100 (column 10), 200 (110), 300 (210)
+      params = {knotX: [100.0, 200.0, 300.0], x: [100.0, 200.0, 300.0], offset: [0.0, 0.0, 0.0], scale: [1.0, 1.1, 1.1]}
+      cuts = BGE.ImpostorFit.columnStripCuts(params, 90, 220, 100, 200, 4, 0)
+      ' the first segment's bottom moves 20px: 3 strips at a 4px step; the second is 1
+      m.assertEqual(cuts, [0, 10, 43, 77, 110, 210, 220])
+    end function
+
+    @it("cuts strips of a fixed width")
+    function _()
+      params = {knotX: [100.0, 200.0], x: [100.0, 200.0], offset: [0.0, 0.0], scale: [1.0, 1.0]}
+      m.assertEqual(BGE.ImpostorFit.columnStripCuts(params, 90, 25, 100, 200, 1, 10), [0, 10, 20, 25])
+    end function
+
+    @describe("projective column warps")
+
+    @it("is exact for two walls in perspective, where the linear warp isn't")
+    function _()
+      edges = m.cornerEdges()
+      fromEdges = m.viewBox(edges, 0, 0, 0)
+      toEdges = m.viewBox(edges, 60, 50, 10)
+      inside = m.cornerInside()
+      fromInside = m.viewBox(inside, 0, 0, 0)
+      toInside = m.viewBox(inside, 60, 50, 10)
+      projective = BGE.ImpostorFit.fitColumnsToEdges(fromEdges.x, fromEdges.y, toEdges.x, toEdges.y, true)
+      linear = BGE.ImpostorFit.fitColumnsToEdges(fromEdges.x, fromEdges.y, toEdges.x, toEdges.y)
+      projectiveError = BGE.ImpostorFit.columnsResidual(projective.params, fromInside.x, fromInside.y, toInside.x, toInside.y)
+      linearError = BGE.ImpostorFit.columnsResidual(linear.params, fromInside.x, fromInside.y, toInside.x, toInside.y)
+      m.assertTrue(projectiveError < 0.01, `projective ${projectiveError}`)
+      m.assertTrue(linearError > 1, `linear ${linearError}`)
+    end function
+
+    @it("maps the knots themselves as the linear warp does")
+    function _()
+      params = {knotX: [100.0, 200.0], x: [90.0, 230.0], offset: [5.0, -12.0], scale: [1.2, 0.8]}
+      linearLeft = BGE.ImpostorFit.mapColumns(params, 100, 150)
+      linearRight = BGE.ImpostorFit.mapColumns(params, 200, 150)
+      BGE.ImpostorFit.makeColumnsProjective(params)
+      left = BGE.ImpostorFit.mapColumns(params, 100, 150)
+      right = BGE.ImpostorFit.mapColumns(params, 200, 150)
+      m.assertTrue(Abs(left.x - linearLeft.x) < 0.001 and Abs(left.y - linearLeft.y) < 0.001, `left ${left.x}, ${left.y}`)
+      m.assertTrue(Abs(right.x - linearRight.x) < 0.001 and Abs(right.y - linearRight.y) < 0.001, `right ${right.x}, ${right.y}`)
+    end function
+
+    @it("fits knots to the walls' points by least squares")
+    function _()
+      edges = m.cornerEdges()
+      fromEdges = m.viewBox(edges, 0, 0, 0)
+      points = m.cornerInside()
+      points.append(edges)
+      fromPoints = m.viewBox(points, 0, 0, 0)
+      toPoints = m.viewBox(points, 60, 50, 10)
+      knotX = [fromEdges.x[0], fromEdges.x[2], fromEdges.x[4]]
+      projective = BGE.ImpostorFit.fitColumns(knotX, fromPoints.x, fromPoints.y, toPoints.x, toPoints.y, true)
+      linear = BGE.ImpostorFit.fitColumns(knotX, fromPoints.x, fromPoints.y, toPoints.x, toPoints.y)
+      m.assertNotInvalid(projective.params)
+      m.assertTrue(projective.residual < 0.05, `projective ${projective.residual}`)
+      m.assertTrue(linear.residual > projective.residual + 0.5, `linear ${linear.residual}`)
+    end function
+
+    ' A box's corner seen corner-on: its left, nearest and right vertical edges, top then bottom.
+    private function cornerEdges() as float[]
+      return [-100.0, 50.0, 400.0, -100.0, -50.0, 400.0, 0.0, 50.0, 300.0, 0.0, -50.0, 300.0, 100.0, 50.0, 400.0, 100.0, -50.0, 400.0]
+    end function
+
+    ' Points on the box's two walls, between its edges.
+    private function cornerInside() as float[]
+      points = [] as float[]
+      for each u in [0.2, 0.5, 0.8]
+        for each height in [-50.0, 0.0, 50.0]
+          points.append([-100.0 + 100 * u, height, 400.0 - 100 * u])
+          points.append([100 * u, height, 300.0 + 100 * u])
+        end for
+      end for
+      return points
+    end function
+
+    ' Projects xyz triples with a pinhole camera at (cameraX, 0, cameraZ) turned yawDegrees
+    ' about y, looking along +z: focal 500, centre (640, 360), y down.
+    private function viewBox(points as float[], cameraX as float, cameraZ as float, yawDegrees as float) as roAssociativeArray
+      yaw = yawDegrees * 3.14159265 / 180
+      outX = [] as float[]
+      outY = [] as float[]
+      for i = 0 to points.count() - 3 step 3
+        dx = points[i] - cameraX
+        dz = points[i + 2] - cameraZ
+        x = dx * Cos(yaw) - dz * Sin(yaw)
+        z = dx * Sin(yaw) + dz * Cos(yaw)
+        outX.push(640 + 500 * x / z)
+        outY.push(360 - 500 * points[i + 1] / z)
+      end for
+      return {x: outX, y: outY}
+    end function
+
+    ' A column warp by hand: x stretches the left wall 0.8x and the right 1.3x, and each
+    ' column scales about y 150 by a factor running 0.9 -> 1.2 -> 1.0 across the knots.
+    private function warpByEdges(xs as float[], ys as float[]) as roAssociativeArray
+      outX = [] as float[]
+      outY = [] as float[]
+      for i = 0 to xs.count() - 1
+        x = xs[i]
+        if x < 200
+          t = (x - 100) / 100
+          outX.push(100 + 0.8 * (x - 100))
+          scale = 0.9 + 0.3 * t
+        else
+          t = (x - 200) / 100
+          outX.push(180 + 1.3 * (x - 200))
+          scale = 1.2 - 0.2 * t
+        end if
+        outY.push(150 + (ys[i] - 150) * scale)
+      end for
+      return {x: outX, y: outY}
+    end function
+
     private function rotate(xs as float[], ys as float[], angle as float) as roAssociativeArray
       outX = [] as float[]
       outY = [] as float[]

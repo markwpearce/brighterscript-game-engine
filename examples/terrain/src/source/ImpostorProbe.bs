@@ -2,6 +2,11 @@
 ' profile path flies, simulates reusing the chapel's captured bitmap instead of redrawing
 ' it, for several pixel tolerances and view-angle limits at once, and counts which draw
 ' each moving frame would have taken. Nothing is drawn differently.
+'
+' The "front" variants (#556) measure every fit on the vertices of the faces that faced the
+' camera at capture, since only those are in the bitmap: "front-rot" a single rotate-scale
+' blit, "strip-edge" that or else vertical strips hinted by the box's visible vertical
+' edges, "strip-lsq" the same strips least-squares fitted to the vertices (an upper bound).
 class ImpostorProbe
 
   ' Rough per-frame costs on a Roku Ultra: a redraw from profile=stages (performDraw plus
@@ -10,17 +15,23 @@ class ImpostorProbe
   redrawMs = 13.0
   pinMs = 4.5
   blitMs = 0.5
+  ' one region DrawScaledObject per strip, from the draw2d benchmark's ~2.5k/sec
+  stripMs = 0.4
+  ' each strip's vertical scale and offset is held within this of the warp
+  stripStepPx = 1.0
   ' a reused bitmap is redrawn after this many frames whatever the fit
   maxStaleFrames = 30
 
   private variants = [] as roAssociativeArray[]
   private projected = [] as float[]
   private modelVertices as BGE.Math.Vector[] = invalid
+  ' each model vertex's face normal in world space, matching modelVertices
+  private modelNormals as BGE.Math.Vector[] = invalid
 
   sub new()
     ' "box" fits the 8 bounding box corners, "verts" every model vertex - the box's corners
     ' are farther apart in depth than the model is, so it may overstate the error
-    for each samples in ["box", "verts"]
+    for each samples in ["box", "front-rot", "strip-edge", "strip-lsq"]
       for each tolerance in [1, 2, 4, 8]
         m.variants.push({
           samples: samples,
@@ -28,7 +39,9 @@ class ImpostorProbe
           maxAngleDegrees: 5,
           capture: invalid,
           staleFrames: 0,
-          counts: {scale: 0, rotate: 0, pin: 0, redraw: 0, hidden: 0}
+          counts: {scale: 0, rotate: 0, pin: 0, strip: 0, redraw: 0, hidden: 0},
+          stripTotal: 0,
+          stripMax: 0
         })
       end for
     end for
@@ -40,17 +53,17 @@ class ImpostorProbe
     if not moving
       return
     end if
-    sets = {
-      box: m.projectSamples(sceneObj.getBoundingPoints(camera), camera),
-      verts: m.projectSamples(m.getModelVertices(sceneObj.drawable as BGE.DrawableModel), camera)
-    }
+    boxProjection = m.projectSamples(sceneObj.getBoundingPoints(camera), camera)
+    verts = m.projectSamples(m.getModelVertices(sceneObj.drawable as BGE.DrawableModel), camera)
+    edges = m.projectSamples(m.getBoxEdges(sceneObj.getBoundingPoints(camera)), camera)
     for each variant in m.variants
-      projection = sets[variant.samples]
-      if invalid = projection
+      if invalid = boxProjection or invalid = verts or invalid = edges
         variant.capture = invalid
         variant.counts.hidden++
+      else if variant.samples = "box"
+        m.observeVariant(variant, boxProjection.xs, boxProjection.ys, boxProjection.direction)
       else
-        m.observeVariant(variant, projection.xs, projection.ys, projection.direction)
+        m.observeFrontVariant(variant, verts, edges, camera)
       end if
     end for
   end sub
@@ -72,7 +85,7 @@ class ImpostorProbe
     centre = BGE.Math.VectorOps.scale(centre, 1.0 / points.count())
     direction = BGE.Math.VectorOps.subtract(centre, camera.position)
     BGE.Math.VectorOps.normalize(direction)
-    return {xs: xs, ys: ys, direction: direction}
+    return {xs: xs, ys: ys, direction: direction, points: points}
   end function
 
   ' The model's vertices in world space, once - the chapel is static.
@@ -80,14 +93,147 @@ class ImpostorProbe
     if invalid = m.modelVertices
       matrix = BGE.Math.Matrix44.multiply(drawable.transformationMatrix, drawable.getOwnerTransformationMatrix())
       m.modelVertices = []
+      m.modelNormals = []
       for each face in drawable.model.faces
         for each vert in face.vertices
-          m.modelVertices.push(BGE.Math.Matrix44.multVecMatrix(vert, matrix))
+          world = BGE.Math.Matrix44.multVecMatrix(vert, matrix)
+          ' a rigid transform: the normal is where vert + normal lands, less vert
+          normal = BGE.Math.VectorOps.subtract(BGE.Math.Matrix44.multVecMatrix(BGE.Math.VectorOps.add(vert, face.normal), matrix), world)
+          BGE.Math.VectorOps.normalize(normal)
+          m.modelVertices.push(world)
+          m.modelNormals.push(normal)
         end for
       end for
     end if
     return m.modelVertices
   end function
+
+  ' The 4 vertical edges of the points' world box, each as its top then bottom point.
+  private function getBoxEdges(points as BGE.Math.Vector[]) as BGE.Math.Vector[]
+    if points.count() = 0
+      return []
+    end if
+    low = BGE.Math.VectorOps.copy(points[0])
+    high = BGE.Math.VectorOps.copy(points[0])
+    for each point in points
+      low = BGE.Math.VectorOps.create(BGE.Math.Min(low.x, point.x), BGE.Math.Min(low.y, point.y), BGE.Math.Min(low.z, point.z))
+      high = BGE.Math.VectorOps.create(BGE.Math.Max(high.x, point.x), BGE.Math.Max(high.y, point.y), BGE.Math.Max(high.z, point.z))
+    end for
+    edges = [] as BGE.Math.Vector[]
+    for each x in [low.x, high.x]
+      for each z in [low.z, high.z]
+        edges.push(BGE.Math.VectorOps.create(x, high.y, z))
+        edges.push(BGE.Math.VectorOps.create(x, low.y, z))
+      end for
+    end for
+    return edges
+  end function
+
+  private sub observeFrontVariant(variant as roAssociativeArray, verts as roAssociativeArray, edges as roAssociativeArray, camera as BGE.Camera3d)
+    capture = variant.capture
+    if invalid = capture or variant.staleFrames >= m.maxStaleFrames or m.angleDegrees(verts.direction, capture.direction) > variant.maxAngleDegrees
+      m.recaptureFront(variant, verts, edges, camera)
+      return
+    end if
+    toX = [] as float[]
+    toY = [] as float[]
+    for each index in capture.front
+      toX.push(verts.xs[index])
+      toY.push(verts.ys[index])
+    end for
+    tolerance = variant.tolerance
+    if BGE.ImpostorFit.fitRotateScale(capture.xs, capture.ys, toX, toY).residual <= tolerance
+      variant.counts.rotate++
+      variant.staleFrames++
+      return
+    end if
+    if variant.samples <> "front-rot"
+      fit = invalid
+      if variant.samples = "strip-edge"
+        edgeToX = [] as float[]
+        edgeToY = [] as float[]
+        for each index in capture.edgePoints
+          edgeToX.push(edges.xs[index])
+          edgeToY.push(edges.ys[index])
+        end for
+        fit = BGE.ImpostorFit.fitColumnsToEdges(capture.edgeXs, capture.edgeYs, edgeToX, edgeToY)
+        if invalid <> fit.params
+          fit.residual = BGE.ImpostorFit.columnsResidual(fit.params, capture.xs, capture.ys, toX, toY)
+        end if
+      else
+        fit = BGE.ImpostorFit.fitColumns(capture.knotX, capture.xs, capture.ys, toX, toY)
+      end if
+      if invalid <> fit.params and fit.residual <= tolerance
+        strips = 0
+        for j = 0 to fit.params.knotX.count() - 2
+          strips += BGE.ImpostorFit.columnSegmentStrips(fit.params, j, capture.top, capture.bottom, m.stripStepPx)
+        end for
+        variant.counts.strip++
+        variant.stripTotal += strips
+        variant.stripMax = BGE.Math.Max(variant.stripMax, strips)
+        variant.staleFrames++
+        return
+      end if
+    end if
+    m.recaptureFront(variant, verts, edges, camera)
+  end sub
+
+  ' Captures the vertices of camera-facing faces, and the box edges that bound the model on
+  ' screen or are nearest the camera (the crease between the two faces it sees) - the far
+  ' edges are hidden, so they'd hint the wrong surface.
+  private sub recaptureFront(variant as roAssociativeArray, verts as roAssociativeArray, edges as roAssociativeArray, camera as BGE.Camera3d)
+    capture = {xs: [] as float[], ys: [] as float[], front: [] as integer[], direction: verts.direction, edgePoints: [] as integer[], edgeXs: [] as float[], edgeYs: [] as float[], knotX: [] as float[]}
+    top = 1000000.0
+    bottom = -1000000.0
+    for i = 0 to m.modelVertices.count() - 1
+      toCamera = BGE.Math.VectorOps.subtract(camera.position, m.modelVertices[i])
+      if BGE.Math.VectorOps.dotProduct(m.modelNormals[i], toCamera) > 0
+        capture.front.push(i)
+        capture.xs.push(verts.xs[i])
+        capture.ys.push(verts.ys[i])
+        top = BGE.Math.Min(top, verts.ys[i])
+        bottom = BGE.Math.Max(bottom, verts.ys[i])
+      end if
+    end for
+    capture.top = top
+    capture.bottom = bottom
+    leftmost = 0
+    rightmost = 0
+    nearest = 0
+    nearestDistance = 1000000000.0
+    for e = 0 to 3
+      x = edges.xs[e * 2]
+      if x < edges.xs[leftmost * 2]
+        leftmost = e
+      end if
+      if x > edges.xs[rightmost * 2]
+        rightmost = e
+      end if
+      distance = BGE.Math.VectorOps.length(BGE.Math.VectorOps.subtract(edges.points[e * 2], camera.position))
+      if distance < nearestDistance
+        nearestDistance = distance
+        nearest = e
+      end if
+    end for
+    for e = 0 to 3
+      if e = leftmost or e = rightmost or e = nearest
+        capture.edgePoints.push(e * 2)
+        capture.edgePoints.push(e * 2 + 1)
+        capture.edgeXs.push(edges.xs[e * 2])
+        capture.edgeXs.push(edges.xs[e * 2 + 1])
+        capture.edgeYs.push(edges.ys[e * 2])
+        capture.edgeYs.push(edges.ys[e * 2 + 1])
+      end if
+    end for
+    ' the least-squares variant's knots: the same edges' captured x, in order
+    hinted = BGE.ImpostorFit.fitColumnsToEdges(capture.edgeXs, capture.edgeYs, capture.edgeXs, capture.edgeYs)
+    if invalid <> hinted.params
+      capture.knotX = hinted.params.knotX
+    end if
+    variant.capture = capture
+    variant.staleFrames = 0
+    variant.counts.redraw++
+  end sub
 
   private sub observeVariant(variant as roAssociativeArray, xs as float[], ys as float[], direction as BGE.Math.Vector)
     capture = variant.capture
@@ -126,14 +272,18 @@ class ImpostorProbe
     lines = [] as string[]
     for each variant in m.variants
       counts = variant.counts
-      drawn = counts.scale + counts.rotate + counts.pin + counts.redraw
+      drawn = counts.scale + counts.rotate + counts.pin + counts.strip + counts.redraw
       if drawn = 0
         drawn = 1
       end if
-      estimate = ((counts.scale + counts.rotate) * m.blitMs + counts.pin * m.pinMs + counts.redraw * m.redrawMs) / drawn
+      estimate = ((counts.scale + counts.rotate) * m.blitMs + counts.pin * m.pinMs + variant.stripTotal * m.stripMs + counts.redraw * m.redrawMs) / drawn
       line = variant.samples + " tol " + variant.tolerance.ToStr() + "px:"
       line += " scale " + m.percent(counts.scale, drawn) + " rotate " + m.percent(counts.rotate, drawn)
-      line += " pin " + m.percent(counts.pin, drawn) + " redraw " + m.percent(counts.redraw, drawn)
+      line += " pin " + m.percent(counts.pin, drawn) + " strip " + m.percent(counts.strip, drawn)
+      if counts.strip > 0
+        line += " (avg " + m.format(variant.stripTotal / counts.strip) + " max " + variant.stripMax.ToStr() + " strips)"
+      end if
+      line += " redraw " + m.percent(counts.redraw, drawn)
       line += " | est " + m.format(estimate) + "ms vs " + m.format(m.redrawMs) + "ms (hidden " + counts.hidden.ToStr() + ")"
       lines.push(line)
     end for

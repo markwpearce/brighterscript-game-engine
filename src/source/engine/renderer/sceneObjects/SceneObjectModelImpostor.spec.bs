@@ -17,17 +17,26 @@ namespace tests
       m.camera.drawDistanceTransitionSeconds = 0
       bitmap = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
       m.renderer = new BGE.Renderer(bitmap, m.game, m.camera)
+      m.addCube(1)
+    end function
+
+    ' Puts a 100 cube, its faces split `divisions` times each way, alone in a new renderer.
+    private sub addCube(divisions as integer)
+      bitmap = CreateObject("roBitmap", {width: 320, height: 240, alphaEnable: true})
+      m.renderer = new BGE.Renderer(bitmap, m.game, m.camera)
       ' ownerless, so nothing reports it moving - an entity outside the game loop never settles
-      drawable = new BGE.DrawableModel(invalid, m.cubeModel(100), {drawMode: BGE.SceneObjectDrawMode.solid})
+      drawable = new BGE.DrawableModel(invalid, m.cubeModel(100, divisions), {drawMode: BGE.SceneObjectDrawMode.solid})
       drawable.offset = BGE.Math.VectorOps.create(-50, -50, -50)
       drawable.useImpostor = true
+      ' the single blit alone; the strip tests turn strips back on
+      drawable.useImpostorStrips = false
       m.sceneObj = drawable.addToRenderer(m.renderer) as BGE.SceneObjectModel
       ' until the drawable's own motion check settles (a frame behind its owner's) and the
       ' last fresh drawing is captured
       for i = 1 to 4
         m.renderFrame()
       end for
-    end function
+    end sub
 
     ' as the game loop does: the draw counter is reset and the camera set up before drawing
     private sub renderFrame()
@@ -36,8 +45,9 @@ namespace tests
       m.renderer.render()
     end sub
 
-    ' A cube from 0 to `size` on each axis, each face wound counter-clockwise from outside.
-    private function cubeModel(size as float) as BGE.Model3d
+    ' A cube from 0 to `size` on each axis, each face wound counter-clockwise from outside and
+    ' split into a `divisions` x `divisions` grid.
+    private function cubeModel(size as float, divisions = 1 as integer) as BGE.Model3d
       faces = []
       quads = [
         [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]],
@@ -48,15 +58,27 @@ namespace tests
         [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]]
       ]
       for each q in quads
-        for each tri in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]]
-          faces.push(BGE.Model3dFaceOps.create([
-            BGE.Math.VectorOps.create(tri[0][0] * size, tri[0][1] * size, tri[0][2] * size),
-            BGE.Math.VectorOps.create(tri[1][0] * size, tri[1][1] * size, tri[1][2] * size),
-            BGE.Math.VectorOps.create(tri[2][0] * size, tri[2][1] * size, tri[2][2] * size)
-          ]))
+        for a = 0 to divisions - 1
+          for b = 0 to divisions - 1
+            cell = [m.quadPoint(q, a, b, divisions, size), m.quadPoint(q, a, b + 1, divisions, size), m.quadPoint(q, a + 1, b + 1, divisions, size), m.quadPoint(q, a + 1, b, divisions, size)]
+            faces.push(BGE.Model3dFaceOps.create([cell[0], cell[1], cell[2]]))
+            faces.push(BGE.Model3dFaceOps.create([cell[0], cell[2], cell[3]]))
+          end for
         end for
       end for
       return new BGE.Model3d(faces)
+    end function
+
+    ' A point on unit quad q, `a` and `b` steps of 1 / divisions from its first corner towards
+    ' its last and second corners, scaled by size.
+    private function quadPoint(q as object, a as integer, b as integer, divisions as integer, size as float) as BGE.Math.Vector
+      u = a / divisions
+      v = b / divisions
+      coords = [] as float[]
+      for axis = 0 to 2
+        coords.push((q[0][axis] + u * (q[3][axis] - q[0][axis]) + v * (q[1][axis] - q[0][axis])) * size)
+      end for
+      return BGE.Math.VectorOps.create(coords[0], coords[1], coords[2])
     end function
 
     @describe("while the camera moves")
@@ -161,6 +183,16 @@ namespace tests
       m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
     end function
 
+    @it("still rotates the blit for a camera roll when it may rotate only for roll")
+    function _()
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.impostorBlitRollOnly = true
+      m.camera.rollDegrees = 3
+      m.renderFrame()
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "rotate")
+      m.assertEqual(1, m.renderer.getDrawCallsLastFrame())
+    end function
+
     @it("redraws once the view turns past the rotate limit")
     function _()
       ' about 9.5 degrees: past medium's 8
@@ -201,6 +233,205 @@ namespace tests
       m.strafeAt(180, 0.03)
       m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "")
       m.assertTrue(m.renderer.getDrawCallsLastFrame() > 1, `draw calls ${m.renderer.getDrawCallsLastFrame()}`)
+    end function
+
+    @describe("a side turning into view")
+
+    ' Loosens every limit so a single blit would take the move, then strafes the camera from
+    ' straight in front of the cube to where its left side shows.
+    private sub strafeToSide(x as float)
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.modelImpostorError = 0.5
+      settings.modelImpostorMaxAngleDegrees = 45
+      settings.modelImpostorMaxSizeChange = 2
+      m.renderer.setQualitySettings(settings)
+      for i = 1 to 4
+        m.renderFrame()
+      end for
+      m.camera.position = BGE.Math.VectorOps.create(x, 0, -500)
+      m.camera.setTarget(BGE.Math.VectorOps.create())
+      m.renderFrame()
+    end sub
+
+    @it("redraws once a side the capture faced away from comes into view")
+    function _()
+      m.strafeToSide(-150)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "")
+      m.assertEqual(m.sceneObj.getImpostorMissThisFrame().reason, "newFace")
+    end function
+
+    @it("still reuses the capture before that side shows")
+    function _()
+      ' the side is at x -50: from x -45 it's still turned away
+      m.strafeToSide(-45)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "rotate")
+    end function
+
+    @it("ignores a side smaller than the minimum area")
+    function _()
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      ' each side is a sixth of the cube
+      drawable.impostorNewFaceMinArea = 0.2
+      m.strafeToSide(-150)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "rotate")
+    end function
+
+    @it("reuses the capture regardless with the check off")
+    function _()
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.impostorRedrawOnNewFace = false
+      m.strafeToSide(-150)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "rotate")
+    end function
+
+    @describe("strips (#556)")
+
+    ' Captures the cube corner-on from 45 degrees round, with a single blit allowed only 2px,
+    ' then orbits the camera `degrees` further round: the two faces it sees turn opposite ways.
+    private sub orbitCorner(useStrips as boolean, knots as integer, stripWidth as integer, degrees as float, stripError = 3.0 as float, distance = 400.0 as float)
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.useImpostorStrips = useStrips
+      drawable.impostorStripKnots = knots
+      drawable.impostorStripWidth = stripWidth
+      drawable.impostorStripMaxError = stripError
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.modelImpostorError = 0.001
+      settings.modelImpostorMaxAngleDegrees = 45
+      settings.modelImpostorMaxSizeChange = 2
+      m.renderer.setQualitySettings(settings)
+      m.placeCameraAround(-45, distance)
+      for i = 1 to 4
+        m.renderFrame()
+      end for
+      m.placeCameraAround(-45 + degrees, distance)
+      m.renderFrame()
+    end sub
+
+    private sub placeCameraAround(degrees as float, distance = 400.0 as float)
+      radians = BGE.Math.DegreesToRadians(degrees)
+      m.camera.position = BGE.Math.VectorOps.create(distance * Sin(radians), 0, -distance * Cos(radians))
+      m.camera.setTarget(BGE.Math.VectorOps.create())
+    end sub
+
+    @it("redraws when a single blit can't follow the turn and strips are off")
+    function _()
+      m.orbitCorner(false, 0, 0, 8)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "")
+    end function
+
+    @it("redraws the capture as strips hinted by the box's edges")
+    function _()
+      m.orbitCorner(true, 0, 0, 8)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+      strips = m.sceneObj.getImpostorStripsThisFrame()
+      m.assertTrue(strips >= 2, `strips ${strips}`)
+      m.assertEqual(m.renderer.getDrawCallsLastFrame(), strips)
+    end function
+
+    @it("redraws the capture as strips fitted to evenly spaced knots")
+    function _()
+      ' corner-on, the crease is midway, so 3 knots land on the cube's 3 visible edges
+      m.orbitCorner(true, 3, 0, 8)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+    end function
+
+    @it("asks for no more knots than the vertices support")
+    function _()
+      ' the cube's vertices sit at only 3 screen x positions: 6 knots would leave segments empty
+      m.orbitCorner(true, 6, 0, 8)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+    end function
+
+    ' up close, with vertices across each wall: linear strips misplace them ~3.4px, perspective
+    ' ones only by the capture's rounding to whole pixels
+    @it("follows a close orbit with perspective strips")
+    function _()
+      m.addCube(4)
+      m.orbitCorner(true, 0, 0, 10, 2.5, 180)
+      miss = m.sceneObj.getImpostorMissThisFrame()
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips", `${miss.reason} ${miss.stripResidual}px`)
+    end function
+
+    @it("redraws that close orbit with the linear strip fit")
+    function _()
+      m.addCube(4)
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.impostorStripPerspective = false
+      m.orbitCorner(true, 0, 0, 10, 2.5, 180)
+      miss = m.sceneObj.getImpostorMissThisFrame()
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "", `${miss.reason} ${miss.stripResidual}px`)
+      m.assertEqual(miss.reason, "stripsError")
+    end function
+
+    @it("cuts strips of a fixed width")
+    function _()
+      m.orbitCorner(true, 0, 10, 8)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+      strips = m.sceneObj.getImpostorStripsThisFrame()
+      m.assertTrue(strips > 4, `strips ${strips}`)
+    end function
+
+    @it("lets the single blit take a small turn")
+    function _()
+      m.orbitCorner(true, 0, 0, 1)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "rotate")
+    end function
+
+    @it("hands that turn to strips when the single blit's allowance is scaled down")
+    function _()
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.impostorBlitErrorScale = 0
+      m.orbitCorner(true, 0, 0, 1)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+    end function
+
+    @it("hands that turn to strips when the single blit's angle is scaled down")
+    function _()
+      ' the 1 degree orbit is past 45 x 0.01
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.impostorBlitAngleScale = 0.01
+      m.orbitCorner(true, 0, 0, 1)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+    end function
+
+    ' Captures the cube near the left of the view, then turns the camera in place to centre it:
+    ' the direction to it doesn't change, only where it is in the view.
+    private sub turnToCentre(useStrips as boolean)
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.useImpostorStrips = useStrips
+      drawable.impostorBlitMaxAngleDegrees = 10
+      drawable.impostorStripMaxError = 3
+      settings = BGE.getRenderQualityPreset(BGE.RenderQualityLevel.medium)
+      settings.modelImpostorMaxAngleDegrees = 45
+      settings.modelImpostorMaxSizeChange = 2
+      settings.modelImpostorError = 0.5
+      m.renderer.setQualitySettings(settings)
+      m.camera.setTarget(BGE.Math.VectorOps.create(200, 0, 0))
+      for i = 1 to 4
+        m.renderFrame()
+      end for
+      m.camera.setTarget(BGE.Math.VectorOps.create())
+      m.renderFrame()
+    end sub
+
+    @it("lets the single blit take a capture from the edge of the view to its centre without strips")
+    function _()
+      m.turnToCentre(false)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "rotate")
+    end function
+
+    @it("hands a capture from the edge of the view to strips once the model has moved across it")
+    function _()
+      m.turnToCentre(true)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "strips")
+    end function
+
+    @it("redraws when the strips would take more than the limit")
+    function _()
+      drawable = m.sceneObj.drawable as BGE.DrawableModel
+      drawable.impostorStripMaxStrips = 2
+      m.orbitCorner(true, 0, 10, 8)
+      m.assertEqual(m.sceneObj.getImpostorKindThisFrame(), "")
     end function
 
   end class
