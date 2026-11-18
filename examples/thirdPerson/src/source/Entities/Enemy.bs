@@ -94,6 +94,16 @@ interface EnemyType
   ' How long a parry leaves it open
   staggerSeconds as float
   attack as EnemyAttack
+  ' Sprite size against the sheet's (a bigger kind drawn from the same sheet). Default 1.
+  optional scale as float
+  ' Tint over the sprite (&hRRGGBB). Default white.
+  optional tint as integer
+  ' The least it's lit, however dark it stands (Drawable.ambientBrightness): a faint glow of
+  ' its own. Default 0.
+  optional glow as float
+  ' Chance that a strike is followed straight away by a second, quicker one (half the wind-up).
+  ' Default 0.
+  optional comboChance as float
 end interface
 
 enum EnemyState
@@ -129,6 +139,18 @@ class Enemy extends Fighter
   private animation as string = ""
   ' 0 is always awake
   private wakeDistance as float = 0
+  ' How long the current wind-up lasts: the attack's, or half that for a combo's second swing
+  private windupDuration as float = 0
+  private comboUsed as boolean = false
+
+  ' With a nav grid it finds its way round walls to the player, and only wakes when it can see
+  ' them. Without one it goes straight at them.
+  private nav as BGE.NavGrid = invalid
+  private path as BGE.NavPoint[] = []
+  private pathIndex as integer = 0
+  private repathSeconds as float = 0
+  private sightSeconds as float = 0
+  private seesPlayer as boolean = true
 
   sub new(game as BGE.Game)
     super(game)
@@ -136,7 +158,8 @@ class Enemy extends Fighter
   end sub
 
   ' args: type (EnemyType), director (CombatDirector), x, z, heading (optional, radians), wakeDistance
-  ' (optional: stands still until the player is this close or hits it)
+  ' (optional: stands still until the player is this close or hits it), nav (optional
+  ' BGE.NavGrid: finds its way round walls, and wakes only in sight of the player)
   override sub onCreate(args as roAssociativeArray)
     m.type = args.type
     m.director = args.director
@@ -155,6 +178,9 @@ class Enemy extends Fighter
       m.wakeDistance = args.wakeDistance
       m.state = EnemyState.dormant
     end if
+    if invalid <> args.nav
+      m.nav = args.nav
+    end if
     m.director.addEnemy(m)
 
     m.sprite = m.addOrientedSprite("body", m.game.getSpriteAtlasFrames(m.type.atlas), 0, 0, m.numDirections, 1, {
@@ -167,6 +193,12 @@ class Enemy extends Fighter
     ' Rendered from the same 12 degrees as the knight, at the same scale
     m.sprite.axisAlignedFullHeightPitch = 12
     m.sprite.setAnchor(m.type.anchorX, m.type.anchorY)
+    if invalid <> m.type.scale
+      m.sprite.scale = BGE.Math.createScaleVector(m.type.scale)
+    end if
+    if invalid <> m.type.glow
+      m.sprite.ambientBrightness = m.type.glow
+    end if
 
     attack = m.type.attack
     frames = m.type.frames
@@ -176,6 +208,9 @@ class Enemy extends Fighter
     m.sprite.addOrientedAnimation("backpedal", tables.backpedal, World.runFrameRate(m.type.speed * 0.6))
     ' Lasts exactly as long as the windup and strike, so the swing lines up with its timing
     m.sprite.addOrientedAnimation("windup", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds), BGE.SpritePlayMode.Forward)
+    if m.comboChance() > 0
+      m.sprite.addOrientedAnimation("windupQuick", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds / 2), BGE.SpritePlayMode.Forward)
+    end if
     m.sprite.addOrientedAnimation("strike", tables.strike, BGE.frameRateFor(frames.strike.Count(), attack.strikeSeconds), BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimation("guard", tables.guard, 8, BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimation("hit", tables.hit, 8, BGE.SpritePlayMode.Forward)
@@ -216,13 +251,13 @@ class Enemy extends Fighter
       ' Lies there until it's removed
     else if m.state = EnemyState.dormant
       player = m.director.player
-      if invalid <> player and player.isAlive() and m.distanceTo(player) <= m.wakeDistance
+      if invalid <> player and player.isAlive() and m.distanceTo(player) <= m.wakeDistance and m.canSee(player, dt)
         m.setState(EnemyState.approach, "idle")
       end if
     else if m.state = EnemyState.windup
       ' Tracks the player while winding up, so a dodge has to come late
       m.turnToward(m.director.player, dt)
-      if m.stateSeconds >= attack.windupSeconds
+      if m.stateSeconds >= m.windupDuration
         m.strikeLanded = false
         m.setState(EnemyState.strike, "strike")
       end if
@@ -264,6 +299,16 @@ class Enemy extends Fighter
     end if
     distance = m.distanceTo(player)
     toPlayer = m.directionTo(player)
+
+    way = m.wayRound(player, dt)
+    if invalid <> way
+      ' A wall between them: follow the path, facing where it's going
+      m.flankSeconds = 0
+      m.setState(EnemyState.approach, "run")
+      m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(way), m.type.turnSpeed * dt)
+      m.moveBy(way, m.type.speed * dt)
+      return
+    end if
     m.turnToward(player, dt)
 
     if m.state = EnemyState.retreat
@@ -295,6 +340,8 @@ class Enemy extends Fighter
       m.setState(EnemyState.approach, "idle")
       if m.director.requestAttack(m)
         m.flankSeconds = 0
+        m.comboUsed = false
+        m.windupDuration = m.type.attack.windupSeconds
         m.setState(EnemyState.windup, "windup")
       end if
       return
@@ -344,7 +391,14 @@ class Enemy extends Fighter
       end if
     end if
     if m.state = EnemyState.strike and m.stateSeconds >= attack.strikeSeconds
-      m.setState(EnemyState.recover, "idle")
+      if not m.comboUsed and Rnd(0) < m.comboChance()
+        ' Straight into a second, quicker swing: dodging the first isn't the end of it
+        m.comboUsed = true
+        m.windupDuration = attack.windupSeconds / 2
+        m.setState(EnemyState.windup, "windupQuick")
+      else
+        m.setState(EnemyState.recover, "idle")
+      end if
     end if
   end sub
 
@@ -402,7 +456,64 @@ class Enemy extends Fighter
     if m.state = EnemyState.dead
       return &h808080
     end if
+    if invalid <> m.type.tint
+      return m.type.tint
+    end if
     return &hFFFFFF
+  end function
+
+  ' True when nothing in the nav grid stands between it and `other` (always, without a grid).
+  ' Looked at a few times a second, not every frame.
+  private function canSee(other as Fighter, dt as float) as boolean
+    if invalid = m.nav
+      return true
+    end if
+    m.sightSeconds -= dt
+    if m.sightSeconds <= 0
+      m.sightSeconds = 0.25
+      m.seesPlayer = m.nav.hasLineOfSight(m.position.x, m.position.z, other.position.x, other.position.z)
+    end if
+    return m.seesPlayer
+  end function
+
+  ' With a wall between it and `player`, the unit direction along a path round it; invalid when
+  ' it can see them (or has no nav grid, or no path)
+  private function wayRound(player as Fighter, dt as float) as dynamic
+    if invalid = m.nav or m.canSee(player, dt)
+      m.path = []
+      return invalid
+    end if
+    m.repathSeconds -= dt
+    if m.repathSeconds <= 0 or m.pathIndex >= m.path.Count()
+      m.repathSeconds = 0.5
+      m.path = m.nav.findPath(m.position.x, m.position.z, player.position.x, player.position.z)
+      m.pathIndex = 1
+    end if
+    closeEnough = World.metres(0.5)
+    while m.pathIndex < m.path.Count()
+      point = m.path[m.pathIndex]
+      ' NavPoint's y is the world's z
+      dx = point.x - m.position.x
+      dz = point.y - m.position.z
+      length = Sqr(dx * dx + dz * dz)
+      if length > closeEnough
+        return BGE.Math.VectorOps.create(dx / length, 0, dz / length)
+      end if
+      m.pathIndex++
+    end while
+    return invalid
+  end function
+
+  private function comboChance() as float
+    if invalid = m.type.comboChance
+      return 0
+    end if
+    return m.type.comboChance
+  end function
+
+  ' Not dormant and not dead
+  function isAwake() as boolean
+    return m.state <> EnemyState.dormant and m.state <> EnemyState.dead
   end function
 
   private sub turnToward(player as Fighter, dt as float)
