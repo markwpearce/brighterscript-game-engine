@@ -272,7 +272,7 @@ linear in capture x between knots. That's exact for vertical walls under a camer
 turns and moves, so it should catch the two faces either side of the near corner turning
 opposite ways, which a single map can't. `BGE.ImpostorFit` gained `fitColumnsToEdges()` (knots
 from vertical edges' tops and bottoms), `fitColumns()` (least squares for given knots),
-`mapColumns()`, `columnsResidual()` and `columnStripCount()` (strips needed to keep each
+`mapColumns()`, `columnsResidual()` and `columnSegmentStrips()` (strips needed to keep each
 strip's single scale within a step of the warp).
 
 `profile=impostor` now also runs "front" variants. Each measures error on the vertices of the
