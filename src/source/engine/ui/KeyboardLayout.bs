@@ -1,0 +1,306 @@
+import "../../math/math.bs"
+
+namespace BGE.UI
+
+  ' What pressing a `BGE.UI.KeyboardKey` does.
+  enum KeyboardKeyKind
+    ' Types the key's `char`.
+    char = "char"
+    ' Types a space.
+    space = "space"
+    ' Deletes the character before the caret.
+    backspace = "backspace"
+    ' Finishes typing.
+    done = "done"
+    ' Switches to the key's `targetPage` (e.g. Shift, "&123").
+    page = "page"
+  end enum
+
+  ' One key on a `BGE.UI.Keyboard`.
+  class KeyboardKey
+    label as string
+    kind as BGE.UI.KeyboardKeyKind
+    ' Character code a char or space key types.
+    char as integer = 0
+    ' Width in grid units (a letter is 1).
+    width as float = 1.0
+    ' Page index a page key switches to.
+    targetPage as integer = 0
+
+    ' @param {string} label - text drawn on the key
+    ' @param {BGE.UI.KeyboardKeyKind} kind
+    ' @param {float} [width=1.0] - width in grid units
+    sub new(label as string, kind as BGE.UI.KeyboardKeyKind, width = 1.0 as float)
+      m.label = label
+      m.kind = kind
+      m.width = width
+    end sub
+  end class
+
+  ' A row of keys, optionally indented (in grid units).
+  class KeyboardRow
+    keys as BGE.UI.KeyboardKey[] = []
+    indent as float = 0.0
+  end class
+
+  ' One page of a keyboard layout, top row first.
+  class KeyboardPage
+    rows as BGE.UI.KeyboardRow[] = []
+
+    ' The widest row in grid units, including its indent.
+    '
+    ' @return {float}
+    function getWidthUnits() as float
+      widest = 0.0
+      for each row in m.rows
+        rowWidth = row.indent
+        for each key in row.keys
+          rowWidth += key.width
+        end for
+        if rowWidth > widest
+          widest = rowWidth
+        end if
+      end for
+      return widest
+    end function
+  end class
+
+  ' Pages of keys plus the highlighted-key cursor for a `BGE.UI.Keyboard`. Build one with
+  ' `createAlphabeticalKeyboardLayout()`, `createQwertyKeyboardLayout()` or
+  ' `createCompactKeyboardLayout()`, or fill `pages` yourself.
+  class KeyboardLayout
+    ' Unique per layout, so a Keyboard can tell when its layout was replaced.
+    id as integer = 0
+    pages as BGE.UI.KeyboardPage[] = []
+    pageIndex as integer = 0
+    ' Highlighted key's row on the current page.
+    row as integer = 0
+    ' Highlighted key's index in its row.
+    column as integer = 0
+
+    sub new()
+      globals = GetGlobalAA()
+      if globals.bgeNextKeyboardLayoutId = invalid
+        globals.bgeNextKeyboardLayoutId = 1
+      end if
+      m.id = globals.bgeNextKeyboardLayoutId
+      globals.bgeNextKeyboardLayoutId++
+    end sub
+
+    ' @return {BGE.UI.KeyboardPage}
+    function currentPage() as BGE.UI.KeyboardPage
+      return m.pages[m.pageIndex]
+    end function
+
+    ' The highlighted key.
+    '
+    ' @return {BGE.UI.KeyboardKey}
+    function currentKey() as BGE.UI.KeyboardKey
+      return m.currentPage().rows[m.row].keys[m.column]
+    end function
+
+    ' Moves the highlight. Left/Right wrap within the row; Up/Down wrap top to bottom and land on
+    ' the key whose centre is nearest the current key's centre (ties go left).
+    '
+    ' @param {integer} dx - -1 left, 1 right
+    ' @param {integer} dy - -1 up, 1 down
+    sub move(dx as integer, dy as integer)
+      rows = m.currentPage().rows
+      if dx <> 0
+        count = rows[m.row].keys.count()
+        m.column = ((m.column + dx) mod count + count) mod count
+      end if
+      if dy <> 0
+        centre = m.keyLeft(m.row, m.column) + m.currentKey().width / 2.0
+        rowCount = rows.count()
+        m.row = ((m.row + dy) mod rowCount + rowCount) mod rowCount
+        m.column = m.nearestColumn(m.row, centre)
+      end if
+    end sub
+
+    ' Switches page, keeping the highlight's row and column where they exist, else clamping.
+    '
+    ' @param {integer} index
+    sub setPage(index as integer)
+      m.pageIndex = index
+      m.setCursor(m.row, m.column)
+    end sub
+
+    ' Moves the highlight to a row and column, clamped to the current page.
+    '
+    ' @param {integer} row
+    ' @param {integer} column
+    sub setCursor(row as integer, column as integer)
+      rows = m.currentPage().rows
+      m.row = cint(BGE.Math.Clamp(row, 0, rows.count() - 1))
+      m.column = cint(BGE.Math.Clamp(column, 0, rows[m.row].keys.count() - 1))
+    end sub
+
+    ' The key under a point on the current page.
+    '
+    ' @param {float} x - in grid units from the left edge
+    ' @param {float} y - in rows from the top edge
+    ' @return {dynamic} `{row, column}`, or invalid if no key is there
+    function keyAt(x as float, y as float) as dynamic
+      rows = m.currentPage().rows
+      if y < 0 or y >= rows.count()
+        return invalid
+      end if
+      rowIndex = int(y)
+      keyRow = rows[rowIndex]
+      left = keyRow.indent
+      for i = 0 to keyRow.keys.count() - 1
+        width = keyRow.keys[i].width
+        if x >= left and x < left + width
+          return {row: rowIndex, column: i}
+        end if
+        left += width
+      end for
+      return invalid
+    end function
+
+    ' Left edge of a key on the current page, in grid units.
+    '
+    ' @param {integer} row
+    ' @param {integer} column
+    ' @return {float}
+    function keyLeft(row as integer, column as integer) as float
+      keyRow = m.currentPage().rows[row]
+      left = keyRow.indent
+      for i = 0 to column - 1
+        left += keyRow.keys[i].width
+      end for
+      return left
+    end function
+
+    private function nearestColumn(row as integer, centre as float) as integer
+      keyRow = m.currentPage().rows[row]
+      best = 0
+      bestDistance = 1000000.0
+      left = keyRow.indent
+      for i = 0 to keyRow.keys.count() - 1
+        distance = abs(left + keyRow.keys[i].width / 2.0 - centre)
+        ' strict < so ties go left
+        if distance < bestDistance
+          bestDistance = distance
+          best = i
+        end if
+        left += keyRow.keys[i].width
+      end for
+      return best
+    end function
+  end class
+
+  ' A row of 1-unit char keys, one per character of `chars`.
+  '
+  ' @param {string} chars
+  ' @param {float} [indent=0.0] - in grid units
+  ' @return {BGE.UI.KeyboardRow}
+  function createKeyboardCharRow(chars as string, indent = 0.0 as float) as BGE.UI.KeyboardRow
+    row = new BGE.UI.KeyboardRow()
+    row.indent = indent
+    for i = 1 to Len(chars)
+      character = Mid(chars, i, 1)
+      key = new BGE.UI.KeyboardKey(character, BGE.UI.KeyboardKeyKind.char)
+      key.char = Asc(character)
+      row.keys.push(key)
+    end for
+    return row
+  end function
+
+  ' A key that switches to another page.
+  '
+  ' @param {string} label
+  ' @param {integer} targetPage - page index
+  ' @param {float} width - in grid units
+  ' @return {BGE.UI.KeyboardKey}
+  function createKeyboardPageKey(label as string, targetPage as integer, width as float) as BGE.UI.KeyboardKey
+    key = new BGE.UI.KeyboardKey(label, BGE.UI.KeyboardKeyKind.page, width)
+    key.targetPage = targetPage
+    return key
+  end function
+
+  ' A row of page keys, then Space, Del and Done.
+  '
+  ' @param {BGE.UI.KeyboardKey[]} pageKeys
+  ' @param {float} spaceWidth - in grid units
+  ' @param {float} editKeyWidth - width of Del and of Done, in grid units
+  ' @return {BGE.UI.KeyboardRow}
+  function createKeyboardSpecialRow(pageKeys as BGE.UI.KeyboardKey[], spaceWidth as float, editKeyWidth as float) as BGE.UI.KeyboardRow
+    row = new BGE.UI.KeyboardRow()
+    for each key in pageKeys
+      row.keys.push(key)
+    end for
+    space = new BGE.UI.KeyboardKey("Space", BGE.UI.KeyboardKeyKind.space, spaceWidth)
+    space.char = 32
+    row.keys.push(space)
+    row.keys.push(new BGE.UI.KeyboardKey("Del", BGE.UI.KeyboardKeyKind.backspace, editKeyWidth))
+    row.keys.push(new BGE.UI.KeyboardKey("Done", BGE.UI.KeyboardKeyKind.done, editKeyWidth))
+    return row
+  end function
+
+  ' A page of char rows followed by a special row.
+  '
+  ' @param {string[]} charRows - one string per row
+  ' @param {float[]} indents - one indent per char row, in grid units
+  ' @param {BGE.UI.KeyboardRow} specialRow
+  ' @return {BGE.UI.KeyboardPage}
+  function createKeyboardPage(charRows as string[], indents as float[], specialRow as BGE.UI.KeyboardRow) as BGE.UI.KeyboardPage
+    page = new BGE.UI.KeyboardPage()
+    for i = 0 to charRows.count() - 1
+      page.rows.push(BGE.UI.createKeyboardCharRow(charRows[i], indents[i]))
+    end for
+    page.rows.push(specialRow)
+    return page
+  end function
+
+  ' a-z in rows of 7, with an upper case page and a symbols page.
+  '
+  ' @return {BGE.UI.KeyboardLayout}
+  function createAlphabeticalKeyboardLayout() as BGE.UI.KeyboardLayout
+    lower = ["abcdefg", "hijklmn", "opqrstu", "vwxyz.@"]
+    upper = [] as string[]
+    for each chars in lower
+      upper.push(UCase(chars))
+    end for
+    symbols = ["1234567", "890-_'""", "!?#&/:;", "()+=*,$"]
+    noIndent = [0.0, 0.0, 0.0, 0.0]
+    layout = new BGE.UI.KeyboardLayout()
+    layout.pages.push(BGE.UI.createKeyboardPage(lower, noIndent, BGE.UI.createKeyboardSpecialRow([BGE.UI.createKeyboardPageKey("Shift", 1, 1.5), BGE.UI.createKeyboardPageKey("&123", 2, 1.5)], 2.0, 1.0)))
+    layout.pages.push(BGE.UI.createKeyboardPage(upper, noIndent, BGE.UI.createKeyboardSpecialRow([BGE.UI.createKeyboardPageKey("abc", 0, 1.5), BGE.UI.createKeyboardPageKey("&123", 2, 1.5)], 2.0, 1.0)))
+    layout.pages.push(BGE.UI.createKeyboardPage(symbols, noIndent, BGE.UI.createKeyboardSpecialRow([BGE.UI.createKeyboardPageKey("abc", 0, 1.5)], 3.5, 1.0)))
+    return layout
+  end function
+
+  ' QWERTY with staggered rows, an upper case page and a symbols page.
+  '
+  ' @return {BGE.UI.KeyboardLayout}
+  function createQwertyKeyboardLayout() as BGE.UI.KeyboardLayout
+    lower = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
+    upper = [] as string[]
+    for each chars in lower
+      upper.push(UCase(chars))
+    end for
+    letterIndents = [0.0, 0.5, 1.5]
+    symbols = ["1234567890", "-_'""!?#&", "/:;()+=", "*,$.@"]
+    symbolIndents = [0.0, 1.0, 1.5, 2.5]
+    layout = new BGE.UI.KeyboardLayout()
+    layout.pages.push(BGE.UI.createKeyboardPage(lower, letterIndents, BGE.UI.createKeyboardSpecialRow([BGE.UI.createKeyboardPageKey("Shift", 1, 2.0), BGE.UI.createKeyboardPageKey("&123", 2, 2.0)], 3.0, 1.5)))
+    layout.pages.push(BGE.UI.createKeyboardPage(upper, letterIndents, BGE.UI.createKeyboardSpecialRow([BGE.UI.createKeyboardPageKey("abc", 0, 2.0), BGE.UI.createKeyboardPageKey("&123", 2, 2.0)], 3.0, 1.5)))
+    layout.pages.push(BGE.UI.createKeyboardPage(symbols, symbolIndents, BGE.UI.createKeyboardSpecialRow([BGE.UI.createKeyboardPageKey("abc", 0, 2.0)], 5.0, 1.5)))
+    return layout
+  end function
+
+  ' A-Z and 0-9 in rows of 9, then Del and Done - for short arcade-style entry.
+  '
+  ' @return {BGE.UI.KeyboardLayout}
+  function createCompactKeyboardLayout() as BGE.UI.KeyboardLayout
+    special = new BGE.UI.KeyboardRow()
+    special.keys.push(new BGE.UI.KeyboardKey("Del", BGE.UI.KeyboardKeyKind.backspace, 4.5))
+    special.keys.push(new BGE.UI.KeyboardKey("Done", BGE.UI.KeyboardKeyKind.done, 4.5))
+    layout = new BGE.UI.KeyboardLayout()
+    layout.pages.push(BGE.UI.createKeyboardPage(["ABCDEFGHI", "JKLMNOPQR", "STUVWXYZ0", "123456789"], [0.0, 0.0, 0.0, 0.0], special))
+    return layout
+  end function
+
+end namespace

@@ -82,6 +82,10 @@ Each frame is a `BGE.SpriteFrameRect` (see [Drawables and Scene Objects](/drawab
 
 A missing or malformed `.json`, or a sheet that won't load, fails the task with a message naming the file, and the atlas isn't registered, so `getSpriteAtlasFrames()` logs a warning and returns `invalid`. Given a URL, the `.json` and its sheets are all downloaded (see [Loading from URLs](#loading-from-urls)). `game.loadSpriteAtlas(name, path)` does the same in one frame, for local files.
 
+## Tiled maps
+
+`loader.loadTiledMap("level1", path)` loads a map made in Tiled, its external `.tsj` tilesets and every tileset image, from a local path or a URL; `game.getTiledMap("level1")` then returns it. See [Tile Maps](/tile-maps#loading).
+
 ## Your own work
 
 `loader.addStep()` calls a function once per step until it says it's done. Return `true` when finished, or a number from 0 to 1 for progress (done at 1). This builds a level one row at a time:

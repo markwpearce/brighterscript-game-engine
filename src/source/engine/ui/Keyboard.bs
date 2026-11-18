@@ -1,0 +1,306 @@
+import "../Game.bs"
+import "../GameInput.bs"
+import "../drawables/DrawableText.bs"
+import "../../math/math.bs"
+import "FocusManager.bs"
+import "KeyboardLayout.bs"
+import "Style.bs"
+import "TextInput.bs"
+import "Theme.bs"
+import "UiContainer.bs"
+import "UiWidget.bs"
+
+namespace BGE.UI
+
+  ' An on-screen keyboard for roScreen games (Roku's own keyboards are SceneGraph-only): the
+  ' d-pad moves a highlighted key and OK presses it, typing into a TextInput. Show it with show(),
+  ' or set `TextInput.keyboard` so OK on the input opens it.
+  '
+  ' While it's open: Back cancels and restores the text, Play (or the Done key) finishes,
+  ' Replay deletes and Fast-forward types a space. Characters from the Roku mobile app's keyboard
+  ' still reach the target. In pointer focus mode, moving the cursor onto a key highlights it.
+  class Keyboard extends UiWidget
+
+    ' Keys and highlight - see createAlphabeticalKeyboardLayout(), createQwertyKeyboardLayout()
+    ' and createCompactKeyboardLayout().
+    layout as BGE.UI.KeyboardLayout
+    ' The TextInput being typed into, set by show().
+    target as BGE.UI.TextInput = invalid
+    ' Called after Done hides the keyboard - sub(keyboard as BGE.UI.Keyboard)
+    onDone as function or dynamic
+    ' Called after Cancel restores the text and hides the keyboard - sub(keyboard as BGE.UI.Keyboard)
+    onCancel as function or dynamic
+    ' Panel colour behind the keys.
+    backgroundRGBA as integer = &h000000C0
+    ' Pixels between keys.
+    keyGap as float = 4.0
+
+    ' Test accessor: how many times the key grid has been baked.
+    gridBuildCount as integer = 0
+
+    private textBeforeShow as string = ""
+    ' Every key, unhighlighted, drawn once per page/size/layout/theme - drawing ~35 keys a frame
+    ' measured 3 ms on an Ultra and 4.8 ms on an Express
+    private gridBitmap as dynamic = invalid
+    private gridCacheKey as string = ""
+    private repeatThrottle as BGE.UI.RepeatThrottle = new BGE.UI.RepeatThrottle()
+    private labelTexts as roAssociativeArray
+    private lastPointerX as float = -1.0
+    private lastPointerY as float = -1.0
+
+    ' @param {BGE.Game} game
+    ' @param {BGE.UI.KeyboardLayout} [layout] - defaults to createAlphabeticalKeyboardLayout()
+    sub new(game as BGE.Game, layout = invalid as dynamic)
+      super(game)
+      m.focusable = true
+      if layout = invalid
+        layout = BGE.UI.createAlphabeticalKeyboardLayout()
+      end if
+      m.layout = layout
+      m.labelTexts = {}
+      ' "a" and "A" are different labels
+      m.labelTexts.SetModeCaseSensitive()
+    end sub
+
+    ' Adds the keyboard to `parent`, focuses it and starts typing into `target`, on the first page
+    ' with the first key highlighted. Cancel restores the target's text from now.
+    '
+    ' @param {BGE.UI.UiContainer} parent
+    ' @param {BGE.UI.TextInput} target
+    sub show(parent as BGE.UI.UiContainer, target as BGE.UI.TextInput)
+      m.layout.setPage(0)
+      m.layout.setCursor(0, 0)
+      m.target = target
+      m.textBeforeShow = target.text
+      target.editing = true
+      parent.addChild(m)
+      m.game.focusManager.focusWidget(m)
+    end sub
+
+    ' Removes the keyboard from its container (so it stops taking focus) and refocuses the target.
+    sub hide()
+      container = m.parentContainer
+      if container <> invalid
+        (container as BGE.UI.UiContainer).removeChild(m)
+      end if
+      m.parentContainer = invalid
+      if m.target <> invalid
+        m.target.editing = false
+        m.game.focusManager.focusWidget(m.target)
+      end if
+    end sub
+
+    ' Removed from its container (hide(), or the container clearing its children): stops editing
+    ' the target so a later show() works.
+    override sub onDestroy()
+      m.parentContainer = invalid
+      if m.target <> invalid
+        m.target.editing = false
+      end if
+    end sub
+
+    ' @return {boolean} true between show() and hide()
+    function isShown() as boolean
+      return m.parentContainer <> invalid
+    end function
+
+    ' Hides the keyboard, then fires onDone and the target's onSubmit.
+    sub done()
+      m.hide()
+      if m.onDone <> invalid
+        m.onDone(m)
+      end if
+      if m.target <> invalid
+        m.target.submit()
+      end if
+    end sub
+
+    ' Restores the target's text from when show() was called, hides, then fires onCancel.
+    sub cancel()
+      if m.target <> invalid
+        m.target.text = m.textBeforeShow
+        m.target.cursorIndex = Len(m.textBeforeShow)
+      end if
+      m.hide()
+      if m.onCancel <> invalid
+        m.onCancel(m)
+      end if
+    end sub
+
+    ' Acts on a key as if it were pressed.
+    '
+    ' @param {BGE.UI.KeyboardKey} key
+    sub pressKey(key as BGE.UI.KeyboardKey)
+      if key.kind = BGE.UI.KeyboardKeyKind.page
+        m.layout.setPage(key.targetPage)
+      else if key.kind = BGE.UI.KeyboardKeyKind.done
+        m.done()
+      else if m.target = invalid
+        return
+      else if key.kind = BGE.UI.KeyboardKeyKind.backspace
+        m.target.deleteBeforeCursor()
+      else
+        m.target.insertChar(key.char)
+      end if
+    end sub
+
+    ' Presses the highlighted key (OK, via FocusManager).
+    override sub onClick()
+      m.pressKey(m.layout.currentKey())
+    end sub
+
+    ' Passes mobile-app keyboard characters through to the target.
+    '
+    ' @param {integer} char
+    override sub onECPKeyboard(char as integer)
+      if not m.focused or m.target = invalid
+        return
+      end if
+      if char = 8 ' backspace
+        m.target.deleteBeforeCursor()
+      else
+        m.target.insertChar(char)
+      end if
+    end sub
+
+    ' D-pad moves the highlight (and never moves focus away), Back cancels, Replay deletes,
+    ' Fast-forward types a space, Play is Done.
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {boolean} true if the keyboard handled the input
+    override function handleInput(input as BGE.GameInput) as boolean
+      if not (input.press or input.held)
+        return false
+      end if
+      if input.isButton("back")
+        if input.press
+          m.cancel()
+        end if
+      else if input.isButton("play")
+        if input.press
+          m.done()
+        end if
+      else if input.isButton("fastforward")
+        if input.press and m.target <> invalid
+          m.target.insertChar(32)
+        end if
+      else if input.isButton("replay")
+        if m.repeatThrottle.shouldAct(input) and m.target <> invalid
+          m.target.deleteBeforeCursor()
+        end if
+      else if input.x <> 0 or input.y <> 0
+        if m.repeatThrottle.shouldAct(input)
+          ' input.y is +1 for up; layout rows count down
+          m.layout.move(cint(input.x), -cint(input.y))
+        end if
+      else
+        return false
+      end if
+      input.consume()
+      return true
+    end function
+
+    ' Pointer mode: a cursor that moved onto a key highlights it.
+    '
+    ' @param {float} deltaTime
+    override sub onUpdate(deltaTime as float)
+      focusManager = m.game.focusManager
+      if focusManager.navigationMode <> BGE.UI.FocusNavigationMode.pointer or m.width <= 0 or m.height <= 0
+        return
+      end if
+      pointer = focusManager.cursorPosition
+      if pointer.x = m.lastPointerX and pointer.y = m.lastPointerY
+        return
+      end if
+      m.lastPointerX = pointer.x
+      m.lastPointerY = pointer.y
+      page = m.layout.currentPage()
+      unitWidth = m.width / page.getWidthUnits()
+      rowHeight = m.height / page.rows.count()
+      hit = m.layout.keyAt((pointer.x - m.position.x) / unitWidth, (pointer.y - m.position.y) / rowHeight)
+      if hit <> invalid
+        m.layout.setCursor(hit.row, hit.column)
+      end if
+    end sub
+
+    override sub draw(parent = invalid as UiWidget)
+      if m.width <= 0 or m.height <= 0
+        return
+      end if
+      theme = m.resolveTheme(parent)
+      m.ensureGrid(theme)
+      renderer = m.canvas.renderer
+      renderer.drawTransformedObject(m.position.x, m.position.y, 1.0, 1.0, 0, m.gridBitmap)
+
+      rect = m.getKeyRect(m.layout.row, m.layout.column)
+      x = m.position.x + rect.x
+      y = m.position.y + rect.y
+      if m.focused
+        renderer.drawRectangle(x - 2, y - 2, rect.w + 4, rect.h + 4, theme.focusedBorderColor)
+      end if
+      m.drawKeyTo(renderer.getDraw2d(), theme, m.layout.currentKey(), x, y, rect.w, rect.h, theme.hoveredBackgroundColor)
+    end sub
+
+    ' Bakes every key (unhighlighted) into gridBitmap if the page, size, layout or theme changed.
+    private sub ensureGrid(theme as BGE.UI.Theme)
+      width = cint(m.width)
+      height = cint(m.height)
+      cacheKey = `${m.layout.id}|${m.layout.pageIndex}|${width}x${height}|${theme.backgroundColor}|${theme.foregroundColor}|${m.backgroundRGBA}|${m.keyGap}`
+      if m.gridBitmap <> invalid and cacheKey = m.gridCacheKey
+        return
+      end if
+      ' a fresh bitmap each time: Roku queues draws, so redrawing into one already drawn from could blank it
+      bitmap = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
+      bitmap.Clear(m.backgroundRGBA)
+      page = m.layout.currentPage()
+      for r = 0 to page.rows.count() - 1
+        for c = 0 to page.rows[r].keys.count() - 1
+          rect = m.getKeyRect(r, c)
+          m.drawKeyTo(bitmap, theme, page.rows[r].keys[c], rect.x, rect.y, rect.w, rect.h, theme.backgroundColor)
+        end for
+      end for
+      m.gridBitmap = bitmap
+      m.gridCacheKey = cacheKey
+      m.gridBuildCount++
+    end sub
+
+    ' A key's rectangle relative to the keyboard's top left, gaps applied.
+    private function getKeyRect(row as integer, column as integer) as roAssociativeArray
+      page = m.layout.currentPage()
+      unitWidth = m.width / page.getWidthUnits()
+      rowHeight = m.height / page.rows.count()
+      gap = m.keyGap
+      return {
+        x: m.layout.keyLeft(row, column) * unitWidth + gap / 2,
+        y: row * rowHeight + gap / 2,
+        w: page.rows[row].keys[column].width * unitWidth - gap,
+        h: rowHeight - gap
+      }
+    end function
+
+    private sub drawKeyTo(draw2d as ifDraw2d, theme as BGE.UI.Theme, key as BGE.UI.KeyboardKey, x as float, y as float, w as float, h as float, color as integer)
+      renderer = m.canvas.renderer
+      renderer.drawRectangleTo(draw2d, x, y, w, h, color)
+      text = m.getLabelText(key.label, theme)
+      textImage = text.getTextImage()
+      if textImage <> invalid
+        size = text.getDrawnSize()
+        renderer.drawTransformedObjectTo(draw2d, x + (w - size.width) / 2, y + (h - size.height) / 2, 1.0, 1.0, 0, textImage)
+      end if
+    end sub
+
+    private function getLabelText(label as string, theme as BGE.UI.Theme) as BGE.DrawableText
+      text = m.labelTexts[label]
+      if text = invalid
+        text = new BGE.DrawableText(m, label)
+        if theme.font <> invalid
+          text.setFont(theme.font)
+        end if
+        m.labelTexts[label] = text
+      end if
+      return text
+    end function
+
+  end class
+
+end namespace
