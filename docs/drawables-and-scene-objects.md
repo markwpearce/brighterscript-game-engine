@@ -489,6 +489,11 @@ its near end is well inside the draw distance. Set `Drawable.fadesWithDistance =
 something drawn at full strength wherever it is - for example a mist layer that stands at a
 fixed distance ahead of the camera, inside the fade band, to hide where the scene ends.
 
+Something that gives off light, like a torch flame or a lit window, should show through fog
+further than the things around it. `Drawable.fadeDistanceScale` fades a drawable (and stops
+drawing it) as if the draw distance were that many times as far: with `2`, a flame is still
+glowing at 1.5x the draw distance, over the fog backdrop, after its post has gone.
+
 A ground plane always reaches the farthest any quality level would draw objects (1.5x
 `maxDrawDistance` with the default presets), so objects fade out on the ground rather than
 past its edge, and the horizon doesn't move when the quality level changes. Past the
@@ -1302,6 +1307,14 @@ the live population; once reached, further spawns (continuous or `burst()`) are 
 dropped until a slot frees up via natural expiry - a safety net against a runaway or
 misconfigured emitter, not something you need to size exactly.
 
+A line's length is in world units, but by default a rectangle's side is in canvas pixels and
+an image's scale is of its pixel size, so they stay the same size on the canvas whatever their
+distance, and cover more of the screen on a lower-resolution canvas. On a `Camera3d`, set
+`sizeInWorldUnits: true` to size them in world units instead (an image as one world unit per
+pixel, times its scale): they then shrink with distance and look the same at every canvas
+size, like the rest of the scene. On a `Camera2d` a world unit is a pixel, so it makes no
+difference there.
+
 The velocity spread only fans out in x/y. For a 3D spray, `burstCone()` fires particles in a
 cone around any direction, with optional upward lift:
 
@@ -1320,7 +1333,7 @@ m.game.addEntity(m.bursts)
 
 m.bursts.play(hitPoint, swingDirection, {
   shape: BGE.ParticleShape.Rectangle, count: 18,
-  startColor: &h8A1010, endColor: &h8A1010, startSize: 10, endSize: 3,
+  startColor: &h8A1010, endColor: &h8A1010, startSize: 2, endSize: 0.6, sizeInWorldUnits: true,
   lifetime: 0.5, spreadRadians: 0.6, speed: 100, speedSpread: 30, lift: 80,
   acceleration: BGE.Math.VectorOps.create(0, -400, 0)
 })
