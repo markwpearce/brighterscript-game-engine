@@ -114,6 +114,9 @@ namespace BGE
     ' this frame, while the camera moves: too close for any capture to follow (see
     ' isTooNearForImpostor()), so its faces draw straight to the canvas
     private impostorTooNear as boolean = false
+    ' this frame, while the camera moves: how far the model reaches in depth past its nearest
+    ' point, as a multiple of that point's depth (0 when not measured)
+    private impostorDepthRatio as float = 0.0
     private impostorStripResidual as float = -1.0
     private impostorStripAllowed as float = -1.0
     private stripProjected as float[] = []
@@ -793,7 +796,9 @@ namespace BGE
         ' and the single blit hands over once the model has moved across the view
         blitCosine = BGE.Math.Min(cosine, BGE.Math.VectorOps.dotProduct(samples.viewDirection, capture.viewDirection))
       end if
-      if blitCosine >= Cos(BGE.Math.DegreesToRadians(blitAngle))
+      ' too deep for its distance for one scale to follow as the camera moves (a bench end on)
+      tooDeepForBlit = m.impostorDepthRatio > settings.modelImpostorBlitMaxDepthRatio
+      if blitCosine >= Cos(BGE.Math.DegreesToRadians(blitAngle)) and not tooDeepForBlit
         rollChanged = Abs((renderObj.camera as Camera3d).rollDegrees - capture.rollDegrees) > 0.01
         if m.drawable.impostorBlitRollOnly and not rollChanged
           ' turning or moving without rolling leaves verticals vertical: don't tilt the blit
@@ -832,13 +837,17 @@ namespace BGE
       if useStrips and cosine >= Cos(BGE.Math.DegreesToRadians(stripAngle))
         return m.timeImpostorStrips(renderObj, capture, diagonal, drawMode)
       end if
+      if tooDeepForBlit
+        return m.missImpostor("deep")
+      end if
       return m.missImpostor("angle")
     end function
 
     ' Whether the model is too close for a capture to follow the camera: its bounding box
     ' reaches behind the camera, or its far corner is more than modelImpostorMaxDepthRatio
     ' times its near corner's depth further off. A flat warp drifts there, then snaps back
-    ' on redraw - a visible wiggle - so it draws its faces each frame instead.
+    ' on redraw - a visible wiggle - so it draws its faces each frame instead. Sets
+    ' impostorDepthRatio for the single blit's own, tighter limit.
     private function isTooNearForImpostor(rendererObj as BGE.Renderer) as boolean
       if rendererObj.camera.name <> "Camera3d"
         return false
@@ -869,7 +878,8 @@ namespace BGE
           farthest = depth
         end if
       end for
-      return farthest - nearest > nearest * rendererObj.qualitySettings.modelImpostorMaxDepthRatio
+      m.impostorDepthRatio = (farthest - nearest) / nearest
+      return m.impostorDepthRatio > rendererObj.qualitySettings.modelImpostorMaxDepthRatio
     end function
 
     ' Records why this frame's impostor attempt failed (for profiling) and returns invalid.
@@ -1260,6 +1270,7 @@ namespace BGE
       m.keepImpostorThroughQualityDrop(rendererObj)
       keptThroughLightChange = m.keepImpostorThroughSmallLightChange(rendererObj)
       m.impostorTooNear = false
+      m.impostorDepthRatio = 0.0
       if m.drawable.useImpostor and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorTooNear = m.isTooNearForImpostor(rendererObj)
       end if
