@@ -2,13 +2,18 @@ import "../World.bs"
 import "../Entities/Torch.bs"
 import "../Entities/Prop.bs"
 import "../Entities/CryptDoorway.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/EnemyTypes.bs"
 import "../Crypt/CryptMap.bs"
+import "../Crypt/CryptLevels.bs"
 import "../SolidTracker.bs"
 import "../Crypt/CryptCameraBoom.bs"
 import "ThirdPersonScene.bs"
 
-' A torch-lit stone maze under the graveyard, laid out by CryptMap. Its exit leads back up to
-' the graveyard.
+' A torch-lit stone maze under the graveyard, three levels deep (CryptLevels; args.level, 1 by
+' default). The undead sleep in its corridors until they see the knight, then find their way
+' round the walls to him; a boss guards the first level's way down and the last level's altar.
+' Each level's `E` leads up (to the graveyard from the first) and its `D` down.
 class CryptScene extends ThirdPersonScene
 
   respawnSeconds as float = 3
@@ -17,6 +22,12 @@ class CryptScene extends ThirdPersonScene
   ' How far up the camera may tilt (radians), so it stays below the wall tops
   maxCameraTilt as float = 0.45
   walls as SolidTracker
+  ' Skeletons wake when the knight is this close and in sight
+  wakeDistance as float = World.metres(12)
+  ' A boss wakes when he's this close: inside its hall
+  bossWakeDistance as float = World.metres(8)
+  ' Which CryptLevels level this visit is, from 1
+  level as integer = 1
 
   private layout as CryptLayout
   ' Where the knight started, and respawns
@@ -24,6 +35,24 @@ class CryptScene extends ThirdPersonScene
   private lights as BGE.Light[] = []
   private deadSeconds as float = 0
   private leaving as boolean = false
+  ' For the undead: paths round the walls, and whether they can see the knight
+  private nav as BGE.NavGrid
+  private levelInfo as CryptLevel
+  ' The enemy kinds by their layout character, made once per visit
+  private enemyKinds as roAssociativeArray = {}
+  ' Every cell an enemy starts on, boss included
+  private enemySpots as CryptCell[] = []
+  private boss as Enemy = invalid
+  ' Sprite atlases loaded for this level's enemies, unloaded on leaving
+  private enemyAtlases as string[] = []
+  private showEnemies as boolean = true
+  ' While the boss lives, a solid and a wall of spirit fire close the way down
+  private sealSolidId as string = ""
+  private sealInside as CryptCell
+  private sealFlames as Torch[] = []
+  ' Count down while the level's name, and the boss's banner, show
+  private titleSeconds as float = 0
+  private victorySeconds as float = 0
   private bitmapPaths as roAssociativeArray = {
     cryptFloor: "pkg:/sprites/crypt_floor.webp",
     cryptWall: "pkg:/sprites/crypt_wall.webp",
@@ -41,7 +70,18 @@ class CryptScene extends ThirdPersonScene
   end sub
 
   override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    m.level = m.levelFrom(args)
+    m.levelInfo = CryptLevels.get(m.level)
+    m.enemyKinds = m.enemyKindsIn(m.levelInfo)
     loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    m.enemyAtlases = []
+    for each key in m.enemyKinds
+      kind = m.enemyKinds[key] as EnemyType
+      if not m.hasString(m.enemyAtlases, kind.atlas)
+        m.enemyAtlases.push(kind.atlas)
+        loader.loadSpriteAtlas(kind.atlas, `pkg:/sprites/${kind.atlas}.json`)
+      end if
+    end for
     for each name in m.bitmapPaths
       if m.game.Bitmaps[name] = invalid
         loader.loadBitmap(name, m.bitmapPaths[name])
@@ -53,8 +93,14 @@ class CryptScene extends ThirdPersonScene
     m.readCommonArgs(args)
     m.leaving = false
     m.deadSeconds = 0
+    m.victorySeconds = 0
+    m.titleSeconds = 4
+    m.boss = invalid
+    m.enemySpots = []
+    m.sealSolidId = ""
+    m.sealFlames = []
     m.game.setBackgroundColor(&h000000FF)
-    m.layout = CryptMap.parse(CryptMap.layout())
+    m.layout = CryptMap.parse(m.levelInfo.layout)
 
     floorBmp = m.game.getBitmap("cryptFloor")
     floorRegion = CreateObject("roRegion", floorBmp, 0, 0, floorBmp.GetWidth(), floorBmp.GetHeight())
@@ -66,7 +112,7 @@ class CryptScene extends ThirdPersonScene
     m.addDrawable("Floor", floor)
 
     ' Just enough cold light that unlit stone isn't pure black
-    ambient = new BGE.AmbientLight(&h8090B0, 0.12)
+    ambient = new BGE.AmbientLight(m.levelInfo.ambientColor, m.levelInfo.ambientIntensity)
     m.game.addLight(ambient)
     m.lights = [ambient]
 
@@ -75,22 +121,29 @@ class CryptScene extends ThirdPersonScene
       m.addCellContents(cell)
     end for
 
+    ' Down from above: just inside the way up, facing into the maze. Up from below: just inside
+    ' the way down - unless its boss still lives (only by deep link), which would wake beside you.
     start = m.layout.startCell
-    if args.from = "graveyard"
-      ' Down from the graveyard: just inside the exit, facing into the maze
-      inside = m.firstOpenSide(m.layout.exitCell)
-      delta = CryptMap.sideStep(inside)
-      start = {col: m.layout.exitCell.col + delta[0], row: m.layout.exitCell.row + delta[1], kind: "."} as CryptCell
+    heading = 0.0
+    bossAlive = invalid <> m.levelInfo.boss and not m.isBossSlain()
+    if args.from = "below" and invalid <> m.layout.downCell and not bossAlive
+      start = m.insideOf(m.layout.downCell)
+      heading = m.awayFrom(m.layout.downCell)
+    else if args.from <> invalid or invalid = start
+      start = m.insideOf(m.layout.exitCell)
+      heading = m.awayFrom(m.layout.exitCell)
+    else
+      heading = m.openHeading(start)
     end if
-    m.startCell = start
     if args.at <> invalid
       ' Measuring: `at=<col>,<row>` starts in another floor cell
       colRow = args.at.split(",")
       start = {col: colRow[0].toInt(), row: colRow[1].toInt(), kind: "."} as CryptCell
-      m.startCell = start
+      heading = m.openHeading(start)
     end if
+    m.startCell = start
     startCenter = CryptMap.cellCenter(m.layout, start.col, start.row)
-    m.addKnight(startCenter.x, startCenter.z, m.openHeading(start))
+    m.addKnight(startCenter.x, startCenter.z, heading)
     m.setUpCamera(World.metres(24), 0.5, m.maxCameraTilt)
     ' Fading walls fade to black rather than showing the floor through them. Reach 1: nothing is
     ' drawn past the draw distance, where black fog would only match the background.
@@ -98,8 +151,155 @@ class CryptScene extends ThirdPersonScene
     camera.fog.enabled = true
     camera.fog.color = &h000000
     camera.fog.silhouetteReach = 1
-    m.walls = new SolidTracker(CryptMap.solidWorld(m.layout))
+    solids = CryptMap.solidWorld(m.layout)
+    m.walls = new SolidTracker(solids)
     m.walls.track(m.knight)
+    ' Grown by the biggest body, so paths keep every body clear of the walls
+    agentRadius = World.metres(0.4)
+    for each key in m.enemyKinds
+      agentRadius = BGE.Math.Max(agentRadius, m.enemyKinds[key].bodyRadius)
+    end for
+    m.nav = new BGE.NavGrid(solids, {cellSize: World.metres(1), agentRadius: agentRadius})
+    ' Measuring: `enemies=0` leaves the undead out
+    m.showEnemies = args.enemies <> "0"
+    m.addUndead()
+    if invalid <> m.layout.downCell and invalid <> m.boss
+      m.sealWayDown(solids)
+    end if
+  end sub
+
+  ' Level from args.level: an integer from a scene change, a string from a deep link
+  private function levelFrom(args as roAssociativeArray) as integer
+    level = 1
+    if invalid <> args.level
+      if type(args.level) = "roString" or type(args.level) = "String"
+        level = args.level.toInt()
+      else
+        level = args.level
+      end if
+    end if
+    if level < 1
+      return 1
+    else if level > CryptLevels.count()
+      return CryptLevels.count()
+    end if
+    return level
+  end function
+
+  ' Which EnemyType each enemy character in the level's layout stands for
+  private function enemyKindsIn(info as CryptLevel) as roAssociativeArray
+    makers = {u: EnemyTypes.skeleton, g: EnemyTypes.ghoul, o: EnemyTypes.graveBrute}
+    kinds = {}
+    for each row in info.layout
+      for i = 1 to Len(row)
+        ch = Mid(row, i, 1)
+        if ch = "W" and invalid <> info.boss
+          kinds["W"] = info.boss
+        else if invalid <> makers[ch] and invalid = kinds[ch]
+          maker = makers[ch]
+          kinds[ch] = maker()
+        end if
+      end for
+    end for
+    return kinds
+  end function
+
+  private function hasString(items as string[], value as string) as boolean
+    for each item in items
+      if item = value
+        return true
+      end if
+    end for
+    return false
+  end function
+
+  ' The heading that walks out of a doorway cell into the maze
+  private function awayFrom(doorway as CryptCell) as float
+    delta = CryptMap.sideStep(m.firstOpenSide(doorway))
+    return BGE.Math.headingOf(BGE.Math.VectorOps.create(delta[0], 0, delta[1]))
+  end function
+
+  ' The floor cell next to a doorway cell (`E` or `D`), into the maze
+  private function insideOf(cell as CryptCell) as CryptCell
+    delta = CryptMap.sideStep(m.firstOpenSide(cell))
+    return {col: cell.col + delta[0], row: cell.row + delta[1], kind: "."} as CryptCell
+  end function
+
+  ' An enemy on each of the level's enemy cells, asleep and facing the way in to their cell;
+  ' the boss only until it has been killed
+  private sub addUndead()
+    m.boss = invalid
+    if not m.showEnemies
+      return
+    end if
+    for each cell in m.enemySpots
+      kind = m.enemyKinds[cell.kind] as EnemyType
+      if cell.kind <> "W"
+        m.addEnemy(kind, cell, m.wakeDistance)
+      else if not m.isBossSlain()
+        m.boss = m.addEnemy(kind, cell, m.bossWakeDistance)
+      end if
+    end for
+  end sub
+
+  ' Blocks the way down with a solid and a row of spirit flames across the doorway
+  private sub sealWayDown(solids as BGE.SolidWorld)
+    cell = m.layout.downCell
+    size = World.metres(CryptMap.CELL_METRES)
+    center = CryptMap.cellCenter(m.layout, cell.col, cell.row)
+    m.sealSolidId = solids.addSolid(center.x - size / 2, center.z - size / 2, size, size)
+    m.sealInside = m.insideOf(cell)
+    side = m.firstOpenSide(cell)
+    doorway = m.onWall(center, side, World.metres(0.3))
+    ' Along the doorway: across the side's normal
+    delta = CryptMap.sideStep(side)
+    for i = -1 to 1
+      flame = new Torch(m.game)
+      offset = i * World.metres(1.6)
+      m.game.addEntity(flame, {x: doorway.x + delta[1] * offset, y: World.metres(0.2), z: doorway.z + delta[0] * offset, kind: FlameKind.spirit})
+      m.sealFlames.push(flame)
+    end for
+  end sub
+
+  private sub unsealWayDown()
+    if m.sealSolidId <> ""
+      m.walls.removeSolid(m.sealSolidId)
+      m.sealSolidId = ""
+    end if
+    for each flame in m.sealFlames
+      flame.invalidate()
+    end for
+    m.sealFlames = []
+  end sub
+
+  private function addEnemy(kind as EnemyType, cell as CryptCell, wakeDistance as float) as Enemy
+    spot = CryptMap.cellCenter(m.layout, cell.col, cell.row)
+    foe = new Enemy(m.game)
+    m.game.addEntity(foe, {
+      type: kind,
+      director: m.director,
+      x: spot.x,
+      z: spot.z,
+      heading: m.openHeading(cell),
+      wakeDistance: wakeDistance,
+      nav: m.nav
+    })
+    m.walls.track(foe)
+    return foe
+  end function
+
+  ' Once killed, a boss stays dead for the rest of the run, even after the knight dies
+  private function isBossSlain() as boolean
+    slain = GetGlobalAA().cryptBossesSlain
+    return invalid <> slain and slain[m.level.toStr()] = true
+  end function
+
+  private sub markBossSlain()
+    globals = GetGlobalAA()
+    if invalid = globals.cryptBossesSlain
+      globals.cryptBossesSlain = {}
+    end if
+    globals.cryptBossesSlain[m.level.toStr()] = true
   end sub
 
   ' Every wall from the same grid: one drawable however many walls there are
@@ -114,7 +314,7 @@ class CryptScene extends ThirdPersonScene
     bmp.Finish()
     region = CreateObject("roRegion", bmp, 0, 0, bmp.GetWidth(), bmp.GetHeight())
     size = World.metres(CryptMap.CELL_METRES)
-    map = new BGE.GridWallsMap(CryptMap.layout(), {
+    map = new BGE.GridWallsMap(m.levelInfo.layout, {
       cellSize: size,
       wallHeight: World.metres(CryptMap.WALL_METRES),
       origin: BGE.Math.VectorOps.create(-m.layout.cols * size / 2, 0, -m.layout.rows * size / 2),
@@ -130,7 +330,7 @@ class CryptScene extends ThirdPersonScene
     center = CryptMap.cellCenter(m.layout, cell.col, cell.row)
     wallSides = CryptMap.wallSides(m.layout, cell.col, cell.row)
     if cell.kind = "T" and wallSides.Count() > 0
-      m.addTorch(center, wallSides[0], FlameKind.fire)
+      m.addTorch(center, wallSides[0], m.levelInfo.torchKind)
     else if cell.kind = "k" and wallSides.Count() > 0
       spot = m.onWall(center, wallSides[0], World.metres(0.05))
       cryptProp = new Prop(m.game)
@@ -153,8 +353,10 @@ class CryptScene extends ThirdPersonScene
       end if
       cryptProp = new Prop(m.game)
       m.game.addEntity(cryptProp, {x: spot.x, z: spot.z, bitmap: bitmap})
-    else if cell.kind = "E"
+    else if cell.kind = "E" or cell.kind = "D"
       m.addDoorway(cell)
+    else if invalid <> m.enemyKinds[cell.kind]
+      m.enemySpots.push(cell)
     end if
   end sub
 
@@ -205,25 +407,93 @@ class CryptScene extends ThirdPersonScene
     for each name in m.bitmapPaths
       m.game.unloadBitmap(name)
     end for
+    for each atlas in m.enemyAtlases
+      m.game.unloadSpriteAtlas(atlas)
+    end for
+    m.enemyAtlases = []
+    m.sealFlames = []
   end sub
 
   override sub onUpdate(dt as float)
     m.director.viewHeading = m.cameraRig.heading
     m.hud.update(dt, m.knight)
     m.director.update(dt)
+    m.updateBoss(dt)
     if not m.knight.isAlive()
+      ' Start over: the knight back at the start, the undead back in their places and asleep
       m.deadSeconds += dt
       if m.deadSeconds >= m.respawnSeconds
         m.deadSeconds = 0
+        m.director.clearEnemies()
+        m.walls.clear()
         start = CryptMap.cellCenter(m.layout, m.startCell.col, m.startCell.row)
         m.knight.respawn(start.x, start.z)
         m.walls.track(m.knight)
+        m.addUndead()
       end if
       return
     end if
+    if m.leaving
+      return
+    end if
     here = CryptMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
-    if not m.leaving and here[0] = m.layout.exitCell.col and here[1] = m.layout.exitCell.row
-      m.leaving = m.game.changeSceneWithFade("GraveyardScene", {from: "crypt"})
+    if m.isCell(here, m.layout.exitCell)
+      if m.level = 1
+        m.leaving = m.game.changeSceneWithFade("GraveyardScene", {from: "crypt"})
+      else
+        m.leaving = m.game.changeSceneWithFade("CryptScene", {level: m.level - 1, from: "below"})
+      end if
+    else if m.isCell(here, m.layout.downCell)
+      m.leaving = m.game.changeSceneWithFade("CryptScene", {level: m.level + 1, from: "above"})
+    end if
+  end sub
+
+  private function isCell(colRow as integer[], cell as CryptCell) as boolean
+    return invalid <> cell and colRow[0] = cell.col and colRow[1] = cell.row
+  end function
+
+  ' True when the knight stands next to the sealed way down
+  private function isAtSeal() as boolean
+    if m.sealSolidId = "" or not m.knight.isAlive()
+      return false
+    end if
+    here = CryptMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
+    return m.isCell(here, m.sealInside)
+  end function
+
+  ' Notices the boss's death: remembered for the run, announced, and the way down opens
+  private sub updateBoss(dt as float)
+    if m.victorySeconds > 0
+      m.victorySeconds -= dt
+    end if
+    if m.titleSeconds > 0
+      m.titleSeconds -= dt
+    end if
+    if invalid <> m.boss and not m.boss.isAlive()
+      m.markBossSlain()
+      m.boss = invalid
+      m.victorySeconds = 5
+      m.titleSeconds = 0
+      m.unsealWayDown()
+    end if
+  end sub
+
+  ' The level's name as you arrive, the boss's health along the bottom once it wakes, and the
+  ' banner when it falls
+  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
+    super.onDrawEnd(renderObj, uiRenderObj)
+    font = m.game.getFont("default")
+    if invalid <> m.boss and m.boss.isAwake() and m.knight.isAlive()
+      m.hud.drawBossBar(uiRenderObj, font, m.boss.name, m.boss.health / m.boss.maxHealth)
+    end if
+    if m.victorySeconds > 0 and invalid <> m.levelInfo.bossBanner and m.knight.isAlive()
+      m.hud.drawBanner(uiRenderObj, font, m.levelInfo.bossBanner, m.victorySeconds, 5)
+    else if m.titleSeconds > 0
+      m.hud.drawBanner(uiRenderObj, font, m.levelInfo.name, m.titleSeconds, 4)
+    end if
+    if m.isAtSeal()
+      center = uiRenderObj.getCanvasCenter()
+      uiRenderObj.DrawText("Spirit fire seals the way down", center.x, center.y * 1.4, &hC8D8FFFF, font, "center")
     end if
   end sub
 
