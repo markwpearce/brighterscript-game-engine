@@ -1,4 +1,26 @@
 namespace tests
+
+  ' Records the size of every square and the scale of every region drawn.
+  class ParticleSizeRecordingRenderer extends BGE.Renderer
+
+    public sizes = []
+
+    sub new(draw2d as ifDraw2d, mainGame as BGE.Game, cam as BGE.Camera)
+      super(draw2d, mainGame, cam)
+    end sub
+
+    override function drawSquare(x as float, y as float, sideLength as float, rgba as integer) as boolean
+      m.sizes.push(sideLength)
+      return true
+    end function
+
+    override function drawRegion(regionToDraw as ifDraw2d, x as float, y as float, scaleX = 1 as float, scaleY = 1 as float, rotation = 0 as float, rgba = -1 as integer) as boolean
+      m.sizes.push(scaleX)
+      return true
+    end function
+
+  end class
+
   @suite("BGE.SceneObjectParticle")
   class SceneObjectParticleTests extends rooibos.BaseTestSuite
     game as BGE.Game
@@ -12,6 +34,17 @@ namespace tests
       m.bitmap = CreateObject("roBitmap", {width: 200, height: 200, alphaEnable: true})
       m.renderer = new BGE.Renderer(m.bitmap)
       m.entity.position = BGE.Math.VectorOps.create(100, 100, 0)
+    end function
+
+    ' A Camera3d at the origin looking down -z, 90 degree FOV on the 200 px canvas
+    private function sizeRenderer() as tests.ParticleSizeRecordingRenderer
+      camera = new BGE.Camera3d()
+      camera.fieldOfViewDegrees = 90
+      camera.position = BGE.Math.VectorOps.create(0, 0, 0)
+      camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      renderer = new tests.ParticleSizeRecordingRenderer(m.bitmap, m.game, camera)
+      renderer.setupCameraForFrame()
+      return renderer
     end function
 
     private function drawOnce(emitter as BGE.DrawableParticles) as integer
@@ -107,6 +140,88 @@ namespace tests
       renderer.resetDrawCallCounter()
       sceneObj.draw(renderer)
       m.assertEqual(2, renderer.getDrawCallsLastFrame())
+    end function
+
+    @describe("sizeInWorldUnits (#491)")
+
+    @it("shrinks rectangles with distance on a Camera3d, by focal length / depth")
+    function _()
+      renderer = m.sizeRenderer()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 2, endSize: 2, sizeInWorldUnits: true})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(2)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(0, 0, -10)
+      emitter.particles[1].position = BGE.Math.VectorOps.create(1, 0, -20)
+      sceneObj.draw(renderer)
+      ' a 200 px canvas at 90 degrees: focal length 100
+      m.assertEqual(renderer.sizes.Count(), 2)
+      m.assertTrue(Abs(renderer.sizes[0] - 20) < 0.01, `near ${renderer.sizes[0]}`)
+      m.assertTrue(Abs(renderer.sizes[1] - 10) < 0.01, `far ${renderer.sizes[1]}`)
+    end function
+
+    @it("scales images with distance on a Camera3d")
+    function _()
+      renderer = m.sizeRenderer()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Image, {lifetime: 100, startSize: 0.5, endSize: 0.5, sizeInWorldUnits: true})
+      emitter.image = CreateObject("roBitmap", {width: 8, height: 8, alphaEnable: true})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(1)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(0, 0, -25)
+      sceneObj.draw(renderer)
+      m.assertEqual(renderer.sizes.Count(), 1)
+      ' 0.5 * 100 / 25
+      m.assertTrue(Abs(renderer.sizes[0] - 2) < 0.01, `scale ${renderer.sizes[0]}`)
+    end function
+
+    @it("leaves out a particle nearer than the near plane, where it would fill the screen")
+    function _()
+      renderer = m.sizeRenderer()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 2, endSize: 2, sizeInWorldUnits: true})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(2)
+      ' focal length 100: the near plane is 100 / 64 ahead
+      emitter.particles[0].position = BGE.Math.VectorOps.create(0, 0, -1)
+      emitter.particles[1].position = BGE.Math.VectorOps.create(0, 0, -10)
+      sceneObj.draw(renderer)
+      m.assertEqual(renderer.sizes.Count(), 1)
+      m.assertTrue(Abs(renderer.sizes[0] - 20) < 0.01, `size ${renderer.sizes[0]}`)
+    end function
+
+    @it("keeps rectangles a fixed canvas size with it off")
+    function _()
+      renderer = m.sizeRenderer()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 2, endSize: 2})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(2)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(0, 0, -10)
+      emitter.particles[1].position = BGE.Math.VectorOps.create(1, 0, -20)
+      sceneObj.draw(renderer)
+      m.assertEqual(renderer.sizes[0], 2.0)
+      m.assertEqual(renderer.sizes[1], 2.0)
+    end function
+
+    @it("leaves sizes alone on a Camera2d, where a world unit is a pixel")
+    function _()
+      renderer = new tests.ParticleSizeRecordingRenderer(m.bitmap, m.game, new BGE.Camera2d())
+      renderer.setupCameraForFrame()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 6, endSize: 6, sizeInWorldUnits: true})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(1)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(50, 50, 0)
+      sceneObj.draw(renderer)
+      m.assertEqual(renderer.sizes[0], 6.0)
+    end function
+
+    @it("pads its bounds by the size in world units, not pixels")
+    function _()
+      renderer = m.sizeRenderer()
+      emitter = new BGE.DrawableParticles(m.entity, BGE.ParticleShape.Rectangle, {lifetime: 100, startSize: 4, endSize: 4, sizeInWorldUnits: true})
+      sceneObj = emitter.addToRenderer(renderer)
+      emitter.burst(1)
+      emitter.particles[0].position = BGE.Math.VectorOps.create(0, 0, -50)
+      bounds = BGE.Math.getBounds(sceneObj.getBoundingPoints(renderer.camera))
+      ' 4 * 0.7072
+      m.assertTrue(Abs(bounds[1].x - 2.8288) < 0.01, `max x ${bounds[1].x}`)
     end function
 
     @it("registers exactly one SceneObject regardless of live particle count")
