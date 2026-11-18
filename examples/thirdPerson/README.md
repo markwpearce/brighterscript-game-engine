@@ -10,7 +10,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Field (`FieldScene`) | `scene=field` | The arena for trying out combat: enemies keep spawning. Nothing leads here; it's for testing. |
 | Graveyard (`GraveyardScene`) | `scene=graveyard` | A fenced churchyard at night: graves, trees, a chapel, the gravedigger's hut and a well. Three skeletons stand among the graves and wake when you come within 10 m (or hit one); killed ones stay dead until you die. The mausoleum's door at the far end leads down into the crypt; the gap in the fence leads back to the town. |
 | Crypt (`CryptScene`) | `scene=crypt` (`at=<col>,<row>`) | A torch-lit stone maze. Its doorway leads back up to the graveyard. |
-| Inside (`InteriorScene`) | `scene=keep`, `scene=chapel` | Walk up to the keep's door in town, or the chapel's in the graveyard, to go in. The keep's great hall: long tables and benches, a hearth either side, the lord beside his throne. The chapel: pews either side of the aisle, the priest before a candle-lit altar. The door leads back out in front of the building. |
+| Inside (`InteriorScene`) | `scene=keep`, `scene=chapel` (`at=<col>,<row>[,<heading>]`) | Walk up to the keep's door in town, or the chapel's in the graveyard, to go in. The keep's great hall: long tables and benches, a hearth either side, the lord beside his throne. The chapel: pews either side of the aisle, the priest before a candle-lit altar. The door leads back out in front of the building. |
 
 ## Playing
 
@@ -63,6 +63,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - The town has a 33 m draw distance (`draw=<metres>` overrides it), its end hidden by the engine fog (`camera.fog`, set up in `ThirdPersonScene.useTownFog()`, which the graveyard shares): things fade into the fog colour rather than into the sky, and buildings and the town wall stay on the skyline as fog-coloured silhouettes past the draw distance. `fog=0` turns it off. Occlusion culling is off in the town (its open streets hide too little to pay for it; `occlusion=1` turns it on).
 - Every prop (`PropModel`) is `isStatic`, so it never checks collisions itself, and only the big buildings block the camera.
 - The town wall is four inward-facing `DrawableWall`s (`Entities/TownWall.bs`), since the knight never sees the outside: far cheaper than the `wall_segment` models. The corner towers and the gate are models.
+- Talking: walk up to someone and face them, and OK (X) talks instead of swinging. `Conversation.bs` plays `src/story/town.json` with `BGE.Story` in a box along the bottom (OK reads on, up and down pick a choice, Back leaves). One `StoryState` lasts the whole run, so what's been said carries between scenes; the crypt's slain bosses show up as `crypt.*` flags. Lord Aldric in the keep sends you to the crypt, Father Edmund in the chapel can bless you (heals), and the villagers say a line each. A scene makes someone talk with `addTalker(entity, node, name)` and calls `updateTalk()` first in `onUpdate()`.
 - `Scenes/InteriorScene.bs`, `Interior/Interiors.bs`: inside the keep and the chapel. Each is a text grid of 2 m cells (its key above `Interiors.keep()`) like the crypt's: one `DrawableGridWalls` for its stone walls, a camera boom that marches the grid, black fog. Furniture has no art: each rectangle of a furniture character is a plain shaded box (`Entities/BoxProp.bs`, every box of a kind in one model), with a solid. The hearths and throne are boxes too, built in the scene. `Torch`'s `size` makes the candles small.
 - `Dressing.bs` has the scenery the town and graveyard place the same way: picket fences, trees (`Y` in `town.txt`, `T` in the graveyard), torches on wall brackets, and the graveyard's stone lantern posts that hold its spirit flames.
 - Torches stand on a flat post image (`Torch`'s `post` arg, far cheaper than a model while the camera moves) or hang from `torch_wall` brackets (by the gate and the keep's door), the flame at the bracket's tip.
@@ -117,7 +118,6 @@ Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16; the skeleton
 
 - [ ] The four packed sheets take ~27 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
 - [ ] The rest of the map: the forest.
-- [ ] Talking to the townsfolk (and the lord and the priest).
 - [ ] Furniture art for the interiors.
 - [ ] Ripostes and backstabs, checkpoints.
 - [ ] Hit and death art for the knight (he holds a frame and changes colour for now).

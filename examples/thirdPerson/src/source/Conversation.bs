@@ -1,0 +1,171 @@
+import "pkg:/source/story/StoryState.bs"
+import "pkg:/source/story/DialogueRunner.bs"
+import "pkg:/source/story/StoryLoader.bs"
+import "World.bs"
+
+' Someone the knight can talk to: an entity, and the story node it starts
+interface Talker extends roAssociativeArray
+  entity as BGE.GameEntity
+  node as string
+  ' Shown in the "talk" prompt
+  name as string
+end interface
+
+' One conversation from the game's story (pkg:/story/town.json), shown in a box along the bottom
+' of the screen: the speaker and their line, or the choices to pick from. The story's state is
+' kept for the whole run, so what's been said and done carries from scene to scene.
+class Conversation
+
+  ' Event names the story posted (e.g. "heal") since the scene last took them
+  posts as string[] = []
+
+  private runner as BGE.Story.DialogueRunner
+  private state as BGE.Story.StoryState
+  private selected as integer = 0
+  ' Where the move stick was last frame, so holding it moves the choice once
+  private stickWas as integer = 0
+
+  sub new()
+    globals = GetGlobalAA()
+    if invalid = globals.thirdPersonStory
+      story = BGE.Story.loadStory("pkg:/story/town.json")
+      globals.thirdPersonStory = {story: story, state: new BGE.Story.StoryState(story)}
+    end if
+    m.state = globals.thirdPersonStory.state
+    m.runner = new BGE.Story.DialogueRunner(m.state, globals.thirdPersonStory.story)
+    m.syncWorldFlags()
+  end sub
+
+  ' Starts at a node; false if it has nothing to say
+  function start(node as string) as boolean
+    m.selected = 0
+    m.stickWas = 0
+    m.take(m.runner.start(node))
+    return m.runner.isActive()
+  end function
+
+  function isActive() as boolean
+    return m.runner.isActive()
+  end function
+
+  ' OK reads on or picks the choice; up and down move between choices; Back ends it
+  sub update(controls as BGE.Controller.ControlMap)
+    if not m.runner.isActive()
+      return
+    end if
+    if controls.isActionPressed("dodge")
+      m.runner.cancel()
+      return
+    end if
+    if m.runner.isChoosing()
+      m.moveSelection(controls)
+      if controls.isActionPressed("attack")
+        views = m.runner.choices()
+        if m.selected < views.Count() and views[m.selected].enabled
+          m.take(m.runner.choose(m.selected))
+          m.selected = 0
+        end if
+      end if
+    else if controls.isActionPressed("attack")
+      m.take(m.runner.advance())
+    end if
+  end sub
+
+  private sub moveSelection(controls as BGE.Controller.ControlMap)
+    axis = controls.getAxis("move")
+    stick = 0
+    if axis.y > 0.5
+      stick = -1
+    else if axis.y < -0.5
+      stick = 1
+    end if
+    if stick <> 0 and stick <> m.stickWas
+      count = m.runner.choices().Count()
+      m.selected = (m.selected + stick + count) mod count
+    end if
+    m.stickWas = stick
+  end sub
+
+  ' The world's doings the story asks about, as flags: the crypt's bosses
+  private sub syncWorldFlags()
+    slain = GetGlobalAA().cryptBossesSlain
+    if invalid <> slain
+      if slain["1"] = true
+        m.state.flags["crypt.wardenSlain"] = true
+      end if
+      if slain["3"] = true
+        m.state.flags["crypt.kingSlain"] = true
+      end if
+    end if
+  end sub
+
+  private sub take(result as BGE.Story.StoryResult)
+    if invalid = result
+      return
+    end if
+    for each name in result.posts
+      m.posts.push(name)
+    end for
+  end sub
+
+  ' The box along the bottom, inside the title-safe area
+  sub draw(uiRenderObj as BGE.Renderer, font as roFont)
+    if not m.runner.isActive()
+      return
+    end if
+    center = uiRenderObj.getCanvasCenter()
+    screenWidth = center.x * 2
+    screenHeight = center.y * 2
+    left = screenWidth * 0.1
+    width = screenWidth * 0.8
+    lineHeight = font.GetOneLineHeight()
+    padding = 16
+    textWidth = width - padding * 2
+    bottom = screenHeight * 0.9
+
+    rows = [] as string[]
+    colors = [] as integer[]
+    speaker = ""
+    if m.runner.isChoosing()
+      views = m.runner.choices()
+      for i = 0 to views.Count() - 1
+        marker = "  "
+        color = &hD8D0C0FF
+        if i = m.selected
+          marker = "> "
+          color = &hF0C860FF
+        end if
+        if not views[i].enabled
+          color = &h707070FF
+        end if
+        rows.push(marker + views[i].label)
+        colors.push(color)
+      end for
+    else
+      line = m.runner.currentLine()
+      speaker = line.speaker ?? ""
+      for each textLine in BGE.UI.wrapText(line.text, font, textWidth)
+        rows.push(textLine)
+        colors.push(&hE8E4DCFF)
+      end for
+    end if
+
+    boxHeight = padding * 2 + rows.Count() * lineHeight
+    if speaker <> ""
+      boxHeight += lineHeight
+    end if
+    top = bottom - boxHeight
+    uiRenderObj.drawRectangle(left, top, width, boxHeight, &h0A0806E0)
+    uiRenderObj.drawRectangle(left, top, width, 2, &hA08040FF)
+    y = top + padding
+    if speaker <> ""
+      uiRenderObj.DrawText(speaker, left + padding, y, &hE0B050FF, font, "left")
+      y += lineHeight
+    end if
+    for i = 0 to rows.Count() - 1
+      uiRenderObj.DrawText(rows[i], left + padding, y, colors[i], font, "left")
+      y += lineHeight
+    end for
+  end sub
+
+end class
