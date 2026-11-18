@@ -49,7 +49,7 @@ namespace BGE
     ' The base default checks only the emitter's own anchor (m.worldPosition), which is
     ' wrong for an emitter whose particles have spread away from it (#114). Returns the 8
     ' corners of the box around every live particle (and line end), padded by the most any
-    ' particle draws beyond its position in pixels, so they bound everything performDraw()
+    ' particle draws beyond its position (in pixels, or world units with sizeInWorldUnits), so they bound everything performDraw()
     ' draws - which lets walls and occluders hide or redraw over it (#463). Still a
     ' fixed number of points to test, whatever the live particle count.
     '
@@ -172,11 +172,8 @@ namespace BGE
       dx = BGE.Math.max(abs(minPoint.x - camPos.x), abs(maxPoint.x - camPos.x))
       dy = BGE.Math.max(abs(minPoint.y - camPos.y), abs(maxPoint.y - camPos.y))
       dz = BGE.Math.max(abs((minPoint.z ?? 0) - (camPos.z ?? 0)), abs((maxPoint.z ?? 0) - (camPos.z ?? 0)))
-      ppu = camera3d.pixelsPerWorldUnitAtDepth(sqr(dx * dx + dy * dy + dz * dz))
-      if ppu <= 0
-        return 1.0
-      end if
-      return 1 / ppu
+      ' a distance, not a view depth, and never clamped at the near plane: it only pads
+      return sqr(dx * dx + dy * dy + dz * dz) / camera3d.getFocalLength()
     end function
 
     protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -205,6 +202,7 @@ namespace BGE
       ' sizeInWorldUnits: camera3d.pixelsPerWorldUnitAt(), inlined below for every particle
       inWorldUnits = m.drawable.sizeInWorldUnits
       focal = 0.0
+      nearDepth = 0.0
       camX = 0.0
       camY = 0.0
       camZ = 0.0
@@ -213,6 +211,7 @@ namespace BGE
       fwdZ = 0.0
       if inWorldUnits
         focal = camera3d.getFocalLength()
+        nearDepth = camera3d.getNearDepth()
         camX = camera3d.position.x
         camY = camera3d.position.y
         camZ = camera3d.position.z ?? 0.0
@@ -254,12 +253,15 @@ namespace BGE
         if inWorldUnits
           p = particle.position
           depth = (p.x - camX) * fwdX + (p.y - camY) * fwdY + ((p.z ?? 0.0) - camZ) * fwdZ
-          if depth > 0
+          ' nearer than the near plane it would fill the screen: left out, as models are cut there
+          if depth > nearDepth
             size = size * focal / depth
+          else
+            size = 0
           end if
         end if
         ' DrawPoint: a centred square, about twice as fast as DrawRect on device
-        if fade > 0
+        if fade > 0 and size > 0
           didDrawAny = rendererObj.drawSquare(projected[i], projected[i + 1], size, (red << 24) + (green << 16) + (blue << 8) + alpha) or didDrawAny
         end if
       end for
@@ -294,27 +296,30 @@ namespace BGE
         size = BGE.Math.lerp(particle.startSize, particle.endSize, t)
         ' a line's length is already in world units
         if m.drawable.sizeInWorldUnits and m.drawable.shape <> BGE.ParticleShape.Line
+          ' 0 nearer than the near plane, so it's left out
           size = size * rendererObj.camera.pixelsPerWorldUnitAt(particle.position)
         end if
 
-        if m.drawable.shape = BGE.ParticleShape.Line
-          didDrawAny = m.drawLineParticle(rendererObj, particle, canvasPos, size, rgba) or didDrawAny
-        else if m.drawable.shape = BGE.ParticleShape.Rectangle
-          didDrawAny = rendererObj.drawSquare(canvasPos.x, canvasPos.y, size, rgba) or didDrawAny
-        else if m.drawable.shape = BGE.ParticleShape.Image and m.drawable.image <> invalid
-          regionToDraw = m.drawable.image
-          frameRegions = m.drawable.getFrameRegions()
-          if frameRegions <> invalid and frameRegions.count() > 0
-            frameIndex = Int(t * frameRegions.count())
-            if frameIndex >= frameRegions.count()
-              frameIndex = frameRegions.count() - 1
+        if size > 0
+          if m.drawable.shape = BGE.ParticleShape.Line
+            didDrawAny = m.drawLineParticle(rendererObj, particle, canvasPos, size, rgba) or didDrawAny
+          else if m.drawable.shape = BGE.ParticleShape.Rectangle
+            didDrawAny = rendererObj.drawSquare(canvasPos.x, canvasPos.y, size, rgba) or didDrawAny
+          else if m.drawable.shape = BGE.ParticleShape.Image and m.drawable.image <> invalid
+            regionToDraw = m.drawable.image
+            frameRegions = m.drawable.getFrameRegions()
+            if frameRegions <> invalid and frameRegions.count() > 0
+              frameIndex = Int(t * frameRegions.count())
+              if frameIndex >= frameRegions.count()
+                frameIndex = frameRegions.count() - 1
+              end if
+              if frameIndex < 0
+                frameIndex = 0
+              end if
+              regionToDraw = frameRegions[frameIndex]
             end if
-            if frameIndex < 0
-              frameIndex = 0
-            end if
-            regionToDraw = frameRegions[frameIndex]
+            didDrawAny = rendererObj.drawRegion(regionToDraw, canvasPos.x, canvasPos.y, size, size, BGE.Math.DegreesToRadians(particle.rotation), rgba) or didDrawAny
           end if
-          didDrawAny = rendererObj.drawRegion(regionToDraw, canvasPos.x, canvasPos.y, size, size, BGE.Math.DegreesToRadians(particle.rotation), rgba) or didDrawAny
         end if
       end for
 
