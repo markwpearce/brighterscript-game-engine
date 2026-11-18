@@ -1,0 +1,278 @@
+import "../World.bs"
+import "../Dressing.bs"
+import "../SolidTracker.bs"
+import "../Entities/BoxProp.bs"
+import "../Entities/Torch.bs"
+import "../Entities/Townsfolk.bs"
+import "../Interior/InteriorMap.bs"
+import "../Interior/Interiors.bs"
+import "../Interior/InteriorCameraBoom.bs"
+import "../Town/TownsfolkTypes.bs"
+import "ThirdPersonScene.bs"
+
+' Inside a building (args.place: "keep" or "chapel", see Interiors): stone walls from its text
+' grid, furniture as plain boxes, firelight, and whoever lives there. Its door leads back out
+' to the scene it came from, in front of the same door.
+class InteriorScene extends ThirdPersonScene
+
+  ' World units per floor texel
+  floorTexelScale as float = 2
+  ' How far up the camera may tilt (radians), so it stays below the ceiling it doesn't have
+  maxCameraTilt as float = 0.45
+  walls as SolidTracker
+
+  private place as InteriorPlace
+  private layout as InteriorLayout
+  private lights as BGE.Light[] = []
+  private leaving as boolean = false
+  private bitmapPaths as roAssociativeArray = {
+    cryptFloor: "pkg:/sprites/crypt_floor.webp",
+    cryptWall: "pkg:/sprites/crypt_wall.webp"
+  }
+  private modelPaths as roAssociativeArray = {
+    torchWall: "pkg:/models/props/torch_wall.obj"
+  }
+  private lord as TownsfolkType = TownsfolkTypes.nobleman()
+  private priest as TownsfolkType = TownsfolkTypes.priest()
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "InteriorScene"
+    m.qualityOptions = {targetFps: 20, fixedDrawDistance: true}
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    m.place = Interiors.get(args.place ?? "keep")
+    loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json")
+    for each kind in [m.lord, m.priest]
+      loader.loadSpriteAtlas(kind.atlas, `pkg:/sprites/${kind.atlas}.json`)
+    end for
+    for each name in m.bitmapPaths
+      if m.game.Bitmaps[name] = invalid
+        loader.loadBitmap(name, m.bitmapPaths[name])
+      end if
+    end for
+    for each name in m.modelPaths
+      loader.load3dModel(name, m.modelPaths[name])
+    end for
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.readCommonArgs(args)
+    m.leaving = false
+    m.game.setBackgroundColor(&h000000FF)
+    m.layout = InteriorMap.parse(m.place.layout)
+
+    floorBmp = m.game.getBitmap("cryptFloor")
+    floor = new BGE.DrawablePlane(m, CreateObject("roRegion", floorBmp, 0, 0, floorBmp.GetWidth(), floorBmp.GetHeight()), {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.tiledImage,
+      scale: BGE.Math.VectorOps.create(m.floorTexelScale, m.floorTexelScale, 1)
+    })
+    floor.isShaded = true
+    m.addDrawable("Floor", floor)
+
+    ambient = new BGE.AmbientLight(m.place.ambientColor, m.place.ambientIntensity)
+    m.game.addLight(ambient)
+    m.lights = [ambient]
+
+    solids = InteriorMap.solidWorld(m.layout)
+    m.addWalls()
+    m.addFurniture(solids)
+    for each cell in m.layout.cells
+      m.addCellContents(cell, solids)
+    end for
+
+    ' Just inside the door, facing into the room
+    door = m.layout.exits[0]
+    inside = InteriorMap.cellCenter(m.layout, door.col + (m.layout.exits.Count() - 1) / 2, door.row - 1)
+    m.addKnight(inside.x, inside.z, 0)
+    m.setUpCamera(World.metres(30), 0.5, m.maxCameraTilt)
+    ' Fading walls fade to black, as in the crypt; nothing is drawn past the draw distance
+    camera = m.game.canvas.renderer.camera as BGE.Camera3d
+    camera.fog.enabled = true
+    camera.fog.color = &h000000
+    camera.fog.silhouetteReach = 1
+    m.walls = new SolidTracker(solids)
+    m.walls.track(m.knight)
+  end sub
+
+  ' Every wall from the grid, as one drawable: the crypt's stone, one 2 m tile to a cell
+  private sub addWalls()
+    tile = m.game.getBitmap("cryptWall")
+    region = CreateObject("roRegion", tile, 0, 0, tile.GetWidth(), tile.GetHeight())
+    size = World.metres(InteriorMap.CELL_METRES)
+    map = new BGE.GridWallsMap(m.place.layout, {
+      cellSize: size,
+      wallHeight: World.metres(m.place.wallMetres),
+      origin: BGE.Math.VectorOps.create(-m.layout.cols * size / 2, 0, -m.layout.rows * size / 2),
+      solid: {"#": "stone"}
+    })
+    walls = new BGE.DrawableGridWalls(m, map, {stone: region}, {isShaded: true, lightWrap: 0.5, castsFogSilhouette: true})
+    m.addDrawable("Walls", walls)
+  end sub
+
+  ' One box per rectangle of each furniture character, all of a kind in one model, and a solid
+  ' for each
+  private sub addFurniture(solids as BGE.SolidWorld)
+    kinds = ""
+    for each key in m.place.furniture
+      kinds += key
+    end for
+    if kinds = ""
+      return
+    end if
+    boxesByKind = {}
+    size = World.metres(InteriorMap.CELL_METRES)
+    for each group in InteriorMap.groups(m.layout, kinds)
+      piece = m.furnitureFor(group.kind)
+      center = InteriorMap.cellCenter(m.layout, group.col + (group.cols - 1) / 2, group.row + (group.rows - 1) / 2)
+      width = group.cols * size - 2 * World.metres(piece.insetX)
+      depth = group.rows * size - 2 * World.metres(piece.insetZ)
+      if invalid = boxesByKind[group.kind]
+        boxesByKind[group.kind] = []
+      end if
+      boxesByKind[group.kind].push({x: center.x, y: 0, z: center.z, width: width, depth: depth, height: World.metres(piece.height), color: piece.color} as PropBox)
+      solids.addSolid(center.x - width / 2, center.z - depth / 2, width, depth)
+    end for
+    for each kind in boxesByKind
+      furniture = new BoxProp(m.game)
+      m.game.addEntity(furniture, {x: 0, z: 0, boxes: boxesByKind[kind], name: "furniture"})
+    end for
+  end sub
+
+  ' The furniture a layout character stands for. Looked up by hand, as AA keys ignore case and
+  ' a place may use both cases.
+  private function furnitureFor(kind as string) as InteriorFurniture
+    for each key in m.place.furniture
+      if key = kind
+        return m.place.furniture[key]
+      end if
+    end for
+    return m.place.furniture[kind]
+  end function
+
+  ' Torches, the hearth, candles, the throne and the people
+  private sub addCellContents(cell as InteriorCell, solids as BGE.SolidWorld)
+    center = InteriorMap.cellCenter(m.layout, cell.col, cell.row)
+    wallSides = InteriorMap.wallSides(m.layout, cell.col, cell.row)
+    if cell.kind = "t" and wallSides.Count() > 0
+      spot = m.onWall(center, wallSides[0], 0)
+      Dressing.addWallTorch(m.game, spot.x, spot.z, InteriorMap.awayTurn(wallSides[0]), FlameKind.fire)
+    else if cell.kind = "H" and wallSides.Count() > 0
+      m.addHearth(center, wallSides[0], solids)
+    else if cell.kind = "c"
+      Dressing.addLanternPost(m.game, center.x, center.z, FlameKind.fire, solids, 0.4)
+    else if cell.kind = "s"
+      Dressing.addLanternPost(m.game, center.x, center.z, FlameKind.spirit, solids, 0.6)
+    else if cell.kind = "R" and wallSides.Count() > 0
+      m.addThrone(center, wallSides[0], solids)
+    else if cell.kind = "L"
+      m.addPerson(m.lord, center, solids)
+    else if cell.kind = "P"
+      m.addPerson(m.priest, center, solids)
+    end if
+  end sub
+
+  ' A point `inset` in from the middle of a cell's wall on `side`
+  private function onWall(center as BGE.Math.Vector, side as string, inset as float) as BGE.Math.Vector
+    delta = InteriorMap.sideStep(side)
+    reach = World.metres(InteriorMap.CELL_METRES) / 2 - inset
+    return BGE.Math.VectorOps.create(center.x + delta[0] * reach, 0, center.z + delta[1] * reach)
+  end function
+
+  ' A stone fireplace against the wall, a fire on the floor in front of it
+  private sub addHearth(center as BGE.Math.Vector, side as string, solids as BGE.SolidWorld)
+    delta = InteriorMap.sideStep(side)
+    ' The block's long side along the wall
+    alongX = delta[0] = 0
+    deep = World.metres(0.9)
+    wide = World.metres(2)
+    back = m.onWall(center, side, deep / 2)
+    slab = {x: back.x, y: 0, z: back.z, width: deep, depth: wide, height: World.metres(1.4), color: &h7A746CFF} as PropBox
+    if alongX
+      slab.width = wide
+      slab.depth = deep
+    end if
+    m.addBoxes([slab], solids)
+    fireSpot = m.onWall(center, side, deep + World.metres(0.3))
+    fire = new Torch(m.game)
+    m.game.addEntity(fire, {x: fireSpot.x, y: World.metres(0.05), z: fireSpot.z, kind: FlameKind.fire, size: 0.9})
+  end sub
+
+  ' A high-backed wooden throne against the wall
+  private sub addThrone(center as BGE.Math.Vector, side as string, solids as BGE.SolidWorld)
+    delta = InteriorMap.sideStep(side)
+    alongX = delta[0] = 0
+    backSpot = m.onWall(center, side, World.metres(0.15))
+    seatSpot = m.onWall(center, side, World.metres(0.7))
+    wood = &h6A4428FF
+    back = {x: backSpot.x, y: 0, z: backSpot.z, width: World.metres(0.25), depth: World.metres(1.2), height: World.metres(2.4), color: wood} as PropBox
+    seat = {x: seatSpot.x, y: 0, z: seatSpot.z, width: World.metres(0.9), depth: World.metres(1.2), height: World.metres(0.55), color: wood} as PropBox
+    if alongX
+      back.width = World.metres(1.2)
+      back.depth = World.metres(0.25)
+      seat.width = World.metres(1.2)
+      seat.depth = World.metres(0.9)
+    end if
+    m.addBoxes([back, seat], solids)
+  end sub
+
+  private sub addBoxes(boxes as PropBox[], solids as BGE.SolidWorld)
+    for each piece in boxes
+      solids.addSolid(piece.x - piece.width / 2, piece.z - piece.depth / 2, piece.width, piece.depth)
+    end for
+    furniture = new BoxProp(m.game)
+    m.game.addEntity(furniture, {x: 0, z: 0, boxes: boxes})
+  end sub
+
+  ' Someone standing still, facing the door
+  private sub addPerson(kind as TownsfolkType, center as BGE.Math.Vector, solids as BGE.SolidWorld)
+    person = new Townsfolk(m.game)
+    m.game.addEntity(person, {type: kind, x: center.x, z: center.z, heading: BGE.Math.PI, idleRate: 4})
+    half = World.metres(0.3)
+    solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+  end sub
+
+  override sub onDestroy()
+    m.clearFog()
+    for each light in m.lights
+      m.game.removeLight(light)
+    end for
+    m.lights = []
+    for each name in m.bitmapPaths
+      m.game.unloadBitmap(name)
+    end for
+    for each name in m.modelPaths
+      m.game.unload3dModel(name)
+    end for
+    for each kind in [m.lord, m.priest]
+      m.game.unloadSpriteAtlas(kind.atlas)
+    end for
+  end sub
+
+  override sub onUpdate(dt as float)
+    m.director.viewHeading = m.cameraRig.heading
+    m.hud.update(dt, m.knight)
+    m.director.update(dt)
+    if m.leaving
+      return
+    end if
+    here = InteriorMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
+    for each door in m.layout.exits
+      if here[0] = door.col and here[1] = door.row
+        m.leaving = m.game.changeSceneWithFade(m.place.outside, {from: m.place.id})
+        return
+      end if
+    end for
+  end sub
+
+  ' Walls stop the camera by the grid, so they need no colliders
+  protected override function makeCameraBoom(args as roAssociativeArray) as BGE.CameraBoom
+    return new InteriorCameraBoom(m.game, m.layout, args)
+  end function
+
+  protected override sub afterBodiesMoved(dt as float)
+    m.walls.resolve()
+  end sub
+
+end class

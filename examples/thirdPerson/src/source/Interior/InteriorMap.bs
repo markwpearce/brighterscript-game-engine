@@ -1,0 +1,176 @@
+import "../World.bs"
+
+' One cell of an interior's grid
+interface InteriorCell extends roAssociativeArray
+  col as integer
+  row as integer
+  ' Its character in the layout
+  kind as string
+end interface
+
+' A rectangle of cells of one kind: a piece of furniture
+interface InteriorGroup extends roAssociativeArray
+  kind as string
+  col as integer
+  row as integer
+  cols as integer
+  rows as integer
+end interface
+
+' A parsed interior layout (see Interiors)
+interface InteriorLayout extends roAssociativeArray
+  cols as integer
+  rows as integer
+  ' Rows of single-character kinds, [row][col]
+  grid as string[][]
+  ' Every cell that isn't solid
+  cells as InteriorCell[]
+  ' The door cells (`E`), the way out
+  exits as InteriorCell[]
+end interface
+
+' Reads an interior's text grid: walls, colliders, furniture and lights all come from it. Cells
+' are 2 m, finer than the crypt's, so there's room to lay out furniture.
+namespace InteriorMap
+
+  const CELL_METRES = 2
+
+  function parse(rows as string[]) as InteriorLayout
+    layout = {cols: Len(rows[0]), rows: rows.Count(), grid: [], cells: [], exits: []} as InteriorLayout
+    for row = 0 to rows.Count() - 1
+      kinds = [] as string[]
+      for col = 0 to layout.cols - 1
+        kind = Mid(rows[row], col + 1, 1)
+        kinds.push(kind)
+        if kind <> "#"
+          cell = {col: col, row: row, kind: kind} as InteriorCell
+          layout.cells.push(cell)
+          if kind = "E"
+            layout.exits.push(cell)
+          end if
+        end if
+      end for
+      layout.grid.push(kinds)
+    end for
+    return layout
+  end function
+
+  ' Outside the grid counts as solid
+  function isSolid(layout as InteriorLayout, col as integer, row as integer) as boolean
+    if col < 0 or row < 0 or col >= layout.cols or row >= layout.rows
+      return true
+    end if
+    return layout.grid[row][col] = "#"
+  end function
+
+  ' World x/z of a cell's centre (y 0), with the grid centred on the origin
+  function cellCenter(layout as InteriorLayout, col as float, row as float) as BGE.Math.Vector
+    size = World.metres(InteriorMap.CELL_METRES)
+    return BGE.Math.VectorOps.create((col - (layout.cols - 1) / 2) * size, 0, (row - (layout.rows - 1) / 2) * size)
+  end function
+
+  ' The cell a world point is in, as [col, row]
+  function cellAt(layout as InteriorLayout, x as float, z as float) as integer[]
+    size = World.metres(InteriorMap.CELL_METRES)
+    return [Int(x / size + layout.cols / 2), Int(z / size + layout.rows / 2)]
+  end function
+
+  ' Sides of a cell ("n" is -z, "e" +x, "s" +z, "w" -x), in that order
+  function sides() as string[]
+    return ["n", "e", "s", "w"]
+  end function
+
+  ' The [col, row] step to the neighbour across a side
+  function sideStep(side as string) as integer[]
+    if side = "n"
+      return [0, -1]
+    else if side = "e"
+      return [1, 0]
+    else if side = "s"
+      return [0, 1]
+    end if
+    return [-1, 0]
+  end function
+
+  ' The turn (+z at 0, as Dressing.addWallTorch() takes it) that points away from a wall on
+  ' `side`, into the room
+  function awayTurn(side as string) as float
+    if side = "n"
+      return 0
+    else if side = "e"
+      return -BGE.Math.HALF_PI
+    else if side = "s"
+      return BGE.Math.PI
+    end if
+    return BGE.Math.HALF_PI
+  end function
+
+  ' Sides of a floor cell that are walls
+  function wallSides(layout as InteriorLayout, col as integer, row as integer) as string[]
+    walls = [] as string[]
+    for each side in InteriorMap.sides()
+      delta = InteriorMap.sideStep(side)
+      if InteriorMap.isSolid(layout, col + delta[0], row + delta[1])
+        walls.push(side)
+      end if
+    end for
+    return walls
+  end function
+
+  ' Each connected rectangle of one of `kinds`' characters (found row by row, then grown down),
+  ' so a table drawn as `===` over two rows is one group
+  function groups(layout as InteriorLayout, kinds as string) as InteriorGroup[]
+    found = [] as InteriorGroup[]
+    taken = {}
+    for row = 0 to layout.rows - 1
+      for col = 0 to layout.cols - 1
+        kind = layout.grid[row][col]
+        key = `${col},${row}`
+        if Instr(1, kinds, kind) > 0 and invalid = taken[key]
+          cols = 1
+          while col + cols < layout.cols and layout.grid[row][col + cols] = kind
+            cols++
+          end while
+          rows = 1
+          while row + rows < layout.rows and InteriorMap.isRowOf(layout, kind, col, row + rows, cols)
+            rows++
+          end while
+          for r = row to row + rows - 1
+            for c = col to col + cols - 1
+              taken[`${c},${r}`] = true
+            end for
+          end for
+          found.push({kind: kind, col: col, row: row, cols: cols, rows: rows} as InteriorGroup)
+        end if
+      end for
+    end for
+    return found
+  end function
+
+  ' True when `cols` cells from col along row are all `kind`
+  function isRowOf(layout as InteriorLayout, kind as string, col as integer, row as integer, cols as integer) as boolean
+    for c = col to col + cols - 1
+      if layout.grid[row][c] <> kind
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  ' The walls, and a wall round the grid (the doors lead out of it), for a SolidTracker
+  function solidWorld(layout as InteriorLayout) as BGE.SolidWorld
+    solids = new BGE.SolidWorld()
+    size = World.metres(InteriorMap.CELL_METRES)
+    for row = 0 to layout.rows - 1
+      for col = 0 to layout.cols - 1
+        if layout.grid[row][col] = "#"
+          center = InteriorMap.cellCenter(layout, col, row)
+          solids.addSolid(center.x - size / 2, center.z - size / 2, size, size)
+        end if
+      end for
+    end for
+    solids.addBounds(-layout.cols * size / 2, -layout.rows * size / 2, layout.cols * size, layout.rows * size, size)
+    return solids
+  end function
+
+end namespace
