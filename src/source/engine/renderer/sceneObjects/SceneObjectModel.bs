@@ -111,6 +111,9 @@ namespace BGE
     ' why this frame didn't reuse the capture, "" if it did or wasn't moving; and the last
     ' strip fit's error against what it was allowed, for profiling
     private impostorMissReason as string = ""
+    ' this frame, while the camera moves: too close for any capture to follow (see
+    ' isTooNearForImpostor()), so its faces draw straight to the canvas
+    private impostorTooNear as boolean = false
     private impostorStripResidual as float = -1.0
     private impostorStripAllowed as float = -1.0
     private stripProjected as float[] = []
@@ -235,6 +238,10 @@ namespace BGE
         offsetX = -origin.x
         offsetY = -origin.y
       end if
+      if face.vertices.count() > 3
+        ' cut back to the near plane
+        return rendererObj.drawPolygonTo(target, face.vertices, offsetX, offsetY, color, allowQuickDraw)
+      end if
       return rendererObj.drawTriangleTo(target, face.vertices, offsetX, offsetY, color, allowQuickDraw)
     end function
 
@@ -262,7 +269,7 @@ namespace BGE
     ' turns, which no capture can follow; while just the camera moves, it draws into its
     ' temp bitmap to capture it.
     protected override function canDrawAsColumns(drawMode as SceneObjectDrawMode) as boolean
-      return (not m.drawable.useImpostor or m.transformVersion <> m.lastDrawTransformVersion) and m.isFlatQuadColumnMode(drawMode)
+      return (not m.drawable.useImpostor or m.impostorTooNear or m.transformVersion <> m.lastDrawTransformVersion) and m.isFlatQuadColumnMode(drawMode)
     end function
 
     ' How far past each canvas edge the temp bitmap holds: MODEL_CLIP_MARGIN_FRACTION of the
@@ -315,6 +322,10 @@ namespace BGE
 
     private sub captureImpostor(rendererObj as BGE.Renderer, origin as BGE.Math.Vector, drawMode as SceneObjectDrawMode)
       m.impostorCapture = invalid
+      if m.impostorTooNear
+        ' no capture is reused while it stays this close
+        return
+      end if
       samples = m.projectImpostorSamples(rendererObj)
       if invalid = samples or not m.lastDrawWasFullyFresh
         return
@@ -828,6 +839,43 @@ namespace BGE
       return m.missImpostor("angle")
     end function
 
+    ' Whether the model is too close for a capture to follow the camera: its bounding box
+    ' reaches behind the camera, or its far corner is more than modelImpostorMaxDepthRatio
+    ' times its near corner's depth further off. A flat warp drifts there, then snaps back
+    ' on redraw - a visible wiggle - so it draws its faces each frame instead.
+    private function isTooNearForImpostor(rendererObj as BGE.Renderer) as boolean
+      if rendererObj.camera.name <> "Camera3d"
+        return false
+      end if
+      points = m.getBoundingPointsThisFrame(rendererObj.camera)
+      if points.count() = 0
+        return false
+      end if
+      ' depth from the eye along the view, not projectPointsWithDepth()'s (from behind it)
+      camera = rendererObj.camera as Camera3d
+      eye = camera.position
+      forward = camera.orientation
+      fx = forward.x
+      fy = forward.y
+      fz = forward.z ?? 0
+      nearest = 0.0
+      farthest = 0.0
+      for i = 0 to points.count() - 1
+        p = points[i]
+        depth = (p.x - eye.x) * fx + (p.y - eye.y) * fy + ((p.z ?? 0) - (eye.z ?? 0)) * fz
+        if depth <= 0
+          return true
+        end if
+        if i = 0 or depth < nearest
+          nearest = depth
+        end if
+        if depth > farthest
+          farthest = depth
+        end if
+      end for
+      return farthest - nearest > nearest * rendererObj.qualitySettings.modelImpostorMaxDepthRatio
+    end function
+
     ' Records why this frame's impostor attempt failed (for profiling) and returns invalid.
     private function missImpostor(reason as string) as TransformTempBitmapDetails
       m.impostorMissReason = reason
@@ -1215,8 +1263,14 @@ namespace BGE
       m.impostorStripAllowed = -1.0
       m.keepImpostorThroughQualityDrop(rendererObj)
       keptThroughLightChange = m.keepImpostorThroughSmallLightChange(rendererObj)
+      m.impostorTooNear = false
+      if m.drawable.useImpostor and m.objMovedInRelationToCamera(rendererObj.camera)
+        m.impostorTooNear = m.isTooNearForImpostor(rendererObj)
+      end if
       ' overlap clusters draw per face, from faces this would leave unprojected
-      if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.cachedDrawingInvalidated() and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
+      if m.impostorTooNear
+        m.impostorMissReason = "near"
+      else if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.cachedDrawingInvalidated() and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorThisFrame = m.attemptImpostor(rendererObj, drawMode)
         if invalid <> m.impostorThisFrame
           m.impostorKindThisFrame = m.impostorCapture.fit.kind
@@ -1469,6 +1523,8 @@ namespace BGE
       a32 = r3[2]
       a33 = r3[3]
       near = camera.getFocalLength()
+      ' where textured faces' columns are cut too
+      nearZ = BGE.QuadColumnNearZ(near)
       canvasWidth = camera.frameSize.x
       canvasHeight = camera.frameSize.y
       halfWidth = canvasWidth * 0.5
@@ -1553,13 +1609,16 @@ namespace BGE
           ia = corners[c]
           ib = corners[c + 1]
           ic = corners[c + 2]
-          pa = canvas[ia]
-          pb = canvas[ib]
-          pc = canvas[ic]
-          if invalid <> pa and invalid <> pb and invalid <> pc
+          if camZ[ia] <= nearZ and camZ[ib] <= nearZ and camZ[ic] <= nearZ
+            verts = [canvas[ia], canvas[ib], canvas[ic]]
+          else
+            ' reaching behind the camera, or so close in front it would project enormous:
+            ' cut back to the near plane, not dropped
+            verts = m.clipMeshTriangleToNear(ia, ib, ic, nearZ, near, canvasWidth, canvasHeight)
+          end if
+          if verts.count() >= 3
             ' only faces that are drawn count towards the bounds, which size the temp bitmap (#344)
-            for j = 0 to 2
-              p = canvas[corners[c + j]]
+            for each p in verts
               if not any
                 any = true
                 loX = p.x
@@ -1586,12 +1645,12 @@ namespace BGE
             if depth[ic] < nearest
               nearest = depth[ic]
             end if
-            canvasFace = {vertices: [pa, pb, pc], normal: n, brightness: 1, priority: nearest, color: worldFace.color, Texture: worldFace.Texture, faceIndex: f} as BGE.Model3dFace
+            canvasFace = {vertices: verts, normal: n, brightness: 1, priority: nearest, color: worldFace.color, Texture: worldFace.Texture, faceIndex: f} as BGE.Model3dFace
             if m.shadeCanvasFace(canvasFace, worldFace, facingAmount, lights, useLights)
               faceColorsChanged = true
             end if
             canvasFaces.Push(canvasFace)
-            samples.push(pa)
+            samples.push(verts[0])
           end if
         end if
       end for
@@ -1605,6 +1664,39 @@ namespace BGE
       end if
       canvasFaces.SortBy("priority", "r")
       return true
+    end function
+
+    ' The canvas corners of the part of mesh triangle (ia, ib, ic) in front of camera z `nearZ`,
+    ' from the camera-space vertices projectMeshFaces() just kept: 3 or 4 of them, or none if
+    ' it's wholly behind. Projected as projectMeshFaces() does.
+    private function clipMeshTriangleToNear(ia as integer, ib as integer, ic as integer, nearZ as float, focal as float, canvasWidth as float, canvasHeight as float) as BGE.Math.Vector[]
+      camX = m.meshCamX
+      camY = m.meshCamY
+      camZ = m.meshCamZ
+      ring = [ia, ib, ic]
+      out = [] as BGE.Math.Vector[]
+      for i = 0 to 2
+        a = ring[i]
+        b = ring[(i + 1) mod 3]
+        az = camZ[a]
+        bz = camZ[b]
+        aInFront = az <= nearZ
+        if aInFront
+          out.push(m.projectCameraPoint(camX[a], camY[a], az, focal, canvasWidth, canvasHeight))
+        end if
+        if aInFront <> (bz <= nearZ)
+          t = (nearZ - az) / (bz - az)
+          out.push(m.projectCameraPoint(camX[a] + t * (camX[b] - camX[a]), camY[a] + t * (camY[b] - camY[a]), nearZ, focal, canvasWidth, canvasHeight))
+        end if
+      end for
+      return out
+    end function
+
+    ' A camera-space point on the canvas, with projectMeshFaces()' arithmetic.
+    private function projectCameraPoint(cx as float, cy as float, cz as float, focal as float, canvasWidth as float, canvasHeight as float) as BGE.Math.Vector
+      ndcX = (focal * cx / -cz + canvasWidth * 0.5) / canvasWidth
+      ndcY = (focal * cy / -cz + canvasHeight * 0.5) / canvasHeight
+      return {x: fix(ndcX * canvasWidth), y: cint((1 - ndcY) * canvasHeight), z: 0}
     end function
 
     ' Recolors the faces projected last time for this draw's lights, without projecting.
