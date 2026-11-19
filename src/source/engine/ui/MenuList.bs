@@ -1,0 +1,463 @@
+import "UiContainer.bs"
+import "Label.bs"
+import "Button.bs"
+import "Theme.bs"
+import "TextWrap.bs"
+import "UiActionListener.bs"
+import "MenuItem.bs"
+import "../Game.bs"
+import "../GameScene.bs"
+import "../../math/math.bs"
+import "../../utils/strings.bs"
+
+namespace BGE.UI
+
+  ' A panel holding an optional title, an optional wrapped message and a column of buttons,
+  ' one per item. Picking an item calls `listener.onUiAction(item.id, button)`.
+  '
+  ' The panel's children are built by open() and removed by close(), so its buttons are only
+  ' focusable while it's open. open() focuses the first enabled item.
+  '
+  ' Colors come from the theme (`panelBackgroundColor`/`panelBackgroundImage`,
+  ' `panelTitleColor`, `panelTextColor`, and the usual button colors); fonts from the
+  ' "heading" and "body" fonts, falling back to "default". Set `width`/`height` to fix the
+  ' size, or leave them 0 to fit the content. Override createButton() to use your own button
+  ' class, or buildChildren() for a different layout.
+  '
+  ' @example
+  ' menu = new BGE.UI.MenuList(game)
+  ' menu.title = "Adventure"
+  ' menu.listener = m ' a scene with onUiAction(actionId, button)
+  ' menu.addItem("continue", "Continue", hasSave)
+  ' menu.addItem("new", "New Game")
+  ' menu.centered = true
+  ' menu.open() ' owned by the current scene, closed when it changes
+  class MenuList extends BGE.UI.UiContainer
+
+    ' Heading drawn above the message. "" = none.
+    title as string = ""
+    ' Body text, wrapped to the panel's inner width. "" = none. Use setMessage() once open.
+    message as string = ""
+    ' Told about picks - see BGE.UI.UiActionListener. Set before open().
+    listener as BGE.UI.UiActionListener = invalid
+
+    ' Space between the panel's edge and its content.
+    panelPadding as float = 24.0
+    ' Space below the title and below the message.
+    sectionGap as float = 16.0
+    itemHeight as float = 56.0
+    itemGap as float = 12.0
+    ' Button width. 0 = the panel's inner width.
+    itemWidth as float = 0.0
+    ' Horizontal alignment of the title, message and buttons: "left" or "center".
+    contentAlign as string = "center"
+    ' Fitted width never goes below this or above maxWidth (0 = 60% of the UI canvas width).
+    minWidth as float = 240.0
+    maxWidth as float = 0.0
+    ' Extra space below the message for content a subclass draws itself; contentTop is its y.
+    contentHeight as float = 0.0
+    ' Center on the parent (or the UI canvas when the parent is gameUi) when opened, instead
+    ' of using customX/customY.
+    centered as boolean = false
+
+    ' The items added with addItem(), in order.
+    items as BGE.UI.MenuItem[] = []
+    ' One button per item, in the same order. Only filled while open.
+    buttons as BGE.UI.Button[] = []
+
+    protected contentTop as float = 0.0
+    protected titleLabel as BGE.UI.Label = invalid
+    protected messageLabel as BGE.UI.Label = invalid
+    protected fixedWidth as float = 0.0
+    protected fixedHeight as float = 0.0
+    protected ownerScene as BGE.GameScene = invalid
+    private opened as boolean = false
+    ' Size from the last build: a width/height that differs was set by the caller, so it's kept.
+    private builtWidth as float = 0.0
+    private builtHeight as float = 0.0
+
+    sub new(game as BGE.Game)
+      super(game)
+      m.customPosition = true
+      ' 0 (transparent) means "use the theme's panelBackgroundColor".
+      m.backgroundRGBA = 0
+    end sub
+
+    ' Adds an item to the end of the list. Takes effect the next time the menu opens.
+    '
+    ' @param {string} id - passed to the listener as `actionId`
+    ' @param {string} label
+    ' @param {boolean} [enabled=true]
+    ' @param {dynamic} [value=invalid] - copied to the button's `value`
+    ' @return {BGE.UI.MenuItem} the new item, e.g. to set `onActivate`
+    function addItem(id as string, label as string, enabled = true as boolean, value = invalid as dynamic) as BGE.UI.MenuItem
+      item = new BGE.UI.MenuItem(id, label, enabled, value)
+      m.items.push(item)
+      return item
+    end function
+
+    ' Removes every item. Takes effect the next time the menu opens.
+    sub clearItems()
+      m.items = []
+    end sub
+
+    ' Enables or disables an item, including its button if the menu is open.
+    '
+    ' @param {string} id
+    ' @param {boolean} enabled
+    sub setItemEnabled(id as string, enabled as boolean)
+      for i = 0 to m.items.count() - 1
+        if m.items[i].id = id
+          m.items[i].enabled = enabled
+          if i < m.buttons.count()
+            m.buttons[i].setDisabled(not enabled)
+          end if
+        end if
+      end for
+    end sub
+
+    ' The button for an item while the menu is open, else invalid.
+    '
+    ' @param {string} id
+    ' @return {BGE.UI.Button}
+    function getButton(id as string) as BGE.UI.Button
+      for each button in m.buttons
+        if button.actionId = id
+          return button
+        end if
+      end for
+      return invalid
+    end function
+
+    ' Sets the title. Takes effect the next time the menu opens.
+    '
+    ' @param {string} text
+    sub setTitle(text as string)
+      m.title = text
+    end sub
+
+    ' Sets the message. On an open menu the text is replaced in place (e.g. "Not enough
+    ' coins"); the panel isn't resized, so keep it to the lines it had.
+    '
+    ' @param {string} text
+    sub setMessage(text as string)
+      m.message = text
+      if m.messageLabel <> invalid
+        m.messageLabel.setText(text)
+        m.alignLabel(m.messageLabel, m.measureLines(text, m.bodyFont()))
+      end if
+    end sub
+
+    ' Builds the panel, adds it to `parent` and focuses the first enabled item. With no
+    ' parent, it's added with the current scene's addUi(), so it closes when the scene
+    ' changes (or to gameUi if there's no scene yet). Opening an open menu rebuilds it.
+    '
+    ' @param {BGE.UI.UiContainer} [parent=invalid]
+    sub open(parent = invalid as BGE.UI.UiContainer)
+      if m.opened
+        m.close()
+      end if
+      m.buildChildren()
+      m.opened = true
+      if parent = invalid and m.game.getScene() = invalid
+        ' no scene yet: nothing to own it
+        parent = m.game.gameUi
+      end if
+      if parent = invalid
+        m.ownerScene = m.game.getScene()
+        if m.centered
+          m.centerIn(m.game.gameUi)
+        end if
+        m.ownerScene.addUi(m)
+      else
+        m.ownerScene = invalid
+        if m.centered
+          m.centerIn(parent)
+        end if
+        parent.addChild(m)
+      end if
+      m.focusFirstEnabled()
+    end sub
+
+    ' Fixes the panel's size; 0 for either fits that side to the content. Takes effect the
+    ' next time the menu opens.
+    '
+    ' @param {float} width
+    ' @param {float} height
+    sub setSize(width as float, height as float)
+      m.fixedWidth = width
+      m.fixedHeight = height
+      m.builtWidth = m.width
+      m.builtHeight = m.height
+    end sub
+
+    ' Removes the panel and its buttons from wherever open() put it.
+    sub close()
+      if not m.opened
+        return
+      end if
+      owner = m.ownerScene
+      parent = m.parentContainer
+      if owner <> invalid
+        owner.removeUi(m)
+      else if parent <> invalid
+        (parent as UiContainer).removeChild(m)
+      end if
+      ' removing it from its parent normally destroys it already
+      if m.opened
+        m.onDestroy()
+      end if
+    end sub
+
+    ' Also runs when the parent removes the panel, e.g. when its scene changes.
+    override sub onDestroy()
+      m.opened = false
+      m.ownerScene = invalid
+      ' its buttons are rebuilt on open, so drop their handlers: a scene listener isn't kept alive
+      for each button in m.buttons
+        button.listener = invalid
+        button.onActivate = invalid
+      end for
+      super.onDestroy()
+      m.buttons = []
+      m.titleLabel = invalid
+      m.messageLabel = invalid
+    end sub
+
+    ' Is the menu open?
+    '
+    ' @return {boolean}
+    function isOpen() as boolean
+      return m.opened
+    end function
+
+    ' Focuses the first enabled item's button.
+    '
+    ' @return {boolean} false if there's none
+    function focusFirstEnabled() as boolean
+      for each button in m.buttons
+        if not button.disabled
+          m.game.focusManager.focusWidget(button)
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' Focuses an item's button.
+    '
+    ' @param {string} id
+    ' @return {boolean} false if the menu isn't open or the item is missing or disabled
+    function focusItem(id as string) as boolean
+      button = m.getButton(id)
+      if button = invalid or button.disabled
+        return false
+      end if
+      m.game.focusManager.focusWidget(button)
+      return true
+    end function
+
+    ' Moves the panel so it's centered within `container` (the UI canvas for gameUi).
+    '
+    ' @param {BGE.UI.UiContainer} container
+    sub centerIn(container as BGE.UI.UiContainer)
+      areaWidth = container.width
+      areaHeight = container.height
+      if container.id = m.game.gameUi.id
+        areaWidth = m.game.uiCanvas.getWidth()
+        areaHeight = m.game.uiCanvas.getHeight()
+      end if
+      m.customX = (areaWidth - m.width) / 2.0
+      m.customY = (areaHeight - m.height) / 2.0
+    end sub
+
+    override sub draw(parent = invalid as UiWidget)
+      theme = m.effectiveTheme()
+      if m.showBackground
+        if m.backgroundRGBA = 0 and theme.panelBackgroundImage <> invalid
+          theme.panelBackgroundImage.draw(m.canvas.renderer, m.position.x, m.position.y, m.width, m.height)
+        else
+          color = m.backgroundRGBA
+          if color = 0
+            color = theme.panelBackgroundColor
+          end if
+          m.canvas.renderer.drawRectangle(m.position.x, m.position.y, m.width, m.height, color)
+        end if
+      end if
+      m.drawChildren()
+    end sub
+
+    ' Makes the button for one item. Override to use your own button class; the menu sets
+    ' its position, size, actionId, value, listener and disabled state afterwards.
+    '
+    ' @param {BGE.UI.MenuItem} item
+    ' @return {BGE.UI.Button}
+    protected function createButton(item as BGE.UI.MenuItem) as BGE.UI.Button
+      return new BGE.UI.Button(m.game)
+    end function
+
+    ' Builds the title, message and buttons and sizes the panel. Called by open().
+    protected sub buildChildren()
+      if m.width <> m.builtWidth
+        m.fixedWidth = m.width
+      end if
+      if m.height <> m.builtHeight
+        m.fixedHeight = m.height
+      end if
+      m.clearChildren()
+      m.buttons = []
+      theme = m.effectiveTheme()
+      titleFont = m.headingFont()
+      bodyFont = m.bodyFont()
+
+      ' built first so the fitted width can measure each label in its button's own font
+      newButtons = [] as BGE.UI.Button[]
+      for each item in m.items
+        button = m.createButton(item)
+        button.setLabel(item.label)
+        newButtons.push(button)
+      end for
+
+      m.width = m.fitWidth(titleFont, bodyFont, theme, newButtons)
+      innerWidth = m.width - m.panelPadding * 2
+      nextY = m.panelPadding
+
+      m.titleLabel = invalid
+      if m.title <> ""
+        titleSize = m.measureLines(m.title, titleFont)
+        m.titleLabel = m.makeLabel(m.title, titleFont, theme.panelTitleColor, nextY, innerWidth, titleSize)
+        nextY += titleSize.height + m.sectionGap
+      end if
+
+      m.messageLabel = invalid
+      if m.message <> ""
+        messageSize = m.measureLines(m.message, bodyFont)
+        m.messageLabel = m.makeLabel(m.message, bodyFont, theme.panelTextColor, nextY, innerWidth, messageSize)
+        nextY += messageSize.height + m.sectionGap
+      end if
+
+      m.contentTop = nextY
+      nextY += m.contentHeight
+
+      buttonWidth = m.itemWidth
+      if buttonWidth <= 0 or buttonWidth > innerWidth
+        buttonWidth = innerWidth
+      end if
+      buttonX = m.panelPadding
+      if m.contentAlign = "center"
+        buttonX = (m.width - buttonWidth) / 2.0
+      end if
+      for i = 0 to m.items.count() - 1
+        item = m.items[i]
+        button = newButtons[i]
+        button.actionId = item.id
+        button.value = item.value
+        button.listener = m.listener
+        if item.onActivate <> invalid
+          button.onActivate = item.onActivate
+        end if
+        button.setDisabled(not item.enabled)
+        button.customPosition = true
+        button.customX = buttonX
+        button.customY = nextY
+        button.width = buttonWidth
+        button.height = m.itemHeight
+        m.addChild(button)
+        m.buttons.push(button)
+        nextY += m.itemHeight + m.itemGap
+      end for
+      if m.items.count() > 0
+        nextY -= m.itemGap
+      else if nextY > m.panelPadding
+        nextY -= m.sectionGap
+      end if
+
+      ' a fixed height is a minimum, so content never spills past the bottom edge
+      m.height = BGE.Math.Max(nextY + m.panelPadding, m.fixedHeight)
+      m.builtWidth = m.width
+      m.builtHeight = m.height
+    end sub
+
+    ' The width to build at: a `width` you set (or setSize()'s), else the widest title, message
+    ' line or button label (in the button's font), clamped to minWidth..maxWidth.
+    protected function fitWidth(titleFont as roFont, bodyFont as roFont, theme as BGE.UI.Theme, buttons as BGE.UI.Button[]) as float
+      if m.fixedWidth > 0
+        return m.fixedWidth
+      end if
+      maxWidth = m.maxWidth
+      if maxWidth <= 0
+        maxWidth = m.game.uiCanvas.getWidth() * 0.6
+      end if
+      content = 0.0
+      if m.title <> ""
+        content = BGE.Math.Max(content, titleFont.GetOneLineWidth(m.title, BGE.TEXT_MAX_LINE_SIZE))
+      end if
+      if m.message <> ""
+        for each line in m.message.split(Chr(10))
+          content = BGE.Math.Max(content, bodyFont.GetOneLineWidth(line, BGE.TEXT_MAX_LINE_SIZE))
+        end for
+      end if
+      for each button in buttons
+        ' room for the focus border and some air either side of the label
+        labelWidth = button.labelFont(theme).GetOneLineWidth(button.getLabel(), BGE.TEXT_MAX_LINE_SIZE)
+        content = BGE.Math.Max(content, labelWidth + 48)
+      end for
+      if m.itemWidth > 0
+        content = BGE.Math.Max(content, m.itemWidth)
+      end if
+      return BGE.Math.Min(BGE.Math.Max(content + m.panelPadding * 2, m.minWidth), BGE.Math.Max(maxWidth, m.minWidth))
+    end function
+
+    protected function headingFont() as roFont
+      font = m.game.getFont("heading")
+      if font = invalid
+        font = m.game.getFont("default")
+      end if
+      return font
+    end function
+
+    protected function bodyFont() as roFont
+      font = m.game.getFont("body")
+      if font = invalid
+        font = m.game.getFont("default")
+      end if
+      return font
+    end function
+
+    private function makeLabel(text as string, font as roFont, color as integer, y as float, innerWidth as float, size as roAssociativeArray) as BGE.UI.Label
+      label = new BGE.UI.Label(m.game)
+      label.setFont(font)
+      label.customPosition = true
+      label.customY = y
+      label.wrapWidth = innerWidth
+      label.drawableText.textColor = color
+      label.setText(text)
+      if m.contentAlign = "center"
+        ' centers each wrapped line within the widest one
+        label.horizAlign = "center"
+      end if
+      m.addChild(label)
+      m.alignLabel(label, size)
+      return label
+    end function
+
+    private sub alignLabel(label as BGE.UI.Label, size as roAssociativeArray)
+      label.customX = m.panelPadding
+      if m.contentAlign = "center"
+        label.customX = BGE.Math.Max((m.width - size.width) / 2.0, m.panelPadding)
+      end if
+    end sub
+
+    ' {width, height} of `text` wrapped to the panel's inner width.
+    private function measureLines(text as string, font as roFont) as roAssociativeArray
+      lines = BGE.UI.wrapText(text, font, m.width - m.panelPadding * 2)
+      widest = 0.0
+      for each line in lines
+        widest = BGE.Math.Max(widest, font.GetOneLineWidth(line, BGE.TEXT_MAX_LINE_SIZE))
+      end for
+      return {width: widest, height: lines.count() * font.GetOneLineHeight()}
+    end function
+
+  end class
+
+end namespace

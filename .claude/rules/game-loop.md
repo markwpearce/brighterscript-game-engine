@@ -24,7 +24,7 @@ Callbacks can delete entities or change scene mid-frame: re-check `isValidEntity
 
 ## Entities and scenes
 - `GameEntity`: hooks `onCreate`/`onUpdate`/`onCollision`/`onInput`/…/`onDestroy`; `position`/`velocity`/`rotation`/`scale`, colliders, drawables, tags. `isOnScreen()` is a signal only — off-screen entities still update.
-- `GameScene` is a `GameEntity` for one game state. Scenes are reused: old one gets `onChangeScene()` then `onDestroy()` — remove its `gameUi` widgets there or buttons keep taking input. Non-persistent entities get `onChangeScene()` and are destroyed (no `onDestroy()`).
+- `GameScene` is a `GameEntity` for one game state. Scenes are reused: old one gets `onChangeScene()` then `onDestroy()` — widgets added with `scene.addUi()` are removed after `onDestroy()`; ones added to `gameUi` directly stay (and keep taking input) until removed. Non-persistent entities get `onChangeScene()` and are destroyed (no `onDestroy()`).
 - Hit flashes (`Drawable.flash`) tick in `Game` before `onUpdate`, only while `GameEntity.hasActiveFlash`.
 - Music: `Game.musicPlay(path, loop, restart = true)`; `restart = false` keeps a shared track across scenes. `roAudioPlayer` can't fade. `Game.changeSceneWithFade()` for transitions.
 

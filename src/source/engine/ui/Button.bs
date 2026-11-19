@@ -1,18 +1,34 @@
 import "../drawables/DrawableText.bs"
 import "../Game.bs"
 import "UiWidget.bs"
+import "UiActionListener.bs"
 
 namespace BGE.UI
 
+  ' Tint for a disabled button's label: white at half alpha.
+  const DISABLED_TEXT_TINT = &hFFFFFF80
+
   ' A focusable, clickable button: a label over a themed background.
-  ' Set onActivate to a function(button as Button) to handle clicks, or
-  ' subclass and override onClick() directly.
+  ' To handle clicks, either give it an `actionId` and a `listener` (its
+  ' `onUiAction(actionId, button)` is called), set `onActivate` to a
+  ' function(button as Button), or subclass and override onClick().
   class Button extends UiWidget
 
     drawableText as BGE.DrawableText
 
     ' Called from onClick() when set - function(button as Button) as void
     onActivate as function or dynamic
+
+    ' Passed to `listener.onUiAction()` on click, so one listener can tell its buttons apart.
+    actionId as string = ""
+    ' Any extra data for the listener (e.g. a choice index).
+    value as dynamic = invalid
+    ' Told about clicks: `listener.onUiAction(actionId, button)`. Called after `onActivate`.
+    listener as BGE.UI.UiActionListener = invalid
+
+    ' A disabled button is drawn dimmed and can't be focused or clicked. Read-only: change it
+    ' with setDisabled(), which also updates focus.
+    disabled as boolean = false
 
     ' Optional Game.loadSound() key played via Game.playSound() when this button gains
     ' focus. "" (default) falls back to Game.uiFocusSoundKey - set this to override just
@@ -29,6 +45,14 @@ namespace BGE.UI
       m.drawableText = new BGE.DrawableText(m)
     end sub
 
+    ' Draws the text in this font, ignoring the theme's font.
+    '
+    ' @param {roFont} font
+    sub setFont(font as roFont)
+      m.drawableText.setFont(font)
+      m.hasAppliedThemeFont = true
+    end sub
+
     ' Sets this button's label text.
     '
     ' @param {string} text
@@ -36,6 +60,74 @@ namespace BGE.UI
     sub setLabel(text as string)
       m.drawableText.text = text
     end sub
+
+    ' The label text.
+    '
+    ' @return {string}
+    function getLabel() as string
+      return m.drawableText.text
+    end function
+
+    ' The font the label is drawn in: one set with setFont(), else `theme`'s, else the default.
+    '
+    ' @param {BGE.UI.Theme} theme
+    ' @return {roFont}
+    function labelFont(theme as BGE.UI.Theme) as roFont
+      if not m.hasAppliedThemeFont and theme.font <> invalid
+        return theme.font
+      end if
+      return m.drawableText.font
+    end function
+
+    ' Enables or disables this button. If it's already in a container it's (un)registered
+    ' for focus too; a re-enabled button goes back to its place among its siblings.
+    '
+    ' @param {boolean} disabled
+    sub setDisabled(disabled as boolean)
+      if m.disabled = disabled and m.focusable = not disabled
+        return
+      end if
+      ' parentContainer isn't cleared on removal, so check this is still one of its children
+      parent = m.parentContainer
+      inFocusTree = parent <> invalid and parent.isContainer() and (parent as UiContainer).focusEnabled
+      if inFocusTree
+        inFocusTree = m.indexInParent(parent as UiContainer) >= 0
+      end if
+      if inFocusTree
+        m.game.focusManager.unregister(m)
+      end if
+      m.disabled = disabled
+      m.focusable = not disabled
+      if inFocusTree and not disabled
+        nextSibling = m.nextFocusableSibling(parent as UiContainer)
+        if nextSibling <> invalid
+          m.game.focusManager.registerBefore(m, nextSibling)
+        else
+          m.game.focusManager.register(m)
+        end if
+      end if
+    end sub
+
+    private function indexInParent(parent as UiContainer) as integer
+      for i = 0 to parent.childCount() - 1
+        child = parent.getChild(i)
+        if child <> invalid and child.id = m.id
+          return i
+        end if
+      end for
+      return -1
+    end function
+
+    ' The first focusable widget after this one in `parent`'s children, or invalid.
+    private function nextFocusableSibling(parent as UiContainer) as dynamic
+      for i = m.indexInParent(parent) + 1 to parent.childCount() - 1
+        child = parent.getChild(i)
+        if child <> invalid and child.focusable
+          return child
+        end if
+      end for
+      return invalid
+    end function
 
     override sub onFocus()
       key = m.focusSoundKey
@@ -48,6 +140,9 @@ namespace BGE.UI
     end sub
 
     override sub onClick()
+      if m.disabled
+        return
+      end if
       key = m.clickSoundKey
       if key = ""
         key = m.game.uiClickSoundKey
@@ -55,10 +150,16 @@ namespace BGE.UI
       if key <> ""
         m.game.playSound(key)
       end if
+      ' onActivate may close the button's panel, so grab the listener first
+      listener = m.listener
       if m.onActivate <> invalid
         m.onActivate(m)
       end if
+      if listener <> invalid
+        listener.onUiAction(m.actionId, m)
+      end if
     end sub
+
 
     override sub draw(parent = invalid as UiWidget)
       if m.width <= 0 or m.height <= 0
@@ -69,7 +170,9 @@ namespace BGE.UI
       m.applyThemeFont(theme, m.drawableText)
 
       backgroundColor = theme.backgroundColor
-      if m.hovered or m.focused
+      if m.disabled
+        backgroundColor = theme.disabledColor
+      else if m.hovered or m.focused
         backgroundColor = theme.hoveredBackgroundColor
       end if
 
@@ -87,7 +190,11 @@ namespace BGE.UI
           textSize = m.drawableText.getDrawnSize()
           textX = m.position.x + (m.width - textSize.width) / 2
           textY = m.position.y + (m.height - textSize.height) / 2
-          m.canvas.renderer.drawTransformedObject(textX, textY, 1.0, 1.0, 0, textImage)
+          textTint = -1
+          if m.disabled
+            textTint = BGE.UI.DISABLED_TEXT_TINT
+          end if
+          m.canvas.renderer.drawTransformedObject(textX, textY, 1.0, 1.0, 0, textImage, textTint)
         end if
       end if
     end sub
