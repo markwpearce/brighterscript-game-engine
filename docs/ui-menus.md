@@ -83,6 +83,32 @@ Panels take their colors from the theme (`game.defaultTheme`, or a container's `
 "heading" font and messages the "body" font, falling back to "default". Set a panel's
 `backgroundRGBA` to override its theme color.
 
+## Pause menus and modals
+
+`game.pushModal()` opens a modal: the game pauses while any modal is open, and nested ones
+just count up. `game.popModal()` closes one and ignores the buttons held right then until
+they're released, so the OK that picked "Resume" doesn't also jump (or close the modal
+underneath); when the last closes the game resumes. A `Pause()` or `Resume()` while a modal
+is open takes over, and closing the modal leaves it alone. Changing scene resumes the game
+and forgets open modals, unless `game.keepPauseOnSceneChange` is set - and even then a pause
+that only came from modals ends.
+
+`BGE.PauseMenu` is a ready-made pause entity built on those:
+
+```brighterscript
+pause = new BGE.PauseMenu(m.game, {buttons: ["resume", "restart", "title"], titleScene: "TitleScene"})
+pause.blockWhen = function(game as BGE.Game) as boolean
+  return game.getEntityByName("GameOverPanel") <> invalid
+end function
+m.game.addEntity(pause)
+```
+
+It toggles on the "pause" action when that's bound, else the remote's Play, and Back closes
+it. Built-in buttons are `resume`, `restart`, `title` and `quit`; `addButton(id, label)` adds
+your own, which go to `listener.onUiAction()` (or override `onAction()`). `style: "text"`
+just draws the title instead of a panel. Subclass it to change the look (`createMenu()`,
+`drawTextStyle()`).
+
 ## UI owned by a scene
 
 `scene.addUi(widget)` adds a widget to `gameUi` for the current visit only. When the game

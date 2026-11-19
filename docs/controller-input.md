@@ -157,10 +157,23 @@ alias (e.g. `"x"`) to trigger the same action as a remote button:
 game.controls.bindAction("jump", ["ok", "x"], "a")
 ```
 
+Because B matches `isButton("back")`, don't use that check to quit the channel:
+`input.isRemoteBack()` (or `input.isRawButton("back")`) is true only for the remote's
+Back, so B can mean "cancel" without leaving the game.
+
 A real gamepad plugged into the *browser* controller page is a separate,
 unrelated case - see "Mapping input" above: its standard-mapping face/menu
 buttons send the same `"ok"`/`"b"`/`"back"` names the on-screen buttons do,
 so a `bindAction` already bound to those needs no changes at all.
+
+## Ignoring a press that's still held
+
+The press that closes a panel or a line of dialogue is often still held when gameplay
+resumes. `game.controls.blockUntilReleased("attack")` makes an action read as not pressed or
+held until its button is released; `blockHeldActions()` does that for every held action.
+`game.suppressInputUntilRelease()` goes further and drops held buttons' raw input to
+`onInput()` and the UI too. `game.popModal()` calls it for you - see
+[Menus and Panels](/ui-menus).
 
 ## Simulator analog sticks
 

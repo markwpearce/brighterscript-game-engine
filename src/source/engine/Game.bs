@@ -107,6 +107,14 @@ namespace BGE
     private background_color as integer = BGE.Colors.Black
     private running = true
     private paused = false
+    ' Open modals (pushModal()), and whether the first one paused the game.
+    private modalDepth as integer = 0
+    private modalPausedGame as boolean = false
+    ' suppressInputUntilRelease(): drop input until the buttons held then are released.
+    private inputSuppressed as boolean = false
+    private inputSuppressedThisFrame as boolean = false
+    private inputPressedSinceSuppression as roAssociativeArray = {}
+    private controllerHeldThisFrame as boolean = false
     sortedEntities as GameEntity[] = []
 
     ' Ids of entities with a collider the compositor hasn't caught up with - see markColliderUnsynced()
@@ -216,6 +224,10 @@ namespace BGE
 
     ' Container for all UI
     gameUi as BGE.UI.UiContainer
+
+    ' Changing scene resumes a paused game (and forgets open modals) unless this is true. A
+    ' pause that only came from open modals (pushModal()) always ends on a scene change.
+    keepPauseOnSceneChange as boolean = false
 
     ' Container for Debug UI
     debugUi as BGE.UI.UiContainer
@@ -468,6 +480,14 @@ namespace BGE
         end if
 
         controllerInputs = m.drainControllerInput()
+        if m.inputSuppressed
+          m.controllerHeldThisFrame = false
+          for each input in controllerInputs
+            if input.held
+              m.controllerHeldThisFrame = true
+            end if
+          end for
+        end if
 
         ' Computed once per frame (not per entity/call site) - remoteHeldGameInputs()
         ' allocates a fresh array/GameInput per held remote, so calling it once and
@@ -639,6 +659,7 @@ namespace BGE
           m.garbageCollectionTimer.mark()
         end if
 
+        m.endInputSuppressionIfReleased()
         m.applyEndOfFrameSceneWork()
 
       end while
@@ -994,6 +1015,9 @@ namespace BGE
     ' @return {boolean} true if this entity is still valid
     private function dispatchOnInput(entity as GameEntity, input as GameInput) as boolean
       isDebugUi = m.debugUi <> invalid and entity.id = m.debugUi.id
+      if m.inputSuppressed and not isDebugUi and m.isSuppressedInput(input)
+        return true
+      end if
       if entity.onInput <> invalid and (isDebugUi or m.currentInputEntityId = invalid or m.currentInputEntityId = entity.id)
         entity.onInput(input)
       end if
@@ -1368,6 +1392,12 @@ namespace BGE
     '
     ' @return {void}
     sub Pause()
+      ' paused on purpose while a modal is open: closing the modal mustn't resume
+      m.modalPausedGame = false
+      m.pauseGame()
+    end sub
+
+    private sub pauseGame()
       if not m.paused
         m.paused = true
 
@@ -1387,6 +1417,12 @@ namespace BGE
     '
     ' @return {integer}
     function Resume() as integer
+      ' resumed on purpose while a modal is open: nothing left for the modal to resume
+      m.modalPausedGame = false
+      return m.resumeGame()
+    end function
+
+    private function resumeGame() as integer
       if m.paused
         m.paused = false
         paused_time = m.pauseTimer.TotalMilliseconds()
@@ -1422,6 +1458,107 @@ namespace BGE
     ' @return {boolean}
     function isPaused() as boolean
       return m.paused
+    end function
+
+    ' Opens a modal: the game pauses while any modal is open. Pair each call with
+    ' popModal(). Nested modals (a confirm box over a pause menu) just count up.
+    '
+    ' @return {void}
+    sub pushModal()
+      m.modalDepth++
+      if m.modalDepth = 1
+        m.modalPausedGame = not m.paused
+        m.pauseGame()
+      end if
+    end sub
+
+    ' Closes a modal opened with pushModal(). The buttons held now are ignored until released,
+    ' so the press that closed it doesn't reach gameplay or the modal underneath. When the last
+    ' one closes the game resumes (unless it was already paused before the first opened).
+    '
+    ' @return {void}
+    sub popModal()
+      if m.modalDepth <= 0
+        return
+      end if
+      m.modalDepth--
+      if m.modalDepth = 0
+        if m.modalPausedGame
+          m.resumeGame()
+        end if
+        m.modalPausedGame = false
+      end if
+      m.suppressInputUntilRelease()
+    end sub
+
+    ' Is a modal open (see pushModal())?
+    '
+    ' @return {boolean}
+    function isModalOpen() as boolean
+      return m.modalDepth > 0
+    end function
+
+    ' How many modals are open.
+    '
+    ' @return {integer}
+    function getModalDepth() as integer
+      return m.modalDepth
+    end function
+
+    ' Ignores every button held right now until it's released: the rest of this frame's input
+    ' is dropped, and after that a held button's held/release events are dropped until it's
+    ' pressed again. Bound actions read as not held too (ControlMap.blockHeldActions()).
+    ' popModal() calls this.
+    '
+    ' @return {void}
+    sub suppressInputUntilRelease()
+      m.inputSuppressed = true
+      m.inputSuppressedThisFrame = true
+      m.inputPressedSinceSuppression = {}
+      m.controllerHeldThisFrame = false
+      m.controls.blockHeldActions()
+    end sub
+
+    ' Is input being ignored after suppressInputUntilRelease()?
+    '
+    ' @return {boolean}
+    function isInputSuppressed() as boolean
+      return m.inputSuppressed
+    end function
+
+    ' Should this input be dropped while input is suppressed?
+    private function isSuppressedInput(input as GameInput) as boolean
+      if m.inputSuppressedThisFrame
+        return true
+      end if
+      key = `${input.playerIndex}|${input.button}`
+      if input.press
+        m.inputPressedSinceSuppression[key] = true
+        return false
+      end if
+      return not m.inputPressedSinceSuppression.DoesExist(key)
+    end function
+
+    ' End of frame: stop suppressing once nothing is held.
+    private sub endInputSuppressionIfReleased()
+      if not m.inputSuppressed
+        return
+      end if
+      if not m.inputSuppressedThisFrame and m.remoteHeldButtons.Count() = 0 and not m.controllerHeldThisFrame
+        m.inputSuppressed = false
+        m.inputPressedSinceSuppression = {}
+      end if
+      m.inputSuppressedThisFrame = false
+    end sub
+
+    ' Test-only: the end-of-frame input suppression check.
+    sub endInputSuppressionIfReleasedForTest()
+      m.endInputSuppressionIfReleased()
+    end sub
+
+    ' Test-only: would this input be dropped right now?
+    function isSuppressedInputForTest(input as GameInput) as boolean
+      return m.inputSuppressed and m.isSuppressedInput(input)
     end function
 
 
@@ -1591,14 +1728,21 @@ namespace BGE
     ' @return {void}
     private sub processFocusManagerInput(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[], remoteHeldInputs as GameInput[])
       for each msg in universalControlEvents
-        m.focusManager.update(m.gameInputForRemoteMsg(msg))
+        m.updateFocusManager(m.gameInputForRemoteMsg(msg))
       end for
       for each heldInput in remoteHeldInputs
-        m.focusManager.update(heldInput)
+        m.updateFocusManager(heldInput)
       end for
       for each input in controllerInputs
-        m.focusManager.update(input)
+        m.updateFocusManager(input)
       end for
+    end sub
+
+    private sub updateFocusManager(input as GameInput)
+      if m.inputSuppressed and m.isSuppressedInput(input)
+        return
+      end if
+      m.focusManager.update(input)
     end sub
 
     ' Draws gameUi to the UI canvas. Called after entity movement/collision/draw
@@ -2590,6 +2734,13 @@ namespace BGE
         m.currentScene = thisScene
         m.currentSceneArgs = args
         m.sceneChangedThisFrame = false
+        ' a pause that only came from the forgotten modals always ends
+        pausedByModal = m.modalDepth > 0 and m.modalPausedGame
+        m.modalDepth = 0
+        m.modalPausedGame = false
+        if m.paused and (pausedByModal or not m.keepPauseOnSceneChange)
+          m.resumeGame()
+        end if
         m.startSceneLoading()
       end if
       ' changeScene() from onLoad/onCreate while the loop isn't running has nothing else to apply it
