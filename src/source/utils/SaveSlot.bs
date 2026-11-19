@@ -46,23 +46,32 @@ namespace BGE
       if raw = invalid
         return invalid
       end if
+      ' anything that isn't SaveSlot's {version, data} (e.g. written before the game used
+      ' SaveSlot) goes to migrate() as version 0, for the game to recognise
       fromVersion = 0
       data = raw
-      if type(raw) = "roAssociativeArray" and raw.Count() = 2 and raw.DoesExist("data") and m.isInteger(raw.version)
+      if type(raw) = "roAssociativeArray" and raw.DoesExist("data") and BGE.isIntegerValue(raw.version)
         fromVersion = raw.version
         data = raw.data
-      else if type(raw) = "roAssociativeArray" and m.isInteger(raw.version)
-        ' written before SaveSlot: the game's own version field
-        fromVersion = raw.version
       end if
       if fromVersion > m.version
+        print "[BGE.SaveSlot] warning: " + m.section + "/" + m.key + " is version " + fromVersion.ToStr() + ", newer than " + m.version.ToStr() + " - ignoring it"
         return invalid
       end if
-      if fromVersion < m.version
+      migrated = fromVersion < m.version
+      if migrated
         data = m.migrate(fromVersion, data)
+        if data = invalid
+          print "[BGE.SaveSlot] warning: dropping " + m.section + "/" + m.key + " - migrate() can't upgrade version " + fromVersion.ToStr() + " to " + m.version.ToStr()
+          return invalid
+        end if
       end if
-      if data <> invalid and validate <> invalid
+      if validate <> invalid
         data = validate(data)
+      end if
+      ' saved upgraded, so it's only migrated once
+      if migrated and data <> invalid
+        m.write(data)
       end if
       return data
     end function
@@ -70,13 +79,13 @@ namespace BGE
     ' Saves `data` under the current version.
     '
     ' @param {dynamic} data - anything FormatJson() can write
-    ' @return {boolean} false if the slot is disabled
+    ' @return {boolean} false if the slot is disabled or the data couldn't be written (see
+    '   BGE.registryWrite())
     function write(data as dynamic) as boolean
       if not m.enabled
         return false
       end if
-      BGE.registryWrite(m.section, m.key, {version: m.version, data: data})
-      return true
+      return BGE.registryWrite(m.section, m.key, {version: m.version, data: data})
     end function
 
     ' Deletes the save.
@@ -98,8 +107,11 @@ namespace BGE
       return m.read(validate) <> invalid
     end function
 
-    ' Upgrades a save from an older version. Return the upgraded data, or invalid to drop it
-    ' (the default). `fromVersion` is 0 for data with no version at all.
+    ' Upgrades a save from an older version. Return the upgraded data, or invalid to drop it.
+    ' The default drops every older save, so override this before bumping `version` or players
+    ' lose their progress. `fromVersion` is 0 for anything SaveSlot didn't write (e.g. a save
+    ' from before the game used SaveSlot) - recognise your own old format there. An upgraded save
+    ' is written back, so this runs once per save.
     '
     ' @param {integer} fromVersion
     ' @param {dynamic} data
@@ -108,12 +120,16 @@ namespace BGE
       return invalid
     end function
 
-    private function isInteger(value as dynamic) as boolean
-      kind = type(value)
-      return kind = "roInt" or kind = "Integer" or kind = "roInteger" or kind = "LongInteger"
-    end function
-
   end class
+
+  ' Is this an integer, boxed or not?
+  '
+  ' @param {dynamic} value
+  ' @return {boolean}
+  function isIntegerValue(value as dynamic) as boolean
+    kind = type(value)
+    return kind = "roInt" or kind = "Integer" or kind = "roInteger" or kind = "LongInteger" or kind = "roLongInteger"
+  end function
 
   ' Data that lasts across saves and new games - settings, unlocks, endings found, high
   ' scores - as named values in one registry key. Every change is written straight away.
@@ -164,10 +180,12 @@ namespace BGE
     '
     ' @param {string} name
     ' @param {dynamic} value - anything FormatJson() can write
-    sub set(name as string, value as dynamic)
+    ' @return {boolean} false if it couldn't be saved (see BGE.registryWrite()) or the profile
+    '   is disabled; the value is still set in memory
+    function set(name as string, value as dynamic) as boolean
       m.values[name] = value
-      m.save()
-    end sub
+      return m.save()
+    end function
 
     ' @param {string} name
     ' @return {boolean}
@@ -235,7 +253,7 @@ namespace BGE
     function getHighScore(table = "highScore" as string) as integer
       best = m.get(table, 0)
       kind = type(best)
-      if kind = "roInt" or kind = "Integer" or kind = "roInteger" or kind = "LongInteger"
+      if BGE.isIntegerValue(best)
         return best
       else if kind = "roFloat" or kind = "Float" or kind = "Double" or kind = "roDouble"
         return Int(best)
@@ -256,11 +274,12 @@ namespace BGE
       return true
     end function
 
-    private sub save()
-      if m.enabled
-        BGE.registryWrite(m.section, m.key, m.values)
+    private function save() as boolean
+      if not m.enabled
+        return false
       end if
-    end sub
+      return BGE.registryWrite(m.section, m.key, m.values)
+    end function
 
   end class
 
