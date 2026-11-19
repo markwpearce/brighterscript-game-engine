@@ -1,0 +1,252 @@
+import "Game.bs"
+import "GameEntity.bs"
+import "GameInput.bs"
+import "GameScene.bs"
+import "controller/ControlMap.bs"
+import "renderer/Renderer.bs"
+import "ui/Button.bs"
+import "ui/MenuList.bs"
+import "ui/UiActionListener.bs"
+import "../utils/colors.bs"
+
+namespace BGE
+
+  ' Options for BGE.PauseMenu. Every field is optional.
+  interface PauseMenuOptions extends roAssociativeArray
+    ' ControlMap action that toggles the menu (default "pause"). Used when it's bound.
+    optional action as string
+    ' Remote button that toggles the menu when the action isn't bound (default "play").
+    optional button as string
+    ' Heading (default "Paused").
+    optional title as string
+    ' Text under the heading (default none).
+    optional message as string
+    ' "panel" (default): a centered BGE.UI.MenuList of buttons. "text": just the title drawn
+    ' in the middle of the screen; the toggle resumes.
+    optional style as string
+    ' Button ids, top to bottom (default ["resume", "quit"]). Built in: "resume", "restart"
+    ' (Game.resetScene()), "title" (changes to titleScene), "quit" (Game.End()). Any other
+    ' id goes to the listener/onAction(). Use addButton() for custom labels.
+    optional buttons as string[]
+    ' Scene the "title" button changes to.
+    optional titleScene as string
+    ' Does Back close an open menu (default true)?
+    optional closeOnBack as boolean
+  end interface
+
+  ' A pause menu entity: press the toggle (a ControlMap action, or a remote button) to pause
+  ' the game and show a menu, press it again (or Back, or Resume) to carry on. It opens a
+  ' modal (Game.pushModal()), so the press that closes it doesn't reach gameplay.
+  '
+  ' Add it to the game like any entity (make it `persistent` to keep it across scenes).
+  ' Customize with options, addButton(), `listener`, `blockWhen`, or by subclassing:
+  ' override onAction() for your own buttons, createMenu() for a different panel, or
+  ' drawTextStyle() for the "text" look.
+  '
+  ' @example
+  ' pause = new BGE.PauseMenu(game, {buttons: ["resume", "restart", "title"], titleScene: "TitleScene"})
+  ' game.addEntity(pause)
+  class PauseMenu extends BGE.GameEntity
+
+    action as string = "pause"
+    button as string = "play"
+    title as string = "Paused"
+    message as string = ""
+    style as string = "panel"
+    titleScene as string = ""
+    closeOnBack as boolean = true
+    ' Told about buttons that aren't built in: onUiAction(actionId, button).
+    listener as BGE.UI.UiActionListener = invalid
+    ' function(game as BGE.Game) as boolean - return true to keep the menu from opening
+    ' (e.g. over a game-over screen).
+    blockWhen as dynamic = invalid
+    ' The open panel ("panel" style), else invalid.
+    menu as BGE.UI.MenuList = invalid
+
+    protected items as BGE.UI.MenuItem[] = []
+    private opened as boolean = false
+
+    ' @param {BGE.Game} game
+    ' @param {BGE.PauseMenuOptions} [options={}]
+    sub new(game as BGE.Game, options = {} as BGE.PauseMenuOptions)
+      super(game)
+      m.name = "PauseMenu"
+      m.pauseable = false
+      for each key in options.Keys()
+        if key <> "buttons"
+          m[key] = options[key]
+        end if
+      end for
+      buttonIds = ["resume", "quit"] as string[]
+      if options.buttons <> invalid
+        buttonIds = options.buttons
+      end if
+      for each id in buttonIds
+        m.addButton(id, m.defaultLabel(id))
+      end for
+    end sub
+
+    ' Adds a button to the end of the menu ("panel" style). Takes effect the next time it
+    ' opens.
+    '
+    ' @param {string} id - a built-in id ("resume", "restart", "title", "quit") or your own
+    ' @param {string} label
+    sub addButton(id as string, label as string)
+      m.items.push(new BGE.UI.MenuItem(id, label))
+    end sub
+
+    ' Removes every button.
+    sub clearButtons()
+      m.items = []
+    end sub
+
+    ' Is the menu open?
+    '
+    ' @return {boolean}
+    function isOpen() as boolean
+      return m.opened
+    end function
+
+    ' Pauses and shows the menu, unless it's open already or blockWhen says no.
+    sub open()
+      if m.opened
+        return
+      end if
+      if m.blockWhen <> invalid
+        if m.blockWhen(m.game)
+          return
+        end if
+      end if
+      m.opened = true
+      m.game.pushModal()
+      if m.style = "panel"
+        m.menu = m.createMenu()
+        m.menu.open()
+      end if
+    end sub
+
+    ' Hides the menu and resumes.
+    sub close()
+      if not m.opened
+        return
+      end if
+      m.opened = false
+      if m.menu <> invalid
+        m.menu.close()
+        m.menu = invalid
+      end if
+      m.game.popModal()
+    end sub
+
+    ' Opens the menu if it's closed, closes it if it's open.
+    sub toggle()
+      if m.opened
+        m.close()
+      else
+        m.open()
+      end if
+    end sub
+
+    override sub onControls(controls as BGE.Controller.ControlMap)
+      if m.usesAction() and controls.isActionPressed(m.action)
+        m.toggle()
+      end if
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      if not input.press
+        return
+      end if
+      if not m.usesAction() and input.isRawButton(m.button)
+        m.toggle()
+      else if m.opened and m.closeOnBack and input.isButton("back")
+        m.close()
+      end if
+    end sub
+
+    ' The scene's UI (and the open panel with it) is cleared on a scene change, and the game
+    ' resumes, so just forget the menu was open.
+    override sub onChangeScene(newScene as BGE.GameScene)
+      m.opened = false
+      m.menu = invalid
+    end sub
+
+    override sub onDrawEnd(renderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+      if m.opened and m.style = "text"
+        m.drawTextStyle(uiRenderer)
+      end if
+    end sub
+
+    ' Handles a button. Built-in ids are dealt with here; override (calling super) to add
+    ' your own, or set `listener`.
+    '
+    ' @param {string} actionId
+    ' @param {BGE.UI.Button} clicked
+    sub onUiAction(actionId as string, clicked as BGE.UI.Button)
+      if actionId = "resume"
+        m.close()
+      else if actionId = "restart"
+        m.close()
+        m.game.resetScene()
+      else if actionId = "title"
+        m.close()
+        m.game.changeScene(m.titleScene)
+      else if actionId = "quit"
+        m.game.End()
+      else
+        m.onAction(actionId, clicked)
+      end if
+    end sub
+
+    ' Called for buttons that aren't built in. Passes them to `listener` by default.
+    '
+    ' @param {string} actionId
+    ' @param {BGE.UI.Button} clicked
+    sub onAction(actionId as string, clicked as BGE.UI.Button)
+      if m.listener <> invalid
+        m.listener.onUiAction(actionId, clicked)
+      end if
+    end sub
+
+    ' Makes the "panel" style menu, owned by the current scene. Override for your own look.
+    '
+    ' @return {BGE.UI.MenuList}
+    protected function createMenu() as BGE.UI.MenuList
+      menu = new BGE.UI.MenuList(m.game)
+      menu.centered = true
+      menu.title = m.title
+      menu.message = m.message
+      menu.listener = m
+      for each item in m.items
+        menu.addItem(item.id, item.label)
+      end for
+      return menu
+    end function
+
+    ' Draws the "text" style: the title in the middle of the UI canvas.
+    '
+    ' @param {BGE.Renderer} uiRenderer
+    protected sub drawTextStyle(uiRenderer as BGE.Renderer)
+      center = uiRenderer.getCanvasCenter()
+      font = m.game.getFont("heading")
+      if font = invalid
+        font = m.game.getFont("default")
+      end if
+      uiRenderer.drawText(m.title, center.x, center.y - font.GetOneLineHeight() / 2, m.game.defaultTheme.foregroundColor, font, "center")
+    end sub
+
+    private function usesAction() as boolean
+      return m.action <> "" and m.game.controls.hasAction(m.action)
+    end function
+
+    private function defaultLabel(id as string) as string
+      labels = {resume: "Resume", restart: "Restart", title: "Quit to Title", quit: "Quit"}
+      if labels.DoesExist(id)
+        return labels[id]
+      end if
+      return id
+    end function
+
+  end class
+
+end namespace
