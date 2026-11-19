@@ -1,0 +1,233 @@
+import "UiWidget.bs"
+import "TextWrap.bs"
+import "../Game.bs"
+import "../../math/math.bs"
+
+namespace BGE.UI
+
+  ' One credits entry: its text and a style name. An empty text is a half-line gap.
+  interface CreditsEntry
+    text as string
+    ' "title", "heading", "body" (the default) or your own - see CreditsView.styleColors.
+    optional style as string
+  end interface
+
+  ' One wrapped line, ready to draw.
+  interface CreditsRow
+    text as string
+    color as integer
+    font as roFont
+    height as float
+  end interface
+
+  ' Credits text: entries of {text, style}, wrapped to the view's width and coloured by
+  ' style, either scrolling up ("scroll", the default) or laid out from the top ("static").
+  ' setFast() speeds a scroll up and skip() jumps to the end; isFinished() says when it's
+  ' done (a static view is finished once skipped). Lines only draw inside the view.
+  '
+  ' The view fills the UI canvas's title-safe area unless you set `customX`/`customY`/
+  ' `width`/`height`. Colors per style are in `styleColors`, fonts in `styleFonts`
+  ' (font keys; "body"/"default" when missing).
+  '
+  ' @example
+  ' credits = new BGE.UI.CreditsView(game, [
+  '   {text: "My Game", style: "title"},
+  '   {text: "Code", style: "heading"},
+  '   {text: "Me"}
+  ' ])
+  ' scene.addUi(credits)
+  class CreditsView extends BGE.UI.UiWidget
+
+    ' "scroll" or "static".
+    mode as string = "scroll"
+    ' Pixels per second.
+    scrollSpeed as float = 40.0
+    ' Speed multiplier while setFast(true).
+    fastScale as float = 4.0
+    ' Style name -> RGBA.
+    styleColors as roAssociativeArray = {
+      "title": &hFFD966FF,
+      "heading": &hF5E6C8FF,
+      "body": &hC8B8A0FF
+    }
+    ' Style name -> font key.
+    styleFonts as roAssociativeArray = {"title": "heading"}
+    ' Static mode: extra space above each heading after the first.
+    headingGap as float = 10.0
+    ' Lines are centered ("center") or left-aligned ("left").
+    textAlign as string = "center"
+    ' Fill drawn behind the text, 0 for none.
+    backgroundRGBA as integer = 0
+
+    private entries as BGE.UI.CreditsEntry[] = []
+    private rows as BGE.UI.CreditsRow[] = []
+    private rowsWidth as float = -1
+    private totalHeight as float = 0
+    private scroll as float = 0
+    private fast as boolean = false
+    private skipped as boolean = false
+
+    ' @param {BGE.Game} game
+    ' @param {BGE.UI.CreditsEntry[]} [entries=[]]
+    sub new(game as BGE.Game, entries = [] as BGE.UI.CreditsEntry[])
+      super(game)
+      m.customPosition = true
+      canvasW = game.uiCanvas.getWidth()
+      canvasH = game.uiCanvas.getHeight()
+      m.customX = canvasW * 0.1
+      m.customY = canvasH * 0.1
+      m.width = canvasW * 0.8
+      m.height = canvasH * 0.8
+      m.entries = entries
+    end sub
+
+    ' Replaces the entries and starts over.
+    '
+    ' @param {BGE.UI.CreditsEntry[]} entries
+    sub setEntries(entries as BGE.UI.CreditsEntry[])
+      m.entries = entries
+      m.rowsWidth = -1
+      m.restart()
+    end sub
+
+    ' Back to the start.
+    sub restart()
+      m.scroll = 0
+      m.skipped = false
+    end sub
+
+    ' @param {boolean} fast - scroll `fastScale` times faster
+    sub setFast(fast as boolean)
+      m.fast = fast
+    end sub
+
+    ' Jumps to the end.
+    sub skip()
+      m.skipped = true
+      m.layout()
+      m.scroll = m.endScroll()
+    end sub
+
+    ' Has the last line scrolled off the top (or, for a static view, has it been skipped)?
+    '
+    ' @return {boolean}
+    function isFinished() as boolean
+      if m.mode = "static"
+        return m.skipped
+      end if
+      m.layout()
+      return m.scroll >= m.endScroll()
+    end function
+
+    ' The wrapped lines, in order.
+    '
+    ' @return {BGE.UI.CreditsRow[]}
+    function getRows() as BGE.UI.CreditsRow[]
+      m.layout()
+      return m.rows
+    end function
+
+    ' How far the roll has scrolled, in pixels.
+    '
+    ' @return {float}
+    function getScroll() as float
+      return m.scroll
+    end function
+
+    override sub onUpdate(deltaTime as float)
+      if m.mode <> "scroll"
+        return
+      end if
+      m.layout()
+      speed = m.scrollSpeed
+      if m.fast
+        speed = speed * m.fastScale
+      end if
+      m.scroll = BGE.Math.Min(m.scroll + speed * deltaTime, m.endScroll())
+    end sub
+
+    override sub draw(parent = invalid as UiWidget)
+      m.layout()
+      renderer = m.canvas.renderer
+      if m.backgroundRGBA <> 0
+        renderer.drawRectangle(m.position.x, m.position.y, m.width, m.height, m.backgroundRGBA)
+      end if
+      top = m.position.y
+      bottom = m.position.y + m.height
+      y = top
+      if m.mode = "scroll"
+        y = bottom - m.scroll
+      end if
+      textX = m.position.x
+      if m.textAlign = "center"
+        textX = m.position.x + m.width / 2
+      end if
+      for each row in m.rows
+        if row.text <> "" and y >= top and y + row.height <= bottom
+          renderer.drawText(row.text, textX, y, row.color, row.font, m.textAlign, "top")
+        end if
+        y += row.height
+      end for
+    end sub
+
+    ' Wraps the entries into rows (again if the width changed).
+    private sub layout()
+      if m.rowsWidth = m.width
+        return
+      end if
+      m.rowsWidth = m.width
+      m.rows = []
+      m.totalHeight = 0
+      first = true
+      for each entry in m.entries
+        style = "body"
+        if entry.style <> invalid
+          style = entry.style
+        end if
+        font = m.fontFor(style)
+        color = m.styleColors[style]
+        if color = invalid
+          color = m.styleColors["body"]
+        end if
+        lineHeight = font.GetOneLineHeight()
+        if m.mode = "static" and style = "heading" and not first
+          m.pushRow("", color, font, m.headingGap)
+        end if
+        if entry.text = ""
+          m.pushRow("", color, font, lineHeight / 2)
+        else
+          for each line in BGE.UI.wrapText(entry.text, font, m.width)
+            m.pushRow(line, color, font, lineHeight)
+          end for
+        end if
+        first = false
+      end for
+    end sub
+
+    private sub pushRow(text as string, color as integer, font as roFont, height as float)
+      m.rows.push({text: text, color: color, font: font, height: height})
+      m.totalHeight += height
+    end sub
+
+    private function fontFor(style as string) as roFont
+      font = invalid
+      if m.styleFonts.DoesExist(style)
+        font = m.game.getFont(m.styleFonts[style])
+      end if
+      if font = invalid
+        font = m.game.getFont("body")
+      end if
+      if font = invalid
+        font = m.game.getFont("default")
+      end if
+      return font
+    end function
+
+    ' A scroll ends when the last line has passed the top.
+    private function endScroll() as float
+      return m.totalHeight + m.height
+    end function
+
+  end class
+
+end namespace

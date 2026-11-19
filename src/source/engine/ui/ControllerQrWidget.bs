@@ -1,0 +1,182 @@
+import "UiWidget.bs"
+import "TextWrap.bs"
+import "../Game.bs"
+import "../debug/LogLevel.bs"
+import "../../utils/qrcode/QrCode.bs"
+import "../../utils/qrcode/QrRenderHelpers.bs"
+import "../../utils/colors.bs"
+
+namespace BGE.UI
+
+  ' A QR code for the phone/browser controller page, with a caption and the URL under it.
+  ' The URL defaults to `game.getControllerConnectionInfo()` (call
+  ' `game.enableControllerInput()` first). It's encoded once; setUrl() changes it.
+  '
+  ' The code is centered in the widget's width with the text below; `height` is worked out
+  ' from the content. `qrSize` is rounded down to whole pixels per module, or the modules show
+  ' gaps.
+  '
+  ' @example
+  ' qr = new BGE.UI.ControllerQrWidget(game)
+  ' qr.customPosition = true
+  ' qr.customX = 100
+  ' qr.customY = 80
+  ' scene.addUi(qr)
+  class ControllerQrWidget extends BGE.UI.UiWidget
+
+    caption as string = "Scan to connect a controller"
+    showUrl as boolean = true
+    textColor as integer = BGE.Colors.White
+    ' Font key ("body", falling back to "default").
+    fontName as string = "body"
+    ' Fill drawn behind everything, 0 for none.
+    backgroundRGBA as integer = 0
+    contentPadding as float = 16.0
+    ' Space between the code and the text.
+    gap as float = 12.0
+
+    private qr as BGE.QrCode.QrCode = invalid
+    private url as string = ""
+    private requestedQrSize as float = 240.0
+    private moduleQrSize as float = 0.0
+    private fixedWidth as boolean = false
+    private cachedLines as string[] = []
+    private cachedLinesKey as string = ""
+    private layoutKey as string = ""
+
+    ' @param {BGE.Game} game
+    ' @param {string} [url=""] - "" uses game.getControllerConnectionInfo()
+    ' @param {float} [qrSize=240] - pixels across the code
+    sub new(game as BGE.Game, url = "" as string, qrSize = 240.0 as float)
+      super(game)
+      m.requestedQrSize = qrSize
+      if url = ""
+        url = game.getControllerConnectionInfo()
+      end if
+      m.setUrl(url)
+    end sub
+
+    ' Encodes a new URL.
+    '
+    ' @param {string} url
+    sub setUrl(url as string)
+      m.url = url
+      m.qr = invalid
+      if url <> ""
+        ' too long for any QR version throws: draw just the text instead of crashing
+        try
+          m.qr = BGE.QrCode.qrEncodeText(url, BGE.QrCode.EccLevel.medium)
+        catch e
+          m.game.log("ControllerQrWidget - couldn't encode " + url + ": " + e.message, BGE.Debug.LogLevel.error)
+        end try
+      end if
+      m.layout()
+    end sub
+
+    ' The encoded URL ("" if none).
+    '
+    ' @return {string}
+    function getUrl() as string
+      return m.url
+    end function
+
+    ' Sets how many pixels across the code should be (rounded down to whole pixels per module).
+    '
+    ' @param {float} qrSize
+    sub setQrSize(qrSize as float)
+      m.requestedQrSize = qrSize
+      m.layout()
+    end sub
+
+    ' The code's drawn size in pixels.
+    '
+    ' @return {float}
+    function getQrSize() as float
+      return m.moduleQrSize
+    end function
+
+    ' Fixes the widget's width (the text wraps to it); 0 fits it to the code.
+    '
+    ' @param {float} width
+    sub setWidth(width as float)
+      m.fixedWidth = width > 0
+      if m.fixedWidth
+        m.width = width
+      end if
+      m.layout()
+    end sub
+
+    override sub draw(parent = invalid as UiWidget)
+      if m.currentLayoutKey() <> m.layoutKey
+        m.layout()
+      end if
+      renderer = m.canvas.renderer
+      if m.backgroundRGBA <> 0
+        renderer.drawRectangle(m.position.x, m.position.y, m.width, m.height, m.backgroundRGBA)
+      end if
+      y = m.position.y + m.contentPadding
+      if m.qr <> invalid
+        qrX = m.position.x + (m.width - m.moduleQrSize) / 2.0
+        renderer.incrementDrawCalls(BGE.QrCode.qrDrawModules(renderer.getDraw2d(), m.qr, qrX, y, m.moduleQrSize))
+        y += m.moduleQrSize + m.gap
+      end if
+      font = m.resolveFont()
+      centerX = m.position.x + m.width / 2.0
+      for each line in m.textLines(font)
+        renderer.drawText(line, centerX, y, m.textColor, font, "center")
+        y += font.GetOneLineHeight()
+      end for
+    end sub
+
+    ' Sizes the widget to its content. Runs by itself when the caption, showUrl, contentPadding
+    ' or gap change; call it to read the new `height` before the next draw.
+    sub layout()
+      m.moduleQrSize = 0
+      if m.qr <> invalid
+        m.moduleQrSize = Int(m.requestedQrSize / m.qr.size) * m.qr.size
+        if m.moduleQrSize <= 0
+          m.moduleQrSize = m.qr.size
+        end if
+      end if
+      if not m.fixedWidth
+        m.width = m.moduleQrSize + m.contentPadding * 2
+      end if
+      font = m.resolveFont()
+      height = m.contentPadding * 2 + m.textLines(font).count() * font.GetOneLineHeight()
+      if m.qr <> invalid
+        height += m.moduleQrSize + m.gap
+      end if
+      m.height = height
+      m.layoutKey = m.currentLayoutKey()
+    end sub
+
+    ' Wrapped caption plus URL, cached until the text or width changes.
+    private function textLines(font as roFont) as string[]
+      key = `${m.caption}|${m.showUrl}|${m.width}|${font.GetOneLineHeight()}`
+      if key = m.cachedLinesKey
+        return m.cachedLines
+      end if
+      m.cachedLinesKey = key
+      lines = [] as string[]
+      wrapWidth = m.width - m.contentPadding * 2
+      if m.caption <> ""
+        lines.append(BGE.UI.wrapText(m.caption, font, wrapWidth))
+      end if
+      if m.showUrl and m.url <> ""
+        lines.push(m.url)
+      end if
+      m.cachedLines = lines
+      return lines
+    end function
+
+    private function currentLayoutKey() as string
+      return `${m.caption}|${m.showUrl}|${m.contentPadding}|${m.gap}|${m.width}`
+    end function
+
+    private function resolveFont() as roFont
+      return m.fontOrDefault(m.fontName)
+    end function
+
+  end class
+
+end namespace
