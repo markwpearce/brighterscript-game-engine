@@ -1,0 +1,216 @@
+import "UiWidget.bs"
+import "../Game.bs"
+import "../renderer/Renderer.bs"
+import "../../math/math.bs"
+
+namespace BGE.UI
+
+  ' A screen-space bar for health, stamina, boss health and the like: fills drawn on a
+  ' backing, with optional extras.
+  '  - Lag chunk: when the value drops, the lost part stays in `lagColor` for
+  '    `lagHoldSeconds`, then drains away (`lagEnabled`).
+  '  - Blink: the fill flashes `blinkColor` while empty (`blinkWhenEmpty`) or for a moment
+  '    after refuse(), e.g. when an action needs more stamina than there is.
+  '  - Layers: setLayer() adds more fills under the main one (e.g. a shield).
+  '  - Label: text above the bar (e.g. a boss's name).
+  '
+  ' Add it to gameUi like any widget, or call drawAt() yourself from a draw hook (call update()
+  ' each frame then).
+  '
+  ' @example
+  ' health = new BGE.UI.Meter(game)
+  ' health.width = 400
+  ' health.height = 14
+  ' health.lagEnabled = true
+  ' scene.addUi(health)
+  ' ' every frame:
+  ' health.setValue(player.health, player.maxHealth)
+  class Meter extends BGE.UI.UiWidget
+
+    fillColor as integer = &hB02020FF
+    backColor as integer = &h000000B0
+    ' Pixels of backing showing around the fill.
+    borderSize as float = 2.0
+
+    lagEnabled as boolean = false
+    lagColor as integer = &hE8C070FF
+    lagHoldSeconds as float = 0.6
+    ' How fast the lag chunk drains, in fractions of the bar per second.
+    lagDrainPerSecond as float = 0.5
+
+    blinkWhenEmpty as boolean = false
+    blinkColor as integer = &hE8E8E8FF
+    ' Seconds refuse() blinks for.
+    refuseSeconds as float = 0.5
+    ' Blinks per second.
+    blinkRate as float = 5.0
+
+    ' Text above the bar. "" = none.
+    label as string = ""
+    labelColor as integer = &hE8E0D0FF
+    ' Font key for the label ("body", falling back to "default").
+    labelFontName as string = "body"
+    ' "left" or "center".
+    labelAlign as string = "left"
+
+    private value as float = 1.0
+    private lagFraction as float = 1.0
+    private lagHeld as float = 0.0
+    private refuseLeft as float = 0.0
+    private blinkClock as float = 0.0
+    private layers as roAssociativeArray = {}
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    ' Sets the value. The lag chunk (if enabled) starts holding on every drop.
+    '
+    ' @param {float} value
+    ' @param {float} [maxValue=1]
+    sub setValue(value as float, maxValue = 1.0 as float)
+      fraction = 0.0
+      if maxValue > 0
+        fraction = BGE.Math.Clamp(value / maxValue, 0, 1)
+      end if
+      if fraction < m.value
+        m.lagHeld = 0
+      end if
+      m.value = fraction
+      if fraction >= m.lagFraction or not m.lagEnabled
+        m.lagFraction = fraction
+      end if
+    end sub
+
+    ' Sets the value at once, with no lag chunk.
+    '
+    ' @param {float} value
+    ' @param {float} [maxValue=1]
+    sub resetValue(value as float, maxValue = 1.0 as float)
+      m.setValue(value, maxValue)
+      m.lagFraction = m.value
+    end sub
+
+    ' The value as a fraction of the bar, 0 to 1.
+    '
+    ' @return {float}
+    function getFraction() as float
+      return m.value
+    end function
+
+    ' Where the lag chunk ends, 0 to 1.
+    '
+    ' @return {float}
+    function getLagFraction() as float
+      return m.lagFraction
+    end function
+
+    ' Blinks the fill for `refuseSeconds`.
+    sub refuse()
+      m.refuseLeft = m.refuseSeconds
+    end sub
+
+    ' Is the fill drawn in `blinkColor` right now?
+    '
+    ' @return {boolean}
+    function isBlinkOn() as boolean
+      blinking = m.refuseLeft > 0 or (m.blinkWhenEmpty and m.value <= 0)
+      return blinking and fix(m.blinkClock * m.blinkRate * 2) mod 2 = 0
+    end function
+
+    ' Adds or replaces an extra fill drawn under the main one. Layers draw in key order.
+    '
+    ' @param {string} key
+    ' @param {float} fraction - 0 to 1
+    ' @param {integer} color
+    sub setLayer(key as string, fraction as float, color as integer)
+      m.layers[key] = {fraction: fraction, color: color}
+    end sub
+
+    ' Removes a layer added with setLayer().
+    '
+    ' @param {string} key
+    sub removeLayer(key as string)
+      m.layers.Delete(key)
+    end sub
+
+    ' Advances the lag chunk and blinking. Called for you when the meter is in gameUi.
+    '
+    ' @param {float} dt - seconds
+    sub update(dt as float)
+      m.blinkClock += dt
+      if m.refuseLeft > 0
+        m.refuseLeft -= dt
+      end if
+      if m.lagFraction <= m.value
+        return
+      end if
+      m.lagHeld += dt
+      if m.lagHeld > m.lagHoldSeconds
+        m.lagFraction = BGE.Math.Max(m.value, m.lagFraction - m.lagDrainPerSecond * dt)
+      end if
+    end sub
+
+    override sub onUpdate(deltaTime as float)
+      m.update(deltaTime)
+    end sub
+
+    override sub draw(parent = invalid as UiWidget)
+      m.drawAt(m.canvas.renderer, m.position.x, m.position.y, m.width, m.height)
+    end sub
+
+    ' Draws the meter with its fill area at x, y.
+    '
+    ' @param {BGE.Renderer} renderer
+    ' @param {float} x
+    ' @param {float} y
+    ' @param {float} width
+    ' @param {float} height
+    sub drawAt(renderer as BGE.Renderer, x as float, y as float, width as float, height as float)
+      if width <= 0 or height <= 0
+        return
+      end if
+      if m.label <> ""
+        font = m.game.getFont(m.labelFontName)
+        if font = invalid
+          font = m.game.getFont("default")
+        end if
+        labelY = y - m.borderSize - font.GetOneLineHeight() - 4
+        if m.labelAlign = "center"
+          renderer.drawText(m.label, x + width / 2, labelY, m.labelColor, font, "center")
+        else
+          renderer.drawText(m.label, x, labelY, m.labelColor, font, "left")
+        end if
+      end if
+      b = m.borderSize
+      renderer.drawRectangle(x - b, y - b, width + b * 2, height + b * 2, m.backColor)
+      layerKeys = m.layers.Keys()
+      layerKeys.Sort()
+      for each key in layerKeys
+        m.drawFill(renderer, x, y, width, height, m.layers[key].fraction, m.layers[key].color)
+      end for
+      if m.lagEnabled and m.lagFraction > m.value
+        m.drawFill(renderer, x, y, width, height, m.lagFraction, m.lagColor)
+      end if
+      color = m.fillColor
+      if m.isBlinkOn()
+        color = m.blinkColor
+      end if
+      if m.value <= 0 and m.isBlinkOn()
+        ' an empty bar blinks its whole track
+        m.drawFill(renderer, x, y, width, height, 1, color)
+      else
+        m.drawFill(renderer, x, y, width, height, m.value, color)
+      end if
+    end sub
+
+    private sub drawFill(renderer as BGE.Renderer, x as float, y as float, width as float, height as float, fraction as float, color as integer)
+      fillWidth = width * BGE.Math.Clamp(fraction, 0, 1)
+      if fillWidth > 0
+        renderer.drawRectangle(x, y, fillWidth, height, color)
+      end if
+    end sub
+
+  end class
+
+end namespace
