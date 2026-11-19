@@ -415,6 +415,68 @@ end if
 - The save has no UI in it, so an autosave on each node is just a call after
   `advance()` or `choose()`.
 
+## Plugging it into a game
+
+The runner and state don't know about your game. These engine pieces do the usual wiring,
+and each can be configured or subclassed.
+
+**`BGE.Story.StorySession`** is a persistent entity that owns the `StoryState` and
+`DialogueRunner`. `session.start()`, `advance()`, `choose()`, `runEvent()` and
+`applyEffects()` each settle the rules and then pass the result on: posts go out as game
+events, messages queue for `takeMessages()`, and a change posts `storyUpdated` (or
+`changedEventName`) and calls `onStoryChanged()`. Override that to autosave.
+`listenTo(["enemyKilled"])` feeds those game events to the story's rules.
+`toSaveData(includeBacklog)`/`loadSaveData()` save the state and position, and the backlog
+if you ask for it.
+
+```brighterscript
+session = new BGE.Story.StorySession(game, BGE.Story.loadStory("pkg:/story/main.json"))
+session.listenTo(["enemyKilled", "chestOpened"])
+game.addEntity(session)
+```
+
+**`BGE.Story.DialogueView`** is a dialogue box for a session. It shows the speaker and the
+line, split into pages, and the choices as buttons, with disabled ones dimmed. OK turns the
+page, up/down/OK pick a choice and Back leaves. It pauses the game while it's open and
+closes itself at the end. The OK that brings the choices up can't also pick one.
+
+```brighterscript
+view = new BGE.Story.DialogueView(game, session)
+view.choiceLayout = "list" ' or "column" (buttons above the box) or "row" (buttons inside it)
+view.listener = m ' optional onDialogueLine(view, line) / onDialogueEnded(view, cancelled)
+view.start("bram")
+```
+
+`choiceLayout` picks how choices show:
+
+- `"column"` (the default): buttons stacked above the box, with the line still showing.
+- `"row"`: buttons side by side along the bottom of the box.
+- `"list"`: lines of text inside the box, under the line that asked (a divider between), the
+  focused one with a marker. The box grows upward to fit. Tune it with `listKeepsLine`
+  (false shows just the choices), `listDivider`/`listDividerColor`, `listMarker`,
+  `listTextColor`/`listFocusedColor`/`listDisabledColor` and `listRowHeight`. The rows are
+  `BGE.UI.TextButton`s, which work anywhere a text-only button fits.
+
+`choicesWithLastLine` (default true) brings a node's choices up with its last page; set it
+false to show the line first and bring the choices up on the next press. `advanceButton` and
+`cancelButton` (default "ok"/"back") are the buttons that turn the page and leave.
+
+Colors default to the theme's `panel*` fields. Nothing is fixed: override
+`createChoiceButton()` (or `createChoiceRow()` for the list) to use your own widgets,
+`layoutChoices()` to place them, and `onLine()`/`onEnded()` to react. `DialogueView` is also
+just one way to show a session - rpg and visualnovel drive their `StorySession` from their
+own boxes (`session.start()`/`advance()`/`choose()` and `session.runner` for what to show).
+
+**`BGE.Story.applyDebugState(state, flags, items)`** sets up a story point from launch
+parameters: `flags` as `"gate.open,kills=4"`, an array or an AA; `items` as
+`"smallKey:2,throneKey"`, an array or an AA of counts. It settles afterwards, so derived
+flags exist on arrival.
+
+**`BGE.Interactables`** keeps the things you can talk to or use and finds the one "in front".
+`nearestInArc(origin, heading, reach, halfAngle)` works on the 3D ground plane (via
+`BGE.Math.isWithinArc()`), and `nearestInRect(x, y, w, h, originX, originY)` works in 2D.
+`promptFor(target, "OK")` gives `"OK: Talk to Bram"`.
+
 ## Checking a story
 
 A typo in a node id or a condition key only shows up when a player reaches it.
