@@ -635,84 +635,220 @@ namespace BGE.ImpostorFit
     return true
   end function
 
-  ' Where a capture's canvas point is drawn now: into the level view at capture, through the
-  ' column warp, then out of the level view now into the camera now.
+  ' The canvas-to-canvas map between two views from the same eye (a turn), as a homography:
+  ' [a, b, c, d, e, f, g, h, i], where (x, y) goes to ((ax + by + c) / w, (dx + ey + f) / w)
+  ' with w = gx + hy + i, in front of the second view while w > 0. Lets the hot loops map
+  ' points without calls (see mapPointsByHomography()).
+  '
+  ' @param {float[]} fromBasis
+  ' @param {float[]} toBasis
+  ' @return {float[]}
+  function homographyBetween(fromBasis as float[], toBasis as float[]) as float[]
+    ' the ray of (x, y) is rA * u + uA * v - bA, with u = (x - cx) / f and v = (cy - y) / f
+    inverseFocal = 1 / fromBasis[12]
+    ux = inverseFocal
+    u0 = -fromBasis[13] * inverseFocal
+    vy = -inverseFocal
+    v0 = fromBasis[14] * inverseFocal
+    h = [] as float[]
+    ' X, Y and depth along the second view's right, up and forward axes, each affine in x, y
+    coefficients = [] as float[]
+    for axis = 0 to 2
+      o = axis * 3
+      sign = 1.0
+      if axis = 2
+        sign = -1.0
+      end if
+      ru = sign * (fromBasis[0] * toBasis[o] + fromBasis[1] * toBasis[o + 1] + fromBasis[2] * toBasis[o + 2])
+      uu = sign * (fromBasis[3] * toBasis[o] + fromBasis[4] * toBasis[o + 1] + fromBasis[5] * toBasis[o + 2])
+      bu = -sign * (fromBasis[6] * toBasis[o] + fromBasis[7] * toBasis[o + 1] + fromBasis[8] * toBasis[o + 2])
+      coefficients.append([ru * ux, uu * vy, ru * u0 + uu * v0 + bu])
+    end for
+    focal = toBasis[12]
+    cx = toBasis[13]
+    cy = toBasis[14]
+    for k = 0 to 2
+      ' x' = cx + focal * X / depth, y' = cy - focal * Y / depth
+      h.push(cx * coefficients[6 + k] + focal * coefficients[k])
+    end for
+    for k = 0 to 2
+      h.push(cy * coefficients[6 + k] - focal * coefficients[3 + k])
+    end for
+    for k = 0 to 2
+      h.push(coefficients[6 + k])
+    end for
+    return h
+  end function
+
+  ' homographyBetween() for a capture's camera to its level view, and for the current level
+  ' view to the current camera: what the strip maps below take.
+  '
+  ' @param {float[][]} bases capture camera, capture level, current level, current camera
+  ' @return {float[][]}
+  function warpHomographies(bases as float[][]) as float[][]
+    return [homographyBetween(bases[0], bases[1]), homographyBetween(bases[2], bases[3])] as float[][]
+  end function
+
+  ' Maps points through a homographyBetween().
+  '
+  ' @param {float[]} h
+  ' @param {float[]} xs
+  ' @param {float[]} ys
+  ' @param {float[]} outX cleared, then filled
+  ' @param {float[]} outY
+  ' @return {boolean} false as soon as a point isn't in front of the second view
+  function mapPointsByHomography(h as float[], xs as float[], ys as float[], outX as float[], outY as float[]) as boolean
+    outX.Clear()
+    outY.Clear()
+    for i = 0 to xs.count() - 1
+      x = xs[i]
+      y = ys[i]
+      w = h[6] * x + h[7] * y + h[8]
+      if w <= 0.000001
+        return false
+      end if
+      outX.push((h[0] * x + h[1] * y + h[2]) / w)
+      outY.push((h[3] * x + h[4] * y + h[5]) / w)
+    end for
+    return true
+  end function
+
+  ' Where a capture's canvas points are drawn now: into the level view at capture, through the
+  ' column warp, then out of the level view now into the camera now. Inlined: it runs for every
+  ' cut, bound and sample point of every strip frame.
   '
   ' @param {roAssociativeArray} params a column warp fitted between the two level views
-  ' @param {float[][]} bases capture camera, capture level, current level, current camera
-  ' @param {float} x
-  ' @param {float} y
-  ' @param {float[]} out x, y written to out[0], out[1]
-  ' @return {boolean}
-  function mapCaptureToNow(params as roAssociativeArray, bases as float[][], x as float, y as float, out as float[]) as boolean
-    if not mapBetweenBases(bases[0], bases[1], x, y, out)
+  ' @param {float[][]} homographies from warpHomographies()
+  ' @param {float[]} xs capture canvas x
+  ' @param {float[]} ys
+  ' @param {float[]} outX cleared, then filled
+  ' @param {float[]} outY
+  ' @return {boolean} false as soon as a point won't map
+  function mapPointsCaptureToNow(params as roAssociativeArray, homographies as float[][], xs as float[], ys as float[], outX as float[], outY as float[]) as boolean
+    outX.Clear()
+    outY.Clear()
+    a = homographies[0]
+    b = homographies[1]
+    knotX = params.knotX
+    knotMapX = params.x
+    last = knotX.count() - 2
+    projective = params.projective = true
+    qs = params.q
+    gs = params.g
+    offsets = params.offset
+    scales = params.scale
+    for i = 0 to xs.count() - 1
+      x = xs[i]
+      y = ys[i]
+      w = a[6] * x + a[7] * y + a[8]
+      if w <= 0.000001
+        return false
+      end if
+      lx = (a[0] * x + a[1] * y + a[2]) / w
+      ly = (a[3] * x + a[4] * y + a[5]) / w
+      s = 0
+      while s < last and lx >= knotX[s + 1]
+        s++
+      end while
+      t = (lx - knotX[s]) / (knotX[s + 1] - knotX[s])
+      if projective
+        w0 = (1 - t) * qs[s]
+        w1 = t * qs[s + 1]
+        d = projectiveDenominator(w0 + w1, qs[s], qs[s + 1])
+        wx = (w0 * knotMapX[s] + w1 * knotMapX[s + 1]) / d
+        wy = (gs[s] + t * (gs[s + 1] - gs[s]) + ly) / d
+      else
+        wx = knotMapX[s] + t * (knotMapX[s + 1] - knotMapX[s])
+        wy = offsets[s] + t * (offsets[s + 1] - offsets[s]) + (scales[s] + t * (scales[s + 1] - scales[s])) * ly
+      end if
+      w = b[6] * wx + b[7] * wy + b[8]
+      if w <= 0.000001
+        return false
+      end if
+      outX.push((b[0] * wx + b[1] * wy + b[2]) / w)
+      outY.push((b[3] * wx + b[4] * wy + b[5]) / w)
+    end for
+    return true
+  end function
+
+  ' mapPointsCaptureToNow() for one point, writing x, y to out[0], out[1].
+  function mapCaptureToNow(params as roAssociativeArray, homographies as float[][], x as float, y as float, out as float[]) as boolean
+    outX = [] as float[]
+    outY = [] as float[]
+    if not mapPointsCaptureToNow(params, homographies, [x] as float[], [y] as float[], outX, outY)
       return false
     end if
-    warped = mapColumns(params, out[0], out[1])
-    return mapBetweenBases(bases[2], bases[3], warped.x, warped.y, out)
+    out[0] = outX[0]
+    out[1] = outY[0]
+    return true
   end function
 
   ' How to draw each strip between `cuts` (capture bitmap columns) now: [x, y, x scale, y
   ' scale, rotation] per strip, flat, for DrawTransformedObject about the strip's top left
   ' (rotation in radians, counterclockwise on screen). Each cut's top and bottom are mapped
-  ' (mapCaptureToNow()); a strip turns to follow the line through its middle, so verticals
-  ' keep converging as they should under a pitched camera. A strip that would flip or collapse
-  ' gets 0 scales.
+  ' (mapPointsCaptureToNow()); a strip turns to follow the line through its middle, so
+  ' verticals keep converging as they should under a pitched camera. A strip that would flip
+  ' or collapse gets 0 scales.
   '
   ' @param {roAssociativeArray} params
-  ' @param {float[][]} bases see mapCaptureToNow()
+  ' @param {float[][]} homographies from warpHomographies()
   ' @param {float} originX the bitmap's left edge, in capture canvas x
   ' @param {integer[]} cuts
   ' @param {float} top the bitmap's top, in capture canvas y
   ' @param {float} height
   ' @return {float[]} empty if a corner won't map
-  function stripTransforms(params as roAssociativeArray, bases as float[][], originX as float, cuts as integer[], top as float, height as float) as float[]
-    topX = [] as float[]
-    topY = [] as float[]
-    bottomX = [] as float[]
-    bottomY = [] as float[]
-    out = [0.0, 0.0] as float[]
+  function stripTransforms(params as roAssociativeArray, homographies as float[][], originX as float, cuts as integer[], top as float, height as float) as float[]
+    ' tops then bottoms
+    xs = [] as float[]
+    ys = [] as float[]
+    count = cuts.count()
     bottom = top + height
     for each cut in cuts
-      if not mapCaptureToNow(params, bases, originX + cut, top, out)
-        return [] as float[]
-      end if
-      topX.push(out[0])
-      topY.push(out[1])
-      if not mapCaptureToNow(params, bases, originX + cut, bottom, out)
-        return [] as float[]
-      end if
-      bottomX.push(out[0])
-      bottomY.push(out[1])
+      xs.push(originX + cut)
+      ys.push(top)
     end for
+    for each cut in cuts
+      xs.push(originX + cut)
+      ys.push(bottom)
+    end for
+    mx = [] as float[]
+    my = [] as float[]
+    if not mapPointsCaptureToNow(params, homographies, xs, ys, mx, my)
+      return [] as float[]
+    end if
     transforms = [] as float[]
-    for i = 0 to cuts.count() - 2
+    for i = 0 to count - 2
+      j = count + i
       ' the line through the strip's middle sets its turn and height
-      vx = (bottomX[i] + bottomX[i + 1] - topX[i] - topX[i + 1]) * 0.5
-      vy = (bottomY[i] + bottomY[i + 1] - topY[i] - topY[i + 1]) * 0.5
+      vx = (mx[j] + mx[j + 1] - mx[i] - mx[i + 1]) * 0.5
+      vy = (my[j] + my[j + 1] - my[i] - my[i + 1]) * 0.5
       tall = Sqr(vx * vx + vy * vy)
-      theta = BGE.Math.Atan2(vx, vy)
+      ' a strip pointing up is refused below, so Atn() covers every angle that's drawn
+      theta = 0.0
+      if vy > 0
+        theta = Atn(vx / vy)
+      end if
       ' width along the strip's turned x axis, (cos, -sin), averaged over its top and bottom
       c = Cos(theta)
       s = Sin(theta)
-      across = ((topX[i + 1] - topX[i] + bottomX[i + 1] - bottomX[i]) * c - (topY[i + 1] - topY[i] + bottomY[i + 1] - bottomY[i]) * s) * 0.5
+      across = ((mx[i + 1] - mx[i] + mx[j + 1] - mx[j]) * c - (my[i + 1] - my[i] + my[j + 1] - my[j]) * s) * 0.5
       scaleX = across / (cuts[i + 1] - cuts[i])
       scaleY = tall / height
       if vy <= 0 or scaleX <= 0 or scaleY <= 0
         scaleX = 0
         scaleY = 0
       end if
-      transforms.append([topX[i], topY[i], scaleX, scaleY, theta])
+      transforms.append([mx[i], my[i], scaleX, scaleY, theta])
     end for
     return transforms
   end function
 
   ' Whether the strips keep a capture's clip rect over the whole frame, so the parts the
   ' capture left out stay off it: the rect's top and bottom at its sides and every cut, and
-  ' its sides at the top, middle and bottom, mapped (mapCaptureToNow()).
+  ' its sides at the top, middle and bottom, mapped (mapPointsCaptureToNow()).
   '
   ' @param {roAssociativeArray} params
-  ' @param {float[][]} bases
+  ' @param {float[][]} homographies
   ' @param {float} x0 the clip rect, in capture canvas coordinates
   ' @param {float} y0
   ' @param {float} x1
@@ -721,27 +857,34 @@ namespace BGE.ImpostorFit
   ' @param {float} frameWidth
   ' @param {float} frameHeight
   ' @return {boolean}
-  function stripsCoverFrame(params as roAssociativeArray, bases as float[][], x0 as float, y0 as float, x1 as float, y1 as float, cutXs as float[], frameWidth as float, frameHeight as float) as boolean
-    out = [0.0, 0.0] as float[]
-    for each y in [y0, (y0 + y1) * 0.5, y1]
-      if not mapCaptureToNow(params, bases, x0, y, out) or out[0] > 0
-        return false
-      end if
-      if not mapCaptureToNow(params, bases, x1, y, out) or out[0] < frameWidth
-        return false
-      end if
-    end for
-    xs = [x0, x1] as float[]
+  function stripsCoverFrame(params as roAssociativeArray, homographies as float[][], x0 as float, y0 as float, x1 as float, y1 as float, cutXs as float[], frameWidth as float, frameHeight as float) as boolean
+    ' the sides first: left at 3 heights, then right at 3
+    xs = [x0, x0, x0, x1, x1, x1] as float[]
+    ys = [y0, (y0 + y1) * 0.5, y1, y0, (y0 + y1) * 0.5, y1] as float[]
+    columns = [x0, x1] as float[]
     for each x in cutXs
       if x > x0 and x < x1
-        xs.push(x)
+        columns.push(x)
       end if
     end for
-    for each x in xs
-      if not mapCaptureToNow(params, bases, x, y0, out) or out[1] > 0
+    for each x in columns
+      xs.push(x)
+      ys.push(y0)
+      xs.push(x)
+      ys.push(y1)
+    end for
+    mx = [] as float[]
+    my = [] as float[]
+    if not mapPointsCaptureToNow(params, homographies, xs, ys, mx, my)
+      return false
+    end if
+    for i = 0 to 2
+      if mx[i] > 0 or mx[i + 3] < frameWidth
         return false
       end if
-      if not mapCaptureToNow(params, bases, x, y1, out) or out[1] < frameHeight
+    end for
+    for i = 6 to mx.count() - 2 step 2
+      if my[i] > 0 or my[i + 1] < frameHeight
         return false
       end if
     end for
@@ -788,30 +931,6 @@ namespace BGE.ImpostorFit
     end for
     cuts.push(rightX)
     return cuts
-  end function
-
-  ' The least and most a column warp stretches capture x anywhere between its knots. A
-  ' projective segment stretches most at one end: its average stretch times q1 / q0 at the
-  ' first knot, q0 / q1 at the second.
-  '
-  ' @param {roAssociativeArray} params
-  ' @return {float[]} [least, most]
-  function columnsStretchRange(params as roAssociativeArray) as float[]
-    least = 1000000.0
-    most = 0.0
-    for j = 1 to params.knotX.count() - 1
-      stretch = (params.x[j] - params.x[j - 1]) / (params.knotX[j] - params.knotX[j - 1])
-      low = stretch
-      high = stretch
-      if params.projective = true
-        ratio = params.q[j] / params.q[j - 1]
-        low = stretch * BGE.Math.Min(ratio, 1 / ratio)
-        high = stretch * BGE.Math.Max(ratio, 1 / ratio)
-      end if
-      least = BGE.Math.Min(least, low)
-      most = BGE.Math.Max(most, high)
-    end for
-    return [least, most]
   end function
 
   ' Moves the inner knot nearest x onto it - the crease between two walls, where the warp
@@ -865,11 +984,13 @@ namespace BGE.ImpostorFit
         extremes[3] = i
       end if
     end for
-    taken = {}
+    taken = [] as boolean[]
+    for i = 0 to n - 1
+      taken.push(false)
+    end for
     for each i in extremes
-      key = i.toStr()
-      if not taken.DoesExist(key)
-        taken[key] = true
+      if not taken[i]
+        taken[i] = true
         kept.push(i)
       end if
     end for
@@ -877,9 +998,8 @@ namespace BGE.ImpostorFit
     k = 0
     while kept.count() < maxPoints and k < maxPoints
       i = Int(k * stride)
-      key = i.toStr()
-      if not taken.DoesExist(key)
-        taken[key] = true
+      if not taken[i]
+        taken[i] = true
         kept.push(i)
       end if
       k++
