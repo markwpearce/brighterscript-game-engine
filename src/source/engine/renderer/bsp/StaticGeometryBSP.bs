@@ -10,6 +10,9 @@ namespace BGE.BSP
     sceneObj as dynamic
     planePoint as BGE.Math.Vector
     planeNormal as BGE.Math.Vector
+    ' The quad's corners (topLeft, topRight, bottomLeft, bottomRight), so findBoundsLeaf() can
+    ' order an object that crosses the quad's plane beyond the quad's edges
+    optional corners as BGE.Math.Vector[]
   end interface
 
   ' One dynamic (non-static) object being threaded into the BSP walk. depthKey mirrors
@@ -20,6 +23,14 @@ namespace BGE.BSP
     sceneObj as dynamic
     position as BGE.Math.Vector
     depthKey as float
+    ' Points bounding the object, to place it with findBoundsLeaf() instead of findLeaf()
+    optional points as BGE.Math.Vector[]
+  end interface
+
+  ' findBoundsLeaf()'s second result
+  interface LeafState extends roAssociativeArray
+    ' Whether the leaf depends on the camera position as well as the object's
+    usesCamera as boolean
   end interface
 
   ' Builds a classification-only BSP tree over static quads - no polygon splitting (see
@@ -50,6 +61,43 @@ namespace BGE.BSP
       d: normal.x * point.x + normal.y * point.y + normal.z * point.z
     }
     counter.next++
+    corners = pivot.corners
+    if corners <> invalid
+      ' The quad's extent along its two edges, for findBoundsLeaf()
+      u = BGE.Math.VectorOps.subtract(corners[1], corners[0])
+      v = BGE.Math.VectorOps.subtract(corners[2], corners[0])
+      uLength = Sqr(u.x * u.x + u.y * u.y + u.z * u.z)
+      vLength = Sqr(v.x * v.x + v.y * v.y + v.z * v.z)
+      if uLength > 0 and vLength > 0
+        node.hasExtent = true
+        node.ux = u.x / uLength
+        node.uy = u.y / uLength
+        node.uz = u.z / uLength
+        node.vx = v.x / vLength
+        node.vy = v.y / vLength
+        node.vz = v.z / vLength
+        node.uMin = 1e30
+        node.uMax = -1e30
+        node.vMin = 1e30
+        node.vMax = -1e30
+        for each corner in corners
+          cu = node.ux * corner.x + node.uy * corner.y + node.uz * corner.z
+          cv = node.vx * corner.x + node.vy * corner.y + node.vz * corner.z
+          if cu < node.uMin
+            node.uMin = cu
+          end if
+          if cu > node.uMax
+            node.uMax = cu
+          end if
+          if cv < node.vMin
+            node.vMin = cv
+          end if
+          if cv > node.vMax
+            node.vMax = cv
+          end if
+        end for
+      end if
+    end if
     front = []
     back = []
     for i = 1 to items.count() - 1
@@ -85,6 +133,98 @@ namespace BGE.BSP
       end if
     end while
     return leaf
+  end function
+
+  ' Like findLeaf(), for an object with size: `points` bound it, and (x, y, z) is its centre.
+  ' An object wholly on one side of a node's plane goes that side. One that crosses the plane
+  ' but lies past the quad's edges (a house across the line of a fence down the street) goes
+  ' on whichever side draws it in the right order from the camera, as a plane at the quad's
+  ' edge separates them; it then sets state.usesCamera. Otherwise its centre's side is used.
+  '
+  ' @param {object} root result of buildTree(), or invalid
+  ' @param {BGE.Math.Vector[]} points
+  ' @param {BGE.Math.Vector} cameraPosition
+  ' @param {BGE.BSP.LeafState} state set on return
+  ' @return {integer} leaf index, as findLeaf()
+  function findBoundsLeaf(root as object, x as float, y as float, z as float, points as BGE.Math.Vector[], cameraPosition as BGE.Math.Vector, state as BGE.BSP.LeafState) as integer
+    state.usesCamera = false
+    node = root
+    leaf = 0
+    while node <> invalid
+      nx = node.nx
+      ny = node.ny
+      nz = node.nz
+      d = node.d
+      low = 1e30
+      high = -1e30
+      for each p in points
+        side = nx * p.x + ny * p.y + nz * p.z - d
+        if side < low
+          low = side
+        end if
+        if side > high
+          high = side
+        end if
+      end for
+      if low >= 0
+        inFront = true
+      else if high < 0
+        inFront = false
+      else
+        inFront = nx * x + ny * y + nz * z >= d
+        if node.hasExtent = true
+          ' 1: the object draws after the quad, -1: before it, 0: they overlap on both edges
+          order = separatedOrder(node.ux, node.uy, node.uz, node.uMin, node.uMax, points, cameraPosition)
+          if order = 0
+            order = separatedOrder(node.vx, node.vy, node.vz, node.vMin, node.vMax, points, cameraPosition)
+          end if
+          if order <> 0
+            state.usesCamera = true
+            ' the child on the camera's side draws after the quad
+            inFront = (nx * cameraPosition.x + ny * cameraPosition.y + nz * cameraPosition.z >= d) = (order > 0)
+          end if
+        end if
+      end if
+      if inFront
+        leaf = node.id * 2
+        node = node.front
+      else
+        leaf = node.id * 2 + 1
+        node = node.back
+      end if
+    end while
+    return leaf
+  end function
+
+  ' Along one of a quad's edge directions (ax, ay, az), where the quad spans quadMin to
+  ' quadMax: 0 if `points` overlap that span, else 1 if the camera is on the points' side of
+  ' the gap (they draw after the quad), -1 if on the quad's.
+  function separatedOrder(ax as float, ay as float, az as float, quadMin as float, quadMax as float, points as BGE.Math.Vector[], cameraPosition as BGE.Math.Vector) as integer
+    low = 1e30
+    high = -1e30
+    for each p in points
+      along = ax * p.x + ay * p.y + az * p.z
+      if along < low
+        low = along
+      end if
+      if along > high
+        high = along
+      end if
+    end for
+    cameraAlong = ax * cameraPosition.x + ay * cameraPosition.y + az * cameraPosition.z
+    if low > quadMax
+      if cameraAlong > (quadMax + low) / 2
+        return 1
+      end if
+      return -1
+    end if
+    if high < quadMin
+      if cameraAlong < (high + quadMin) / 2
+        return 1
+      end if
+      return -1
+    end if
+    return 0
   end function
 
   ' Walks the tree back-to-front relative to the camera, appending each static item's
@@ -155,9 +295,14 @@ namespace BGE.BSP
     ' as documented. See issue #230.
     dynamicItems.sortBy("depthKey")
     buckets = []
+    state = {usesCamera: false} as BGE.BSP.LeafState
     for each dynItem in dynamicItems
       position = dynItem.position
-      leaf = findLeaf(node, position.x, position.y, position.z)
+      if dynItem.points <> invalid
+        leaf = findBoundsLeaf(node, position.x, position.y, position.z, dynItem.points, cameraPosition, state)
+      else
+        leaf = findLeaf(node, position.x, position.y, position.z)
+      end if
       if buckets[leaf] = invalid
         buckets[leaf] = []
       end if
