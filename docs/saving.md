@@ -31,15 +31,20 @@ m.slot.delete()
 - `read(validate)` returns the data only if it was written with this `version` (or an older
   one `migrate()` upgrades) and passes `validate`, a `function(data) as dynamic` that returns
   the data (cleaned up if need be) or invalid.
-- Subclass and override `migrate(fromVersion, data)` to upgrade old saves. Data written before
-  you used `SaveSlot` arrives with `fromVersion` set to its own `version` field (0 if it has
-  none).
+- Subclass and override `migrate(fromVersion, data)` to upgrade old saves. **The default drops
+  them**, so override it before you bump `version` or players lose their progress (a dropped
+  save logs a warning). An upgraded save is written back, so it's migrated once. Data written
+  before you used `SaveSlot` arrives with `fromVersion` set to its own `version` field (0 if it
+  has none).
+- `write()` returns false if the data can't be saved: something `FormatJson()` can't write
+  (a function, an roBitmap...) or a full registry.
 - `enabled = false` stops it reading and writing, e.g. while a deep link is testing a level.
 
 ## SaveProfile
 
 `BGE.SaveProfile(section)` holds what should outlast any one save or new game: settings,
-unlocks, endings found, high scores. Each change is written straight away.
+unlocks, endings found, high scores. Each change is written straight away, so don't call
+`set()` every frame.
 
 ```brighterscript
 m.profile = new BGE.SaveProfile("my-game")

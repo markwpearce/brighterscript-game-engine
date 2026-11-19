@@ -11,6 +11,7 @@ import "../engine/ui/Theme.bs"
 import "../math/math.bs"
 import "../utils/strings.bs"
 import "../engine/GameScene.bs"
+import "../engine/ui/TextButton.bs"
 
 namespace BGE.Story
 
@@ -24,8 +25,14 @@ namespace BGE.Story
   '
   ' Colors come from the theme (panelBackgroundColor/Image, panelTitleColor for the speaker,
   ' panelTextColor), fonts from `speakerFontName`/`textFontName`. It sits along the bottom of
-  ' the title-safe area unless you set customX/customY/width. Override onLine() and onEnded()
-  ' (or set `listener`), createChoiceButton() and layoutChoices() to customize.
+  ' the title-safe area unless you set customX/customY/width.
+  '
+  ' Choices: `choiceLayout` picks "column" (buttons above the box), "row" (buttons along its
+  ' bottom) or "list" (lines of text in the box, under the line that asked - see the list*
+  ' fields). Anything else is yours: override createChoiceButton()/createChoiceRow() for your
+  ' own widgets and layoutChoices() to place them, or onLine()/onEnded() (or set `listener`)
+  ' to react. It's only one way to show a StorySession - a game can drive the session from
+  ' its own UI instead.
   '
   ' @example
   ' view = new BGE.Story.DialogueView(game, session)
@@ -42,8 +49,22 @@ namespace BGE.Story
     textFontName as string = "body"
     ' Shown in the bottom right while there's another page.
     moreText as string = "..."
-    ' "column": stacked above the box. "row": side by side along the bottom of the box.
+    ' "column": buttons stacked above the box. "row": buttons side by side along the bottom of
+    ' the box. "list": lines of text inside the box, which grows upward to fit them.
     choiceLayout as string = "column"
+    ' "list": keep the speaker and line showing above the choices?
+    listKeepsLine as boolean = true
+    ' "list": a rule between the line and the choices? Its color; 0 = the theme's panelTitleColor.
+    listDivider as boolean = true
+    listDividerColor as integer = 0
+    ' "list": the focused choice's marker (the others are indented to match).
+    listMarker as string = "> "
+    ' "list": choice colors; 0 = the theme's panelTextColor / panelTitleColor.
+    listTextColor as integer = 0
+    listFocusedColor as integer = 0
+    listDisabledColor as integer = &h707070FF
+    ' "list": height of each choice line; 0 = the text font's line height plus 6.
+    listRowHeight as float = 0.0
     choiceHeight as float = 52.0
     choiceGap as float = 10.0
     ' Column choices' width; 0 = 60% of the box.
@@ -51,6 +72,12 @@ namespace BGE.Story
     ' List choices the story marks disabled (dimmed, not pickable)?
     showDisabledChoices as boolean = true
     closeOnBack as boolean = true
+    ' Buttons (GameInput.isButton() names) that turn the page / leave.
+    advanceButton as string = "ok"
+    cancelButton as string = "back"
+    ' Do a node's choices come up with its last page (true), or after one more press of
+    ' advanceButton (false)?
+    choicesWithLastLine as boolean = true
     ' Pause the game while open?
     modal as boolean = true
     ' Drawn behind the box instead of the theme's panel background, when set (a
@@ -70,6 +97,8 @@ namespace BGE.Story
     protected pageIndex as integer = 0
     private opened as boolean = false
     private ownerScene as BGE.GameScene = invalid
+    ' "list": where the divider is drawn (relative to the box), -1 for none
+    private listDividerY as float = -1
 
     ' @param {BGE.Game} game
     ' @param {BGE.Story.StorySession} session
@@ -108,7 +137,8 @@ namespace BGE.Story
         return
       end if
       m.opened = true
-      m.height = m.boxHeight()
+      ' layout fields may have changed since new(): resize around the same bottom edge
+      m.setHeightKeepingBottom(m.boxHeight())
       m.buildLabels()
       if m.modal
         m.game.pushModal()
@@ -192,6 +222,8 @@ namespace BGE.Story
 
     sub onUiAction(actionId as string, button as BGE.UI.Button)
       m.choose(button.value)
+      ' the press that picked it mustn't also turn the reply's first page
+      m.game.suppressInputUntilRelease()
     end sub
 
     override sub onInput(input as BGE.GameInput)
@@ -203,9 +235,9 @@ namespace BGE.Story
       if not input.press
         return
       end if
-      if m.closeOnBack and input.isButton("back")
+      if m.closeOnBack and input.isButton(m.cancelButton)
         m.close()
-      else if input.isButton("ok")
+      else if input.isButton(m.advanceButton)
         m.next()
       end if
     end sub
@@ -214,8 +246,13 @@ namespace BGE.Story
     override sub onDestroy()
       super.onDestroy()
       if m.opened
+        ' removed by its parent mid-conversation: end it like close() would
         m.opened = false
         m.ownerScene = invalid
+        if m.session.runner.isActive()
+          m.session.runner.cancel()
+        end if
+        m.onEnded(true)
         if m.modal
           m.game.popModal()
         end if
@@ -232,13 +269,14 @@ namespace BGE.Story
       else
         m.canvas.renderer.drawRectangle(m.position.x, m.position.y, m.width, m.height, theme.panelBackgroundColor)
       end if
-      m.children.sortBy("zIndex")
-      for each child in m.children
-        if invalid <> child and child.enabled
-          child.repositionBasedOnParent(m)
-          child.draw(m)
+      if m.listDividerY >= 0
+        dividerColor = m.listDividerColor
+        if dividerColor = 0
+          dividerColor = theme.panelTitleColor
         end if
-      end for
+        m.canvas.renderer.drawRectangle(m.position.x + m.boxPadding, m.position.y + m.listDividerY, m.width - m.boxPadding * 2, 1, dividerColor)
+      end if
+      m.drawChildren()
     end sub
 
     ' Called for each line as it's shown (e.g. to set portraits). Tells the listener.
@@ -266,9 +304,36 @@ namespace BGE.Story
     ' @param {integer} index - in runner.choices()
     ' @return {BGE.UI.Button}
     protected function createChoiceButton(choice as BGE.Story.ChoiceView, index as integer) as BGE.UI.Button
+      if m.choiceLayout = "list"
+        return m.createChoiceRow(choice, index)
+      end if
       button = new BGE.UI.Button(m.game)
       button.setLabel(choice.label)
       return button
+    end function
+
+    ' Makes one "list" choice: a BGE.UI.TextButton styled from the list* fields. Override for
+    ' your own row widget.
+    '
+    ' @param {BGE.Story.ChoiceView} choice
+    ' @param {integer} index - in runner.choices()
+    ' @return {BGE.UI.Button}
+    protected function createChoiceRow(choice as BGE.Story.ChoiceView, index as integer) as BGE.UI.Button
+      theme = m.effectiveTheme()
+      row = new BGE.UI.TextButton(m.game)
+      row.setLabel(choice.label)
+      row.font = m.fontNamed(m.textFontName)
+      row.marker = m.listMarker
+      row.textColor = m.listTextColor
+      if row.textColor = 0
+        row.textColor = theme.panelTextColor
+      end if
+      row.focusedColor = m.listFocusedColor
+      if row.focusedColor = 0
+        row.focusedColor = theme.panelTitleColor
+      end if
+      row.disabledColor = m.listDisabledColor
+      return row
     end function
 
     ' Positions the choice buttons (relative to the box) per `choiceLayout`.
@@ -277,6 +342,10 @@ namespace BGE.Story
     protected sub layoutChoices(buttons as BGE.UI.Button[])
       count = buttons.count()
       if count = 0
+        return
+      end if
+      if m.choiceLayout = "list"
+        m.layoutListChoices(buttons)
         return
       end if
       if m.choiceLayout = "row"
@@ -347,7 +416,7 @@ namespace BGE.Story
       end if
       m.moreLabel.setText("")
       ' a node's choices come up with its last line rather than after another OK
-      if m.session.runner.choicesFollow()
+      if m.choicesWithLastLine and m.session.runner.choicesFollow()
         m.session.advance()
         if m.session.runner.isChoosing()
           m.removeChoices()
@@ -390,7 +459,53 @@ namespace BGE.Story
       for each button in m.choiceButtons
         m.removeChild(button)
       end for
+      hadList = m.listDividerY >= 0 or (m.choiceLayout = "list" and m.choiceButtons.count() > 0)
       m.choiceButtons = []
+      m.listDividerY = -1
+      if hadList
+        m.setHeightKeepingBottom(m.boxHeight())
+      end if
+    end sub
+
+    ' "list": the rows go in the box under what's left of the line, and the box grows upward.
+    protected sub layoutListChoices(buttons as BGE.UI.Button[])
+      textFont = m.fontNamed(m.textFontName)
+      lineHeight = textFont.GetOneLineHeight()
+      rowHeight = m.listRowHeight
+      if rowHeight <= 0
+        rowHeight = lineHeight + 6
+      end if
+      top = m.boxPadding
+      if m.listKeepsLine
+        pageText = m.getPageText()
+        lineCount = 0
+        if pageText <> ""
+          lineCount = pageText.split(Chr(10)).count()
+        end if
+        speakerFont = m.fontNamed(m.speakerFontName)
+        top += speakerFont.GetOneLineHeight() + m.speakerGap + lineCount * lineHeight + m.choiceGap
+        if m.listDivider
+          m.listDividerY = top
+          top += m.choiceGap + 1
+        end if
+      else
+        m.speakerLabel.setText("")
+        m.textLabel.setText("")
+      end if
+      for i = 0 to buttons.count() - 1
+        buttons[i].customX = m.boxPadding
+        buttons[i].customY = top + i * rowHeight
+        buttons[i].width = m.width - m.boxPadding * 2
+        buttons[i].height = rowHeight
+      end for
+      m.setHeightKeepingBottom(top + buttons.count() * rowHeight + m.boxPadding)
+    end sub
+
+    ' Resizes the box with its bottom edge where it was.
+    protected sub setHeightKeepingBottom(height as float)
+      bottom = m.customY + m.height
+      m.height = height
+      m.customY = bottom - height
     end sub
 
     protected function fontNamed(name as string) as roFont
@@ -398,7 +513,7 @@ namespace BGE.Story
       return font
     end function
 
-    private function boxHeight() as float
+    protected function boxHeight() as float
       speakerFont = m.fontNamed(m.speakerFontName)
       textFont = m.fontNamed(m.textFontName)
       height = m.boxPadding * 2 + speakerFont.GetOneLineHeight() + m.speakerGap + textFont.GetOneLineHeight() * m.linesPerPage
@@ -408,7 +523,7 @@ namespace BGE.Story
       return height
     end function
 
-    private sub buildLabels()
+    protected sub buildLabels()
       m.clearChildren()
       m.choiceButtons = []
       theme = m.effectiveTheme()
@@ -420,7 +535,7 @@ namespace BGE.Story
       m.moreLabel = m.makeLabel(textFont, theme.panelTitleColor, moreX, m.height - m.boxPadding - textFont.GetOneLineHeight())
     end sub
 
-    private function makeLabel(font as roFont, color as integer, x as float, y as float) as BGE.UI.Label
+    protected function makeLabel(font as roFont, color as integer, x as float, y as float) as BGE.UI.Label
       label = new BGE.UI.Label(m.game)
       label.setFont(font)
       label.customPosition = true
@@ -432,7 +547,7 @@ namespace BGE.Story
     end function
 
     ' The modal is released after onEnded(), so a panel opened from there keeps the game paused.
-    private sub finish(cancelled as boolean)
+    protected sub finish(cancelled as boolean)
       holdsModal = m.opened and m.modal
       m.opened = false
       owner = m.ownerScene

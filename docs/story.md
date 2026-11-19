@@ -442,13 +442,30 @@ closes itself at the end. The OK that brings the choices up can't also pick one.
 
 ```brighterscript
 view = new BGE.Story.DialogueView(game, session)
-view.choiceLayout = "row" ' or "column", stacked above the box
+view.choiceLayout = "list" ' or "column" (buttons above the box) or "row" (buttons inside it)
 view.listener = m ' optional onDialogueLine(view, line) / onDialogueEnded(view, cancelled)
 view.start("bram")
 ```
 
-Colors come from the theme's `panel*` fields. Override `createChoiceButton()`,
-`layoutChoices()`, `onLine()` and `onEnded()` for more.
+`choiceLayout` picks how choices show:
+
+- `"column"` (the default): buttons stacked above the box, with the line still showing.
+- `"row"`: buttons side by side along the bottom of the box.
+- `"list"`: lines of text inside the box, under the line that asked (a divider between), the
+  focused one with a marker. The box grows upward to fit. Tune it with `listKeepsLine`
+  (false shows just the choices), `listDivider`/`listDividerColor`, `listMarker`,
+  `listTextColor`/`listFocusedColor`/`listDisabledColor` and `listRowHeight`. The rows are
+  `BGE.UI.TextButton`s, which work anywhere a text-only button fits.
+
+`choicesWithLastLine` (default true) brings a node's choices up with its last page; set it
+false to show the line first and bring the choices up on the next press. `advanceButton` and
+`cancelButton` (default "ok"/"back") are the buttons that turn the page and leave.
+
+Colors default to the theme's `panel*` fields. Nothing is fixed: override
+`createChoiceButton()` (or `createChoiceRow()` for the list) to use your own widgets,
+`layoutChoices()` to place them, and `onLine()`/`onEnded()` to react. `DialogueView` is also
+just one way to show a session - rpg and visualnovel drive their `StorySession` from their
+own boxes (`session.start()`/`advance()`/`choose()` and `session.runner` for what to show).
 
 **`BGE.Story.applyDebugState(state, flags, items)`** sets up a story point from launch
 parameters: `flags` as `"gate.open,kills=4"`, an array or an AA; `items` as
