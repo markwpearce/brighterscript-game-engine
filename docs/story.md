@@ -415,6 +415,51 @@ end if
 - The save has no UI in it, so an autosave on each node is just a call after
   `advance()` or `choose()`.
 
+## Plugging it into a game
+
+The runner and state don't know about your game. These engine pieces do the usual wiring,
+and each can be configured or subclassed.
+
+**`BGE.Story.StorySession`** is a persistent entity that owns the `StoryState` and
+`DialogueRunner`. `session.start()`, `advance()`, `choose()`, `runEvent()` and
+`applyEffects()` each settle the rules and then pass the result on: posts go out as game
+events, messages queue for `takeMessages()`, and a change posts `storyUpdated` (or
+`changedEventName`) and calls `onStoryChanged()`. Override that to autosave.
+`listenTo(["enemyKilled"])` feeds those game events to the story's rules.
+`toSaveData(includeBacklog)`/`loadSaveData()` save the state and position, and the backlog
+if you ask for it.
+
+```brighterscript
+session = new BGE.Story.StorySession(game, BGE.Story.loadStory("pkg:/story/main.json"))
+session.listenTo(["enemyKilled", "chestOpened"])
+game.addEntity(session)
+```
+
+**`BGE.Story.DialogueView`** is a dialogue box for a session. It shows the speaker and the
+line, split into pages, and the choices as buttons, with disabled ones dimmed. OK turns the
+page, up/down/OK pick a choice and Back leaves. It pauses the game while it's open and
+closes itself at the end. The OK that brings the choices up can't also pick one.
+
+```brighterscript
+view = new BGE.Story.DialogueView(game, session)
+view.choiceLayout = "row" ' or "column", stacked above the box
+view.listener = m ' optional onDialogueLine(view, line) / onDialogueEnded(view, cancelled)
+view.start("bram")
+```
+
+Colors come from the theme's `panel*` fields. Override `createChoiceButton()`,
+`layoutChoices()`, `onLine()` and `onEnded()` for more.
+
+**`BGE.Story.applyDebugState(state, flags, items)`** sets up a story point from launch
+parameters: `flags` as `"gate.open,kills=4"`, an array or an AA; `items` as
+`"smallKey:2,throneKey"`, an array or an AA of counts. It settles afterwards, so derived
+flags exist on arrival.
+
+**`BGE.Interactables`** keeps the things you can talk to or use and finds the one "in front".
+`nearestInArc(origin, heading, reach, halfAngle)` works on the 3D ground plane (via
+`BGE.Math.isWithinArc()`), and `nearestInRect(x, y, w, h, originX, originY)` works in 2D.
+`promptFor(target, "OK")` gives `"OK: Talk to Bram"`.
+
 ## Checking a story
 
 A typo in a node id or a condition key only shows up when a player reaches it.

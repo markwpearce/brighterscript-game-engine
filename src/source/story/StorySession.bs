@@ -1,0 +1,238 @@
+import "StoryTypes.bs"
+import "StoryState.bs"
+import "DialogueRunner.bs"
+import "ValueKinds.bs"
+import "../engine/Game.bs"
+import "../engine/GameEntity.bs"
+
+namespace BGE.Story
+
+  ' StorySession.toSaveData(): plain values, safe to write with BGE.registryWrite()/SaveSlot.
+  interface StorySessionSave extends roAssociativeArray
+    state as StorySaveData
+    ' where the conversation is, when one is active
+    optional position as RunnerPosition
+    ' {text, speaker, isChoice} per line, when saved with the backlog
+    optional backlog as roAssociativeArray[]
+  end interface
+
+  ' A persistent entity that owns a story's StoryState and DialogueRunner and does the
+  ' bookkeeping around them, so every story game handles results the same way:
+  '  - apply(result) settles the event rules, sends each post out as a game event, queues
+  '    messages (takeMessages()), posts `changedEventName` and calls onStoryChanged() when
+  '    the state changed - override that (or set `onChanged`) to autosave.
+  '  - listenTo(eventNames) forwards those game events to the story's event rules.
+  '  - start()/advance()/choose()/runEvent()/applyEffects() run the story and apply() the
+  '    result for you.
+  '  - toSaveData()/loadSaveData() save the state, position and (optionally) the backlog.
+  '
+  ' @example
+  ' session = new BGE.Story.StorySession(game, BGE.Story.loadStory("pkg:/story/main.json"))
+  ' session.listenTo(["enemyKilled", "itemFound"])
+  ' game.addEntity(session)
+  class StorySession extends BGE.GameEntity
+
+    story as StoryData
+    state as StoryState
+    runner as DialogueRunner
+    ' Send each post effect out with game.postGameEvent()?
+    postEvents as boolean = true
+    ' Game event posted whenever the state changes. "" for none.
+    changedEventName as string = "storyUpdated"
+    ' Optional function(session as object) called when the state changes, after
+    ' onStoryChanged(). `m` inside it is the session.
+    onChanged as dynamic = invalid
+
+    private listened as roAssociativeArray = {}
+    private pendingMessages as StoryMessage[] = []
+    ' set while this session posts events, so it doesn't feed its own posts back in
+    private posting as boolean = false
+
+    ' @param {BGE.Game} game
+    ' @param {StoryData} story
+    ' @param {object} [args={}] - GameEntity args
+    sub new(game as BGE.Game, story as StoryData, args = {} as roAssociativeArray)
+      super(game, args)
+      if m.name = invalid or m.name = ""
+        m.name = "StorySession"
+      end if
+      m.persistent = true
+      m.pauseable = false
+      m.story = story
+      m.state = new StoryState(story)
+      m.runner = new DialogueRunner(m.state, story)
+      m.listened.SetModeCaseSensitive()
+    end sub
+
+    ' Forwards these game events to the story's event rules (state.runEvent(name, data)).
+    '
+    ' @param {string[]} eventNames
+    sub listenTo(eventNames as string[])
+      for each eventName in eventNames
+        m.listened[eventName] = true
+      end for
+    end sub
+
+    ' Stops forwarding a game event.
+    '
+    ' @param {string} eventName
+    sub stopListening(eventName as string)
+      m.listened.Delete(eventName)
+    end sub
+
+    override sub onGameEvent(eventName as string, data as roAssociativeArray)
+      if not m.posting and m.listened.DoesExist(eventName)
+        m.runEvent(eventName, data)
+      end if
+    end sub
+
+    ' Settles the rules and passes on what a story step did: posts go out as game events,
+    ' messages are queued for takeMessages(), and a change calls onStoryChanged().
+    '
+    ' @param {StoryResult} result
+    ' @return {StoryResult} the result merged with what settling did
+    function apply(result as StoryResult) as StoryResult
+      merged = {changed: result.changed, posts: [] as string[], messages: [] as StoryMessage[]} as StoryResult
+      merged.posts.append(result.posts)
+      merged.messages.append(result.messages)
+      if not result.changed and result.posts.count() = 0 and result.messages.count() = 0
+        return merged
+      end if
+      settled = m.state.settle()
+      merged.changed = merged.changed or settled.changed
+      merged.posts.append(settled.posts)
+      merged.messages.append(settled.messages)
+      m.pendingMessages.append(merged.messages)
+      if merged.changed
+        m.onStoryChanged(merged)
+        if m.onChanged <> invalid
+          m.onChanged(m)
+        end if
+      end if
+      m.posting = true
+      if m.postEvents
+        for each eventName in merged.posts
+          m.game.postGameEvent(eventName, {})
+        end for
+      end if
+      if merged.changed and m.changedEventName <> ""
+        m.game.postGameEvent(m.changedEventName, {})
+      end if
+      m.posting = false
+      return merged
+    end function
+
+    ' Called by apply() when the story state changed (e.g. to autosave). Does nothing by
+    ' default.
+    '
+    ' @param {StoryResult} result - the merged result
+    sub onStoryChanged(result as StoryResult)
+    end sub
+
+    ' Messages from `message` effects since the last call, oldest first.
+    '
+    ' @return {StoryMessage[]}
+    function takeMessages() as StoryMessage[]
+      messages = m.pendingMessages
+      m.pendingMessages = []
+      return messages
+    end function
+
+    ' Are there messages waiting?
+    '
+    ' @return {boolean}
+    function hasMessages() as boolean
+      return m.pendingMessages.count() > 0
+    end function
+
+    ' Starts a conversation at a node and applies the result.
+    '
+    ' @param {string} id
+    ' @return {StoryResult}
+    function start(id as string) as StoryResult
+      return m.apply(m.runner.start(id))
+    end function
+
+    ' Moves the conversation on and applies the result.
+    '
+    ' @return {StoryResult}
+    function advance() as StoryResult
+      return m.apply(m.runner.advance())
+    end function
+
+    ' Picks a choice and applies the result.
+    '
+    ' @param {integer} index
+    ' @return {StoryResult}
+    function choose(index as integer) as StoryResult
+      return m.apply(m.runner.choose(index))
+    end function
+
+    ' Runs the story's rules for an event and applies the result.
+    '
+    ' @param {string} eventName
+    ' @param {object} [data={}]
+    ' @return {StoryResult}
+    function runEvent(eventName as string, data = {} as roAssociativeArray) as StoryResult
+      return m.apply(m.state.runEvent(eventName, data))
+    end function
+
+    ' Applies effects from code and applies the result.
+    '
+    ' @param {StoryEffect[]} effects
+    ' @return {StoryResult}
+    function applyEffects(effects as StoryEffect[]) as StoryResult
+      return m.apply(m.state.applyEffects(effects))
+    end function
+
+    ' The state, the conversation's position (if one is active) and, optionally, the backlog.
+    '
+    ' @param {boolean} [includeBacklog=false]
+    ' @return {StorySessionSave}
+    function toSaveData(includeBacklog = false as boolean) as StorySessionSave
+      save = {state: m.state.toSaveData()} as StorySessionSave
+      position = m.runner.getPosition()
+      if position <> invalid
+        save.position = position
+      end if
+      if includeBacklog
+        entries = [] as roAssociativeArray[]
+        for each view in m.runner.backlog
+          entries.push({text: view.text, speaker: view.speaker, isChoice: view.isChoice})
+        end for
+        save.backlog = entries
+      end if
+      return save
+    end function
+
+    ' Loads what toSaveData() wrote. A malformed state loads as a fresh one.
+    '
+    ' @param {dynamic} data
+    ' @return {boolean} false if a saved conversation no longer fits the story (the state
+    '   is still loaded; start the conversation again)
+    function loadSaveData(data as dynamic) as boolean
+      m.runner.cancel()
+      if type(data) <> "roAssociativeArray"
+        m.state.reset()
+        return true
+      end if
+      m.state.loadSaveData(data.state)
+      restored = true
+      if type(data.position) = "roAssociativeArray"
+        restored = m.runner.restore(data.position)
+      end if
+      if type(data.backlog) = "roArray"
+        views = [] as StoryLineView[]
+        for each entry in data.backlog
+          if type(entry) = "roAssociativeArray" and valueKind(entry.text) = "string" and valueKind(entry.speaker) = "string"
+            views.push({text: entry.text, speaker: entry.speaker, line: {text: entry.text}, isChoice: isTrue(entry.isChoice)})
+          end if
+        end for
+        m.runner.backlog = views
+      end if
+      return restored
+    end function
+
+  end class
+
+end namespace

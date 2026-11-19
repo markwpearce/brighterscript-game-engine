@@ -1,0 +1,258 @@
+import "pkg:/source/story/StorySession.bs"
+import "pkg:/source/story/DialogueView.bs"
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameEntity.bs"
+import "pkg:/source/engine/GameScene.bs"
+
+namespace tests
+  @suite("BGE.Story.StorySession and DialogueView")
+  class StorySessionTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(640, 480)
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "SceneA"}))
+      m.game.changeScene("SceneA")
+    end function
+
+    private function storyData() as BGE.Story.StoryData
+      return {
+        items: {},
+        nodes: {
+          "start": {"speaker": "Bram", "lines": ["Hello there.", "Second line."], "effects": [{"set": "met", "value": true}, {"post": "greeted"}, {"message": "Bram waves"}], "choices": [
+            {"label": "Bye", "goto": "bye"},
+            {"label": "Locked", "when": [{"flag": "never"}], "showDisabled": true, "goto": "bye"}
+          ]},
+          "bye": {"lines": ["See you."]},
+          "silent": {"effects": [{"set": "silent", "value": true}]}
+        },
+        rules: [
+          {"event": "enemyKilled", "effects": [{"add": "kills", "amount": 1}]},
+          {"event": "storyChanged", "when": [{"flag": "kills", "gte": 2}], "effects": [{"set": "hunter", "value": true}]}
+        ]
+      }
+    end function
+
+    private function newSession() as BGE.Story.StorySession
+      session = new BGE.Story.StorySession(m.game, m.storyData())
+      m.game.addEntity(session)
+      return session
+    end function
+
+    @describe("StorySession")
+
+    @it("is a persistent, unpauseable entity holding a state and runner")
+    function _()
+      session = m.newSession()
+      m.assertTrue(session.persistent)
+      m.assertFalse(session.pauseable)
+      m.assertNotInvalid(session.state)
+      m.assertNotInvalid(session.runner)
+    end function
+
+    @it("forwards listened game events to the rules and settles")
+    function _()
+      session = m.newSession()
+      session.listenTo(["enemyKilled"])
+      m.game.postGameEvent("enemyKilled", {})
+      m.game.postGameEvent("enemyKilled", {})
+      m.game.postGameEvent("somethingElse", {})
+      m.assertEqual(2, session.state.flags.get("kills"))
+      m.assertTrue(session.state.flags.get("hunter"))
+    end function
+
+    @it("stops forwarding after stopListening()")
+    function _()
+      session = m.newSession()
+      session.listenTo(["enemyKilled"])
+      session.stopListening("enemyKilled")
+      m.game.postGameEvent("enemyKilled", {})
+      m.assertInvalid(session.state.flags.get("kills"))
+    end function
+
+    @it("apply() posts, queues messages and calls onStoryChanged()")
+    function _()
+      session = new CountingSession(m.game, m.storyData())
+      m.game.addEntity(session)
+      watcher = new EventWatcher(m.game)
+      m.game.addEntity(watcher)
+      session.start("start")
+      session.advance()
+      session.advance()
+      m.assertTrue(session.runner.isChoosing())
+      m.assertEqual(1, session.changes)
+      m.assertTrue(watcher.seen.DoesExist("greeted"))
+      m.assertTrue(watcher.seen.DoesExist("storyUpdated"))
+      m.assertTrue(session.hasMessages())
+      messages = session.takeMessages()
+      m.assertEqual("Bram waves", messages[0].text)
+      m.assertFalse(session.hasMessages())
+    end function
+
+    @it("saves and loads the state, position and backlog")
+    function _()
+      session = m.newSession()
+      session.start("start")
+      session.advance()
+      save = session.toSaveData(true)
+      m.assertNotInvalid(save.position)
+      m.assertEqual(2, save.backlog.count())
+
+      other = new BGE.Story.StorySession(m.game, m.storyData())
+      m.assertTrue(other.loadSaveData(save))
+      m.assertEqual("Second line.", other.runner.currentLine().text)
+      m.assertEqual(2, other.runner.backlog.count())
+    end function
+
+    @it("loadSaveData() of junk gives a fresh state")
+    function _()
+      session = m.newSession()
+      session.state.flags.set("met", true)
+      m.assertTrue(session.loadSaveData("junk"))
+      m.assertInvalid(session.state.flags.get("met"))
+    end function
+
+    @describe("DialogueView")
+
+    @it("start() opens on a node with lines, as a modal owned by the scene")
+    function _()
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      m.assertTrue(view.start("start"))
+      m.assertTrue(view.isOpen())
+      m.assertTrue(m.game.isModalOpen())
+      m.assertEqual(1, m.game.getScene().uiCount())
+      m.assertEqual("Hello there.", view.getPageText())
+    end function
+
+    @it("doesn't open on a node with nothing to show")
+    function _()
+      session = m.newSession()
+      view = new BGE.Story.DialogueView(m.game, session)
+      m.assertFalse(view.start("silent"))
+      m.assertTrue(session.state.flags.get("silent"))
+      m.assertFalse(m.game.isModalOpen())
+    end function
+
+    @it("next() moves through the lines and brings choices up with the last one")
+    function _()
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      view.start("start")
+      view.next()
+      m.assertEqual("Second line.", view.getPageText())
+      m.assertEqual(2, view.choiceButtons.count())
+      m.assertTrue(view.choiceButtons[1].disabled)
+      m.assertTrue(view.choiceButtons[0].focused)
+    end function
+
+    @it("pages a long line")
+    function _()
+      session = new BGE.Story.StorySession(m.game, {items: {}, nodes: {"long": {"lines": ["word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word"]}}})
+      view = new BGE.Story.DialogueView(m.game, session)
+      view.width = 200
+      view.linesPerPage = 1
+      view.start("long")
+      m.assertTrue(view.hasMorePages())
+    end function
+
+    @it("picking a choice goes on, and the end closes it and resumes")
+    function _()
+      listener = new DialogueListener()
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      view.listener = listener
+      view.start("start")
+      view.next()
+      view.choiceButtons[0].onClick()
+      m.assertEqual("See you.", view.getPageText())
+      view.next()
+      m.assertFalse(view.isOpen())
+      m.assertFalse(m.game.isModalOpen())
+      m.assertEqual(0, m.game.getScene().uiCount())
+      m.assertFalse(listener.cancelled)
+      m.assertEqual(1, listener.ended)
+      m.assertTrue(listener.lines >= 3)
+    end function
+
+    @it("a disabled choice can't be picked")
+    function _()
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      view.start("start")
+      view.next()
+      view.choose(1)
+      m.assertTrue(view.session.runner.isChoosing())
+    end function
+
+    @it("Back cancels the conversation")
+    function _()
+      listener = new DialogueListener()
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      view.listener = listener
+      view.start("start")
+      view.onInput(new BGE.GameInput(0, 0, 0))
+      m.assertFalse(view.isOpen())
+      m.assertFalse(view.session.runner.isActive())
+      m.assertTrue(listener.cancelled)
+    end function
+
+    @it("a scene change closes it and pops the modal")
+    function _()
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "SceneB"}))
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      view.start("start")
+      m.game.End()
+      m.game.changeScene("SceneB")
+      m.assertFalse(view.isOpen())
+      m.assertFalse(m.game.isModalOpen())
+    end function
+
+    @it("the row layout draws without throwing")
+    function _()
+      view = new BGE.Story.DialogueView(m.game, m.newSession())
+      view.choiceLayout = "row"
+      view.start("start")
+      view.next()
+      m.game.gameUi.draw()
+      m.assertTrue(true)
+    end function
+
+  end class
+
+  class CountingSession extends BGE.Story.StorySession
+    changes as integer = 0
+
+    sub new(game as BGE.Game, story as BGE.Story.StoryData)
+      super(game, story)
+    end sub
+
+    override sub onStoryChanged(result as BGE.Story.StoryResult)
+      m.changes++
+    end sub
+  end class
+
+  class EventWatcher extends BGE.GameEntity
+    seen as roAssociativeArray = {}
+
+    sub new(game as BGE.Game)
+      super(game, {name: "EventWatcher"})
+    end sub
+
+    override sub onGameEvent(eventName as string, data as roAssociativeArray)
+      m.seen[eventName] = true
+    end sub
+  end class
+
+  class DialogueListener
+    lines as integer = 0
+    ended as integer = 0
+    cancelled as boolean = false
+
+    sub onDialogueLine(view as object, line as BGE.Story.StoryLineView)
+      m.lines++
+    end sub
+
+    sub onDialogueEnded(view as object, cancelled as boolean)
+      m.ended++
+      m.cancelled = cancelled
+    end sub
+  end class
+end namespace
