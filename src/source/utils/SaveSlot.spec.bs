@@ -1,0 +1,181 @@
+import "pkg:/source/utils/SaveSlot.bs"
+import "pkg:/source/utils/registry.bs"
+
+namespace tests
+  @suite("BGE.SaveSlot and SaveProfile")
+  class SaveSlotTests extends rooibos.BaseTestSuite
+
+    protected override function beforeEach()
+      BGE.registryDelete("BGETestSaves", "save")
+      BGE.registryDelete("BGETestSaves", "profile")
+    end function
+
+    @describe("SaveSlot")
+
+    @it("round-trips data under its version")
+    function _()
+      slot = new BGE.SaveSlot("BGETestSaves", "save", 2)
+      m.assertTrue(slot.write({level: 3}))
+      m.assertEqual(3, slot.read().level)
+      m.assertTrue(slot.exists())
+      raw = BGE.registryRead("BGETestSaves", "save")
+      m.assertEqual(2, raw.version)
+    end function
+
+    @it("reads invalid when there's no save")
+    function _()
+      slot = new BGE.SaveSlot("BGETestSaves")
+      m.assertInvalid(slot.read())
+      m.assertFalse(slot.exists())
+    end function
+
+    @it("delete() removes it")
+    function _()
+      slot = new BGE.SaveSlot("BGETestSaves")
+      slot.write(1)
+      slot.delete()
+      m.assertFalse(slot.exists())
+    end function
+
+    @it("validate can reject or clean up a save")
+    function _()
+      slot = new BGE.SaveSlot("BGETestSaves")
+      slot.write({level: -1})
+      rejectNegative = function(data as dynamic) as dynamic
+        if data.level < 0
+          return invalid
+        end if
+        return data
+      end function
+      m.assertInvalid(slot.read(rejectNegative))
+      m.assertFalse(slot.exists(rejectNegative))
+      slot.write({level: 2})
+      m.assertEqual(2, slot.read(rejectNegative).level)
+    end function
+
+    @it("a save from a newer version reads as invalid")
+    function _()
+      BGE.registryWrite("BGETestSaves", "save", {version: 5, data: {}})
+      slot = new BGE.SaveSlot("BGETestSaves", "save", 2)
+      m.assertInvalid(slot.read())
+    end function
+
+    @it("an older save is dropped unless migrate() upgrades it")
+    function _()
+      BGE.registryWrite("BGETestSaves", "save", {version: 1, data: {coins: 4}})
+      m.assertInvalid((new BGE.SaveSlot("BGETestSaves", "save", 2)).read())
+      upgraded = (new MigratingSlot()).read()
+      m.assertEqual(4, upgraded.coins)
+      m.assertEqual(1, upgraded.migratedFrom)
+    end function
+
+    @it("writes an upgraded save back under the current version")
+    function _()
+      BGE.registryWrite("BGETestSaves", "save", {version: 1, data: {coins: 4}})
+      (new MigratingSlot()).read()
+      raw = BGE.registryRead("BGETestSaves", "save")
+      m.assertEqual(2, raw.version)
+      m.assertEqual(4, raw.data.coins)
+    end function
+
+    @it("write() returns false for data FormatJson() can't write, and keeps the old save")
+    function _()
+      slot = new BGE.SaveSlot("BGETestSaves")
+      slot.write({level: 1})
+      m.assertFalse(slot.write({timer: CreateObject("roTimespan")}))
+      m.assertEqual(1, slot.read().level)
+    end function
+
+    @it("data SaveSlot didn't write goes to migrate() whole, as version 0")
+    function _()
+      BGE.registryWrite("BGETestSaves", "save", {version: 1, coins: 9})
+      upgraded = (new MigratingSlot()).read()
+      m.assertEqual(9, upgraded.coins)
+      m.assertEqual(1, upgraded.version)
+      m.assertEqual(0, upgraded.migratedFrom)
+    end function
+
+    @it("an envelope with extra fields still reads as one")
+    function _()
+      BGE.registryWrite("BGETestSaves", "save", {version: 2, data: {coins: 5}, savedAt: 123})
+      m.assertEqual(5, (new BGE.SaveSlot("BGETestSaves", "save", 2)).read().coins)
+    end function
+
+    @it("a profile set() reports whether it was saved")
+    function _()
+      profile = new BGE.SaveProfile("BGETestSaves")
+      m.assertTrue(profile.set("volume", 70))
+      m.assertFalse(profile.set("timer", CreateObject("roTimespan")))
+      profile.enabled = false
+      m.assertFalse(profile.set("volume", 20))
+    end function
+
+    @it("a disabled slot doesn't read, write or delete")
+    function _()
+      slot = new BGE.SaveSlot("BGETestSaves")
+      slot.write(1)
+      slot.enabled = false
+      m.assertInvalid(slot.read())
+      m.assertFalse(slot.write(2))
+      m.assertFalse(slot.delete())
+      slot.enabled = true
+      m.assertEqual(1, slot.read())
+    end function
+
+    @describe("SaveProfile")
+
+    @it("keeps values across instances")
+    function _()
+      profile = new BGE.SaveProfile("BGETestSaves")
+      profile.set("volume", 7)
+      m.assertEqual(7, (new BGE.SaveProfile("BGETestSaves")).get("volume"))
+      m.assertEqual("x", profile.get("missing", "x"))
+      m.assertTrue(profile.has("volume"))
+      profile.remove("volume")
+      m.assertFalse((new BGE.SaveProfile("BGETestSaves")).has("volume"))
+    end function
+
+    @it("records high scores only when they're beaten")
+    function _()
+      profile = new BGE.SaveProfile("BGETestSaves")
+      m.assertEqual(0, profile.getHighScore("arcade"))
+      m.assertTrue(profile.recordHighScore("arcade", 120))
+      m.assertFalse(profile.recordHighScore("arcade", 80))
+      m.assertTrue(profile.recordHighScore("arcade", 200))
+      m.assertEqual(200, (new BGE.SaveProfile("BGETestSaves")).getHighScore("arcade"))
+    end function
+
+    @it("keeps sets, e.g. endings found")
+    function _()
+      profile = new BGE.SaveProfile("BGETestSaves")
+      m.assertTrue(profile.addToSet("endings", "escape"))
+      m.assertFalse(profile.addToSet("endings", "escape"))
+      profile.addToSet("endings", "mutiny")
+      m.assertEqual(2, (new BGE.SaveProfile("BGETestSaves")).setCount("endings"))
+    end function
+
+    @it("clear() empties it, and a disabled profile doesn't write")
+    function _()
+      profile = new BGE.SaveProfile("BGETestSaves")
+      profile.set("a", 1)
+      profile.clear()
+      m.assertFalse((new BGE.SaveProfile("BGETestSaves")).has("a"))
+      profile.enabled = false
+      profile.set("b", 2)
+      m.assertEqual(2, profile.get("b"))
+      m.assertFalse((new BGE.SaveProfile("BGETestSaves")).has("b"))
+    end function
+
+  end class
+
+  class MigratingSlot extends BGE.SaveSlot
+    sub new()
+      super("BGETestSaves", "save", 2)
+    end sub
+
+    override function migrate(fromVersion as integer, data as dynamic) as dynamic
+      data.migratedFrom = fromVersion
+      return data
+    end function
+  end class
+end namespace

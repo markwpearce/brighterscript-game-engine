@@ -1,9 +1,12 @@
 ' examples/visualnovel/src/source/Novel/VnSave.bs
+import "pkg:/source/utils/registry.bs"
+import "pkg:/source/utils/SaveSlot.bs"
 import "pkg:/source/story/StoryState.bs"
 import "pkg:/source/story/DialogueRunner.bs"
 
 const VN_SAVE_VERSION = 1
 const VN_SAVE_SECTION = "bge-visualnovel"
+const VN_SAVE_KEY = "save"
 const VN_ENDING_COUNT = 3
 
 ' What's on screen: background and portrait ids ("" for none).
@@ -14,13 +17,61 @@ interface VnStage
 end interface
 
 interface VnSave extends roAssociativeArray
-  version as integer
   state as BGE.Story.StorySaveData
   position as BGE.Story.RunnerPosition
   ' {text, speaker, isChoice} per entry
   backlog as roAssociativeArray[]
   stage as VnStage
 end interface
+
+' The save slot. Saves from before SaveSlot were the payload itself, with its own version field;
+' SaveSlot hands them to migrate() as version 0, and one at this version loads unchanged.
+class VnSaveSlot extends BGE.SaveSlot
+
+  sub new()
+    super(VN_SAVE_SECTION, VN_SAVE_KEY, VN_SAVE_VERSION)
+  end sub
+
+  override function migrate(fromVersion as integer, data as dynamic) as dynamic
+    if fromVersion = 0 and type(data) = "roAssociativeArray" and BGE.isIntegerValue(data.version)
+      if data.version = VN_SAVE_VERSION
+        return data
+      end if
+    end if
+    return invalid
+  end function
+
+end class
+
+' @return {BGE.SaveSlot}
+function newVnSlot() as BGE.SaveSlot
+  return new VnSaveSlot()
+end function
+
+' The endings found, kept apart from the save so they outlast it. Endings the old "endings" key
+' held are moved in (once) when the profile is opened with saving on.
+'
+' @param {boolean} enabled - false on deep links, which don't record endings
+' @return {BGE.SaveProfile}
+function openVnProfile(enabled as boolean) as BGE.SaveProfile
+  profile = new BGE.SaveProfile(VN_SAVE_SECTION)
+  profile.enabled = enabled
+  if enabled
+    legacy = BGE.registryRead(VN_SAVE_SECTION, "endings")
+    if type(legacy) = "roAssociativeArray"
+      merged = profile.get("endings")
+      if type(merged) <> "roAssociativeArray"
+        merged = {}
+      end if
+      merged.Append(legacy)
+      ' only drop the old key once the profile has them, or they'd be lost
+      if profile.set("endings", merged)
+        BGE.registryDelete(VN_SAVE_SECTION, "endings")
+      end if
+    end if
+  end if
+  return profile
+end function
 
 ' @return {VnSave} or invalid if there's nothing to resume (no conversation, or a one-off node)
 function buildVnSave(state as BGE.Story.StoryState, runner as BGE.Story.DialogueRunner, stage as VnStage) as VnSave
@@ -29,7 +80,6 @@ function buildVnSave(state as BGE.Story.StoryState, runner as BGE.Story.Dialogue
     return invalid
   end if
   return {
-    version: VN_SAVE_VERSION,
     state: state.toSaveData(),
     position: position,
     backlog: backlogToSave(runner.backlog),
@@ -37,15 +87,11 @@ function buildVnSave(state as BGE.Story.StoryState, runner as BGE.Story.Dialogue
   }
 end function
 
-' @return {VnSave} the save if it has the right shape and version, else invalid
+' Checks a save's payload (what SaveSlot read() returned). The version is checked by the slot.
+'
+' @return {VnSave} the save if it has the right shape, else invalid
 function validateVnSave(data as dynamic) as VnSave
   if type(data) <> "roAssociativeArray"
-    return invalid
-  end if
-  if BGE.Story.valueKind(data.version) <> "integer"
-    return invalid
-  end if
-  if data.version <> VN_SAVE_VERSION
     return invalid
   end if
   if type(data.state) <> "roAssociativeArray" or type(data.position) <> "roAssociativeArray" or type(data.stage) <> "roAssociativeArray"
@@ -98,26 +144,11 @@ function backlogFromSave(data as dynamic) as BGE.Story.StoryLineView[]
   return views
 end function
 
-function addEndingSeen(seen as roAssociativeArray, endingId as string) as roAssociativeArray
-  result = {}
-  if type(seen) = "roAssociativeArray"
-    result.Append(seen)
-  end if
-  result[endingId] = true
-  return result
-end function
-
+' @param {integer} count - endings found so far
 ' @return {string} "Endings found: n of 3", or "" before the first
-function endingsSeenText(seen as roAssociativeArray) as string
-  if type(seen) <> "roAssociativeArray" or seen.Count() = 0
+function endingsSeenText(count as integer) as string
+  if count = 0
     return ""
   end if
-  return "Endings found: " + seen.Count().toStr() + " of " + VN_ENDING_COUNT.toStr()
+  return "Endings found: " + count.toStr() + " of " + VN_ENDING_COUNT.toStr()
 end function
-
-' Removes the saved game once the story ends (New Game just overwrites it).
-sub deleteVnSave()
-  section = CreateObject("roRegistrySection", VN_SAVE_SECTION)
-  section.Delete("save")
-  section.Flush()
-end sub
