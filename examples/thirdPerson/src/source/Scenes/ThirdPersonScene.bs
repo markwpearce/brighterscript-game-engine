@@ -3,9 +3,12 @@ import "../Entities/Knight.bs"
 import "../CombatDirector.bs"
 import "../Hud.bs"
 import "../PerfLog.bs"
-import "../Conversation.bs"
+import "../TownStory.bs"
 import "../SolidTracker.bs"
 import "../Night.bs"
+import "pkg:/source/story/DialogueView.bs"
+import "pkg:/source/utils/Interactables.bs"
+import "pkg:/source/engine/ui/Theme.bs"
 
 ' The `at=<col>,<row>[,<heading in degrees>]` deep link (see ThirdPersonScene.parseAt())
 interface AtCell extends roAssociativeArray
@@ -48,11 +51,11 @@ class ThirdPersonScene extends BGE.GameScene
   protected sceneAtlases as string[] = []
   protected sceneModels as string[] = []
 
-  ' People the knight can talk to (addTalker()), the one in reach, and the conversation if one's
-  ' going
-  talkers as Talker[] = []
-  talkTarget as Talker = invalid
-  conversation as Conversation = invalid
+  ' People the knight can talk to (addTalker()), the one in reach, and the dialogue box while a
+  ' conversation is open (it pauses the game)
+  talkers as BGE.Interactables = new BGE.Interactables()
+  talkTarget as BGE.Interactable = invalid
+  talkView as BGE.Story.DialogueView = invalid
   ' How far away, and how far either side of where he faces, someone can be talked to
   talkReach as float = World.metres(2.4)
 
@@ -205,11 +208,16 @@ class ThirdPersonScene extends BGE.GameScene
   ' talkers and this visit's assets go
   override sub onDestroy()
     m.clearFog()
+    ' ends a conversation still open (cancelling it, and un-pausing the game) before the scene's
+    ' people go
+    if invalid <> m.talkView
+      m.talkView.close()
+    end if
+    m.talkView = invalid
     ' held on to, this visit's people and enemies would keep their sprites in memory after their
     ' atlases unload
-    m.talkers = []
+    m.talkers = new BGE.Interactables()
     m.talkTarget = invalid
-    m.conversation = invalid
     m.walls = invalid
     m.director = new CombatDirector()
     m.knight = invalid
@@ -252,9 +260,8 @@ class ThirdPersonScene extends BGE.GameScene
     m.director.update(dt)
     if not m.knight.isAlive()
       ' a conversation doesn't carry on past a death
-      if invalid <> m.conversation
-        m.conversation = invalid
-        m.knight.talking = false
+      if invalid <> m.talkView
+        m.talkView.close()
       end if
       m.updateRespawn(dt)
       return true
@@ -302,78 +309,65 @@ class ThirdPersonScene extends BGE.GameScene
 
   ' Someone the knight can walk up to and talk to (OK), starting the story at `node`
   protected sub addTalker(entity as BGE.GameEntity, node as string, name as string)
-    m.talkers.push({entity: entity, node: node, name: name} as Talker)
+    m.talkers.add(entity, entity.id, "talk to " + name, node)
   end sub
 
-  ' beginUpdate() calls this, before the knight moves. Finds who's in reach, starts a
-  ' conversation on OK (instead of a swing), and runs one that's going. True while talking.
+  ' beginUpdate() calls this, before the knight moves. Finds who's in reach and starts a
+  ' conversation on OK (instead of a swing). True if one opened.
   private function updateTalk() as boolean
-    controls = m.game.controls
-    if invalid <> m.conversation
-      if m.conversation.isActive()
-        m.conversation.update(controls)
-        m.takeStoryPosts()
-        return true
-      end if
-      m.takeStoryPosts()
-      m.conversation = invalid
-      ' The OK (or dodge) that closed the last line may still be down: don't swing, dodge or start
-      ' another talk until it's released.
-      controls.blockUntilReleased("attack")
-      controls.blockUntilReleased("dodge")
-      m.knight.talking = false
-      return false
-    end if
-    m.knight.talking = false
     m.talkTarget = m.talkerInReach()
-    if invalid <> m.talkTarget and controls.isActionPressed("attack")
-      chat = new Conversation()
-      started = chat.start(m.talkTarget.node)
-      ' A node with nothing to say can still post (a blessing with no lines)
-      m.conversation = chat
-      m.takeStoryPosts()
-      if started
-        m.knight.talking = true
-        m.knight.faceToward(m.talkTarget.entity.position)
-        return true
-      end if
-      m.conversation = invalid
+    if invalid <> m.talkTarget and m.game.controls.isActionPressed("attack")
+      return m.startTalk(m.talkTarget)
     end if
     return false
   end function
 
+  ' Opens the dialogue box on the target's node. The box is modal, so the game is paused until the
+  ' conversation ends, and the OK that closed it can't swing: popModal() blocks held buttons until
+  ' they're released.
+  private function startTalk(target as BGE.Interactable) as boolean
+    view = new BGE.Story.DialogueView(m.game, TownStory.session(m.game))
+    view.theme = m.talkTheme()
+    view.speakerFontName = "default"
+    view.textFontName = "default"
+    view.boxPadding = 16
+    view.listener = m
+    ' start() runs the node even when nothing shows (a blessing with no lines), so its posts still go out
+    if not view.start(target.data as string)
+      return false
+    end if
+    m.talkView = view
+    m.knight.faceToward(target.entity.position)
+    return true
+  end function
+
+  ' The box's colours: a dark panel, gold speaker, cream text
+  private function talkTheme() as BGE.UI.Theme
+    theme = new BGE.UI.Theme()
+    theme.panelBackgroundColor = &h0A0806E0
+    theme.panelTitleColor = &hE0B050FF
+    theme.panelTextColor = &hE8E4DCFF
+    theme.backgroundColor = &h1A1410FF
+    theme.foregroundColor = &hD8D0C0FF
+    theme.borderColor = &hA08040FF
+    theme.focusedBorderColor = &hF0C860FF
+    theme.hoveredBackgroundColor = &h3A2A18FF
+    theme.disabledColor = &h707070FF
+    return theme
+  end function
+
+  ' The DialogueView's listener: the conversation has ended (or been left)
+  sub onDialogueEnded(view as BGE.Story.DialogueView, cancelled as boolean)
+    m.talkView = invalid
+  end sub
+
   ' The nearest talker in front of the knight and within talkReach, while he's free to talk
-  private function talkerInReach() as Talker
+  private function talkerInReach() as BGE.Interactable
     if not m.knight.isAlive() or (m.knight.state <> KnightState.idle and m.knight.state <> KnightState.run)
       return invalid
     end if
-    best = invalid
-    bestDistance = m.talkReach
-    for each talker in m.talkers
-      if talker.entity.isValid()
-        distance = BGE.Math.flatDistance(m.knight.position, talker.entity.position)
-        if distance < bestDistance
-          toward = BGE.Math.headingOf(BGE.Math.flatDirection(m.knight.position, talker.entity.position))
-          if Abs(BGE.Math.wrapAngle(toward - m.knight.rotation.y)) < BGE.Math.PI / 3
-            best = talker
-            bestDistance = distance
-          end if
-        end if
-      end if
-    end for
-    return best
+    return m.talkers.nearestInArc(m.knight.position, m.knight.rotation.y, m.talkReach, BGE.Math.PI / 3)
   end function
-
-  ' What the story asked the world to do
-  private sub takeStoryPosts()
-    for each name in m.conversation.posts
-      if name = "heal"
-        m.knight.health = m.knight.maxHealth
-        m.knight.stamina.refill()
-      end if
-    end for
-    m.conversation.posts = []
-  end sub
 
   ' The town's fog, which the graveyard shares: buildings fade into it rather than turning
   ' see-through, and casters stay on the skyline past the draw distance. Its backdrop uses the
@@ -583,10 +577,9 @@ class ThirdPersonScene extends BGE.GameScene
     end for
 
     m.hud.draw(uiRenderObj)
-    if invalid <> m.conversation
-      m.conversation.draw(uiRenderObj, font)
-    else if invalid <> m.talkTarget
-      uiRenderObj.DrawText(`OK / X: talk to ${m.talkTarget.name}`, center.x, center.y * 2 * 0.82, &hF0E0B0FF, font, "center")
+    ' the dialogue box draws itself while it's open
+    if invalid = m.talkView and invalid <> m.talkTarget
+      uiRenderObj.DrawText(m.talkers.promptFor(m.talkTarget, "OK / X"), center.x, center.y * 2 * 0.82, &hF0E0B0FF, font, "center")
     end if
     if not m.knight.isAlive()
       uiRenderObj.DrawText("YOU DIED", center.x, center.y, &hC02828FF, font, "center")
