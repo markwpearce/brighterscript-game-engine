@@ -439,30 +439,83 @@ namespace BGE
       if level.count() = 0
         return
       end if
-      front = [] as BGE.Math.Vector[]
+      ' the drawn faces' vertices, once each: all of them, and those of walls (faces within
+      ' ~20 degrees of vertical) apart, with each wall plane's area and vertices
+      allFront = [] as BGE.Math.Vector[]
+      wallFront = [] as BGE.Math.Vector[]
+      seen = {}
+      wallSeen = {}
+      planes = {}
+      planeOrder = [] as string[]
+      faceIndices = [] as integer[]
       if m.meshCameraValid
-        ' the drawn faces' vertices, once each
-        seen = {}
-        corners = m.meshCorners
         for each face in m.modelCanvasFaces
-          c = face.faceIndex * 3
-          for j = c to c + 2
-            index = corners[j]
-            key = index.toStr()
-            if not seen.DoesExist(key)
-              seen[key] = true
-              front.push(m.meshWorld[index])
-            end if
-          end for
+          faceIndices.push(face.faceIndex)
         end for
       else
-        for each worldFace in m.modelWorldFaces
+        for i = 0 to m.modelWorldFaces.count() - 1
+          worldFace = m.modelWorldFaces[i]
           if getOutwardNormalFacingAmount(rendererObj, worldFace.vertices[0], worldFace.normal) > 0.0001
-            for each vert in worldFace.vertices
-              front.push(vert)
-            end for
+            faceIndices.push(i)
           end if
         end for
+      end if
+      corners = m.meshCorners
+      for each faceIndex in faceIndices
+        worldFace = m.modelWorldFaces[faceIndex]
+        verts = worldFace.vertices
+        keys = [] as string[]
+        if m.meshCameraValid
+          c = faceIndex * 3
+          verts = [m.meshWorld[corners[c]], m.meshWorld[corners[c + 1]], m.meshWorld[corners[c + 2]]] as BGE.Math.Vector[]
+          for j = c to c + 2
+            keys.push(corners[j].toStr())
+          end for
+        else
+          for j = 0 to verts.count() - 1
+            keys.push(faceIndex.toStr() + "_" + j.toStr())
+          end for
+        end if
+        n = worldFace.normal
+        vertical = Abs(n.y) < 0.35
+        for j = 0 to verts.count() - 1
+          if not seen.DoesExist(keys[j])
+            seen[keys[j]] = true
+            allFront.push(verts[j])
+          end if
+          if vertical and not wallSeen.DoesExist(keys[j])
+            wallSeen[keys[j]] = true
+            wallFront.push(verts[j])
+          end if
+        end for
+        if vertical and verts.count() = 3
+          a = verts[0]
+          ux = verts[1].x - a.x
+          uy = verts[1].y - a.y
+          uz = verts[1].z - a.z
+          wx = verts[2].x - a.x
+          wy = verts[2].y - a.y
+          wz = verts[2].z - a.z
+          cx = uy * wz - uz * wy
+          cy = uz * wx - ux * wz
+          cz = ux * wy - uy * wx
+          ' coplanar faces share a key, as captureHiddenPlanes()
+          key = Int(n.x * 64 + 0.5).toStr() + "," + Int(n.z * 64 + 0.5).toStr() + "," + Int(n.x * a.x + n.y * a.y + n.z * a.z + 0.5).toStr()
+          plane = planes[key]
+          if invalid = plane
+            plane = {area: 0.0, verts: [] as BGE.Math.Vector[]}
+            planes[key] = plane
+            planeOrder.push(key)
+          end if
+          plane.area += 0.5 * Sqr(cx * cx + cy * cy + cz * cz)
+          plane.verts.append(verts)
+        end if
+      end for
+      ' fitted to the walls alone: a roof's ridge, set back from the walls over the middle of
+      ' the model, pulled the middle knot up and down as the camera walked
+      front = allFront
+      if wallFront.count() >= 6
+        front = wallFront
       end if
       xs = [] as float[]
       ys = [] as float[]
@@ -476,7 +529,7 @@ namespace BGE
       if knots >= 2
         ' from every vertex, so the outer knots reach the outline before any are dropped below
         knotX = BGE.ImpostorFit.placeKnots(xs, knots)
-        crease = m.getStripCreaseX(level)
+        crease = m.getWallCreaseX(level, planes, planeOrder)
         if knotX.count() >= 3 and crease.count() = 1
           BGE.ImpostorFit.snapKnotTo(knotX, crease[0])
         end if
@@ -502,6 +555,26 @@ namespace BGE
       capture.frontWorld = front
       capture.frontXs = xs
       capture.frontYs = ys
+      ' fitting walls alone, the error is still measured on everything drawn (roofs too), so
+      ' anything the walls' warp can't follow redraws instead of drifting
+      capture.checkWorld = invalid
+      if front.count() <> allFront.count()
+        checkX = [] as float[]
+        checkY = [] as float[]
+        if BGE.ImpostorFit.projectToBasis(level, allFront, checkX, checkY)
+          checkWorld = [] as BGE.Math.Vector[]
+          keptX = [] as float[]
+          keptY = [] as float[]
+          for each i in BGE.ImpostorFit.subsetWithExtremes(checkX, checkY, maxPoints)
+            checkWorld.push(allFront[i])
+            keptX.push(checkX[i])
+            keptY.push(checkY[i])
+          end for
+          capture.checkWorld = checkWorld
+          capture.checkXs = keptX
+          capture.checkYs = keptY
+        end if
+      end if
       if knots >= 2 or m.modelWorldBounds.count() <> 2
         return
       end if
@@ -571,19 +644,45 @@ namespace BGE
       return nearest
     end function
 
-    ' The level-view x of the box's nearest vertical edge, as one value, or none without a box.
-    private function getStripCreaseX(level as float[]) as float[]
-      if m.modelWorldBounds.count() <> 2
-        return [] as float[]
+    ' Where the two biggest wall planes in view meet, in level-view x, as one value - the crease
+    ' a knot belongs on - or none unless both are sizeable and share an edge on screen.
+    private function getWallCreaseX(level as float[], planes as roAssociativeArray, order as string[]) as float[]
+      first = invalid
+      second = invalid
+      for each key in order
+        plane = planes[key]
+        if invalid = first or plane.area > first.area
+          second = first
+          first = plane
+        else if invalid = second or plane.area > second.area
+          second = plane
+        end if
+      end for
+      none = [] as float[]
+      if invalid = second or second.area < 0.15 * first.area
+        return none
       end if
-      edges = m.getBoxVerticalEdges()
-      nearest = m.getNearestBoxEdge(edges, level)
-      xs = [] as float[]
-      ys = [] as float[]
-      if not BGE.ImpostorFit.projectToBasis(level, [edges[nearest * 2]] as BGE.Math.Vector[], xs, ys)
-        return [] as float[]
+      ranges = [] as float[]
+      for each plane in [first, second]
+        xs = [] as float[]
+        ys = [] as float[]
+        if not BGE.ImpostorFit.projectToBasis(level, plane.verts, xs, ys)
+          return none
+        end if
+        ranges.push(BGE.Math.arrayMin(xs))
+        ranges.push(BGE.Math.arrayMax(xs))
+      end for
+      leftMax = ranges[1]
+      rightMin = ranges[2]
+      if ranges[0] + ranges[1] > ranges[2] + ranges[3]
+        leftMax = ranges[3]
+        rightMin = ranges[0]
       end if
-      return xs
+      width = BGE.Math.Max(ranges[1], ranges[3]) - BGE.Math.Min(ranges[0], ranges[2])
+      if Abs(rightMin - leftMax) > 0.05 * width + 2
+        return none
+      end if
+      return [(leftMax + rightMin) * 0.5] as float[]
     end function
 
     ' The camera as a BGE.ImpostorFit.cameraBasis().
@@ -655,6 +754,14 @@ namespace BGE
       if invalid = p
         return m.missImpostor("stripsFit")
       end if
+      if invalid <> capture.checkWorld
+        checkX = [] as float[]
+        checkY = [] as float[]
+        if not BGE.ImpostorFit.projectToBasis(level, capture.checkWorld, checkX, checkY)
+          return m.missImpostor("stripsProject")
+        end if
+        fit.residual = BGE.Math.Max(fit.residual, BGE.ImpostorFit.columnsResidual(p, capture.checkXs, capture.checkYs, checkX, checkY))
+      end if
       settings = renderObj.qualitySettings
       allowed = drawable.impostorStripMaxError
       if allowed <= 0
@@ -662,7 +769,7 @@ namespace BGE
         if scale <= 0
           scale = settings.modelImpostorStripErrorScale
         end if
-        allowed = m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode) * scale
+        allowed = BGE.Math.Min(m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode) * scale, settings.modelImpostorStripMaxErrorPixels)
       end if
       m.impostorStripResidual = fit.residual
       m.impostorStripAllowed = allowed

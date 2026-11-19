@@ -559,3 +559,20 @@ session, average of the last 5 lines:
 
 So the level view costs ~5ms (~5%) at Basic over main, for strip error that's almost gone; how
 it looks needs eyes on the device (`stripLevel=0` for the upright strips).
+
+### Walls only, and a pixel cap (the "chevron")
+
+In play, flat house fronts bent at the middle knot as the camera walked, and the middle bobbed
+up and down. The least-squares knots were pulled by vertices the column model can't follow: a
+gable roof's ridge, set back from the walls over the middle of the house, and the side wall
+when the box's nearest edge (the old crease) sat inside the front wall, e.g. past an overhang.
+Now:
+
+- Strips are fitted only to the vertices of walls (faces within ~20° of vertical); the error is
+  still measured on every drawn vertex (roofs too), so anything the walls' warp can't follow
+  redraws instead of drifting.
+- The crease knot is where the two biggest visible wall planes meet (both sizeable, sharing an
+  edge on screen), not the bounding box's nearest edge.
+- The strip error allowance is capped in pixels per quality level
+  (`modelImpostorStripMaxErrorPixels`: 6, 5, 4, 3, 2) - before, up to 20% of the model's size
+  on screen at Basic.
