@@ -510,3 +510,34 @@ Strips are now on by default with the tuned values: `useImpostorStrips = true`,
 `impostorBlitAngleScale = 0.75`, `impostorStripErrorScale = 2`. They were tuned at Basic in the
 thirdPerson town; High/Ultra are untested, and moving them into `RenderQualityPresets` per level
 is still to do.
+
+## Strips in a level view, and other accuracy fixes
+
+The column warp is exact only where world verticals project vertical, i.e. for a camera with
+no pitch or roll. thirdPerson's chase camera always looks down (~8.5° at rest, more with tilt),
+so verticals converge and their lean changes as a model crosses the view; upright strips can't
+follow that. Headless, a box corner (~310x200px, left of centre) with knots right on the crease
+was off 2.1-2.7px at 8.5° pitch and 5-5.9px at 20°, against ~0 level.
+
+- **Level view**: hints, knots and the fit now live in the camera turned level at the same eye
+  (`ImpostorFit.levelBasis()`, no pitch or roll). A strip's corners are mapped capture canvas →
+  capture level view → warp → current level view → current canvas (`mapCaptureToNow()`), and each
+  strip is drawn turned to follow the line through its middle (`stripTransforms()`), still one
+  `DrawTransformedObject`. A pitched turn is exact again (the same corner: < 0.01px).
+  `DrawableModel.impostorStripLevel` (default true; deep link `stripLevel=0`) fits on the canvas
+  with upright strips instead, as before.
+- **Knots**: placed from every visible vertex before the hint points are cut down to
+  `impostorStripMaxPoints`, and the cut keeps the outline's leftmost, rightmost, top and bottom
+  vertices (`subsetWithExtremes()`), so the outer knots reach the outline and its error is
+  measured. With 3+ knots, the inner knot nearest the box's nearest vertical edge moves onto it
+  (`snapKnotTo()`): a segment then spans one wall, which the perspective warp is exact for.
+- **Cuts**: a projective segment is cut evenly in current x (`levelStripCuts()`), where a flat
+  wall's top and bottom are straight, instead of evenly in capture x; the stretch limit checks a
+  segment's worst stretch, at its ends (`columnsStretchRange()`), not its average.
+- **Seams**: a strip's region takes a pixel more of the source past its right edge, drawn at the
+  true scale, instead of the strip being stretched a pixel wider.
+- **Per level**: `modelImpostorStripMaxAngleDegrees` (25, 25, 25, 15, 10) and
+  `modelImpostorStripErrorScale` (2, 2, 2, 1.5, 1.25) are quality settings now; the drawable's
+  `impostorStripMaxAngleDegrees` / `impostorStripErrorScale` default to 0 (the level's).
+- Hint points are projected exactly rather than taken from the capture's whole-pixel positions,
+  which also lowers residuals: the close-orbit linear fit went from ~3.4px to ~1.6px.

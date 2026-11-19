@@ -119,8 +119,6 @@ namespace BGE
     private impostorDepthRatio as float = 0.0
     private impostorStripResidual as float = -1.0
     private impostorStripAllowed as float = -1.0
-    private stripProjected as float[] = []
-    private stripEdgeProjected as float[] = []
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -431,15 +429,19 @@ namespace BGE
     end function
 
     ' What a strip impostor (#556) fits to later: the vertices of the faces facing the camera
-    ' (the ones in the capture) and either evenly spaced knots across them or the box's
-    ' visible vertical edges - the two outermost on screen and the nearest, the crease.
+    ' (the ones in the capture), in the level view (see impostorStripLevel), and either knots
+    ' across them or the box's visible vertical edges - the two outermost on screen and the
+    ' nearest, the crease.
     private sub captureStripHints(rendererObj as BGE.Renderer, capture as roAssociativeArray)
       camera = rendererObj.camera as Camera3d
+      actual = m.getCameraBasis(camera)
+      level = m.getStripBasis(actual)
+      if level.count() = 0
+        return
+      end if
       front = [] as BGE.Math.Vector[]
-      xs = [] as float[]
-      ys = [] as float[]
       if m.meshCameraValid
-        ' the drawn faces' vertices, once each, where the redraw just projected them
+        ' the drawn faces' vertices, once each
         seen = {}
         corners = m.meshCorners
         for each face in m.modelCanvasFaces
@@ -449,10 +451,7 @@ namespace BGE
             key = index.toStr()
             if not seen.DoesExist(key)
               seen[key] = true
-              point = m.meshCanvas[index]
               front.push(m.meshWorld[index])
-              xs.push(point.x)
-              ys.push(point.y)
             end if
           end for
         end for
@@ -464,24 +463,33 @@ namespace BGE
             end for
           end if
         end for
-        if front.count() >= 3 and camera.projectPointsWithDepth(front, m.stripProjected)
-          for i = 0 to front.count() - 1
-            xs.push(m.stripProjected[i * 3])
-            ys.push(m.stripProjected[i * 3 + 1])
-          end for
-        end if
       end if
-      if xs.count() < 3
+      xs = [] as float[]
+      ys = [] as float[]
+      if front.count() < 3 or not BGE.ImpostorFit.projectToBasis(level, front, xs, ys)
         return
       end if
-      if front.count() > m.drawable.impostorStripMaxPoints and m.drawable.impostorStripMaxPoints >= 3
-        ' every strip attempt projects and fits these, and a spread-out subset fits as well
-        stride = front.count() / m.drawable.impostorStripMaxPoints
+      capture.actualBasis = actual
+      capture.levelBasis = level
+      knots = m.drawable.impostorStripKnots
+      if knots >= 2
+        ' from every vertex, so the outer knots reach the outline before any are dropped below
+        knotX = BGE.ImpostorFit.placeKnots(xs, knots)
+        crease = m.getStripCreaseX(level)
+        if knotX.count() >= 3 and crease.count() = 1
+          BGE.ImpostorFit.snapKnotTo(knotX, crease[0])
+        end if
+        if knotX.count() >= 2
+          capture.knotX = knotX
+        end if
+      end if
+      maxPoints = m.drawable.impostorStripMaxPoints
+      if front.count() > maxPoints and maxPoints >= 4
+        ' every strip attempt projects and fits these: an even spread, with the outline's extremes
         keptWorld = [] as BGE.Math.Vector[]
         keptX = [] as float[]
         keptY = [] as float[]
-        for k = 0 to m.drawable.impostorStripMaxPoints - 1
-          i = Int(k * stride)
+        for each i in BGE.ImpostorFit.subsetWithExtremes(xs, ys, maxPoints)
           keptWorld.push(front[i])
           keptX.push(xs[i])
           keptY.push(ys[i])
@@ -493,45 +501,25 @@ namespace BGE
       capture.frontWorld = front
       capture.frontXs = xs
       capture.frontYs = ys
-      knots = m.drawable.impostorStripKnots
-      if knots >= 2
-        knotX = BGE.ImpostorFit.placeKnots(xs, knots)
-        if knotX.count() >= 2
-          capture.knotX = knotX
-        end if
+      if knots >= 2 or m.modelWorldBounds.count() <> 2
         return
       end if
-      if m.modelWorldBounds.count() <> 2
-        return
-      end if
-      low = m.modelWorldBounds[0]
-      high = m.modelWorldBounds[1]
-      edges = [] as BGE.Math.Vector[]
-      for each x in [low.x, high.x]
-        for each z in [low.z, high.z]
-          edges.push(BGE.Math.VectorOps.create(x, high.y, z))
-          edges.push(BGE.Math.VectorOps.create(x, low.y, z))
-        end for
-      end for
-      if not camera.projectPointsWithDepth(edges, m.stripEdgeProjected)
+      edges = m.getBoxVerticalEdges()
+      edgeAllX = [] as float[]
+      edgeAllY = [] as float[]
+      if not BGE.ImpostorFit.projectToBasis(level, edges, edgeAllX, edgeAllY)
         return
       end if
       leftmost = 0
       rightmost = 0
-      nearest = 0
-      nearestDistance = 1000000000.0
+      nearest = m.getNearestBoxEdge(edges, level)
       for e = 0 to 3
-        x = m.stripEdgeProjected[e * 6]
-        if x < m.stripEdgeProjected[leftmost * 6]
+        x = edgeAllX[e * 2]
+        if x < edgeAllX[leftmost * 2]
           leftmost = e
         end if
-        if x > m.stripEdgeProjected[rightmost * 6]
+        if x > edgeAllX[rightmost * 2]
           rightmost = e
-        end if
-        distance = BGE.Math.VectorOps.length(BGE.Math.VectorOps.subtract(edges[e * 2], camera.position))
-        if distance < nearestDistance
-          nearestDistance = distance
-          nearest = e
         end if
       end for
       edgeWorld = [] as BGE.Math.Vector[]
@@ -541,8 +529,8 @@ namespace BGE
         if e = leftmost or e = rightmost or e = nearest
           for i = e * 2 to e * 2 + 1
             edgeWorld.push(edges[i])
-            edgeXs.push(m.stripEdgeProjected[i * 3])
-            edgeYs.push(m.stripEdgeProjected[i * 3 + 1])
+            edgeXs.push(edgeAllX[i])
+            edgeYs.push(edgeAllY[i])
           end for
         end if
       end for
@@ -550,6 +538,69 @@ namespace BGE
       capture.edgeXs = edgeXs
       capture.edgeYs = edgeYs
     end sub
+
+    ' The world bounding box's 4 vertical edges, top then bottom each.
+    private function getBoxVerticalEdges() as BGE.Math.Vector[]
+      low = m.modelWorldBounds[0]
+      high = m.modelWorldBounds[1]
+      edges = [] as BGE.Math.Vector[]
+      for each x in [low.x, high.x]
+        for each z in [low.z, high.z]
+          edges.push(BGE.Math.VectorOps.create(x, high.y, z))
+          edges.push(BGE.Math.VectorOps.create(x, low.y, z))
+        end for
+      end for
+      return edges
+    end function
+
+    ' Which of getBoxVerticalEdges()' edges is nearest the eye: the crease of a box seen corner-on.
+    private function getNearestBoxEdge(edges as BGE.Math.Vector[], basis as float[]) as integer
+      nearest = 0
+      nearestDistance = 1000000000.0
+      for e = 0 to 3
+        p = edges[e * 2]
+        dx = p.x - basis[9]
+        dz = (p.z ?? 0.0) - basis[11]
+        distance = dx * dx + dz * dz
+        if distance < nearestDistance
+          nearestDistance = distance
+          nearest = e
+        end if
+      end for
+      return nearest
+    end function
+
+    ' The level-view x of the box's nearest vertical edge, as one value, or none without a box.
+    private function getStripCreaseX(level as float[]) as float[]
+      if m.modelWorldBounds.count() <> 2
+        return [] as float[]
+      end if
+      edges = m.getBoxVerticalEdges()
+      nearest = m.getNearestBoxEdge(edges, level)
+      xs = [] as float[]
+      ys = [] as float[]
+      if not BGE.ImpostorFit.projectToBasis(level, [edges[nearest * 2]] as BGE.Math.Vector[], xs, ys)
+        return [] as float[]
+      end if
+      return xs
+    end function
+
+    ' The camera as a BGE.ImpostorFit.cameraBasis().
+    private function getCameraBasis(camera as Camera3d) as float[]
+      if invalid = camera.worldToCamera
+        camera.computeWorldToCameraMatrix()
+      end if
+      return BGE.ImpostorFit.basisFromView(camera.worldToCamera, camera.position, camera.getFocalLength(), camera.frameSize.x, camera.frameSize.y)
+    end function
+
+    ' The view strips are fitted in: the camera turned level, or the camera itself with
+    ' impostorStripLevel off. Empty when a level view can't be had (looking straight down).
+    private function getStripBasis(actual as float[]) as float[]
+      if m.drawable.impostorStripLevel
+        return BGE.ImpostorFit.levelBasis(actual)
+      end if
+      return actual
+    end function
 
     ' attemptImpostorStrips(), timed as the stripFitHit or stripFitMiss stage while the renderer
     ' profiles stages.
@@ -575,29 +626,28 @@ namespace BGE
         return m.missImpostor("stripsNoHints")
       end if
       camera = renderObj.camera as Camera3d
-      if not camera.projectPointsWithDepth(capture.frontWorld, m.stripProjected)
+      actual = m.getCameraBasis(camera)
+      level = m.getStripBasis(actual)
+      if level.count() = 0
         return m.missImpostor("stripsProject")
       end if
       toX = [] as float[]
       toY = [] as float[]
-      for i = 0 to capture.frontWorld.count() - 1
-        toX.push(m.stripProjected[i * 3])
-        toY.push(m.stripProjected[i * 3 + 1])
-      end for
+      if not BGE.ImpostorFit.projectToBasis(level, capture.frontWorld, toX, toY)
+        return m.missImpostor("stripsProject")
+      end if
       drawable = m.drawable
       fit = BGE.ImpostorFit.unusable()
       if invalid <> capture.knotX
         fit = BGE.ImpostorFit.fitColumns(capture.knotX, capture.frontXs, capture.frontYs, toX, toY, drawable.impostorStripPerspective)
-      else if invalid <> capture.edgeWorld and camera.projectPointsWithDepth(capture.edgeWorld, m.stripEdgeProjected)
+      else if invalid <> capture.edgeWorld
         edgeX = [] as float[]
         edgeY = [] as float[]
-        for i = 0 to capture.edgeWorld.count() - 1
-          edgeX.push(m.stripEdgeProjected[i * 3])
-          edgeY.push(m.stripEdgeProjected[i * 3 + 1])
-        end for
-        fit = BGE.ImpostorFit.fitColumnsToEdges(capture.edgeXs, capture.edgeYs, edgeX, edgeY, drawable.impostorStripPerspective)
-        if invalid <> fit.params
-          fit.residual = BGE.ImpostorFit.columnsResidual(fit.params, capture.frontXs, capture.frontYs, toX, toY)
+        if BGE.ImpostorFit.projectToBasis(level, capture.edgeWorld, edgeX, edgeY)
+          fit = BGE.ImpostorFit.fitColumnsToEdges(capture.edgeXs, capture.edgeYs, edgeX, edgeY, drawable.impostorStripPerspective)
+          if invalid <> fit.params
+            fit.residual = BGE.ImpostorFit.columnsResidual(fit.params, capture.frontXs, capture.frontYs, toX, toY)
+          end if
         end if
       end if
       p = fit.params
@@ -607,41 +657,95 @@ namespace BGE
       settings = renderObj.qualitySettings
       allowed = drawable.impostorStripMaxError
       if allowed <= 0
-        allowed = m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode) * drawable.impostorStripErrorScale
+        scale = drawable.impostorStripErrorScale
+        if scale <= 0
+          scale = settings.modelImpostorStripErrorScale
+        end if
+        allowed = m.getImpostorAllowedError(settings.modelImpostorError, diagonal, drawMode) * scale
       end if
       m.impostorStripResidual = fit.residual
       m.impostorStripAllowed = allowed
       if fit.residual > allowed
         return m.missImpostor("stripsError")
       end if
-      ' no column, or stretch of the bitmap between knots, may grow or shrink past the limit
+      ' no column may grow or shrink past the limit, nor the bitmap stretch anywhere between knots
       maxSize = settings.modelImpostorMaxSizeChange
       for j = 0 to p.knotX.count() - 1
         if p.scale[j] > maxSize or p.scale[j] * maxSize < 1
           return m.missImpostor("stripsScale")
         end if
-        if j > 0
-          stretch = (p.x[j] - p.x[j - 1]) / (p.knotX[j] - p.knotX[j - 1])
-          if stretch > maxSize or stretch * maxSize < 1
-            return m.missImpostor("stripsStretch")
-          end if
-        end if
       end for
-      top = capture.originY
-      cuts = BGE.ImpostorFit.columnStripCuts(p, capture.originX, region.GetWidth(), top, top + region.GetHeight(), drawable.impostorStripStepPx, drawable.impostorStripWidth)
+      stretch = BGE.ImpostorFit.columnsStretchRange(p)
+      if stretch[1] > maxSize or stretch[0] * maxSize < 1
+        return m.missImpostor("stripsStretch")
+      end if
+      bases = [capture.actualBasis, capture.levelBasis, level, actual] as float[][]
+      cuts = m.getStripCuts(p, capture, region, bases)
       if cuts.count() - 1 > drawable.impostorStripMaxStrips
         return m.missImpostor("stripsCount")
+      end if
+      transforms = BGE.ImpostorFit.stripTransforms(p, bases, capture.originX, cuts, capture.originY, region.GetHeight())
+      if transforms.count() = 0
+        return m.missImpostor("stripsProject")
       end if
       if capture.clipped
         ' as the single blit: what the capture left out must stay off the canvas
         clip = capture.clipRect
         frame = renderObj.camera.frameSize
-        if invalid = clip or not BGE.ImpostorFit.columnsCoverFrame(p, clip.x0, clip.y0, clip.x1, clip.y1, frame.x, frame.y)
+        cutXs = [] as float[]
+        for each cut in cuts
+          cutXs.push(capture.originX + cut)
+        end for
+        if invalid = clip or not BGE.ImpostorFit.stripsCoverFrame(p, bases, clip.x0, clip.y0, clip.x1, clip.y1, cutXs, frame.x, frame.y)
           return m.missImpostor("stripsClipped")
         end if
       end if
-      capture.fit = {kind: "strips", params: p, residual: fit.residual, cuts: cuts}
-      return {origin: BGE.ImpostorFit.mapColumns(p, capture.originX, capture.originY), rotation: 0, scaleX: 1, scaleY: 1}
+      capture.fit = {kind: "strips", params: p, residual: fit.residual, cuts: cuts, transforms: transforms, bases: bases}
+      return {origin: BGE.Math.VectorOps.create(transforms[0], transforms[1]), rotation: 0, scaleX: 1, scaleY: 1}
+    end function
+
+    ' Which columns of the captured bitmap to cut it at, from 0 to its width: every
+    ' impostorStripWidth pixels, or else the warp's cuts in the level view
+    ' (BGE.ImpostorFit.levelStripCuts()) taken back to the capture across the bitmap's middle.
+    private function getStripCuts(p as roAssociativeArray, capture as roAssociativeArray, region as roRegion, bases as float[][]) as integer[]
+      width = region.GetWidth()
+      height = region.GetHeight()
+      if m.drawable.impostorStripWidth > 0
+        return BGE.ImpostorFit.fixedStripCuts(width, m.drawable.impostorStripWidth)
+      end if
+      captureActual = bases[0]
+      captureLevel = bases[1]
+      midY = capture.originY + height * 0.5
+      out = [0.0, 0.0] as float[]
+      levelEnds = [] as float[]
+      for each x in [capture.originX, capture.originX + width]
+        if not BGE.ImpostorFit.mapBetweenBases(captureActual, captureLevel, x, midY, out)
+          return [0, width] as integer[]
+        end if
+        levelEnds.push(out[0])
+      end for
+      levelMidY = out[1]
+      ' the bitmap's top and bottom in the level view, for how many strips each segment needs
+      levelTop = levelMidY
+      levelBottom = levelMidY
+      if BGE.ImpostorFit.mapBetweenBases(captureActual, captureLevel, capture.originX + width * 0.5, capture.originY, out)
+        levelTop = out[1]
+      end if
+      if BGE.ImpostorFit.mapBetweenBases(captureActual, captureLevel, capture.originX + width * 0.5, capture.originY + height, out)
+        levelBottom = out[1]
+      end if
+      levelCuts = BGE.ImpostorFit.levelStripCuts(p, levelEnds[0], levelEnds[1], levelTop, levelBottom, m.drawable.impostorStripStepPx)
+      cuts = [0] as integer[]
+      for i = 1 to levelCuts.count() - 2
+        if BGE.ImpostorFit.mapBetweenBases(captureLevel, captureActual, levelCuts[i], levelMidY, out)
+          cut = Int(out[0] - capture.originX + 0.5)
+          if cut > cuts[cuts.count() - 1] and cut < width
+            cuts.push(cut)
+          end if
+        end if
+      end for
+      cuts.push(width)
+      return cuts
     end function
 
     ' A strip impostor frame draws the capture as strips (see attemptImpostorStrips()); any
@@ -657,9 +761,10 @@ namespace BGE
         start = rendererObj.getProfileClockMs()
       end if
       cuts = capture.fit.cuts
+      transforms = capture.fit.transforms
       bitmap = region.GetBitmap()
+      width = region.GetWidth()
       height = region.GetHeight()
-      placements = BGE.ImpostorFit.stripPlacements(capture.fit.params, capture.originX, cuts, capture.originY, height)
       ' the strips' regions, kept with the capture: its knots are fixed, so the cuts mostly repeat
       ' frame to frame (and Roku needs a source kept until its queued draws have run)
       regions = capture.stripRegions
@@ -669,16 +774,22 @@ namespace BGE
       end if
       drew = false
       for i = 0 to cuts.count() - 2
-        k = i * 4
-        if placements[k + 2] > 0
+        k = i * 5
+        if transforms[k + 2] > 0
           x0 = cuts[i]
           key = x0.toStr() + "_" + cuts[i + 1].toStr()
           strip = regions[key]
           if invalid = strip
-            strip = CreateObject("roRegion", bitmap, x0, 0, cuts[i + 1] - x0, height)
+            ' a pixel more of the source past its right edge, at the same scale: overlapping the
+            ' next strip with what's really there hides the seam
+            stripWidth = cuts[i + 1] - x0
+            if cuts[i + 1] < width
+              stripWidth++
+            end if
+            strip = CreateObject("roRegion", bitmap, x0, 0, stripWidth, height)
             regions[key] = strip
           end if
-          if rendererObj.drawTransformedObject(placements[k], placements[k + 1], placements[k + 2], placements[k + 3], 0, strip, blitColor)
+          if rendererObj.drawTransformedObject(transforms[k], transforms[k + 1], transforms[k + 2], transforms[k + 3], transforms[k + 4], strip, blitColor)
             drew = true
           end if
         end if
@@ -837,7 +948,7 @@ namespace BGE
       ' strips can follow a bigger turn than the single blit, up to their own limit
       stripAngle = m.drawable.impostorStripMaxAngleDegrees
       if stripAngle <= 0
-        stripAngle = settings.modelImpostorMaxAngleDegrees
+        stripAngle = settings.modelImpostorStripMaxAngleDegrees
       end if
       if useStrips and cosine >= Cos(BGE.Math.DegreesToRadians(stripAngle))
         return m.timeImpostorStrips(renderObj, capture, diagonal, drawMode)
@@ -1413,10 +1524,13 @@ namespace BGE
           corners.push(m.mapByImpostorFit(capture, corner[0], corner[1]))
         end for
         if capture.fit.kind = "strips"
-          ' the strips bend at the knots, so bound those too
-          for each knotX in capture.fit.params.knotX
-            corners.push(m.mapByImpostorFit(capture, knotX, lo.y))
-            corners.push(m.mapByImpostorFit(capture, knotX, hi.y))
+          ' the strips bend between knots, so bound every cut too
+          for each cut in capture.fit.cuts
+            x = capture.originX + cut
+            if x > lo.x and x < hi.x
+              corners.push(m.mapByImpostorFit(capture, x, lo.y))
+              corners.push(m.mapByImpostorFit(capture, x, hi.y))
+            end if
           end for
         end if
         m.modelCanvasBounds.push(BGE.Math.VectorOps.copy(corners[0]))
@@ -1435,7 +1549,9 @@ namespace BGE
     ' Where this frame's impostor fit takes a canvas point of the captured rendering.
     private function mapByImpostorFit(capture as roAssociativeArray, x as float, y as float) as BGE.Math.Vector
       if capture.fit.kind = "strips"
-        return BGE.ImpostorFit.mapColumns(capture.fit.params, x, y)
+        out = [x, y] as float[]
+        BGE.ImpostorFit.mapCaptureToNow(capture.fit.params, capture.fit.bases, x, y, out)
+        return BGE.Math.VectorOps.create(out[0], out[1])
       end if
       return BGE.ImpostorFit.mapRotateScale(capture.fit.params, x, y)
     end function

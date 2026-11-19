@@ -462,107 +462,6 @@ namespace BGE.ImpostorFit
     return BGE.Math.VectorOps.create(mappedX, offset + scale * y)
   end function
 
-  ' Where each strip between `cuts` (capture bitmap columns) lands: [left x, top y, x scale,
-  ' y scale] per strip, flat. Each cut's x is mapped once, and a strip's vertical scale and
-  ' offset are taken at its middle. x scale includes a 1px overlap with the next strip, which
-  ' hides seams. A strip that would flip or collapse gets 0 scales.
-  '
-  ' @param {roAssociativeArray} params a column warp's params
-  ' @param {float} originX the bitmap's left edge, in capture x
-  ' @param {integer[]} cuts from columnStripCuts()
-  ' @param {float} top the bitmap's top, in capture y
-  ' @param {float} height the bitmap's height
-  ' @return {float[]}
-  function stripPlacements(params as roAssociativeArray, originX as float, cuts as integer[], top as float, height as float) as float[]
-    ' mapColumns(), inlined: this runs for every strip drawn
-    knotX = params.knotX
-    knotMapX = params.x
-    last = knotX.count() - 2
-    projective = params.projective = true
-    qs = params.q
-    gs = params.g
-    offsets = params.offset
-    scales = params.scale
-    cutX = [] as float[]
-    for each cut in cuts
-      x = originX + cut
-      s = 0
-      while s < last and x >= knotX[s + 1]
-        s++
-      end while
-      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
-      if projective
-        w0 = (1 - t) * qs[s]
-        w1 = t * qs[s + 1]
-        d = projectiveDenominator(w0 + w1, qs[s], qs[s + 1])
-        cutX.push((w0 * knotMapX[s] + w1 * knotMapX[s + 1]) / d)
-      else
-        cutX.push(knotMapX[s] + t * (knotMapX[s + 1] - knotMapX[s]))
-      end if
-    end for
-    bottom = top + height
-    out = [] as float[]
-    for i = 0 to cuts.count() - 2
-      x = originX + (cuts[i] + cuts[i + 1]) * 0.5
-      s = 0
-      while s < last and x >= knotX[s + 1]
-        s++
-      end while
-      t = (x - knotX[s]) / (knotX[s + 1] - knotX[s])
-      if projective
-        w0 = (1 - t) * qs[s]
-        w1 = t * qs[s + 1]
-        d = projectiveDenominator(w0 + w1, qs[s], qs[s + 1])
-        g = gs[s] + t * (gs[s + 1] - gs[s])
-        topY = (g + top) / d
-        bottomY = (g + bottom) / d
-      else
-        offset = offsets[s] + t * (offsets[s + 1] - offsets[s])
-        scale = scales[s] + t * (scales[s + 1] - scales[s])
-        topY = offset + scale * top
-        bottomY = offset + scale * bottom
-      end if
-      scaleX = (cutX[i + 1] - cutX[i] + 1) / (cuts[i + 1] - cuts[i])
-      scaleY = (bottomY - topY) / height
-      if scaleX <= 0 or scaleY <= 0
-        scaleX = 0
-        scaleY = 0
-      end if
-      out.append([cutX[i], topY, scaleX, scaleY])
-    end for
-    return out
-  end function
-
-  ' Whether a column warp keeps a capture's clip rect over the whole frame, so the parts the
-  ' capture left out stay off it. Columns stay vertical, and a column's top and bottom move
-  ' monotonically between knots, so the rect's sides and the knots inside it are enough.
-  '
-  ' @param {roAssociativeArray} params a column warp's params
-  ' @param {float} x0 the clip rect, in capture coordinates
-  ' @param {float} y0
-  ' @param {float} x1
-  ' @param {float} y1
-  ' @param {float} frameWidth
-  ' @param {float} frameHeight
-  ' @return {boolean}
-  function columnsCoverFrame(params as roAssociativeArray, x0 as float, y0 as float, x1 as float, y1 as float, frameWidth as float, frameHeight as float) as boolean
-    if mapColumns(params, x0, y0).x > 0 or mapColumns(params, x1, y0).x < frameWidth
-      return false
-    end if
-    xs = [x0, x1] as float[]
-    for each knot in params.knotX
-      if knot > x0 and knot < x1
-        xs.push(knot)
-      end if
-    end for
-    for each x in xs
-      if mapColumns(params, x, y0).y > 0 or mapColumns(params, x, y1).y < frameHeight
-        return false
-      end if
-    end for
-    return true
-  end function
-
   ' The farthest a column warp puts any point from where it is now, in pixels.
   '
   ' @param {roAssociativeArray} params
@@ -621,6 +520,373 @@ namespace BGE.ImpostorFit
     return Sqr(worst)
   end function
 
+  ' A camera's view as a flat array, for projectToBasis() and mapBetweenBases(): its right,
+  ' up and back axes, the eye, the focal length in pixels and the canvas centre. Projects as
+  ' Camera3d does, without the rounding to whole pixels.
+  '
+  ' @param {BGE.Math.Vector} rightAxis
+  ' @param {BGE.Math.Vector} upAxis
+  ' @param {BGE.Math.Vector} backAxis the camera looks down -backAxis
+  ' @param {BGE.Math.Vector} eye
+  ' @param {float} focal
+  ' @param {float} centreX
+  ' @param {float} centreY
+  ' @return {float[]}
+  function cameraBasis(rightAxis as BGE.Math.Vector, upAxis as BGE.Math.Vector, backAxis as BGE.Math.Vector, eye as BGE.Math.Vector, focal as float, centreX as float, centreY as float) as float[]
+    return [rightAxis.x, rightAxis.y, rightAxis.z ?? 0.0, upAxis.x, upAxis.y, upAxis.z ?? 0.0, backAxis.x, backAxis.y, backAxis.z ?? 0.0, eye.x, eye.y, eye.z ?? 0.0, focal, centreX, centreY]
+  end function
+
+  ' cameraBasis() for a camera's world-to-camera matrix (a rigid transform, as Camera3d's).
+  '
+  ' @param {float[][]} worldToCamera
+  ' @param {BGE.Math.Vector} eye
+  ' @param {float} focal
+  ' @param {float} frameWidth
+  ' @param {float} frameHeight
+  ' @return {float[]}
+  function basisFromView(worldToCamera as float[][], eye as BGE.Math.Vector, focal as float, frameWidth as float, frameHeight as float) as float[]
+    w = worldToCamera
+    rightAxis = BGE.Math.VectorOps.create(w[0][0], w[1][0], w[2][0])
+    upAxis = BGE.Math.VectorOps.create(w[0][1], w[1][1], w[2][1])
+    backAxis = BGE.Math.VectorOps.create(w[0][2], w[1][2], w[2][2])
+    return cameraBasis(rightAxis, upAxis, backAxis, eye, focal, frameWidth * 0.5, frameHeight * 0.5)
+  end function
+
+  ' The same camera turned level: the same eye and heading, with no pitch or roll (world up
+  ' is +y). World verticals project as vertical lines in it, which the column warp needs.
+  '
+  ' @param {float[]} basis from cameraBasis()
+  ' @return {float[]} empty when the camera looks almost straight up or down
+  function levelBasis(basis as float[]) as float[]
+    ' heading: the view direction (-back) flattened
+    fx = -basis[6]
+    fz = -basis[8]
+    length = Sqr(fx * fx + fz * fz)
+    if length < 0.05
+      return [] as float[]
+    end if
+    fx = fx / length
+    fz = fz / length
+    ' right is horizontal, on the same side as the camera's own
+    rx = -fz
+    rz = fx
+    if rx * basis[0] + rz * basis[2] < 0
+      rx = -rx
+      rz = -rz
+    end if
+    return [rx, 0.0, rz, 0.0, 1.0, 0.0, -fx, 0.0, -fz, basis[9], basis[10], basis[11], basis[12], basis[13], basis[14]]
+  end function
+
+  ' Projects world points through a cameraBasis().
+  '
+  ' @param {float[]} basis
+  ' @param {BGE.Math.Vector[]} points
+  ' @param {float[]} outX cleared, then each point's canvas x
+  ' @param {float[]} outY
+  ' @return {boolean} false as soon as a point isn't in front of the camera
+  function projectToBasis(basis as float[], points as BGE.Math.Vector[], outX as float[], outY as float[]) as boolean
+    outX.Clear()
+    outY.Clear()
+    rx = basis[0]
+    ry = basis[1]
+    rz = basis[2]
+    ux = basis[3]
+    uy = basis[4]
+    uz = basis[5]
+    bx = basis[6]
+    by = basis[7]
+    bz = basis[8]
+    focal = basis[12]
+    for each point in points
+      dx = point.x - basis[9]
+      dy = point.y - basis[10]
+      dz = (point.z ?? 0.0) - basis[11]
+      depth = -(dx * bx + dy * by + dz * bz)
+      if depth <= 0.001
+        return false
+      end if
+      outX.push(basis[13] + focal * (dx * rx + dy * ry + dz * rz) / depth)
+      outY.push(basis[14] - focal * (dx * ux + dy * uy + dz * uz) / depth)
+    end for
+    return true
+  end function
+
+  ' Where the canvas point (x, y) of one camera lands in another at the same eye (the view
+  ' turned): its ray, projected again. Writes x, y to out[0], out[1].
+  '
+  ' @param {float[]} fromBasis
+  ' @param {float[]} toBasis
+  ' @param {float} x
+  ' @param {float} y
+  ' @param {float[]} out
+  ' @return {boolean} false if the ray isn't in front of the other camera
+  function mapBetweenBases(fromBasis as float[], toBasis as float[], x as float, y as float, out as float[]) as boolean
+    a = (x - fromBasis[13]) / fromBasis[12]
+    b = (fromBasis[14] - y) / fromBasis[12]
+    dx = fromBasis[0] * a + fromBasis[3] * b - fromBasis[6]
+    dy = fromBasis[1] * a + fromBasis[4] * b - fromBasis[7]
+    dz = fromBasis[2] * a + fromBasis[5] * b - fromBasis[8]
+    depth = -(dx * toBasis[6] + dy * toBasis[7] + dz * toBasis[8])
+    if depth <= 0.000001
+      return false
+    end if
+    out[0] = toBasis[13] + toBasis[12] * (dx * toBasis[0] + dy * toBasis[1] + dz * toBasis[2]) / depth
+    out[1] = toBasis[14] - toBasis[12] * (dx * toBasis[3] + dy * toBasis[4] + dz * toBasis[5]) / depth
+    return true
+  end function
+
+  ' Where a capture's canvas point is drawn now: into the level view at capture, through the
+  ' column warp, then out of the level view now into the camera now.
+  '
+  ' @param {roAssociativeArray} params a column warp fitted between the two level views
+  ' @param {float[][]} bases capture camera, capture level, current level, current camera
+  ' @param {float} x
+  ' @param {float} y
+  ' @param {float[]} out x, y written to out[0], out[1]
+  ' @return {boolean}
+  function mapCaptureToNow(params as roAssociativeArray, bases as float[][], x as float, y as float, out as float[]) as boolean
+    if not mapBetweenBases(bases[0], bases[1], x, y, out)
+      return false
+    end if
+    warped = mapColumns(params, out[0], out[1])
+    return mapBetweenBases(bases[2], bases[3], warped.x, warped.y, out)
+  end function
+
+  ' How to draw each strip between `cuts` (capture bitmap columns) now: [x, y, x scale, y
+  ' scale, rotation] per strip, flat, for DrawTransformedObject about the strip's top left
+  ' (rotation in radians, counterclockwise on screen). Each cut's top and bottom are mapped
+  ' (mapCaptureToNow()); a strip turns to follow the line through its middle, so verticals
+  ' keep converging as they should under a pitched camera. A strip that would flip or collapse
+  ' gets 0 scales.
+  '
+  ' @param {roAssociativeArray} params
+  ' @param {float[][]} bases see mapCaptureToNow()
+  ' @param {float} originX the bitmap's left edge, in capture canvas x
+  ' @param {integer[]} cuts
+  ' @param {float} top the bitmap's top, in capture canvas y
+  ' @param {float} height
+  ' @return {float[]} empty if a corner won't map
+  function stripTransforms(params as roAssociativeArray, bases as float[][], originX as float, cuts as integer[], top as float, height as float) as float[]
+    topX = [] as float[]
+    topY = [] as float[]
+    bottomX = [] as float[]
+    bottomY = [] as float[]
+    out = [0.0, 0.0] as float[]
+    bottom = top + height
+    for each cut in cuts
+      if not mapCaptureToNow(params, bases, originX + cut, top, out)
+        return [] as float[]
+      end if
+      topX.push(out[0])
+      topY.push(out[1])
+      if not mapCaptureToNow(params, bases, originX + cut, bottom, out)
+        return [] as float[]
+      end if
+      bottomX.push(out[0])
+      bottomY.push(out[1])
+    end for
+    transforms = [] as float[]
+    for i = 0 to cuts.count() - 2
+      ' the line through the strip's middle sets its turn and height
+      vx = (bottomX[i] + bottomX[i + 1] - topX[i] - topX[i + 1]) * 0.5
+      vy = (bottomY[i] + bottomY[i + 1] - topY[i] - topY[i + 1]) * 0.5
+      tall = Sqr(vx * vx + vy * vy)
+      theta = BGE.Math.Atan2(vx, vy)
+      ' width along the strip's turned x axis, (cos, -sin), averaged over its top and bottom
+      c = Cos(theta)
+      s = Sin(theta)
+      across = ((topX[i + 1] - topX[i] + bottomX[i + 1] - bottomX[i]) * c - (topY[i + 1] - topY[i] + bottomY[i + 1] - bottomY[i]) * s) * 0.5
+      scaleX = across / (cuts[i + 1] - cuts[i])
+      scaleY = tall / height
+      if vy <= 0 or scaleX <= 0 or scaleY <= 0
+        scaleX = 0
+        scaleY = 0
+      end if
+      transforms.append([topX[i], topY[i], scaleX, scaleY, theta])
+    end for
+    return transforms
+  end function
+
+  ' Whether the strips keep a capture's clip rect over the whole frame, so the parts the
+  ' capture left out stay off it: the rect's top and bottom at its sides and every cut, and
+  ' its sides at the top, middle and bottom, mapped (mapCaptureToNow()).
+  '
+  ' @param {roAssociativeArray} params
+  ' @param {float[][]} bases
+  ' @param {float} x0 the clip rect, in capture canvas coordinates
+  ' @param {float} y0
+  ' @param {float} x1
+  ' @param {float} y1
+  ' @param {float[]} cutXs the cuts, in capture canvas x
+  ' @param {float} frameWidth
+  ' @param {float} frameHeight
+  ' @return {boolean}
+  function stripsCoverFrame(params as roAssociativeArray, bases as float[][], x0 as float, y0 as float, x1 as float, y1 as float, cutXs as float[], frameWidth as float, frameHeight as float) as boolean
+    out = [0.0, 0.0] as float[]
+    for each y in [y0, (y0 + y1) * 0.5, y1]
+      if not mapCaptureToNow(params, bases, x0, y, out) or out[0] > 0
+        return false
+      end if
+      if not mapCaptureToNow(params, bases, x1, y, out) or out[0] < frameWidth
+        return false
+      end if
+    end for
+    xs = [x0, x1] as float[]
+    for each x in cutXs
+      if x > x0 and x < x1
+        xs.push(x)
+      end if
+    end for
+    for each x in xs
+      if not mapCaptureToNow(params, bases, x, y0, out) or out[1] > 0
+        return false
+      end if
+      if not mapCaptureToNow(params, bases, x, y1, out) or out[1] < frameHeight
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  ' Where to cut a column warp's capture x (in its level view) into strips, from leftX to
+  ' rightX: each knot segment split as columnSegmentStrips() says, and the parts past the outer
+  ' knots a strip each. A projective warp's cuts are spaced evenly in current x, where a flat
+  ' wall's top and bottom are straight lines, so every strip changes about as much.
+  '
+  ' @param {roAssociativeArray} params
+  ' @param {float} leftX
+  ' @param {float} rightX
+  ' @param {float} top the bitmap's top, in level capture y
+  ' @param {float} bottom
+  ' @param {float} maxStep
+  ' @return {float[]} increasing, leftX first and rightX last
+  function levelStripCuts(params as roAssociativeArray, leftX as float, rightX as float, top as float, bottom as float, maxStep as float) as float[]
+    knotX = params.knotX
+    cuts = [leftX] as float[]
+    projective = params.projective = true
+    for j = 0 to knotX.count() - 2
+      strips = columnSegmentStrips(params, j, top, bottom, maxStep)
+      x0 = params.x[j]
+      x1 = params.x[j + 1]
+      for k = 0 to strips
+        t = k / strips
+        if projective and k > 0 and k < strips
+          ' invert the perspective map at current x evenly between the knots'
+          current = x0 + (x1 - x0) * t
+          q0 = params.q[j]
+          q1 = params.q[j + 1]
+          denominator = q0 * (current - x0) - q1 * (current - x1)
+          if denominator <> 0
+            t = q0 * (current - x0) / denominator
+          end if
+        end if
+        cut = knotX[j] + (knotX[j + 1] - knotX[j]) * t
+        if cut > cuts[cuts.count() - 1] + 0.5 and cut < rightX - 0.5
+          cuts.push(cut)
+        end if
+      end for
+    end for
+    cuts.push(rightX)
+    return cuts
+  end function
+
+  ' The least and most a column warp stretches capture x anywhere between its knots. A
+  ' projective segment stretches most at one end: its average stretch times q1 / q0 at the
+  ' first knot, q0 / q1 at the second.
+  '
+  ' @param {roAssociativeArray} params
+  ' @return {float[]} [least, most]
+  function columnsStretchRange(params as roAssociativeArray) as float[]
+    least = 1000000.0
+    most = 0.0
+    for j = 1 to params.knotX.count() - 1
+      stretch = (params.x[j] - params.x[j - 1]) / (params.knotX[j] - params.knotX[j - 1])
+      low = stretch
+      high = stretch
+      if params.projective = true
+        ratio = params.q[j] / params.q[j - 1]
+        low = stretch * BGE.Math.Min(ratio, 1 / ratio)
+        high = stretch * BGE.Math.Max(ratio, 1 / ratio)
+      end if
+      least = BGE.Math.Min(least, low)
+      most = BGE.Math.Max(most, high)
+    end for
+    return [least, most]
+  end function
+
+  ' Moves the inner knot nearest x onto it - the crease between two walls, where the warp
+  ' changes from one wall to the next - if the knots stay in order more than a pixel apart.
+  '
+  ' @param {float[]} knotX increasing, changed in place
+  ' @param {float} x
+  sub snapKnotTo(knotX as float[], x as float)
+    if knotX.count() < 3
+      return
+    end if
+    best = 1
+    for j = 2 to knotX.count() - 2
+      if Abs(knotX[j] - x) < Abs(knotX[best] - x)
+        best = j
+      end if
+    end for
+    if x > knotX[best - 1] + 1 and x < knotX[best + 1] - 1
+      knotX[best] = x
+    end if
+  end sub
+
+  ' Which of the points to keep, at most maxPoints of them: the leftmost, rightmost, top and
+  ' bottom ones, so knots and errors still reach the model's outline, then an even spread.
+  '
+  ' @param {float[]} xs
+  ' @param {float[]} ys
+  ' @param {integer} maxPoints below 4 keeps every point
+  ' @return {integer[]} indices
+  function subsetWithExtremes(xs as float[], ys as float[], maxPoints as integer) as integer[]
+    n = xs.count()
+    kept = [] as integer[]
+    if n <= maxPoints or maxPoints < 4
+      for i = 0 to n - 1
+        kept.push(i)
+      end for
+      return kept
+    end if
+    extremes = [0, 0, 0, 0] as integer[]
+    for i = 1 to n - 1
+      if xs[i] < xs[extremes[0]]
+        extremes[0] = i
+      end if
+      if xs[i] > xs[extremes[1]]
+        extremes[1] = i
+      end if
+      if ys[i] < ys[extremes[2]]
+        extremes[2] = i
+      end if
+      if ys[i] > ys[extremes[3]]
+        extremes[3] = i
+      end if
+    end for
+    taken = {}
+    for each i in extremes
+      key = i.toStr()
+      if not taken.DoesExist(key)
+        taken[key] = true
+        kept.push(i)
+      end if
+    end for
+    stride = n / maxPoints
+    k = 0
+    while kept.count() < maxPoints and k < maxPoints
+      i = Int(k * stride)
+      key = i.toStr()
+      if not taken.DoesExist(key)
+        taken[key] = true
+        kept.push(i)
+      end if
+      k++
+    end while
+    return kept
+  end function
+
   ' A projective warp's denominator, kept positive past the outer knots, where it can reach
   ' 0 before the bitmap's edge.
   function projectiveDenominator(d as float, q0 as float, q1 as float) as float
@@ -645,38 +911,18 @@ namespace BGE.ImpostorFit
     return Int(change / (2 * maxStep) + 0.999)
   end function
 
-  ' Which pixel columns of the captured bitmap to cut it at for a column warp, from 0 to its
-  ' width. With stripWidth > 0 every strip is that wide; otherwise each knot segment is split
-  ' as columnSegmentStrips() says, and the parts past the outer knots are a strip each.
+  ' Strips every stripWidth pixels across a bitmap `width` wide: the cuts from 0 to width.
   '
-  ' @param {roAssociativeArray} params
-  ' @param {float} originX the bitmap's left edge, in capture x
-  ' @param {integer} width the bitmap's width
-  ' @param {float} top its top, in capture y
-  ' @param {float} bottom its bottom
-  ' @param {float} maxStep
-  ' @param {integer} stripWidth
+  ' @param {integer} width
+  ' @param {integer} stripWidth above 0
   ' @return {integer[]}
-  function columnStripCuts(params as roAssociativeArray, originX as float, width as integer, top as float, bottom as float, maxStep as float, stripWidth as integer) as integer[]
+  function fixedStripCuts(width as integer, stripWidth as integer) as integer[]
     cuts = [0] as integer[]
-    if stripWidth > 0
-      x = stripWidth
-      while x < width
-        cuts.push(x)
-        x += stripWidth
-      end while
-    else
-      knotX = params.knotX
-      for j = 0 to knotX.count() - 2
-        strips = columnSegmentStrips(params, j, top, bottom, maxStep)
-        for s = 0 to strips
-          cut = Int(knotX[j] - originX + (knotX[j + 1] - knotX[j]) * s / strips + 0.5)
-          if cut > cuts[cuts.count() - 1] and cut < width
-            cuts.push(cut)
-          end if
-        end for
-      end for
-    end if
+    x = stripWidth
+    while x < width
+      cuts.push(x)
+      x += stripWidth
+    end while
     cuts.push(width)
     return cuts
   end function
