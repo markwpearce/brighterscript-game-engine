@@ -1,8 +1,8 @@
 import "pkg:/source/engine/GameScene.bs"
 import "pkg:/source/utils/SaveSlot.bs"
 import "pkg:/source/story/ValueKinds.bs"
-import "pkg:/source/story/StoryState.bs"
-import "pkg:/source/story/DialogueRunner.bs"
+import "pkg:/source/story/StorySession.bs"
+import "pkg:/source/story/DebugState.bs"
 import "pkg:/source/story/StoryLoader.bs"
 import "../Novel/Characters.bs"
 import "../Novel/VnSave.bs"
@@ -17,13 +17,17 @@ import "pkg:/source/engine/ui/Button.bs"
 ' line's background/left/right keys. OK reads on, * or Up opens the backlog, Back returns to the title.
 '
 ' changeScene args: {continue: true} resumes the save, {node, flags, items} starts at a node with
-' saving off (deep links), {} starts a new game.
+' saving off (deep links; flags/items as BGE.Story.applyDebugState() takes them), {} starts a new
+' game.
 class StageScene extends BGE.GameScene
 
   ' Both off on deep links (a node given), so testing never touches the real save or endings.
   private slot as BGE.SaveSlot = invalid
   private endings as BGE.SaveProfile = invalid
-  private story as BGE.Story.StoryData = invalid
+  ' Settles each step and hands back what it posted (endings). Made per visit, not added to the
+  ' game: nothing outside the scene needs it.
+  private session as BGE.Story.StorySession = invalid
+  ' Aliases of the session's.
   private state as BGE.Story.StoryState = invalid
   private runner as BGE.Story.DialogueRunner = invalid
   private stage as VnStage = invalid
@@ -62,9 +66,14 @@ class StageScene extends BGE.GameScene
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.story = BGE.Story.loadStory("pkg:/story/mutiny.json")
-    m.state = new BGE.Story.StoryState(m.story)
-    m.runner = new BGE.Story.DialogueRunner(m.state, m.story)
+    story = BGE.Story.loadStory("pkg:/story/mutiny.json")
+    if story = invalid
+      ' loadStory has said why; the stage shows The End
+      story = {nodes: {}} as BGE.Story.StoryData
+    end if
+    m.session = new BGE.Story.StorySession(m.game, story, {name: "mutinySession"})
+    m.state = m.session.state
+    m.runner = m.session.runner
     m.stage = {background: "", left: "", right: ""}
     m.ended = false
     m.backlog = invalid
@@ -88,9 +97,10 @@ class StageScene extends BGE.GameScene
       startNode = "start"
       if not savingOn
         startNode = args.node
-        m.applyDeepLinkState(args)
+        ' args["items"]: args.items would read as AA.Items()
+        BGE.Story.applyDebugState(m.state, args.flags, args["items"])
       end if
-      m.applyResult(m.runner.start(startNode))
+      m.recordEndings(m.session.start(startNode))
     end if
     m.refresh()
   end sub
@@ -107,27 +117,6 @@ class StageScene extends BGE.GameScene
     m.addUi(m.textBox)
     ' Opens itself with addUi() when there are choices to show.
     m.choiceList = new ChoiceList(m.game)
-  end sub
-
-  ' Deep links: set flags and give items before the start node runs.
-  private sub applyDeepLinkState(args as roAssociativeArray)
-    if type(args.flags) = "roArray"
-      for each flagName in args.flags
-        if BGE.Story.valueKind(flagName) = "string"
-          m.state.flags.set(flagName, true)
-        end if
-      end for
-    end if
-    ' items may be an array of ids or an AA keyed by id (args.items would read as AA.Items())
-    items = args["items"] as dynamic
-    if type(items) = "roArray" or type(items) = "roAssociativeArray"
-      for each itemId in items
-        if BGE.Story.valueKind(itemId) = "string"
-          m.state.inventory.add(itemId)
-        end if
-      end for
-    end if
-    m.state.settle()
   end sub
 
   ' Resuming at a choice: show the line the choices followed.
@@ -175,7 +164,7 @@ class StageScene extends BGE.GameScene
       if m.textBox.isTyping()
         m.textBox.finishTyping()
       else
-        m.applyResult(m.runner.advance())
+        m.recordEndings(m.session.advance())
         m.refresh()
       end if
     end if
@@ -190,7 +179,7 @@ class StageScene extends BGE.GameScene
       m.lineTyping = false
       if m.runner.choicesFollow()
         ' The whole line is showing: bring its choices up under it.
-        m.applyResult(m.runner.advance())
+        m.recordEndings(m.session.advance())
         m.refresh()
       end if
     end if
@@ -209,16 +198,15 @@ class StageScene extends BGE.GameScene
     end if
     index = button.value
     m.choiceList.clear()
-    m.applyResult(m.runner.choose(index))
+    m.recordEndings(m.session.choose(index))
     m.refresh()
   end sub
 
-  ' Settles the rules and records any endings reached (the profile ignores them on deep-link runs).
-  private sub applyResult(result as BGE.Story.StoryResult)
-    posts = [] as string[]
-    posts.append(result.posts)
-    posts.append(m.state.settle().posts)
-    for each eventName in posts
+  ' Records any endings a step reached (the profile ignores them on deep-link runs).
+  '
+  ' @param {BGE.Story.StoryResult} result - from the session, so already settled
+  private sub recordEndings(result as BGE.Story.StoryResult)
+    for each eventName in result.posts
       if Left(eventName, 7) = "ending:"
         m.endings.addToSet("endings", Mid(eventName, 8))
       end if

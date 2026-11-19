@@ -123,6 +123,14 @@ today's code path, unchanged. This guarantees existing 2D examples and any 3D ex
 hasn't opted in (`examples/3d`, `examples/terrain`, until a later pass considers them) see
 no behavior or performance change.
 
+**Objects across a node's plane** (added later): a plane is endless, but its quad isn't. A
+dynamic object whose bounds (`getBoundingPoints()`) cross a node's plane is placed by its
+centre only if it also overlaps the quad along both of the quad's edges. If it lies past an
+edge (thirdPerson's town: a house standing on the line of a fence further down the street), a
+plane at that edge separates the two, so it goes on whichever side draws it in the right order
+for the camera's side of that edge (`BGE.BSP.findBoundsLeaf()`). That leaf depends on the
+camera, so it's found again every frame rather than cached.
+
 ## Misuse detection: a static entity that moves anyway
 
 Piggybacks on the transform dirty-check every `Drawable` already runs
