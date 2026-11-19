@@ -1,105 +1,90 @@
+import "pkg:/source/engine/ui/Meter.bs"
+import "pkg:/source/engine/ui/Banner.bs"
 import "Entities/Knight.bs"
-
-interface HudBarFill
-  fraction as float
-  color as integer
-end interface
 
 ' Souls-style HUD: health and stamina bars in the top left, inside the title-safe area. Lost
 ' health shows as a pale chunk that drains after a moment, and the stamina bar flashes when an
-' action is refused for lack of it.
+' action is refused for lack of it. Also a boss's health along the bottom and a banner across
+' the middle. The bars are BGE.UI.Meter and the banner BGE.UI.Banner, drawn from the scene's
+' draw hook at fixed positions (update() each frame first).
 class Hud
 
-  healthColor as integer = &hB02020FF
-  healthLagColor as integer = &hE8C070FF
-  staminaColor as integer = &h3C9C46FF
-  staminaDeniedColor as integer = &hE8E8E8FF
-  backColor as integer = &h000000B0
-  bossColor as integer = &h9C1C1CFF
+  private healthMeter as BGE.UI.Meter = invalid
+  private staminaMeter as BGE.UI.Meter = invalid
+  private bossMeter as BGE.UI.Meter = invalid
+  private banner as BGE.UI.Banner = invalid
+  ' Stamina's deniedSeconds last frame: a jump up is a fresh refusal
+  private lastDeniedSeconds as float = 0
 
-  ' Where the lag chunk ends, as a fraction of max health
-  private lagFraction as float = 1
-  private lagHoldSeconds as float = 0
-  private lastHealthFraction as float = 1
+  sub new(game as BGE.Game)
+    m.healthMeter = new BGE.UI.Meter(game)
+    m.healthMeter.fillColor = &hB02020FF
+    m.healthMeter.lagEnabled = true
 
-  sub update(dt as float, player as Knight)
-    healthFraction = player.health / player.maxHealth
-    ' Each new hit holds the chunk for a moment again
-    if healthFraction < m.lastHealthFraction
-      m.lagHoldSeconds = 0
-    end if
-    m.lastHealthFraction = healthFraction
-    if healthFraction >= m.lagFraction
-      m.lagFraction = healthFraction
-      return
-    end if
-    m.lagHoldSeconds += dt
-    if m.lagHoldSeconds > 0.6
-      m.lagFraction = BGE.Math.Max(healthFraction, m.lagFraction - 0.5 * dt)
-    end if
+    m.staminaMeter = new BGE.UI.Meter(game)
+    m.staminaMeter.fillColor = &h3C9C46FF
+    m.staminaMeter.blinkColor = &hE8E8E8FF
+    ' the stamina refusal flash lasts as long as Stamina's denied window
+    m.staminaMeter.refuseSeconds = 0.4
+
+    m.bossMeter = new BGE.UI.Meter(game)
+    m.bossMeter.fillColor = &h9C1C1CFF
+    m.bossMeter.labelFontName = "default"
+
+    m.banner = new BGE.UI.Banner(game)
+    m.banner.fontName = "default"
   end sub
 
-  sub draw(uiRenderObj as BGE.Renderer, player as Knight)
+  sub update(dt as float, player as Knight)
+    m.healthMeter.setValue(player.health, player.maxHealth)
+    m.healthMeter.update(dt)
+
+    pool = player.stamina
+    m.staminaMeter.setValue(pool.current, pool.max)
+    if pool.deniedSeconds > m.lastDeniedSeconds
+      m.staminaMeter.refuse()
+    end if
+    m.lastDeniedSeconds = pool.deniedSeconds
+    m.staminaMeter.update(dt)
+
+    m.banner.update(dt)
+  end sub
+
+  sub draw(uiRenderObj as BGE.Renderer)
     center = uiRenderObj.getCanvasCenter()
     screenWidth = center.x * 2
     left = screenWidth * 0.1
     top = center.y * 2 * 0.1
 
-    healthWidth = screenWidth * 0.3
-    m.drawBar(uiRenderObj, left, top, healthWidth, 14, [
-      {fraction: m.lagFraction, color: m.healthLagColor},
-      {fraction: player.health / player.maxHealth, color: m.healthColor}
-    ])
-
-    staminaPool = player.stamina
-    staminaColor = m.staminaColor
-    ' Blink while an action is being refused
-    if staminaPool.deniedSeconds > 0 and fix(staminaPool.deniedSeconds * 10) mod 2 = 0
-      staminaColor = m.staminaDeniedColor
-    end if
-    m.drawBar(uiRenderObj, left, top + 22, screenWidth * 0.25, 10, [
-      {fraction: staminaPool.fraction(), color: staminaColor}
-    ])
+    m.healthMeter.drawAt(uiRenderObj, left, top, screenWidth * 0.3, 14)
+    m.staminaMeter.drawAt(uiRenderObj, left, top + 22, screenWidth * 0.25, 10)
   end sub
 
   ' A boss's name and health along the bottom of the screen, inside the title-safe area.
-  sub drawBossBar(uiRenderObj as BGE.Renderer, font as roFont, name as string, fraction as float)
+  sub drawBossBar(uiRenderObj as BGE.Renderer, name as string, health as float, maxHealth as float)
     center = uiRenderObj.getCanvasCenter()
     screenWidth = center.x * 2
     width = screenWidth * 0.6
     left = center.x - width / 2
     barTop = center.y * 2 * 0.9 - 12
-    uiRenderObj.DrawText(name, left, barTop - font.GetOneLineHeight() - 4, &hE8E0D0FF, font, "left")
-    m.drawBar(uiRenderObj, left, barTop, width, 12, [
-      {fraction: fraction, color: m.bossColor}
-    ])
+
+    m.bossMeter.label = name
+    m.bossMeter.setValue(health, maxHealth)
+    m.bossMeter.drawAt(uiRenderObj, left, barTop, width, 12)
   end sub
 
-  ' A gold line across the middle of the screen that fades in and out over `totalSeconds`
-  ' (`secondsLeft` counts down to 0), on a dark band.
-  sub drawBanner(uiRenderObj as BGE.Renderer, font as roFont, text as string, secondsLeft as float, totalSeconds as float)
-    shown = totalSeconds - secondsLeft
-    ' Half a second in, a second out
-    opacity = BGE.Math.Min(1, BGE.Math.Min(shown / 0.5, secondsLeft / 1))
-    if opacity <= 0
-      return
-    end if
-    alpha = Int(opacity * 255)
-    center = uiRenderObj.getCanvasCenter()
-    lineHeight = font.GetOneLineHeight()
-    uiRenderObj.drawRectangle(0, center.y - lineHeight, center.x * 2, lineHeight * 2, Int(opacity * 160))
-    uiRenderObj.DrawText(text, center.x, center.y - lineHeight / 2, (&hE8C060 << 8) + alpha, font, "center")
+  ' Shows `text` for `seconds` (fades in and out), replacing any banner showing.
+  sub showBanner(text as string, seconds as float)
+    m.banner.show(text, seconds)
   end sub
 
-  ' A backed bar; fills are drawn in order, so put the longest first.
-  private sub drawBar(uiRenderObj as BGE.Renderer, x as float, y as float, width as float, height as float, fills as HudBarFill[])
-    uiRenderObj.drawRectangle(x - 2, y - 2, width + 4, height + 4, m.backColor)
-    for each fill in fills
-      fillWidth = width * BGE.Math.Clamp(fill.fraction, 0, 1)
-      if fillWidth > 0
-        uiRenderObj.drawRectangle(x, y, fillWidth, height, fill.color)
-      end if
-    end for
+  sub hideBanner()
+    m.banner.hide()
+  end sub
+
+  ' Draws the banner, if one is showing.
+  sub drawBanner(uiRenderObj as BGE.Renderer)
+    m.banner.drawOn(uiRenderObj)
   end sub
 
 end class
