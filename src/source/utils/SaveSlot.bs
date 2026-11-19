@@ -1,0 +1,267 @@
+import "registry.bs"
+
+namespace BGE
+
+  ' A versioned save in the device registry. What goes in it is up to the game: write() any
+  ' JSON-friendly value and read() it back. It's stored as `{version, data}`.
+  '
+  ' read() only returns a save that can be used: one written with this `version`, or an older
+  ' one migrate() upgrades, that passes the `validate` function if one's given. Anything else
+  ' reads as invalid, so "Continue" can be shown with `exists(validate)`.
+  '
+  ' Set `enabled = false` to stop it reading or writing (e.g. while a deep link is testing a
+  ' level). Subclass and override migrate() to upgrade old saves.
+  '
+  ' @example
+  ' slot = new BGE.SaveSlot("my-game", "save", 2)
+  ' slot.write({level: 3, coins: 40})
+  ' save = slot.read(validateMySave) ' function(data) as dynamic: data, or invalid if bad
+  class SaveSlot
+
+    section as string
+    key as string
+    version as integer
+    ' While false, read() returns invalid and write()/delete() do nothing.
+    enabled as boolean = true
+
+    ' @param {string} section - registry section, e.g. your game's id
+    ' @param {string} [key="save"]
+    ' @param {integer} [version=1] - bump when the save's shape changes
+    sub new(section as string, key = "save" as string, version = 1 as integer)
+      m.section = section
+      m.key = key
+      m.version = version
+    end sub
+
+    ' The saved data, upgraded and validated, or invalid if there's none it can use.
+    '
+    ' @param {function} [validate=invalid] - function(data) as dynamic returning the (possibly
+    '   cleaned up) data, or invalid to reject it
+    ' @return {dynamic}
+    function read(validate = invalid as dynamic) as dynamic
+      if not m.enabled
+        return invalid
+      end if
+      raw = BGE.registryRead(m.section, m.key)
+      if raw = invalid
+        return invalid
+      end if
+      fromVersion = 0
+      data = raw
+      if type(raw) = "roAssociativeArray" and raw.Count() = 2 and raw.DoesExist("data") and m.isInteger(raw.version)
+        fromVersion = raw.version
+        data = raw.data
+      else if type(raw) = "roAssociativeArray" and m.isInteger(raw.version)
+        ' written before SaveSlot: the game's own version field
+        fromVersion = raw.version
+      end if
+      if fromVersion > m.version
+        return invalid
+      end if
+      if fromVersion < m.version
+        data = m.migrate(fromVersion, data)
+      end if
+      if data <> invalid and validate <> invalid
+        data = validate(data)
+      end if
+      return data
+    end function
+
+    ' Saves `data` under the current version.
+    '
+    ' @param {dynamic} data - anything FormatJson() can write
+    ' @return {boolean} false if the slot is disabled
+    function write(data as dynamic) as boolean
+      if not m.enabled
+        return false
+      end if
+      BGE.registryWrite(m.section, m.key, {version: m.version, data: data})
+      return true
+    end function
+
+    ' Deletes the save.
+    '
+    ' @return {boolean} false if the slot is disabled
+    function delete() as boolean
+      if not m.enabled
+        return false
+      end if
+      BGE.registryDelete(m.section, m.key)
+      return true
+    end function
+
+    ' Is there a save read() would return?
+    '
+    ' @param {function} [validate=invalid] - as for read()
+    ' @return {boolean}
+    function exists(validate = invalid as dynamic) as boolean
+      return m.read(validate) <> invalid
+    end function
+
+    ' Upgrades a save from an older version. Return the upgraded data, or invalid to drop it
+    ' (the default). `fromVersion` is 0 for data with no version at all.
+    '
+    ' @param {integer} fromVersion
+    ' @param {dynamic} data
+    ' @return {dynamic}
+    function migrate(fromVersion as integer, data as dynamic) as dynamic
+      return invalid
+    end function
+
+    private function isInteger(value as dynamic) as boolean
+      kind = type(value)
+      return kind = "roInt" or kind = "Integer" or kind = "roInteger" or kind = "LongInteger"
+    end function
+
+  end class
+
+  ' Data that lasts across saves and new games - settings, unlocks, endings found, high
+  ' scores - as named values in one registry key. Every change is written straight away.
+  '
+  ' @example
+  ' profile = new BGE.SaveProfile("my-game")
+  ' if profile.recordHighScore("arcade", score)
+  '   ' a new best
+  ' end if
+  class SaveProfile
+
+    section as string
+    key as string
+    ' While false, changes aren't written (reads still work from what's loaded).
+    enabled as boolean = true
+
+    private values as roAssociativeArray = {}
+
+    ' @param {string} section - registry section, e.g. your game's id
+    ' @param {string} [key="profile"]
+    sub new(section as string, key = "profile" as string)
+      m.section = section
+      m.key = key
+      m.reload()
+    end sub
+
+    ' Reads the profile from the registry again.
+    sub reload()
+      stored = BGE.registryRead(m.section, m.key)
+      if type(stored) = "roAssociativeArray"
+        m.values = stored
+      else
+        m.values = {}
+      end if
+    end sub
+
+    ' @param {string} name
+    ' @param {dynamic} [defaultValue=invalid]
+    ' @return {dynamic} the value, or defaultValue if it isn't set
+    function get(name as string, defaultValue = invalid as dynamic) as dynamic
+      if m.values.DoesExist(name)
+        return m.values[name]
+      end if
+      return defaultValue
+    end function
+
+    ' Sets a value and saves.
+    '
+    ' @param {string} name
+    ' @param {dynamic} value - anything FormatJson() can write
+    sub set(name as string, value as dynamic)
+      m.values[name] = value
+      m.save()
+    end sub
+
+    ' @param {string} name
+    ' @return {boolean}
+    function has(name as string) as boolean
+      return m.values.DoesExist(name)
+    end function
+
+    ' Removes a value and saves.
+    '
+    ' @param {string} name
+    sub remove(name as string)
+      m.values.Delete(name)
+      m.save()
+    end sub
+
+    ' Removes everything, including the registry key.
+    sub clear()
+      m.values = {}
+      if m.enabled
+        BGE.registryDelete(m.section, m.key)
+      end if
+    end sub
+
+    ' Every value, by name. Don't change it - use set().
+    '
+    ' @return {roAssociativeArray}
+    function getAll() as roAssociativeArray
+      return m.values
+    end function
+
+    ' Adds `id` to a set kept under `name` (e.g. endings found).
+    '
+    ' @param {string} name
+    ' @param {string} id
+    ' @return {boolean} true if it wasn't there before
+    function addToSet(name as string, id as string) as boolean
+      found = m.get(name)
+      if type(found) <> "roAssociativeArray"
+        found = {}
+      end if
+      if found.DoesExist(id)
+        return false
+      end if
+      found[id] = true
+      m.set(name, found)
+      return true
+    end function
+
+    ' How many ids are in the set kept under `name`.
+    '
+    ' @param {string} name
+    ' @return {integer}
+    function setCount(name as string) as integer
+      found = m.get(name)
+      if type(found) <> "roAssociativeArray"
+        return 0
+      end if
+      return found.Count()
+    end function
+
+    ' The best score recorded for a table, 0 if none.
+    '
+    ' @param {string} [table="highScore"]
+    ' @return {integer}
+    function getHighScore(table = "highScore" as string) as integer
+      best = m.get(table, 0)
+      kind = type(best)
+      if kind = "roInt" or kind = "Integer" or kind = "roInteger" or kind = "LongInteger"
+        return best
+      else if kind = "roFloat" or kind = "Float" or kind = "Double" or kind = "roDouble"
+        return Int(best)
+      end if
+      return 0
+    end function
+
+    ' Keeps `score` if it beats the best for the table.
+    '
+    ' @param {string} table
+    ' @param {integer} score
+    ' @return {boolean} true if it's a new best
+    function recordHighScore(table as string, score as integer) as boolean
+      if score <= m.getHighScore(table)
+        return false
+      end if
+      m.set(table, score)
+      return true
+    end function
+
+    private sub save()
+      if m.enabled
+        BGE.registryWrite(m.section, m.key, m.values)
+      end if
+    end sub
+
+  end class
+
+end namespace
