@@ -1,0 +1,184 @@
+import "Game.bs"
+import "GameEntity.bs"
+import "GameInput.bs"
+import "GameScene.bs"
+import "renderer/Renderer.bs"
+import "../utils/colors.bs"
+
+namespace BGE
+
+  ' Options for BGE.SceneCycler. Every field is optional.
+  interface SceneCyclerOptions extends roAssociativeArray
+    ' Button that changes to the next scene (default "fastforward"; "" for none).
+    optional nextButton as string
+    ' Button that changes to the previous scene (default "rewind"; "" for none).
+    optional previousButton as string
+    ' Does the remote's Back button quit the game (default true)?
+    optional quitOnBack as boolean
+    ' The scenes to cycle through, in order (default every scene, in the order they were
+    ' defined - see Game.getSceneNames()).
+    optional sceneNames as string[]
+    ' Hint drawn at the bottom of the screen (default "Change Scene: << / >>  |  Quit: Back";
+    ' "" draws nothing).
+    optional caption as string
+    ' The caption's color (default white).
+    optional captionColor as integer
+    ' The caption's font key (default "default").
+    optional captionFont as string
+  end interface
+
+  ' Steps through a game's scenes with the remote: Fast Forward/Rewind change to the next or
+  ' previous scene (wrapping around), Back quits, and a hint along the bottom of the screen
+  ' says so. Made for demo apps that show one feature per scene.
+  '
+  ' It's a persistent entity, so add it once (e.g. in main) and it stays across scene changes.
+  ' Configure it with options, or subclass it: override onSceneChanged() to do something on
+  ' every change (reset the camera, say), changeToScene() to change scene differently (with a
+  ' fade), drawCaption() for your own hint, or quit() for what Back does. Set `enabled` to
+  ' false to turn it off (hint included) for a while, e.g. in a scene that needs those buttons itself.
+  '
+  ' @example
+  ' game.defineScene(new FirstScene(game))
+  ' game.defineScene(new SecondScene(game))
+  ' cycler = new BGE.SceneCycler(game)
+  ' game.addEntity(cycler)
+  ' game.changeScene(game.getSceneNames()[0])
+  class SceneCycler extends BGE.GameEntity
+
+    nextButton as string = "fastforward"
+    previousButton as string = "rewind"
+    quitOnBack as boolean = true
+    ' Empty (the default) means every scene, from Game.getSceneNames() at the time of the change.
+    sceneNames as string[] = []
+    caption as string = "Change Scene: << / >>  |  Quit: Back"
+    captionColor as integer = BGE.Colors.White
+    captionFont as string = "default"
+
+    ' The scene this cycler asked for, until the change takes effect
+    private pendingSceneName as string = ""
+
+    ' @param {BGE.Game} game
+    ' @param {BGE.SceneCyclerOptions} [options={}]
+    sub new(game as BGE.Game, options = {} as BGE.SceneCyclerOptions)
+      super(game)
+      m.name = "SceneCycler"
+      m.persistent = true
+      for each key in options.Keys()
+        m[key] = options[key]
+      end for
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      if not input.press
+        return
+      end if
+      if m.quitOnBack and input.isRemoteBack()
+        m.quit()
+      else if m.nextButton <> "" and input.isButton(m.nextButton)
+        m.nextScene()
+      else if m.previousButton <> "" and input.isButton(m.previousButton)
+        m.previousScene()
+      end if
+    end sub
+
+    override sub onChangeScene(newScene as BGE.GameScene)
+      if m.pendingSceneName <> "" and m.pendingSceneName = newScene.name
+        m.pendingSceneName = ""
+        m.onSceneChanged(newScene.name)
+      end if
+    end sub
+
+    override sub onDrawEnd(renderer as BGE.Renderer, uiRenderer as BGE.Renderer)
+      if m.enabled and m.caption <> ""
+        m.drawCaption(uiRenderer)
+      end if
+    end sub
+
+    ' The scenes this cycles through, in order.
+    '
+    ' @return {string[]}
+    function getSceneNames() as string[]
+      if m.sceneNames.count() > 0
+        return m.sceneNames
+      end if
+      return m.game.getSceneNames()
+    end function
+
+    ' Changes to the next scene, wrapping around to the first.
+    sub nextScene()
+      m.stepScene(1)
+    end sub
+
+    ' Changes to the previous scene, wrapping around to the last.
+    sub previousScene()
+      m.stepScene(-1)
+    end sub
+
+    ' Called when a change this cycler made takes effect (after any fade out), as the old scene
+    ' is left and before the new one loads. Does nothing by default.
+    '
+    ' @param {string} sceneName - the scene being changed to
+    sub onSceneChanged(sceneName as string)
+    end sub
+
+    ' Changes scene. Override for a different change, e.g. Game.changeSceneWithFade().
+    '
+    ' @param {string} sceneName
+    ' @return {boolean} whether the change was made
+    protected function changeToScene(sceneName as string) as boolean
+      return m.game.changeScene(sceneName)
+    end function
+
+    ' What Back does when quitOnBack is set: ends the game.
+    protected sub quit()
+      m.game.End()
+    end sub
+
+    ' Draws the caption centered along the bottom of the title-safe area.
+    '
+    ' @param {BGE.Renderer} uiRenderer
+    protected sub drawCaption(uiRenderer as BGE.Renderer)
+      font = m.game.getFontOr(m.captionFont)
+      if invalid = font
+        return
+      end if
+      size = uiRenderer.getCanvasSize()
+      y = size.y * 0.9 - font.GetOneLineHeight()
+      uiRenderer.drawText(m.caption, size.x / 2, y, m.captionColor, font, "center")
+    end sub
+
+    private sub stepScene(direction as integer)
+      names = m.getSceneNames()
+      count = names.count()
+      if count = 0
+        return
+      end if
+      currentIndex = -1
+      if invalid <> m.game.currentScene
+        currentName = m.game.currentScene.name
+        for i = 0 to count - 1
+          if names[i] = currentName
+            currentIndex = i
+            exit for
+          end if
+        end for
+      end if
+      nextIndex = 0
+      if currentIndex < 0
+        ' not one of ours: forward goes to the first, back to the last
+        if direction < 0
+          nextIndex = count - 1
+        end if
+      else
+        nextIndex = (currentIndex + direction + count) mod count
+      end if
+      ' set first: with the game not running, changeScene() applies the change straight away
+      m.pendingSceneName = names[nextIndex]
+      if not m.changeToScene(m.pendingSceneName)
+        m.pendingSceneName = ""
+      end if
+    end sub
+
+  end class
+
+end namespace

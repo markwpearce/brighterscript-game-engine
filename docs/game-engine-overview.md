@@ -101,6 +101,46 @@ end sub
 See [Loading Assets](/loading-assets) for custom loading work, loading screens and background
 loading.
 
+### Changing scenes
+
+Switch scenes by name, passing whatever the next scene's `onLoad`/`onCreate` needs in `args`:
+
+```
+m.game.changeScene("LevelScene", {level: 2})
+m.game.changeSceneWithFade("TownScene", {from: "crypt"})
+m.game.resetScene() ' the current scene again, with the same args
+```
+
+The old scene gets `onChangeScene()` then `onDestroy()`, its non-`persistent` entities, `addUi()`
+widgets and its own drawables are removed, and the new scene's `onLoad()`/`onCreate()` run.
+Changing to the scene you're already in (the next level of a level scene, or `resetScene()`)
+works exactly the same way, so `onCreate()` can always add its drawables from scratch. Set
+`persistDrawablesAcrossSceneChange = true` on a scene to keep its own drawables, or override
+`onChangeScene()` (without calling `super`) to clean up yourself.
+
+`game.getSceneNames()` lists the scenes in the order you defined them.
+
+### Demo apps: stepping through scenes
+
+For an app that shows one thing per scene, add a `BGE.SceneCycler`: Fast Forward/Rewind change
+to the next/previous scene in definition order, Back quits, and a hint is drawn along the bottom
+of the screen. It's persistent, so add it once:
+
+```
+game.defineScene(new FirstScene(game))
+game.defineScene(new SecondScene(game))
+cycler = new BGE.SceneCycler(game, {caption: "Next: >>  |  Previous: <<"})
+game.addEntity(cycler)
+game.changeScene(game.getSceneNames()[0])
+```
+
+Options set the buttons (`nextButton`, `previousButton`, `quitOnBack`), the scenes and their
+order (`sceneNames`) and the hint (`caption`, `""` for none). Subclass it to do something on
+every change - `examples/3d` puts the camera back in `onSceneChanged()` - or override
+`changeToScene()` to fade. Set `enabled = false` while a scene needs those buttons itself.
+`BGE.cycleDrawMode(entity)` and `BGE.nextDrawMode(mode, first, last)` step through the draw
+modes for demos that show them off.
+
 ### Laying out UI
 
 UI widgets in `game.gameUi` draw on their own canvas, `game.uiCanvas`, not the game canvas. Unless

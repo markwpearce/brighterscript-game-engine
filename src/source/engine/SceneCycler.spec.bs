@@ -1,0 +1,172 @@
+import "pkg:/source/engine/SceneCycler.bs"
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameScene.bs"
+import "pkg:/source/engine/GameInput.bs"
+
+namespace tests
+  @suite("BGE.SceneCycler")
+  class SceneCyclerTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(640, 480)
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Zebra"}))
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Apple"}))
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Mango"}))
+      m.game.changeScene("Zebra")
+      ' not running, so later scene changes apply straight away
+      m.game.End()
+    end function
+
+    @describe("cycling")
+
+    @it("is persistent")
+    function _()
+      cycler = new BGE.SceneCycler(m.game)
+      m.assertTrue(cycler.persistent)
+    end function
+
+    @it("Fast Forward goes to the next scene in definition order")
+    function _()
+      cycler = new BGE.SceneCycler(m.game)
+      cycler.onInput(new BGE.GameInput(9, 0, 0)) ' fastforward
+      m.assertEqual("Apple", m.game.currentScene.name)
+      cycler.onInput(new BGE.GameInput(9, 0, 0))
+      m.assertEqual("Mango", m.game.currentScene.name)
+    end function
+
+    @it("wraps around both ways")
+    function _()
+      cycler = new BGE.SceneCycler(m.game)
+      cycler.onInput(new BGE.GameInput(8, 0, 0)) ' rewind
+      m.assertEqual("Mango", m.game.currentScene.name)
+      cycler.onInput(new BGE.GameInput(9, 0, 0))
+      m.assertEqual("Zebra", m.game.currentScene.name)
+    end function
+
+    @it("stays across scene changes")
+    function _()
+      cycler = new BGE.SceneCycler(m.game)
+      m.game.addEntity(cycler)
+      cycler.nextScene()
+      m.assertTrue(cycler.isValid())
+    end function
+
+    @it("ignores releases")
+    function _()
+      cycler = new BGE.SceneCycler(m.game)
+      cycler.onInput(new BGE.GameInput(109, 0, 0)) ' fastforward released
+      m.assertEqual("Zebra", m.game.currentScene.name)
+    end function
+
+    @it("takes its own scene list and buttons")
+    function _()
+      cycler = new BGE.SceneCycler(m.game, {sceneNames: ["Zebra", "Mango"], nextButton: "play", previousButton: ""})
+      cycler.onInput(new BGE.GameInput(9, 0, 0))
+      m.assertEqual("Zebra", m.game.currentScene.name)
+      cycler.onInput(new BGE.GameInput(13, 0, 0)) ' play
+      m.assertEqual("Mango", m.game.currentScene.name)
+      cycler.onInput(new BGE.GameInput(8, 0, 0))
+      m.assertEqual("Mango", m.game.currentScene.name)
+    end function
+
+    @it("from a scene not in its list, goes to the first or last")
+    function _()
+      cycler = new BGE.SceneCycler(m.game, {sceneNames: ["Apple", "Mango"]})
+      cycler.previousScene()
+      m.assertEqual("Mango", m.game.currentScene.name)
+      m.game.changeScene("Zebra")
+      cycler.nextScene()
+      m.assertEqual("Apple", m.game.currentScene.name)
+    end function
+
+    @it("calls onSceneChanged with the new scene's name when the change happens")
+    function _()
+      cycler = new RecordingSceneCyclerForTests(m.game)
+      m.game.addEntity(cycler)
+      cycler.nextScene()
+      m.assertEqual(["Apple"], cycler.changes)
+    end function
+
+    @it("calls onSceneChanged only once a fade out has finished")
+    function _()
+      cycler = new FadingSceneCyclerForTests(m.game)
+      m.game.addEntity(cycler)
+      cycler.nextScene()
+      m.assertEqual([], cycler.changes)
+      for i = 0 to 9
+        m.game.updateFadeTransitionForTest(0.02)
+      end for
+      m.assertEqual(["Apple"], cycler.changes)
+    end function
+
+    @it("doesn't call onSceneChanged for changes it didn't make")
+    function _()
+      cycler = new RecordingSceneCyclerForTests(m.game)
+      m.game.addEntity(cycler)
+      m.game.changeScene("Mango")
+      m.assertEqual([], cycler.changes)
+    end function
+
+    @describe("Back")
+
+    @it("quits on the remote's Back")
+    function _()
+      cycler = new RecordingSceneCyclerForTests(m.game)
+      cycler.onInput(new BGE.GameInput(0, 0, 0)) ' back
+      m.assertTrue(cycler.quitCalled)
+    end function
+
+    @it("doesn't quit when quitOnBack is false")
+    function _()
+      cycler = new RecordingSceneCyclerForTests(m.game, {quitOnBack: false})
+      cycler.onInput(new BGE.GameInput(0, 0, 0))
+      m.assertFalse(cycler.quitCalled)
+    end function
+
+    @describe("caption")
+
+    @it("has a default caption that can be replaced")
+    function _()
+      defaultCycler = new BGE.SceneCycler(m.game)
+      m.assertEqual("Change Scene: << / >>  |  Quit: Back", defaultCycler.caption)
+      cycler = new BGE.SceneCycler(m.game, {caption: ""})
+      m.assertEqual("", cycler.caption)
+    end function
+
+  end class
+
+  class FadingSceneCyclerForTests extends BGE.SceneCycler
+    changes = [] as string[]
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    override sub onSceneChanged(sceneName as string)
+      m.changes.push(sceneName)
+    end sub
+
+    protected override function changeToScene(sceneName as string) as boolean
+      return m.game.changeSceneWithFade(sceneName, {}, 0.05)
+    end function
+  end class
+
+  class RecordingSceneCyclerForTests extends BGE.SceneCycler
+    changes = [] as string[]
+    quitCalled as boolean = false
+
+    sub new(game as BGE.Game, options = {} as BGE.SceneCyclerOptions)
+      super(game, options)
+    end sub
+
+    override sub onSceneChanged(sceneName as string)
+      m.changes.push(sceneName)
+    end sub
+
+    protected override sub quit()
+      m.quitCalled = true
+    end sub
+  end class
+end namespace
