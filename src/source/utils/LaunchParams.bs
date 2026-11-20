@@ -1,0 +1,344 @@
+import "../roku_modules/rodash/rodash.d.bs"
+
+namespace BGE
+
+  ' Typed access to deep-link/launch params: the `args` Main() gets (e.g.
+  ' `rokubot launch dev --param level=3`), or any args AA such as a scene's.
+  '
+  ' Launch params arrive as strings, sometimes wrapped in one-element arrays, and the AA itself can
+  ' come wrapped too; the getters unwrap both. A value that's missing or doesn't parse gives the
+  ' default, so `level=abc` doesn't quietly become level 0.
+  '
+  ' @example
+  ' sub Main(args as dynamic)
+  '   params = new BGE.LaunchParams(args)
+  '   game = new BGE.Game(1280, 720)
+  '   if not game.applyLaunchQuality(params)
+  '     game.enableAdaptiveQuality()
+  '   end if
+  '   ' ... defineScene() calls ...
+  '   game.changeScene(params.sceneName(game.getSceneNames(), "TitleScene"), {
+  '     level: params.getInt("level", 1, 1, 9)
+  '   })
+  class LaunchParams
+
+    private values as roAssociativeArray
+    ' compiled once, not per number checked
+    private integerPattern as roRegex = BGE.integerStringPattern()
+    private numberPattern as roRegex = BGE.numberStringPattern()
+
+    ' @param {dynamic} args - Main()'s args, a one-element array holding them, or invalid
+    sub new(args = invalid as dynamic)
+      if type(args) = "roArray" and args.count() > 0
+        args = args[0]
+      end if
+      if type(args) = "roAssociativeArray"
+        m.values = args
+      else
+        m.values = {}
+      end if
+    end sub
+
+    ' Is `name` given?
+    '
+    ' @param {string} name
+    ' @return {boolean}
+    function has(name as string) as boolean
+      return invalid <> m.raw(name)
+    end function
+
+    ' The names given.
+    '
+    ' @return {string[]}
+    function keys() as string[]
+      return m.values.Keys() as string[]
+    end function
+
+    ' A param as a string, or `default` if it's missing.
+    '
+    ' @param {string} name
+    ' @param {string} [default=""]
+    ' @return {string}
+    function getString(name as string, default = "" as string) as string
+      value = m.raw(name)
+      if rodash.isString(value)
+        return value
+      else if rodash.isBoolean(value)
+        if value
+          return "true"
+        end if
+        return "false"
+      else if rodash.isNumber(value)
+        return value.toStr()
+      end if
+      return default
+    end function
+
+    ' A param as an integer, clamped to `min`..`max`, or `default` if it's missing or isn't a
+    ' whole number ("1.5" or 1.5).
+    '
+    ' @param {string} name
+    ' @param {integer} [default=0]
+    ' @param {integer} [min=-2147483648]
+    ' @param {integer} [max=2147483647]
+    ' @return {integer}
+    function getInt(name as string, default = 0 as integer, min = -2147483648 as integer, max = 2147483647 as integer) as integer
+      value = m.raw(name)
+      if rodash.isInteger(value)
+        result = value
+      else if rodash.isNumber(value)
+        if value <> Int(value)
+          return default
+        end if
+        result = value
+      else if rodash.isString(value) and m.integerPattern.isMatch(value)
+        text = value.trim()
+        ' toInt() overflows past 32 bits; anything that long is past min or max anyway
+        if not BGE.fitsInInteger(text)
+          if text.left(1) = "-"
+            return Int(min)
+          end if
+          return Int(max)
+        end if
+        result = text.toInt()
+      else
+        return default
+      end if
+      ' Int(): the default min/max can arrive as Doubles
+      if result < min
+        return Int(min)
+      else if result > max
+        return Int(max)
+      end if
+      return Int(result)
+    end function
+
+    ' A param as a float, or `default` if it's missing or isn't a number.
+    '
+    ' @param {string} name
+    ' @param {float} [default=0]
+    ' @return {float}
+    function getFloat(name as string, default = 0.0 as float) as float
+      value = m.raw(name)
+      if rodash.isNumber(value)
+        return value * 1.0
+      else if rodash.isString(value) and m.numberPattern.isMatch(value)
+        return value.trim().toFloat()
+      end if
+      return default
+    end function
+
+    ' A param as a boolean: "1", "true", "yes" and "on" are true, "0", "false", "no" and "off"
+    ' false (any case). Anything else gives `default`.
+    '
+    ' @param {string} name
+    ' @param {boolean} [default=false]
+    ' @return {boolean}
+    function getBool(name as string, default = false as boolean) as boolean
+      value = m.raw(name)
+      if rodash.isBoolean(value)
+        return value
+      else if rodash.isNumber(value)
+        return value <> 0
+      end if
+      text = LCase(m.getString(name).trim())
+      if text = "1" or text = "true" or text = "yes" or text = "on"
+        return true
+      else if text = "0" or text = "false" or text = "no" or text = "off"
+        return false
+      end if
+      return default
+    end function
+
+    ' A comma list, e.g. `items=key,map` -> ["key", "map"]. Entries are trimmed and empty ones
+    ' dropped; a missing param is an empty list.
+    '
+    ' @param {string} name
+    ' @return {string[]}
+    function getList(name as string) as string[]
+      list = [] as string[]
+      for each entry in m.getString(name).split(",")
+        entry = entry.trim()
+        if entry <> ""
+          list.push(entry)
+        end if
+      end for
+      return list
+    end function
+
+    ' A comma list of whole numbers, e.g. `at=4,7,90` -> [4, 7, 90]. Invalid if any entry isn't
+    ' a whole number, so a typo isn't read as 0.
+    '
+    ' @param {string} name
+    ' @return {integer[]}
+    function getIntList(name as string) as dynamic
+      list = [] as integer[]
+      for each entry in m.getList(name)
+        if not m.integerPattern.isMatch(entry)
+          return invalid
+        end if
+        list.push(entry.toInt())
+      end for
+      return list
+    end function
+
+    ' A comma list of numbers, e.g. `at=4,7,22.5` -> [4.0, 7.0, 22.5]. Invalid if any entry
+    ' isn't a number.
+    '
+    ' @param {string} name
+    ' @return {float[]}
+    function getFloatList(name as string) as dynamic
+      list = [] as float[]
+      for each entry in m.getList(name)
+        if not m.numberPattern.isMatch(entry)
+          return invalid
+        end if
+        list.push(entry.toFloat())
+      end for
+      return list
+    end function
+
+    ' A comma list of counts, e.g. `items=key:2,map` -> {key: 2, map: 1}. `id=n` works too; an
+    ' entry without a count is 1, and one with a bad count is skipped.
+    '
+    ' @param {string} name
+    ' @return {roAssociativeArray}
+    function getCounts(name as string) as roAssociativeArray
+      counts = {}
+      for each entry in m.getList(name)
+        parts = entry.split(":")
+        if parts.count() < 2
+          parts = entry.split("=")
+        end if
+        id = parts[0].trim()
+        if id <> ""
+          if parts.count() < 2
+            counts[id] = 1
+          else if m.integerPattern.isMatch(parts[1]) and BGE.fitsInInteger(parts[1].trim())
+            counts[id] = parts[1].trim().toInt()
+          end if
+        end if
+      end for
+      return counts
+    end function
+
+    ' Copies the params named in `names` that are given into a new AA (as given, unwrapped), e.g.
+    ' to pass a whitelist of keys on as scene args.
+    '
+    ' @param {string[]} names
+    ' @param {roAssociativeArray} [into={}] - added to and returned
+    ' @return {roAssociativeArray}
+    function pick(names as string[], into = {} as roAssociativeArray) as roAssociativeArray
+      for each name in names
+        value = m.raw(name)
+        if invalid <> value
+          into[name] = value
+        end if
+      end for
+      return into
+    end function
+
+    ' Every param as given, with one-element arrays unwrapped, in a new AA.
+    '
+    ' @return {roAssociativeArray}
+    function toAA() as roAssociativeArray
+      return m.pick(m.keys())
+    end function
+
+    ' The scene to start on from a `scene=` param: an alias from `aliases` (alias -> scene name),
+    ' or a scene name from `sceneNames` (any case). Anything else logs a warning and gives
+    ' `default`, as does a missing param.
+    '
+    ' @param {string[]} sceneNames - usually `game.getSceneNames()`
+    ' @param {string} default
+    ' @param {roAssociativeArray} [aliases={}] - e.g. {crypt: "CryptScene"}
+    ' @param {string} [key="scene"]
+    ' @return {string}
+    function sceneName(sceneNames as string[], default as string, aliases = {} as roAssociativeArray, key = "scene" as string) as string
+      requested = m.getString(key).trim()
+      if requested = ""
+        return default
+      end if
+      ' AA lookups ignore case
+      alias = aliases[requested]
+      if rodash.isString(alias)
+        requested = alias
+      end if
+      lowerRequested = LCase(requested)
+      for each name in sceneNames
+        if LCase(name) = lowerRequested
+          return name
+        end if
+      end for
+      print "[BGE.LaunchParams] warning: " + key + "=" + requested + " isn't a scene (" + sceneNames.join(", ") + ") - starting on " + default
+      return default
+    end function
+
+    ' The value given for `name`, unwrapping a one-element array (an empty one is invalid).
+    private function raw(name as string) as dynamic
+      value = m.values[name]
+      if type(value) = "roArray"
+        if value.count() = 0
+          return invalid
+        else if value.count() = 1
+          return value[0]
+        end if
+      end if
+      return value
+    end function
+
+  end class
+
+  ' Is `text` a whole number, e.g. "42", " -3 "?
+  '
+  ' @param {string} text
+  ' @return {boolean}
+  function isIntegerString(text as string) as boolean
+    return integerStringPattern().isMatch(text)
+  end function
+
+  ' Is `text` a number, e.g. "4", "-0.5", "1e3"?
+  '
+  ' @param {string} text
+  ' @return {boolean}
+  function isNumberString(text as string) as boolean
+    return numberStringPattern().isMatch(text)
+  end function
+
+  ' Matches a whole number - see isIntegerString().
+  '
+  ' @return {roRegex}
+  function integerStringPattern() as roRegex
+    return CreateObject("roRegex", "^\s*[+-]?\d+\s*$", "")
+  end function
+
+  ' Matches a number - see isNumberString().
+  '
+  ' @return {roRegex}
+  function numberStringPattern() as roRegex
+    return CreateObject("roRegex", "^\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$", "")
+  end function
+
+  ' Does a whole number string (see isIntegerString(), trimmed) fit in a 32-bit integer?
+  '
+  ' @param {string} text
+  ' @return {boolean}
+  function fitsInInteger(text as string) as boolean
+    limit = "2147483647"
+    digits = text
+    if digits.left(1) = "-"
+      limit = "2147483648"
+      digits = digits.mid(1)
+    else if digits.left(1) = "+"
+      digits = digits.mid(1)
+    end if
+    while digits.len() > 1 and digits.left(1) = "0"
+      digits = digits.mid(1)
+    end while
+    if digits.len() <> limit.len()
+      return digits.len() < limit.len()
+    end if
+    return digits <= limit
+  end function
+
+end namespace
