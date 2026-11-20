@@ -3,9 +3,14 @@
 '   triangles - the fan of triangles (drawPolygonAsTrianglesTo, exact at rest)
 '   hullRects - BGE.FogSilhouettes.hullRects()'s band rects, then DrawRect each
 '   span      - drawConvexPolygonAsSpansTo(), one DrawRect per run of equal bands
+'   scan      - drawPolygonAsSpansTo(), the concave scanline fill (#547), on the same shape
 '   auto      - drawPolygonTo() / drawTriangleTo(), which pick between them
 '
 '   exact     - drawTriangleExactTo() (triangles only)
+'
+' and concave outlines (#547): their hull's fill (hullSpan1 = span1 of the hull, auto = what
+' drawPolygonTo() does) against the scanline fill of the outline (scan1/scan4, and concave /
+' concaveQuick = drawConcavePolygonTo()). span1/scan1 also print us per band.
 '
 ' "Quick" suffixes pass allowQuickDraw (coarse while moving). Each case runs in its own frame
 ' (the watchdog), draws into an offscreen bitmap and Finish()es it, so queued GPU work is
@@ -18,8 +23,11 @@ class PolygonFillBenchmark extends RendererTest
 
   private shapeNames as string[] = []
   private shapes as roArray = []
-  private polygonMethods as string[] = ["triangles", "trianglesQuick", "hullRects1", "hullRects4", "span1", "span4", "auto", "autoQuick"]
-  private triangleMethods as string[] = ["exact", "span1", "auto", "autoQuick"]
+  private polygonMethods as string[] = ["triangles", "trianglesQuick", "hullRects1", "hullRects4", "span1", "span4", "scan1", "auto", "autoQuick"]
+  private triangleMethods as string[] = ["exact", "span1", "scan1", "auto", "autoQuick"]
+  private concaveMethods as string[] = ["hullSpan1", "auto", "scan1", "scan4", "concave", "concaveQuick"]
+  ' shapes from this index on are concave
+  private firstConcaveShape = 0
   ' [shape index, method] per case
   private cases as roArray = []
   private caseIndex = 0
@@ -27,6 +35,7 @@ class PolygonFillBenchmark extends RendererTest
   private rendererRef as BGE.Renderer = invalid
   private resultLines as string[] = []
   private rows as roAssociativeArray = {}
+  private font as roFont = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
 
   sub new()
     super("Polygon Fill Benchmark")
@@ -45,10 +54,33 @@ class PolygonFillBenchmark extends RendererTest
     m.addShape("circle24 40", 24, 20)
     m.addShape("circle24 120", 24, 60)
     m.addShape("circle24 300", 24, 150)
+    m.firstConcaveShape = m.shapes.count()
+    chevron = [-1.0, -0.8, 1.0, 0.0, -1.0, 0.8, -0.3, 0.0] as float[]
+    ell = [-1.0, -1.0, -0.4, -1.0, -0.4, 0.4, 1.0, 0.4, 1.0, 1.0, -1.0, 1.0] as float[]
+    star10 = m.starOutline(5, 0.45)
+    gear24 = m.starOutline(12, 0.8)
+    pentagram = [] as float[]
+    for i = 0 to 4
+      a = 2 * BGE.Math.PI * (i * 2) / 5 - BGE.Math.HALF_PI
+      pentagram.push(cos(a))
+      pentagram.push(sin(a))
+    end for
+    m.addOutline("chevron 60", chevron, 30)
+    m.addOutline("chevron 240", chevron, 120)
+    m.addOutline("L 60", ell, 30)
+    m.addOutline("L 240", ell, 120)
+    m.addOutline("star10 40", star10, 20)
+    m.addOutline("star10 120", star10, 60)
+    m.addOutline("star10 300", star10, 150)
+    m.addOutline("pentagram 120", pentagram, 60)
+    m.addOutline("gear24 120", gear24, 60)
+    m.addOutline("gear24 300", gear24, 150)
     m.cases = []
     for s = 0 to m.shapes.count() - 1
       methods = m.polygonMethods
-      if m.shapes[s][0].count() = 6
+      if s >= m.firstConcaveShape
+        methods = m.concaveMethods
+      else if m.shapes[s][0].count() = 6
         methods = m.triangleMethods
       end if
       for each method in methods
@@ -77,6 +109,39 @@ class PolygonFillBenchmark extends RendererTest
     m.shapes.push(rotations)
   end sub
 
+  ' A star's outline as [x, y, ...] round the unit circle: `tips` points, notches at radius `inner`
+  private function starOutline(tips as integer, inner as float) as float[]
+    pts = [] as float[]
+    for i = 0 to tips * 2 - 1
+      r = 1.0
+      if i mod 2 = 1
+        r = inner
+      end if
+      a = BGE.Math.PI * i / tips - BGE.Math.HALF_PI
+      pts.push(r * cos(a))
+      pts.push(r * sin(a))
+    end for
+    return pts
+  end function
+
+  ' One rotation per iteration of a unit outline ([x, y, ...]) scaled by r round the canvas middle
+  private sub addOutline(name as string, unit as float[], r as float)
+    rotations = []
+    for i = 0 to m.iterations - 1
+      theta = BGE.Math.DegreesToRadians(i * 1.7)
+      c = cos(theta)
+      sn = sin(theta)
+      pts = [] as float[]
+      for k = 0 to unit.count() - 1 step 2
+        pts.push(640 + r * (unit[k] * c - unit[k + 1] * sn))
+        pts.push(360 + r * (unit[k] * sn + unit[k + 1] * c))
+      end for
+      rotations.push(pts)
+    end for
+    m.shapeNames.push(name)
+    m.shapes.push(rotations)
+  end sub
+
   override sub update(dt as float)
     if m.caseIndex >= m.cases.count()
       return
@@ -87,13 +152,19 @@ class PolygonFillBenchmark extends RendererTest
     method = testCase[1]
     ms = m.runCase(m.shapes[shapeIdx], method)
     name = m.shapeNames[shapeIdx]
-    ' on screen, just the old fill against what drawPolygonTo()/drawTriangleTo() pick now
-    if method = "triangles" or method = "exact" or method = "auto"
+    ' on screen, just what drawPolygonTo()/drawTriangleTo() pick against the scanline fill
+    if method = "auto" or method = "scan1"
       row = m.rows[name]
       if invalid = row
         row = name + ":"
       end if
-      m.rows[name] = row + " " + method + " " + ms + " ms"
+      shortMs = ms
+      bracket = Instr(1, ms, "(")
+      if bracket > 0
+        shortMs = Left(ms, bracket - 1)
+      end if
+      shortMs = Str(cint(Val(shortMs) * 100) / 100).trim()
+      m.rows[name] = row + " " + method + " " + shortMs + " ms"
     end if
     print "POLYFILL " + name + " " + method + " " + ms
     if m.caseIndex >= m.cases.count()
@@ -121,6 +192,23 @@ class PolygonFillBenchmark extends RendererTest
     color = &h33CCFFFF
     timer = CreateObject("roTimespan")
     rectCount = 0
+    bandCount = 0.0
+    if method = "span1" or method = "scan1"
+      ' bands per fill: the bounding box's shorter side, as both fills pick
+      for each pts in rotations
+        minX = pts[0]
+        maxX = minX
+        minY = pts[1]
+        maxY = minY
+        for i = 0 to pts.count() - 1 step 2
+          minX = BGE.Math.Min(minX, pts[i])
+          maxX = BGE.Math.Max(maxX, pts[i])
+          minY = BGE.Math.Min(minY, pts[i + 1])
+          maxY = BGE.Math.Max(maxY, pts[i + 1])
+        end for
+        bandCount += BGE.Math.Min(maxX - minX, maxY - minY)
+      end for
+    end if
     timer.Mark()
     for each pts in rotations
       if method = "triangles" or method = "trianglesQuick"
@@ -137,6 +225,16 @@ class PolygonFillBenchmark extends RendererTest
         for r = 0 to rects.count() - 1 step 4
           target.DrawRect(rects[r], rects[r + 1], rects[r + 2], rects[r + 3], color)
         end for
+      else if method = "hullSpan1"
+        rectCount += renderer.drawConvexPolygonAsSpansTo(target, BGE.QuickHull.QuickHull(m.toVectors(pts)), 0, 0, color, 1)
+      else if method = "scan1" or method = "scan4"
+        bandSize = 1
+        if method = "scan4"
+          bandSize = 4
+        end if
+        rectCount += renderer.drawPolygonAsSpansTo(target, m.toVectors(pts), 0, 0, color, bandSize)
+      else if method = "concave" or method = "concaveQuick"
+        renderer.drawConcavePolygonTo(target, m.toVectors(pts), 0, 0, color, method = "concaveQuick")
       else if method = "span1" or method = "span4"
         bandSize = 1
         if method = "span4"
@@ -159,14 +257,23 @@ class PolygonFillBenchmark extends RendererTest
     if rectCount > 0
       result = result + "(" + Str(rectCount \ m.iterations).trim() + "r)"
     end if
+    if bandCount > 0
+      usPerBand = ms * m.iterations * 1000 / bandCount
+      result = result + "(" + Str(Int(usPerBand * 10) / 10).trim() + "us/band)"
+    end if
     return result
   end function
 
   override sub draw(renderer as BGE.Renderer)
-    y = 80
-    for each line in m.resultLines
-      renderer.drawText(line, 140, y, BGE.Colors.White)
-      y += 28
+    ' convex shapes on the left, concave on the right
+    for i = 0 to m.resultLines.count() - 1
+      x = 130
+      row = i
+      if m.resultLines.count() > 1 and i >= m.firstConcaveShape
+        x = 660
+        row = i - m.firstConcaveShape
+      end if
+      renderer.drawText(m.resultLines[i], x, 80 + row * 26, BGE.Colors.White, m.font)
     end for
     if m.caseIndex < m.cases.count()
       return
@@ -192,6 +299,22 @@ class PolygonFillBenchmark extends RendererTest
         rowY += 95
       end for
     end for
+    ' right: concave outlines - a star at 1px, a translucent pentagram (nonzero, with
+    ' even-odd over it, so its tips come out more solid than its middle), an L at 4px
+    concave = m.firstConcaveShape
+    m.drawCheckOutline(renderer, m.shapes[concave + 5][7], 1095, 410, &hFF6699FF, 1, BGE.PolygonFillRule.nonZero)
+    m.drawCheckOutline(renderer, m.shapes[concave + 7][3], 1095, 540, &h66FF9999, 1, BGE.PolygonFillRule.nonZero)
+    m.drawCheckOutline(renderer, m.shapes[concave + 7][3], 1095, 540, &h66FF9999, 1, BGE.PolygonFillRule.evenOdd)
+    m.drawCheckOutline(renderer, m.shapes[concave + 2][11], 1095, 640, &hFF6699FF, 4, BGE.PolygonFillRule.nonZero)
+  end sub
+
+  ' Fills one rotation of a concave outline, recentred on (cx, cy), with drawPolygonAsSpansTo()
+  private sub drawCheckOutline(renderer as BGE.Renderer, shape as float[], cx as float, cy as float, rgba as integer, bandSize as integer, fillRule as BGE.PolygonFillRule)
+    points = [] as BGE.Math.Vector[]
+    for i = 0 to shape.count() - 1 step 2
+      points.push(BGE.Math.VectorOps.create(shape[i] - 640 + cx, shape[i + 1] - 360 + cy))
+    end for
+    renderer.drawPolygonAsSpansTo(renderer.getDraw2d(), points, 0, 0, rgba, bandSize, invalid, fillRule)
   end sub
 
 end class

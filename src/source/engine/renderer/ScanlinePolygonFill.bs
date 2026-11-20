@@ -1,0 +1,317 @@
+import "../../math/vector.bs"
+
+namespace BGE
+
+  ' Which parts of a self-intersecting outline count as inside (SVG's `fill-rule`).
+  enum PolygonFillRule
+    ' Inside wherever the outline winds round a point at all: a star drawn as one line is solid.
+    nonZero = "nonzero"
+    ' Inside wherever a ray from a point crosses the outline an odd number of times: a star
+    ' drawn as one line has a hollow centre.
+    evenOdd = "evenodd"
+  end enum
+
+  ' Fills any polygon, concave or self-intersecting, as `DrawRect` bands: a scanline fill
+  ' with an active-edge list. Spans in a band never overlap, so translucent fills blend once.
+  ' Use it through `Renderer.drawPolygonAsSpansTo()`/`drawConcavePolygonTo()`.
+  class ScanlinePolygonFill
+
+    ' Scratch, reused across fills and written by index with counts kept alongside (no
+    ' per-band allocation). Edges are in (u, v), v the banded axis.
+    private edgeTop as float[] = []
+    private edgeBottom as float[] = []
+    private edgeU as float[] = []
+    private edgeSlope as float[] = []
+    private edgeDir as integer[] = []
+    ' edge indices sorted by top
+    private edgeOrder as integer[] = []
+    ' active edge indices, kept in crossing order
+    private active as integer[] = []
+    private crossU as float[] = []
+    ' this band's spans
+    private spanStart as integer[] = []
+    private spanEnd as integer[] = []
+    ' rects still growing down, and the next band's
+    private pendStart as integer[] = []
+    private pendEnd as integer[] = []
+    private pendV as integer[] = []
+    private pendLen as integer[] = []
+    private nextStart as integer[] = []
+    private nextEnd as integer[] = []
+    private nextV as integer[] = []
+    private nextLen as integer[] = []
+
+    ' Fills `points` (any outline, in order) with one `DrawRect` per run of matching band
+    ' spans. Each band's spans are the outline's cross-section at the band's middle, so at
+    ' 1px it's accurate; edges come out stepped by up to `bandSize` pixels.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the outline's corners in order
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {integer} bandSize band thickness in pixels
+    ' @param {dynamic} bandAcrossY true for horizontal bands, false for vertical, invalid to
+    '   band across the bounding box's shorter side
+    ' @param {BGE.PolygonFillRule} fillRule
+    ' @return {integer} rects drawn
+    function fill(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize as integer, bandAcrossY as dynamic, fillRule as BGE.PolygonFillRule) as integer
+      n = points.count()
+      if invalid = canvasDrawTo or n < 3
+        return 0
+      end if
+      if bandSize < 1
+        bandSize = 1
+      end if
+      minX = points[0].x
+      maxX = minX
+      minY = points[0].y
+      maxY = minY
+      for each p in points
+        if p.x < minX
+          minX = p.x
+        else if p.x > maxX
+          maxX = p.x
+        end if
+        if p.y < minY
+          minY = p.y
+        else if p.y > maxY
+          maxY = p.y
+        end if
+      end for
+      if invalid = bandAcrossY
+        bandAcrossY = (maxY - minY) <= (maxX - minX)
+      end if
+      if bandAcrossY
+        minV = minY + y
+        maxV = maxY + y
+        canvasV = canvasDrawTo.GetHeight()
+      else
+        minV = minX + x
+        maxV = maxX + x
+        canvasV = canvasDrawTo.GetWidth()
+      end if
+      if maxV <= minV
+        return 0
+      end if
+
+      edgeTop = m.edgeTop
+      edgeBottom = m.edgeBottom
+      edgeU = m.edgeU
+      edgeSlope = m.edgeSlope
+      edgeDir = m.edgeDir
+      edgeOrder = m.edgeOrder
+
+      ' edge table, insertion-sorted by top as it's built
+      edgeCount = 0
+      prev = points[n - 1]
+      if bandAcrossY
+        pu = prev.x + x
+        pv = prev.y + y
+      else
+        pu = prev.y + y
+        pv = prev.x + x
+      end if
+      for i = 0 to n - 1
+        p = points[i]
+        if bandAcrossY
+          cu = p.x + x
+          cv = p.y + y
+        else
+          cu = p.y + y
+          cv = p.x + x
+        end if
+        if cv <> pv
+          if pv < cv
+            top = pv
+            edgeBottom[edgeCount] = cv
+            edgeU[edgeCount] = pu
+            edgeDir[edgeCount] = 1
+          else
+            top = cv
+            edgeBottom[edgeCount] = pv
+            edgeU[edgeCount] = cu
+            edgeDir[edgeCount] = -1
+          end if
+          edgeTop[edgeCount] = top
+          edgeSlope[edgeCount] = (cu - pu) / (cv - pv)
+          k = edgeCount
+          while k > 0 and edgeTop[edgeOrder[k - 1]] > top
+            edgeOrder[k] = edgeOrder[k - 1]
+            k--
+          end while
+          edgeOrder[k] = edgeCount
+          edgeCount++
+        end if
+        pu = cu
+        pv = cv
+      end for
+
+      evenOdd = fillRule = BGE.PolygonFillRule.evenOdd
+      active = m.active
+      crossU = m.crossU
+      spanStart = m.spanStart
+      spanEnd = m.spanEnd
+      pendStart = m.pendStart
+      pendEnd = m.pendEnd
+      pendV = m.pendV
+      pendLen = m.pendLen
+      nextStart = m.nextStart
+      nextEnd = m.nextEnd
+      nextV = m.nextV
+      nextLen = m.nextLen
+      activeCount = 0
+      nextEdge = 0
+      pendCount = 0
+      rects = 0
+
+      ' on a shared grid, like the convex fill
+      bandStart = Int(minV / bandSize) * bandSize
+      if bandStart < 0
+        bandStart = 0
+      end if
+      bandEnd = maxV
+      if bandEnd > canvasV
+        bandEnd = canvasV
+      end if
+      while bandStart < bandEnd
+        sampleV = bandStart + bandSize / 2.0
+        if sampleV > maxV
+          sampleV = (bandStart + maxV) / 2.0
+        end if
+        if sampleV < minV
+          bandLast = bandStart + bandSize
+          if bandLast > maxV
+            bandLast = maxV
+          end if
+          sampleV = (minV + bandLast) / 2.0
+        end if
+
+        ' drop edges that ended, keeping the rest in order
+        kept = 0
+        for k = 0 to activeCount - 1
+          e = active[k]
+          if edgeBottom[e] > sampleV
+            active[kept] = e
+            kept++
+          end if
+        end for
+        activeCount = kept
+        ' add edges that started (one wholly between two samples never is)
+        while nextEdge < edgeCount and edgeTop[edgeOrder[nextEdge]] <= sampleV
+          e = edgeOrder[nextEdge]
+          if edgeBottom[e] > sampleV
+            active[activeCount] = e
+            activeCount++
+          end if
+          nextEdge++
+        end while
+
+        ' crossings, insertion-sorted: still nearly in last band's order
+        for k = 0 to activeCount - 1
+          e = active[k]
+          cu = edgeU[e] + (sampleV - edgeTop[e]) * edgeSlope[e]
+          j = k
+          while j > 0 and crossU[j - 1] > cu
+            crossU[j] = crossU[j - 1]
+            active[j] = active[j - 1]
+            j--
+          end while
+          crossU[j] = cu
+          active[j] = e
+        end for
+
+        ' spans, by winding
+        spanCount = 0
+        winding = 0
+        openU = 0.0
+        for k = 0 to activeCount - 1
+          before = winding
+          if evenOdd
+            winding = 1 - winding
+          else
+            winding += edgeDir[active[k]]
+          end if
+          if before = 0 and winding <> 0
+            openU = crossU[k]
+          else if before <> 0 and winding = 0
+            startU = Int(openU + 0.5)
+            endU = Int(crossU[k] + 0.5)
+            if endU <= startU
+              ' a sliver thinner than a pixel still gets one
+              endU = startU + 1
+            end if
+            if spanCount > 0 and startU <= spanEnd[spanCount - 1]
+              ' touches or overlaps the last span (slivers): join it, never draw twice
+              if endU > spanEnd[spanCount - 1]
+                spanEnd[spanCount - 1] = endU
+              end if
+            else
+              spanStart[spanCount] = startU
+              spanEnd[spanCount] = endU
+              spanCount++
+            end if
+          end if
+        end for
+
+        ' a span matching a pending rect grows it; both lists are sorted and disjoint
+        nextCount = 0
+        i = 0
+        for k = 0 to spanCount - 1
+          s = spanStart[k]
+          while i < pendCount and pendStart[i] < s
+            i++
+          end while
+          if i < pendCount and pendStart[i] = s and pendEnd[i] = spanEnd[k]
+            nextV[nextCount] = pendV[i]
+            nextLen[nextCount] = pendLen[i] + bandSize
+            ' carried on, so not drawn yet
+            pendLen[i] = 0
+            i++
+          else
+            nextV[nextCount] = bandStart
+            nextLen[nextCount] = bandSize
+          end if
+          nextStart[nextCount] = s
+          nextEnd[nextCount] = spanEnd[k]
+          nextCount++
+        end for
+        for i = 0 to pendCount - 1
+          if pendLen[i] > 0
+            if bandAcrossY
+              canvasDrawTo.DrawRect(pendStart[i], pendV[i], pendEnd[i] - pendStart[i], pendLen[i], rgba)
+            else
+              canvasDrawTo.DrawRect(pendV[i], pendStart[i], pendLen[i], pendEnd[i] - pendStart[i], rgba)
+            end if
+            rects++
+          end if
+        end for
+        swap = pendStart
+        pendStart = nextStart
+        nextStart = swap
+        swap = pendEnd
+        pendEnd = nextEnd
+        nextEnd = swap
+        swap = pendV
+        pendV = nextV
+        nextV = swap
+        swap = pendLen
+        pendLen = nextLen
+        nextLen = swap
+        pendCount = nextCount
+        bandStart += bandSize
+      end while
+      for i = 0 to pendCount - 1
+        if bandAcrossY
+          canvasDrawTo.DrawRect(pendStart[i], pendV[i], pendEnd[i] - pendStart[i], pendLen[i], rgba)
+        else
+          canvasDrawTo.DrawRect(pendV[i], pendStart[i], pendLen[i], pendEnd[i] - pendStart[i], rgba)
+        end if
+        rects++
+      end for
+      return rects
+    end function
+
+  end class
+
+end namespace

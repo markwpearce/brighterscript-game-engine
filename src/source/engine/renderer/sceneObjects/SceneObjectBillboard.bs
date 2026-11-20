@@ -64,6 +64,15 @@ namespace BGE
 
     protected canvasPosition as BGE.Math.Vector
 
+    ' The size the direct draw modes draw at under a zoomed Camera2d, set with canvasPosition
+    ' (see updateDirectModeCanvasSize()). Unzoomed, the drawable's live size is used instead.
+    private directModeCanvasSize as SizeWH = {width: 0.0, height: 0.0}
+    private directModeZoomed as boolean = false
+    ' getDirectModeCanvasSize() and the zoom directModeCanvasSize was worked out from
+    private directModeSourceWidth as float = 0.0
+    private directModeSourceHeight as float = 0.0
+    private directModeZoom as float = 1.0
+
     private isMirror = false
     ' computeBillboardWorldCorners()'s last result and what it was computed from
     private billboardCornersCache as roAssociativeArray = invalid
@@ -525,18 +534,17 @@ namespace BGE
       color = m.getCanvasDrawColorRGBA(rendererObj)
       if (drawMode = BGE.SceneObjectDrawMode.directToCamera) and m.canvasPosition <> invalid
         drawPos = m.canvasPosition
-        drawnSize = m.drawable.getDrawnSize()
-        ' The ratio of the drawable's own declared size to the region's native pixel
-        ' size - 1.0 for every existing billboard drawable (Image, whose width/height
-        ' come directly from its region; DrawableRectangle/Text, which have no region at
-        ' all and never reach this branch), but not 1.0 for a drawable like
-        ' DrawableCircle that intentionally shares one fixed-size texture at an
-        ' arbitrary display size. Matches the same ratio directScaled already computes
-        ' below (canvasPoints.getAvgWidth() / regionObj.getWidth()), just derived from
-        ' the drawable's own size instead of a projected quad.
-        ownerScale = m.drawable.getOwnerScale()
-        totalScaleX = 1.0 * (drawnSize.width / regionObj.getWidth()) * ownerScale.x
-        totalScaleY = 1.0 * (drawnSize.height / regionObj.getHeight()) * ownerScale.y
+        ' The ratio of the drawable's own declared size (with owner scale, and a Camera2d's
+        ' zoom) to the region's native pixel size - 1.0 for every existing billboard drawable
+        ' at zoom 1 (Image, whose width/height come directly from its region;
+        ' DrawableRectangle/Text, which have no region at all and never reach this branch),
+        ' but not 1.0 for a drawable like DrawableCircle that intentionally shares one
+        ' fixed-size texture at an arbitrary display size. Matches the same ratio directScaled
+        ' already computes below (canvasPoints.getAvgWidth() / regionObj.getWidth()), just
+        ' derived from the drawable's own size instead of a projected quad.
+        canvasSize = m.getDirectModeDrawSize()
+        totalScaleX = 1.0 * canvasSize.width / regionObj.getWidth()
+        totalScaleY = 1.0 * canvasSize.height / regionObj.getHeight()
         retVal = rendererObj.drawRegion(regionToDraw.region, drawPos.x, drawPos.y, totalScaleX, totalScaleY, -m.getNetRotationZ(), color)
       else if isCameraFacingQuadDrawMode(drawMode)
         if drawMode = BGE.SceneObjectDrawMode.axisAligned and m.getCanvasMidlineHeight() < 1
@@ -1091,6 +1099,7 @@ namespace BGE
         if invalid = m.canvasPosition
           return false
         end if
+        m.updateDirectModeCanvasSize(rendererObj, worldPos)
         if m.needsCanvasCornerPoints()
           m.updateCanvasPointsForDirectMode()
         end if
@@ -1222,7 +1231,7 @@ namespace BGE
     ' `updateCanvasPosition`). `canvasPosition` is the quad's top left corner and the point
     ' any rotation pivots around, matching how `drawToCanvas` blits the region.
     protected sub updateCanvasPointsForDirectMode()
-      canvasSize = m.getDirectModeCanvasSize()
+      canvasSize = m.getDirectModeDrawSize()
       ' negated to match the sign convention drawToCanvas passes to Renderer.drawRegion,
       ' since canvas space is y-down while world rotations are y-up
       theta = -m.getNetRotationZ()
@@ -1371,9 +1380,61 @@ namespace BGE
     end function
 
 
+    ' Sets directModeCanvasSize for a direct draw mode at `worldPos`. A Camera2d's zoom
+    ' enlarges it: measured to the projected far corner, so tiles that meet in the world meet on
+    ' the canvas at any zoom (they share each rounded edge), or just times the zoom when rotated,
+    ' where corners don't line up anyway. A perspective camera's direct modes stay in pixels.
+    '
+    ' @param {Renderer} rendererObj
+    ' @param {BGE.Math.Vector} worldPos - the point canvasPosition was projected from
+    protected sub updateDirectModeCanvasSize(rendererObj as Renderer, worldPos as BGE.Math.Vector)
+      camera = rendererObj.camera
+      m.directModeZoomed = false
+      if camera.isPerspective()
+        return
+      end if
+      zoom = camera.getEffectiveZoom()
+      if zoom = 1
+        return
+      end if
+      m.directModeZoomed = true
+      size = m.getDirectModeCanvasSize()
+      m.directModeSourceWidth = size.width
+      m.directModeSourceHeight = size.height
+      m.directModeZoom = zoom
+      ' filled in place: this runs for every 2D sprite while the camera moves zoomed
+      canvasSize = m.directModeCanvasSize
+      canvasSize.width = size.width * zoom
+      canvasSize.height = size.height * zoom
+      if m.getNetRotationZ() = 0
+        ' world +y up, canvas y down
+        far = rendererObj.worldPointToCanvasPoint(BGE.Math.VectorOps.create(worldPos.x + size.width, worldPos.y - size.height, worldPos.z))
+        if invalid <> far
+          canvasSize.width = far.x - m.canvasPosition.x
+          canvasSize.height = far.y - m.canvasPosition.y
+        end if
+      end if
+    end sub
+
+    ' The canvas size a direct draw mode draws at: getDirectModeCanvasSize(), or under a zoomed
+    ' Camera2d, that times the zoom (see updateDirectModeCanvasSize()).
+    '
+    ' @return {SizeWH}
+    protected function getDirectModeDrawSize() as SizeWH
+      size = m.getDirectModeCanvasSize()
+      if m.directModeZoomed
+        if size.width = m.directModeSourceWidth and size.height = m.directModeSourceHeight
+          return m.directModeCanvasSize
+        end if
+        ' resized without moving (new text, say), so not placed again: just times the zoom
+        size.width = size.width * m.directModeZoom
+        size.height = size.height * m.directModeZoom
+      end if
+      return size
+    end function
+
     ' The on-canvas size of this object in the direct (billboard) draw modes - its drawn
-    ' size scaled by the owning entity, matching the scale `drawToCanvas` applies to the
-    ' region it blits.
+    ' size scaled by the owning entity, before any Camera2d zoom (see getDirectModeDrawSize()).
     '
     ' @return {SizeWH}
     protected function getDirectModeCanvasSize() as SizeWH
