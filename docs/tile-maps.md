@@ -23,6 +23,7 @@ The helpers, all in the `BGE.TileMap` namespace unless noted:
 | Top-down movement against walls | `BGE.SolidWorld` |
 | Pick border/corner tiles from neighbours | `getEdgePiece3x3()`, `getNeighbourMask4()`, `getNeighbourMask8()`, `getBlobTileIndex()` |
 | Load a map made in Tiled | `loader.loadTiledMap()` or `BGE.Tiled.parseMapFile()`, and friends |
+| A 3D level written as rows of characters on the ground | `BGE.CharGrid`, `BGE.GridSides` (see [Text-grid levels on the ground](#text-grid-levels-on-the-ground)) |
 
 `examples/platformer` (side-scrolling) and `examples/rpg` (top-down) use all
 of these; this guide follows how they do it.
@@ -376,6 +377,78 @@ A neighbour outside the map counts as matching, so a path runs cleanly off
 the edge. Pass `{outOfBoundsMatches: false}` to draw a border there instead.
 A missing cell (past the end of a short row) or an `invalid` cell value also
 counts as outside the map.
+
+## Text-grid levels on the ground
+
+In a 3D game the same rows of characters can lay out a level on the ground
+(x/z) instead of the screen: a maze, a town, a room full of furniture.
+`BGE.CharGrid` holds the rows and does the jobs every such map needs. What the
+characters mean stays up to your game.
+
+```brighterscript
+' #  wall   =  table   T  torch   E  the way out
+grid = new BGE.CharGrid([
+  "#########"
+  "#T.....T#"
+  "#..===..#"
+  "#..===..#"
+  "####E####"
+], {cellSize: 64})
+
+for each cell in grid.cellsOf("T")
+  center = grid.cellCenter(cell.col, cell.row)
+  side = grid.wallSides(cell.col, cell.row)[0]   ' "n", "e", "s" or "w"
+  addTorch(center, BGE.GridSides.normal(side))   ' your own entity
+end for
+for each table in grid.findRectGroups("=")
+  center = grid.groupCenter(table)               ' one 3 x 2 table
+  addTable(center, table.cols * 64, table.rows * 64)
+end for
+solids = grid.toSolidWorld()                     ' every `#`, and a wall round the grid
+```
+
+Row 0 is -z and column 0 is -x. The grid is centred on the world origin
+unless you pass an `origin` (the -x/-z corner of cell 0, 0). `isSolid()` counts
+`solidKinds` (`"#"` by default, `""` for none) and everything outside the grid
+as solid; override it for anything else. Character matches are
+case-sensitive, so `p` and `P` can mean different things.
+
+Finding things in the grid:
+
+| Want | Call |
+| --- | --- |
+| Cells of some characters, or all but some | `cellsOf(kinds)`, `cellsExcept(kinds)` |
+| Blocks drawn as rectangles (`===` over two rows is one table) | `findRectGroups(kinds)` |
+| Connected blocks of any shape, as their bounding rectangles | `findConnectedGroups(kinds)` |
+| The rectangle round every cell of some characters, wherever they are | `boundsOf(kinds)` |
+| Straight runs (fences), along rows then down columns | `findRuns(kinds, minLength)` |
+| The cell a world position is in, its character | `cellAt(x, z)`, `kindAt(col, row)`, `isKindOf(col, row, kinds)` |
+| Which sides of a cell face a wall or open floor | `wallSides(col, row)`, `openSides(col, row)` |
+
+`BGE.GridSides` turns a side into a `[col, row]` `offset()`, a unit
+`normal()`, its `opposite()` or the `heading()` that faces out through it.
+
+A level that keeps more than the grid (its start cell, its exits) can extend
+`BGE.CharGrid`:
+
+```brighterscript
+class DungeonLevel extends BGE.CharGrid
+  exits as BGE.CharGridCell[]
+
+  sub new(rows as string[])
+    super(rows, {cellSize: 192})
+    m.exits = m.cellsOf("E")
+  end sub
+end class
+```
+
+To draw the walls, give the same rows to a `BGE.GridWallsMap` and a
+`BGE.DrawableGridWalls` (see
+[Drawables and scene objects](/drawables-and-scene-objects)), with
+`origin: grid.origin` so they line up. A `BGE.GridWallsCameraBoom` keeps a chase
+camera out of those walls without colliders (see
+[Third-person cameras](/third-person-cameras)). `examples/thirdPerson`'s town,
+graveyard, crypt and interiors are all built this way.
 
 ## Tiled maps
 

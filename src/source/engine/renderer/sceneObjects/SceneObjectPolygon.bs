@@ -12,8 +12,17 @@ namespace BGE
     drawable as DrawablePolygon
 
     private lastPolygonPoints as BGE.Math.Vector[] = []
+    private lastConcave as boolean = false
+    private lastFillRule as BGE.PolygonFillRule = BGE.PolygonFillRule.nonZero
+    private lastFillColor as integer = -1
     private polygonCanvasPoints as BGE.Math.Vector[] = []
     private polygonWorldPoints as BGE.Math.Vector[] = []
+    ' Whether every world point projected this frame: a concave fill needs them all, in order
+    private allPointsProjected as boolean = true
+    ' Whether this draw moved relative to the camera, and whether a cached concave fill is
+    ' being tried for moving into place (see usesTempBitmap())
+    private movingThisDraw as boolean = false
+    private tryingCachedMove as boolean = false
 
     sub new(name as string, drawableObj as DrawablePolygon)
       super(name, drawableObj, SceneObjectType.Polygon)
@@ -22,7 +31,36 @@ namespace BGE
     end sub
 
     protected override function didRegionToDrawChange() as boolean
-      return not BGE.Math.vectorArraysEqual(m.lastPolygonPoints, m.drawable.points)
+      return m.lastConcave <> m.drawable.concave or m.lastFillRule <> m.drawable.fillRule or m.lastFillColor <> m.drawable.getFillColorRGBA() or not BGE.Math.vectorArraysEqual(m.lastPolygonPoints, m.drawable.points)
+    end function
+
+    ' A concave fill is DrawRect bands, too dear to redo every frame (a 300px star took ~15ms
+    ' on a Roku Express), so once still it's cached in a temp bitmap in every draw mode and
+    ' blitted until the polygon, its color or the camera changes. While it moves, refilling
+    ' the cache (and flushing it) every frame cost more than banding onto the canvas, so it's
+    ' drawn straight there unless the cache can just be moved into place.
+    protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.movingThisDraw = m.objMovedInRelationToCamera(rendererObj.camera)
+      return super.performDraw(rendererObj, drawMode)
+    end function
+
+    protected override function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
+      usesTemp = super.usesTempBitmap(drawMode)
+      if usesTemp or not m.drawable.concave or isWireFrameDrawMode(drawMode)
+        return usesTemp
+      end if
+      return not m.movingThisDraw or m.tryingCachedMove
+    end function
+
+    ' A cached fill of old points, fill rule or color can't be moved into place.
+    protected override function attemptTransformTempBitmap(renderObj as Renderer, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      if m.didRegionToDrawChange()
+        return invalid
+      end if
+      m.tryingCachedMove = true
+      details = super.attemptTransformTempBitmap(renderObj, drawMode)
+      m.tryingCachedMove = false
+      return details
     end function
 
 
@@ -30,6 +68,9 @@ namespace BGE
       worked = false
       if isWireFrameDrawMode(drawMode)
         worked = rendererObj.drawPolygonOutline(m.polygonCanvasPoints, m.getCanvasOutlineDrawColorRGBA(rendererObj), m.drawable.outlineWidth)
+      else if m.drawable.concave and m.allPointsProjected
+        ' only while moving (see usesTempBitmap()), so coarse bands are fine
+        worked = rendererObj.drawConcavePolygon(m.polygonCanvasPoints, 0, 0, m.getCanvasDrawColorRGBA(rendererObj), true, m.drawable.fillRule)
       else
         worked = rendererObj.drawPolygon(m.polygonCanvasPoints, 0, 0, m.getCanvasDrawColorRGBA(rendererObj), true)
       end if
@@ -62,6 +103,8 @@ namespace BGE
       lossyFillsBefore = rendererObj.getLossyTriangleFillCount()
       if isWireFrameDrawMode(drawMode)
         tempBmpDidDraw = rendererObj.drawPolygonOutlineTo(tempBitmap, offsetCanvasPoints, m.getOutlineDrawColorRGBA(rendererObj), m.drawable.outlineWidth)
+      else if m.drawable.concave and m.allPointsProjected and offsetCanvasPoints.count() = m.polygonCanvasPoints.count()
+        tempBmpDidDraw = rendererObj.drawConcavePolygonTo(tempBitmap, offsetCanvasPoints, 0, 0, m.getDrawColorRGBA(rendererObj), allowFastDraw, m.drawable.fillRule)
       else
         tempBmpDidDraw = rendererObj.drawPolygonTo(tempBitmap, offsetCanvasPoints, 0, 0, m.getDrawColorRGBA(rendererObj), allowFastDraw)
       end if
@@ -123,7 +166,7 @@ namespace BGE
       return m.worldPosition
     end function
 
-    ' DrawablePolygon.points defines a convex, planar polygon, so - unlike a general 3D
+    ' DrawablePolygon.points defines a planar polygon, so - unlike a general 3D
     ' mesh (see SceneObjectModel) - its own world points are already a tight bound: no
     ' need for getBoundingCubePoints()'s O(N) scan-and-inflate-to-8-corners, which is pure
     ' overhead for a shape whose corners already lie in one plane. Mirrors
@@ -135,6 +178,9 @@ namespace BGE
 
     protected override sub afterDraw()
       m.lastPolygonPoints = BGE.Math.vectorArrayCopy(m.drawable.points)
+      m.lastConcave = m.drawable.concave
+      m.lastFillRule = m.drawable.fillRule
+      m.lastFillColor = m.drawable.getFillColorRGBA()
     end sub
 
     protected override function updateCanvasPosition(rendererObj as Renderer, drawMode as SceneObjectDrawMode) as boolean
@@ -145,6 +191,8 @@ namespace BGE
           m.polygonCanvasPoints.push(canvasPoint)
         end if
       end for
+      ' a dropped corner joins two that aren't neighbours, so a concave fill falls back to the hull
+      m.allPointsProjected = m.polygonCanvasPoints.count() = m.polygonWorldPoints.count() and m.polygonWorldPoints.count() = m.drawable.points.count()
       return true
     end function
 
