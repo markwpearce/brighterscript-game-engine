@@ -49,6 +49,61 @@ override sub onLoad(loader as BGE.AssetLoader, args as object)
 end sub
 ```
 
+## Following a target
+
+`BGE.NavFollower` does the usual job for you: it steers straight at a target
+it can see, and otherwise follows a path round the walls. Make one per agent,
+and call `steer()` each frame:
+
+```brighterscript
+m.follower = new BGE.NavFollower(m.nav, {plane: BGE.SeparationPlane.xy})
+
+override sub onUpdate(dt as float)
+  way = m.follower.steer(m.position, m.player.position, dt)
+  if invalid <> way
+    ' A wall in the way: `way` is a unit vector along the path
+    m.moveBy(way.x * m.speed * dt, way.y * m.speed * dt)
+  else if m.follower.canSeeTarget
+    ' In sight: up to you. Chase, circle, attack...
+    m.moveToward(m.player.position, dt)
+  end if
+end sub
+```
+
+`steer()` returns invalid when the agent can see its target, so the game
+decides what to do then. It also returns invalid out of sight when there's
+no path left to follow (e.g. the target is walled off and the agent got as
+close as it can), with `canSeeTarget` false.
+
+`plane` says which position axes are the grid's x and y: `xz` (the default)
+for a 3D game's ground, `xy` for a 2D one. Directions come back on the same
+plane. The rest of the options are timings and distances:
+
+```brighterscript
+m.follower = new BGE.NavFollower(m.nav, {
+  sightInterval: 0.25,   ' seconds between line-of-sight checks
+  repathInterval: 0.5,   ' seconds between searches while out of sight
+  repathDistance: 20,    ' search early when the target moves this far (default off)
+  arriveRadius: 6,       ' a waypoint is reached this close (default half a cell)
+  searchBudgetMs: 2,     ' spread searches over frames (default 0: all at once)
+  pathWhileVisible: true ' keep a path ready while in sight (default false)
+})
+```
+
+- `canSee(from, target, dt)` gives the same timed sight check without
+  steering, e.g. to wake a guard. It shares `steer()`'s timer, so call one or
+  the other each frame.
+- `forceRepath()` searches and checks sight again next frame, e.g. after a
+  door opened. `repathAfter(seconds)` delays the next search, to spread
+  several agents' first searches over frames. `clearPath()` drops the path.
+- `path`, `pathIndex`, `lastSearch` and `lastSearchFrames` are there to draw
+  or debug what it's doing.
+- Sight is the grid's `hasLineOfSight()`. For something else (a raycast, a
+  view cone), subclass it and override `checkSight(from, target)`.
+
+`examples/navigation` (`Agent.bs`, on the xy plane) and `examples/thirdPerson`
+(`Entities/Enemy.bs`, on the ground) both use it.
+
 ## Finding a path
 
 `findPath()` returns the waypoints from the start to the goal, or `[]` if
@@ -121,6 +176,12 @@ if m.nav.hasLineOfSight(m.position.x, m.position.y, target.x, target.y)
   ' steer directly
 end if
 ```
+
+Solids are grown by `agentRadius`, so an agent against a wall often stands in
+a blocked cell. An end of the line in a blocked cell is looked at from the
+open cell nearest it, up to 2 cells away. Pass a fifth argument to change
+that (`0` counts any blocked end as blocked). Points outside the grid aren't
+moved.
 
 ## When the world changes
 
