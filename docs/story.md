@@ -459,7 +459,10 @@ view.start("bram")
 
 `choicesWithLastLine` (default true) brings a node's choices up with its last page; set it
 false to show the line first and bring the choices up on the next press. `advanceButton` and
-`cancelButton` (default "ok"/"back") are the buttons that turn the page and leave.
+`cancelButton` (default "ok"/"back") are the buttons that turn the page and leave. Set
+`advanceAction` to a `Game.controls` action (e.g. a gamepad's "attack") to also turn the page and
+pick the focused choice with it; set `game.focusManager.analogAxisName` to a bound axis so a
+stick moves between choices.
 
 Colors default to the theme's `panel*` fields. Nothing is fixed: override
 `createChoiceButton()` (or `createChoiceRow()` for the list) to use your own widgets,
