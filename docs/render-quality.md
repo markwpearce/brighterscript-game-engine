@@ -86,6 +86,8 @@ game.setQualityLevel(BGE.RenderQualityLevel.high)
 ```
 
 This also turns adaptive tuning off - handy for testing, or for a settings menu.
+`game.applyLaunchQuality(params)` does it from a `quality=<0-4>` deep link (see
+[Launch Params](/launch-params)).
 
 ## Draw distance
 
