@@ -197,3 +197,26 @@ end sub
 
 The result has y = 0. Its length follows the stick, up to 1, so a stick pushed halfway gives a
 half-speed walk, and a diagonal isn't faster than straight ahead.
+
+## Zooming
+
+`camera.zoom` (or `camera.zoomTo(target, seconds)`, see
+[Building a Game with BGE](/game-engine-overview#zooming)) works on a `Camera3d` like a zoom
+lens: it multiplies the focal length, so zoom 2 shows the middle of the view twice as big, with
+real perspective. `fieldOfViewDegrees` stays the field of view at zoom 1;
+`getEffectiveFieldOfViewDegrees()` is the narrower one in use, `2 * atan(tan(fov / 2) / zoom)`.
+The frustum, culling, `getFocalLength()`, `pixelsPerWorldUnitAt()`, the skybox, the ground,
+models, impostors, fog and particles sized in world units all follow it.
+
+Some things deliberately don't change:
+
+- The draw distance. A zoomed-in camera stops drawing at the same distance, so zooming at
+  something past the fog won't show it. Raise `maxDrawDistance` for a scene that needs it.
+- `directToCamera` billboards and particles that aren't `sizeInWorldUnits` stay their size in
+  pixels.
+- Models are cut at `getNearDepth()` (focal length / 64), which moves out as you zoom in, so the
+  zoomed view loses things very close to the camera first.
+
+An `OrbitCamera`'s lock-on dead zone is a fraction of the screen, so it tightens in world terms
+as you zoom in. `examples/collisions3d` zooms on Replay, and `examples/thirdPerson` takes a
+`zoom=<n>` deep link.

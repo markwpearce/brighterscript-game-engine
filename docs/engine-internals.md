@@ -27,7 +27,9 @@ origin top-left, +y down, in pixels.
 The flip between the two happens in exactly one place: `Camera.worldPointToCanvasPoint()`
 (`Camera2d.bs` for the default 2D camera, `Camera3d.bs` for a perspective camera). Every
 `Drawable` goes through this - which is _why_ it's safe for game code to think entirely in
-"+y is up" world-space terms and never worry about the flip.
+"+y is up" world-space terms and never worry about the flip. The camera's `zoom` is applied
+there too (in `Camera2d`'s orthographic box, `Camera3d`'s focal length), so a point you project
+yourself in `onDrawEnd` lands where the zoomed drawables are.
 
 ## Colliders never go through the camera
 

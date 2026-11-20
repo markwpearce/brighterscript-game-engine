@@ -1,9 +1,17 @@
 import "../../../math/Matrix44.bs"
 import "../../../math/vector.bs"
 import "../../../utils/MotionChecker.bs"
+import "../../../utils/tweens.bs"
 import "../sceneObjects/SceneObject.bs"
 
 namespace BGE
+
+  ' The smallest and largest zoom Camera.getEffectiveZoom() allows
+  const CAMERA_MIN_ZOOM = 0.1
+  const CAMERA_MAX_ZOOM = 100.0
+
+  ' Longest frame step zoomTo() advances by, so one slow frame can't finish a zoom in a jump.
+  const MAX_ZOOM_STEP_SECONDS = 0.1
 
   class Camera
 
@@ -36,7 +44,25 @@ namespace BGE
     private lastProjectionFrameWidth as float = -1
     private lastProjectionFrameHeight as float = -1
 
-    zoom as float = 1 ' TODO: do something with zoom!
+    ' How much bigger the view is drawn, about its middle: 1 as it comes, 2 twice as big, 0.5
+    ' half. A Camera2d scales world-to-canvas, a Camera3d multiplies its focal length (see
+    ' Camera3d.getEffectiveFieldOfViewDegrees()). Kept within CAMERA_MIN_ZOOM-CAMERA_MAX_ZOOM
+    ' (see getEffectiveZoom()). Write it directly, or ease it with zoomTo().
+    zoom as float = 1.0
+
+    private lastProjectionZoom as float = 1.0
+
+    ' zoomTo()'s ease: where it started and is going, how far through it is (seconds)
+    private zooming as boolean = false
+    private zoomFrom as float = 1.0
+    private zoomTarget as float = 1.0
+    private zoomSeconds as float = 0.0
+    private zoomElapsed as float = 0.0
+    ' the easing function itself, looked up once per zoomTo()
+    private zoomEase as function = invalid
+    ' the zoom advanceZoom() last wrote, so a direct write can cancel the ease
+    private zoomWritten as float = 1.0
+    private zoomClock as roTimespan = invalid
 
     ' Multiplier on a 3D camera's maxDrawDistance, set from the renderer's quality
     ' settings every frame - see `BGE.RenderQualitySettings`. Ignored by Camera2d.
@@ -88,12 +114,116 @@ namespace BGE
     '
     ' @return {boolean} true if the projection changed
     protected function projectionChangedThisFrame() as boolean
-      if m.lastProjectionFrameWidth = m.frameSize.x and m.lastProjectionFrameHeight = m.frameSize.y
+      zoom = m.getEffectiveZoom()
+      if m.lastProjectionFrameWidth = m.frameSize.x and m.lastProjectionFrameHeight = m.frameSize.y and m.lastProjectionZoom = zoom
         return false
       end if
       m.lastProjectionFrameWidth = m.frameSize.x
       m.lastProjectionFrameHeight = m.frameSize.y
+      m.lastProjectionZoom = zoom
       return true
+    end function
+
+    ' The zoom the camera actually uses: `zoom`, kept within CAMERA_MIN_ZOOM-CAMERA_MAX_ZOOM so
+    ' a zero or negative zoom can't divide by zero or mirror the view.
+    '
+    ' @return {float}
+    function getEffectiveZoom() as float
+      zoom = m.zoom
+      if zoom >= BGE.CAMERA_MIN_ZOOM and zoom <= BGE.CAMERA_MAX_ZOOM
+        return zoom * 1.0
+      else if zoom > BGE.CAMERA_MAX_ZOOM
+        return BGE.CAMERA_MAX_ZOOM
+      end if
+      ' below the minimum, or not a number
+      return BGE.CAMERA_MIN_ZOOM
+    end function
+
+    ' Eases `zoom` to `target` over `seconds`, from wherever it is now (a zoom already easing
+    ' carries on from where it had got to). Runs on the camera's own clock, so it works with or
+    ' without a Game, and keeps going while the game is paused. Writing `zoom` yourself, or
+    ' stopZooming(), stops it.
+    '
+    ' @param {float} target - kept within CAMERA_MIN_ZOOM-CAMERA_MAX_ZOOM
+    ' @param {float} [seconds=0.5] - 0 or less zooms at once
+    ' @param {BGE.Tweens.Easing} [easing=SinusoidalEaseInOut] - the curve, applied to the zoom's
+    '   logarithm so equal steps look like equal changes in size
+    sub zoomTo(target as float, seconds = 0.5 as float, easing = BGE.Tweens.Easing.SinusoidalEaseInOut as BGE.Tweens.Easing)
+      if target < BGE.CAMERA_MIN_ZOOM
+        target = BGE.CAMERA_MIN_ZOOM
+      else if target > BGE.CAMERA_MAX_ZOOM
+        target = BGE.CAMERA_MAX_ZOOM
+      end if
+      from = m.getEffectiveZoom()
+      if seconds <= 0 or from = target
+        m.zooming = false
+        m.zoom = target
+        return
+      end if
+      m.zooming = true
+      m.zoomFrom = from
+      m.zoomTarget = target
+      m.zoomSeconds = seconds
+      m.zoomElapsed = 0.0
+      m.zoomEase = BGE.Tweens.GetTweens()[easing]
+      m.zoom = from
+      m.zoomWritten = from
+      if invalid = m.zoomClock
+        m.zoomClock = CreateObject("roTimespan")
+      end if
+      m.zoomClock.Mark()
+    end sub
+
+    ' Whether a zoomTo() is still easing.
+    '
+    ' @return {boolean}
+    function isZooming() as boolean
+      return m.zooming
+    end function
+
+    ' Stops a zoomTo() where it has got to.
+    sub stopZooming()
+      m.zooming = false
+    end sub
+
+    ' Moves a zoomTo() on by `dt` seconds. Called every frame by checkMovement(); only call it
+    ' yourself in tests.
+    '
+    ' @param {float} dt elapsed seconds (clamped to 0-0.1)
+    sub advanceZoom(dt as float)
+      if not m.zooming
+        return
+      end if
+      if m.zoom <> m.zoomWritten
+        ' written directly since the last step
+        m.zooming = false
+        return
+      end if
+      if dt < 0
+        dt = 0
+      else if dt > BGE.MAX_ZOOM_STEP_SECONDS
+        dt = BGE.MAX_ZOOM_STEP_SECONDS
+      end if
+      m.zoomElapsed += dt
+      if m.zoomElapsed >= m.zoomSeconds
+        m.zoom = m.zoomTarget
+        m.zooming = false
+      else
+        ease = m.zoomEase
+        eased = ease(0.0, 1.0, m.zoomElapsed, m.zoomSeconds)
+        m.zoom = m.zoomFrom * Exp(eased * Log(m.zoomTarget / m.zoomFrom))
+      end if
+      m.zoomWritten = m.zoom
+    end sub
+
+    ' Seconds since the last call while a zoomTo() runs (0 otherwise).
+    protected function getZoomClockSeconds() as float
+      if not m.zooming or invalid = m.zoomClock
+        return 0.0
+      end if
+      seconds = m.zoomClock.TotalMilliseconds() / 1000.0
+      m.zoomClock.Mark()
+      return seconds
     end function
 
     ' Rebuild whatever the camera derives from its projection. Renderer only rebuilds the
@@ -128,6 +258,12 @@ namespace BGE
     end sub
 
     sub checkMovement()
+      m.advanceZoom(m.getZoomClockSeconds())
+      m.checkProjectionAndMotion()
+    end sub
+
+    ' checkMovement() after the zoom has advanced: projection, then position/orientation.
+    protected sub checkProjectionAndMotion()
       m.checkProjectionChange()
 
       currentlyMoved = m.motionChecker.check(m.position, m.orientation)
