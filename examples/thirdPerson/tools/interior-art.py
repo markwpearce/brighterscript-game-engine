@@ -34,30 +34,30 @@ def crypt_wall():
 
 
 def in_arch(x, y, x0, x1, spring, rise):
-    """Inside a pointed arch over x0..x1 whose sides spring at y = spring and rise `rise` px."""
+    """Inside an arch over x0..x1 springing at y = spring and rising `rise` px: pointed when rise
+    is more than half the span, else a flat top with rounded shoulders."""
     if x < x0 or x >= x1:
         return False
     if y >= spring:
         return True
     half = (x1 - x0) / 2
     cx = x0 + half
-    # two circles meeting at the apex, each centred on the far springing point's side
+    # two circles through each springing point and the apex, clipped at the apex height
     radius = (half * half + rise * rise) / (2 * half) if half > 0 else 0
-    dx = abs(x + 0.5 - cx)
     centre = cx - (radius - half) if x + 0.5 >= cx else cx + (radius - half)
-    return (x + 0.5 - centre) ** 2 + (y + 0.5 - spring) ** 2 <= radius * radius and spring - y <= rise and dx <= half
+    return (x + 0.5 - centre) ** 2 + (y + 0.5 - spring) ** 2 <= radius * radius and spring - y <= rise
 
 
 def door(rng, leaves, wall_m):
-    """`leaves` 2 m leaves side by side under one pointed arch, set in wall_m of stone."""
+    """`leaves` 2 m leaves side by side under one arch, set in wall_m of stone."""
     width = leaves * 2 * PX
     height = int(wall_m * PX)
     img = Image(width, height, (0, 0, 0, 255))
     stone = crypt_wall()
     for y in range(height):
         for x in range(width):
-            # the wall texture's damp foot lines up with the floor
-            p = stone.get(x, y - height)
+            # the grid walls stretch one texture height over the whole wall, so do the same
+            p = stone.get(x, y * stone.height // height)
             img.put(x, y, tuple(p[:3]))
     x0, x1 = 7, width - 7
     leaf_h = int(3.1 * PX)
@@ -165,7 +165,7 @@ def banner(rng, cloth):
             if notch > 0 and abs(x + 0.5 - width / 2) < notch * (right - left) / (2 * tail):
                 continue
             fold = 0.86 + 0.16 * math.sin((x - left) * 0.55)
-            edge = x < left + 2 or x >= right - 2 or y < 5 or (notch > -2 and notch > 0 and False)
+            edge = x < left + 2 or x >= right - 2 or y < 5
             col = GOLD if edge else cloth
             img.put(x, y, shade(col, fold * rng.uniform(0.95, 1.04)))
     # gold hem along the tails
