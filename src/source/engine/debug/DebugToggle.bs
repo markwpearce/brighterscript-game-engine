@@ -1,0 +1,242 @@
+import "../Game.bs"
+import "../GameInput.bs"
+
+namespace BGE.Debug
+
+  ' One step of a BGE.Debug.DebugToggle cycle. Every field is optional.
+  '
+  ' The flags (showUi, colliders, entityDetails, safeZones, occlusion) a toggle manages are the
+  ' ones any of its levels sets: a level turns those on or off (missing = off), and flags no
+  ' level mentions are left alone, so a game can still set them itself.
+  interface DebugLevel extends roAssociativeArray
+    ' Show the debug UI panels (Game.debugShowUi())
+    optional showUi as boolean
+    ' Draw colliders (Game.debugDrawColliders())
+    optional colliders as boolean
+    ' Draw entity axes and names (Game.debugDrawEntityDetails())
+    optional entityDetails as boolean
+    ' Draw the title/action safe zones (Game.debugDrawSafeZones())
+    optional safeZones as boolean
+    ' Draw the occlusion culling overlay (Game.debugDrawOcclusion())
+    optional occlusion as boolean
+    ' Replaces the debug UI's panels with Game.enableStandardDebugUi(panels) - this clears
+    ' every child of game.debugUi, including ones the game added. Unset leaves the panels alone.
+    optional panels as roAssociativeArray
+    ' Called after the flags above are applied, for anything else this level should do
+    optional apply as sub(game as BGE.Game) as void
+  end interface
+
+  ' Options for Game.enableDebugToggle(). Every field is optional.
+  interface DebugToggleOptions extends roAssociativeArray
+    ' Remote button that steps to the next level (default "options", the * button). Aliases
+    ' work, as with GameInput.isButton().
+    optional button as string
+    ' ControlMap action that steps to the next level instead of the button, when it's bound
+    optional action as string
+    ' The cycle, in order (default: off, panels, + entity details, + colliders)
+    optional levels as BGE.Debug.DebugLevel[]
+    ' Index of the level the game starts at (default 0). It isn't applied - it only says
+    ' where the first press moves on from, e.g. 1 for a game that turns the panels on itself.
+    optional startLevel as integer
+    ' Does the button do anything (default true)? Turn it off while the button means something
+    ' else, e.g. game.debugToggle.enabled = false.
+    optional enabled as boolean
+  end interface
+
+  ' Steps through a cycle of debug overlays each time a button (or ControlMap action) is
+  ' pressed, wrapping back to the first. Made by Game.enableDebugToggle(); nothing is bound
+  ' until a game calls that.
+  '
+  ' It acts on presses before entities get them and doesn't consume them, so pick a button
+  ' gameplay doesn't use, or turn `enabled` off while it does. It still works while the game is
+  ' paused, but not in a frame a UI widget captured input (GameInput.consume()).
+  '
+  ' Each change posts a "debugLevelChanged" game event ({level, previousLevel}). Subclass to
+  ' change how a level is applied (applyLevel()) or what happens after (onLevelChanged()), and
+  ' assign the instance to game.debugToggle.
+  '
+  ' @example
+  ' game.enableStandardDebugUi()
+  ' game.enableDebugToggle({levels: [{}, {showUi: true, colliders: true}]})
+  class DebugToggle
+
+    ' Remote button that steps the cycle (used when `action` isn't bound)
+    button as string = "options"
+    ' ControlMap action that steps the cycle, when bound
+    action as string = ""
+    ' Does the button do anything?
+    enabled as boolean = true
+
+    protected game as BGE.Game
+    protected levels as BGE.Debug.DebugLevel[]
+    protected level as integer = 0
+    ' Flags any level sets - the only ones applyLevel() touches
+    protected managedFlags as roAssociativeArray = {}
+
+    ' @param {BGE.Game} game
+    ' @param {BGE.Debug.DebugToggleOptions} [options={}]
+    sub new(game as BGE.Game, options = {} as BGE.Debug.DebugToggleOptions)
+      m.game = game
+      if options.button <> invalid
+        m.button = options.button
+      end if
+      if options.action <> invalid
+        m.action = options.action
+      end if
+      if options.enabled <> invalid
+        m.enabled = options.enabled
+      end if
+      levels = options.levels
+      if levels = invalid or levels.Count() = 0
+        levels = m.defaultLevels()
+      end if
+      m.setLevels(levels)
+      if options.startLevel <> invalid
+        m.level = m.wrapIndex(options.startLevel)
+      end if
+    end sub
+
+    ' Replaces the cycle. Keeps the current index (wrapped to fit) without applying anything.
+    '
+    ' @param {BGE.Debug.DebugLevel[]} levels
+    ' @return {void}
+    sub setLevels(levels as BGE.Debug.DebugLevel[])
+      m.levels = levels
+      m.managedFlags = {}
+      for each settings in levels
+        for each flag in m.flagNames()
+          if settings.DoesExist(flag)
+            m.managedFlags[flag] = true
+          end if
+        end for
+      end for
+      m.level = m.wrapIndex(m.level)
+    end sub
+
+    ' Index of the current level
+    '
+    ' @return {integer}
+    function getLevel() as integer
+      return m.level
+    end function
+
+    ' How many levels the cycle has
+    '
+    ' @return {integer}
+    function getLevelCount() as integer
+      return m.levels.Count()
+    end function
+
+    ' Steps to the next level, wrapping back to the first.
+    '
+    ' @return {integer} the new level's index
+    function nextLevel() as integer
+      m.setLevel(m.level + 1)
+      return m.level
+    end function
+
+    ' Applies a level (wrapped into range) and posts "debugLevelChanged".
+    '
+    ' @param {integer} index
+    ' @return {void}
+    sub setLevel(index as integer)
+      previous = m.level
+      m.level = m.wrapIndex(index)
+      m.applyLevel(m.levels[m.level])
+      m.onLevelChanged(m.level, previous)
+    end sub
+
+    ' Steps the cycle if this input is a press of `button` (and no action is in use).
+    ' Game calls this for each of the frame's inputs.
+    '
+    ' @param {BGE.GameInput} input
+    ' @return {boolean} true if it stepped
+    function handleInput(input as BGE.GameInput) as boolean
+      if not m.enabled or m.usesAction() or not input.press or not input.isButton(m.button)
+        return false
+      end if
+      m.nextLevel()
+      return true
+    end function
+
+    ' Steps the cycle if `action` is bound and was pressed this frame. Game calls this once a frame.
+    '
+    ' @return {boolean} true if it stepped
+    function handleControls() as boolean
+      if not m.enabled or not m.usesAction() or not m.game.controls.isActionPressed(m.action)
+        return false
+      end if
+      m.nextLevel()
+      return true
+    end function
+
+    ' Sets the game's debug flags for a level.
+    '
+    ' @param {BGE.Debug.DebugLevel} settings
+    ' @return {void}
+    protected sub applyLevel(settings as BGE.Debug.DebugLevel)
+      if settings.panels <> invalid
+        m.game.debugUi.clearChildren()
+        m.game.enableStandardDebugUi(settings.panels)
+      end if
+      if m.managedFlags.DoesExist("showUi")
+        m.game.debugShowUi(m.isOn(settings, "showUi"))
+      end if
+      if m.managedFlags.DoesExist("colliders")
+        m.game.debugDrawColliders(m.isOn(settings, "colliders"))
+      end if
+      if m.managedFlags.DoesExist("entityDetails")
+        m.game.debugDrawEntityDetails(m.isOn(settings, "entityDetails"))
+      end if
+      if m.managedFlags.DoesExist("safeZones")
+        m.game.debugDrawSafeZones(m.isOn(settings, "safeZones"))
+      end if
+      if m.managedFlags.DoesExist("occlusion")
+        m.game.debugDrawOcclusion(m.isOn(settings, "occlusion"))
+      end if
+      if settings.apply <> invalid
+        settings.apply(m.game)
+      end if
+    end sub
+
+    ' Called after a level is applied. Posts "debugLevelChanged" ({level, previousLevel});
+    ' override (calling super) to do more.
+    '
+    ' @param {integer} level
+    ' @param {integer} previousLevel
+    ' @return {void}
+    protected sub onLevelChanged(level as integer, previousLevel as integer)
+      m.game.postGameEvent("debugLevelChanged", {level: level, previousLevel: previousLevel})
+    end sub
+
+    ' The cycle used when no levels are given: off, panels, + entity details, + colliders
+    '
+    ' @return {BGE.Debug.DebugLevel[]}
+    protected function defaultLevels() as BGE.Debug.DebugLevel[]
+      return [
+        {showUi: false, entityDetails: false, colliders: false},
+        {showUi: true},
+        {showUi: true, entityDetails: true},
+        {showUi: true, entityDetails: true, colliders: true}
+      ] as BGE.Debug.DebugLevel[]
+    end function
+
+    private function usesAction() as boolean
+      return m.action <> "" and m.game.controls.hasAction(m.action)
+    end function
+
+    private function isOn(settings as BGE.Debug.DebugLevel, flag as string) as boolean
+      return settings.DoesExist(flag) and settings[flag] = true
+    end function
+
+    private function flagNames() as string[]
+      return ["showUi", "colliders", "entityDetails", "safeZones", "occlusion"]
+    end function
+
+    private function wrapIndex(index as integer) as integer
+      count = m.levels.Count()
+      return ((index mod count) + count) mod count
+    end function
+  end class
+
+end namespace
