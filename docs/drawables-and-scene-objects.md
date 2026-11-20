@@ -46,7 +46,7 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `DrawableCircle`      | `SceneObjectCircle`      | A filled and/or outlined circle - foreshortens into an ellipse when oriented in 3D. |
 | `DrawableSphere`      | `SceneObjectCircle`      | A `DrawableCircle` that always renders as an undistorted circle, regardless of camera angle. |
 | `DrawableOrientedSprite` | `SceneObjectImage`   | A `Sprite` that swaps its active animation based on the camera's angle to the entity, faking a Doom-style billboard sprite. |
-| `DrawablePolygon`     | `SceneObjectPolygon`     | A filled (its convex hull) or outlined polygon.                             |
+| `DrawablePolygon`     | `SceneObjectPolygon`     | A filled (its convex hull, or as drawn with `concave`) or outlined polygon (see below). |
 | `DrawableLine`        | `SceneObjectLine`        | A single line segment between two points.                                   |
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
 | `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
@@ -322,6 +322,44 @@ To replay a one-shot from its first frame, such as a second attack in a combo, p
 ```brighterscript
 sprite.playOrientedAnimation("attack", true) ' Sprite.playAnimation() takes it too
 ```
+
+## Polygons
+
+`DrawablePolygon` fills (or, in the wireframe draw modes, strokes) a flat polygon from its `points`.
+By default the fill is the points' **convex hull**, whatever order they're in, so a chevron or a
+star comes out with its notches filled in. That's the cheapest fill: a big convex polygon is drawn
+as exact triangles.
+
+Set `concave = true` to fill the outline as drawn. The points must then go round the outline in
+order (either way round):
+
+```brighterscript
+arrow = new BGE.DrawablePolygon(m, [
+  BGE.Math.VectorOps.create(-40, -30, 0),
+  BGE.Math.VectorOps.create(40, 0, 0),
+  BGE.Math.VectorOps.create(-40, 30, 0),
+  BGE.Math.VectorOps.create(-10, 0, 0)
+], {concave: true, color: BGE.ColorsRGB.Yellow})
+m.addDrawable("arrow", arrow)
+```
+
+For an outline that crosses itself, `fillRule` says what's inside: `BGE.PolygonFillRule.nonZero`
+(the default, as in SVG) fills a star drawn as one line solid; `BGE.PolygonFillRule.evenOdd` leaves
+its centre hollow.
+
+A concave polygon is filled with one `DrawRect` per run of equal pixel bands
+(`Renderer.drawConcavePolygonTo()`, a scanline fill), banding across the shorter side of its
+bounding box. The bands never overlap, so a translucent polygon blends once everywhere, even where
+a self-crossing outline overlaps itself. There's no exact triangle fill to fall back on, so a big
+concave polygon costs more than its hull would: roughly one rect per pixel row, more where the row
+crosses several arms. While it moves it uses coarser bands (`RenderQualitySettings.triangleQuickDrawStep`)
+once it's wider than a convex polygon with as many sides would band, and is redrawn exactly when it
+stops. Points that happen to be convex in order take the normal hull path, so the flag costs
+nothing on a convex shape.
+
+Changing `concave` or `fillRule` redraws the polygon. A polygon is depth sorted by its hull, so an
+object in a notch may be ordered against it when it needn't be, but never wrongly, and polygons
+are never occluders (see "Occluders and visibility"), so a notch can't hide what's behind it.
 
 ## SceneObjectDrawMode
 
