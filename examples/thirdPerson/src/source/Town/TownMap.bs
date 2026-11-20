@@ -1,36 +1,5 @@
 import "../World.bs"
-import "pkg:/source/engine/sceneFlow/ExitArea.bs"
-
-' One cell of the town's grid
-interface TownCell extends roAssociativeArray
-  col as integer
-  row as integer
-  ' Its character in src/maps/town.txt
-  kind as string
-end interface
-
-' A connected block of cells of one kind (a building, a tower, the gate)
-interface TownGroup extends roAssociativeArray
-  kind as string
-  col as integer
-  row as integer
-  cols as integer
-  rows as integer
-end interface
-
-' A parsed town.txt
-interface TownLayout extends roAssociativeArray
-  cols as integer
-  rows as integer
-  ' Rows of single-character kinds, [row][col]
-  grid as string[][]
-  ' Every cell holding something placed one per cell (torches, people, pigs, the well, the start)
-  cells as TownCell[]
-  ' Houses, huts and the keep
-  buildings as TownGroup[]
-  towers as TownGroup[]
-  gate as TownGroup
-end interface
+import "pkg:/source/engine/gridMaps/CharGrid.bs"
 
 ' The town as a text grid of 2 m cells, read from src/maps/town.txt (its key is the comment at the
 ' top). tools/town-ground.py paints the ground from the same file.
@@ -44,7 +13,8 @@ namespace TownMap
   ' Kinds a door can open onto
   const STREET_KINDS = "=-"
 
-  function load() as TownLayout
+  ' town.txt's rows, without its comments
+  function readRows() as string[]
     rows = [] as string[]
     for each textLine in ReadAsciiFile("pkg:/maps/town.txt").split(Chr(10))
       textLine = textLine.trim()
@@ -52,73 +22,34 @@ namespace TownMap
         rows.push(textLine)
       end if
     end for
-    return TownMap.parse(rows)
+    return rows
   end function
 
-  function parse(rows as string[]) as TownLayout
-    layout = {cols: Len(rows[0]), rows: rows.Count(), grid: [], cells: [], buildings: [], towers: []} as TownLayout
-    for row = 0 to rows.Count() - 1
-      kinds = [] as string[]
-      for col = 0 to layout.cols - 1
-        kind = Mid(rows[row], col + 1, 1)
-        kinds.push(kind)
-        if Instr(1, TownMap.CELL_KINDS, kind) > 0
-          layout.cells.push({col: col, row: row, kind: kind} as TownCell)
-        end if
-      end for
-      layout.grid.push(kinds)
-    end for
-    TownMap.findGroups(layout)
-    return layout
-  end function
+end namespace
 
-  ' Flood-fills each connected block of a group kind into one TownGroup (its bounding rectangle)
-  sub findGroups(layout as TownLayout)
-    seen = {}
-    for row = 0 to layout.rows - 1
-      for col = 0 to layout.cols - 1
-        kind = layout.grid[row][col]
-        key = `${col},${row}`
-        if Instr(1, TownMap.GROUP_KINDS, kind) > 0 and not seen.DoesExist(key)
-          group = {kind: kind, col: col, row: row, cols: 1, rows: 1} as TownGroup
-          lastCol = col
-          lastRow = row
-          stack = [[col, row]]
-          seen[key] = true
-          while stack.Count() > 0
-            here = stack.Pop()
-            if here[0] < group.col
-              group.col = here[0]
-            end if
-            if here[0] > lastCol
-              lastCol = here[0]
-            end if
-            if here[1] > lastRow
-              lastRow = here[1]
-            end if
-            for each offset in [[1, 0], [-1, 0], [0, 1], [0, -1]]
-              c = here[0] + offset[0]
-              r = here[1] + offset[1]
-              nextKey = `${c},${r}`
-              if c >= 0 and r >= 0 and c < layout.cols and r < layout.rows and not seen.DoesExist(nextKey)
-                if layout.grid[r][c] = kind
-                  seen[nextKey] = true
-                  stack.Push([c, r])
-                end if
-              end if
-            end for
-          end while
-          group.cols = lastCol - group.col + 1
-          group.rows = lastRow - group.row + 1
-          if kind = "t"
-            layout.towers.push(group)
-          else if kind = "G"
-            layout.gate = group
-          else
-            layout.buildings.push(group)
-          end if
-        end if
-      end for
+' A parsed town.txt (TownMap.readRows()). Nothing in it is solid by character.
+class TownLayout extends BGE.CharGrid
+
+  ' Every cell holding something placed one per cell (torches, people, pigs, the well, the start)
+  cells as BGE.CharGridCell[]
+  ' Houses, huts and the keep: each connected block of a group kind
+  buildings as BGE.CharGridGroup[]
+  towers as BGE.CharGridGroup[]
+  gate as BGE.CharGridGroup
+
+  sub new(rows as string[])
+    super(rows, {cellSize: World.metres(TownMap.CELL_METRES), solidKinds: ""})
+    m.cells = m.cellsOf(TownMap.CELL_KINDS)
+    m.buildings = []
+    m.towers = []
+    for each group in m.findConnectedGroups(TownMap.GROUP_KINDS)
+      if group.kind = "t"
+        m.towers.push(group)
+      else if group.kind = "G"
+        m.gate = group
+      else
+        m.buildings.push(group)
+      end if
     end for
   end sub
 
@@ -126,15 +57,15 @@ namespace TownMap
   ' A group as wide as `frontCells` faces +z or -z; otherwise it's turned to face +x or -x. A
   ' square one may face any way. Of the allowed sides, the door goes on the one with the most
   ' street or path along it.
-  function doorTurn(layout as TownLayout, group as TownGroup, frontCells as integer) as float
+  function doorTurn(group as BGE.CharGridGroup, frontCells as integer) as float
     sides = [] as roAssociativeArray[]
     if group.cols = frontCells
-      sides.push({turn: 0, streetCells: TownMap.streetAlong(layout, group.col, group.row + group.rows, group.cols, 1)})
-      sides.push({turn: BGE.Math.PI, streetCells: TownMap.streetAlong(layout, group.col, group.row - 1, group.cols, 1)})
+      sides.push({turn: 0, streetCells: m.streetAlong(group.col, group.row + group.rows, group.cols, 1)})
+      sides.push({turn: BGE.Math.PI, streetCells: m.streetAlong(group.col, group.row - 1, group.cols, 1)})
     end if
     if group.rows = frontCells
-      sides.push({turn: BGE.Math.PI / 2, streetCells: TownMap.streetAlong(layout, group.col + group.cols, group.row, 1, group.rows)})
-      sides.push({turn: -BGE.Math.PI / 2, streetCells: TownMap.streetAlong(layout, group.col - 1, group.row, 1, group.rows)})
+      sides.push({turn: BGE.Math.PI / 2, streetCells: m.streetAlong(group.col + group.cols, group.row, 1, group.rows)})
+      sides.push({turn: -BGE.Math.PI / 2, streetCells: m.streetAlong(group.col - 1, group.row, 1, group.rows)})
     end if
     best = sides[0]
     for each side in sides
@@ -146,34 +77,16 @@ namespace TownMap
   end function
 
   ' How many street or path cells are in a rectangle (off the grid counts as none)
-  function streetAlong(layout as TownLayout, col as integer, row as integer, cols as integer, rows as integer) as integer
+  function streetAlong(col as integer, row as integer, cols as integer, rows as integer) as integer
     count = 0
     for r = row to row + rows - 1
       for c = col to col + cols - 1
-        if c >= 0 and r >= 0 and c < layout.cols and r < layout.rows
-          if Instr(1, TownMap.STREET_KINDS, layout.grid[r][c]) > 0
-            count++
-          end if
+        if m.isKindOf(c, r, TownMap.STREET_KINDS)
+          count++
         end if
       end for
     end for
     return count
   end function
 
-  ' World x/z of a cell's centre (y 0), with the grid centred on the origin
-  function cellCenter(layout as TownLayout, col as float, row as float) as BGE.Math.Vector
-    size = World.metres(TownMap.CELL_METRES)
-    return BGE.Math.VectorOps.create((col - (layout.cols - 1) / 2) * size, 0, (row - (layout.rows - 1) / 2) * size)
-  end function
-
-  ' World x/z of the middle of a group of cells
-  function groupCenter(layout as TownLayout, group as TownGroup) as BGE.Math.Vector
-    return TownMap.cellCenter(layout, group.col + (group.cols - 1) / 2, group.row + (group.rows - 1) / 2)
-  end function
-
-  ' A scene exit over a group's cells
-  function groupArea(layout as TownLayout, group as TownGroup) as BGE.GridCellsExitArea
-    return World.cellsArea(layout.cols, layout.rows, TownMap.CELL_METRES, group.col, group.row, group.cols, group.rows)
-  end function
-
-end namespace
+end class

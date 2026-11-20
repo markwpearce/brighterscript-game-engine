@@ -6,7 +6,8 @@ import "../Entities/Torch.bs"
 import "../Entities/Townsfolk.bs"
 import "../Interior/InteriorMap.bs"
 import "../Interior/Interiors.bs"
-import "../Interior/InteriorCameraBoom.bs"
+import "pkg:/source/engine/gridMaps/GridSides.bs"
+import "pkg:/source/engine/renderer/cameras/GridWallsCameraBoom.bs"
 import "../Town/TownsfolkTypes.bs"
 import "ThirdPersonScene.bs"
 
@@ -20,6 +21,8 @@ class InteriorScene extends ThirdPersonScene
 
   private place as InteriorPlace
   private layout as InteriorLayout
+  ' The walls' grid, which the camera boom marches through
+  private wallsMap as BGE.GridWallsMap
   private bitmapPaths as roAssociativeArray = {
     cryptFloor: "pkg:/sprites/crypt_floor.webp",
     cryptWall: "pkg:/sprites/crypt_wall.webp"
@@ -53,7 +56,8 @@ class InteriorScene extends ThirdPersonScene
   override sub onCreate(args as roAssociativeArray)
     m.readCommonArgs(args)
     m.game.setBackgroundColor(&h000000FF)
-    m.layout = InteriorMap.parse(m.place.layout)
+    layout = new InteriorLayout(m.place.layout)
+    m.layout = layout
     ' scenes are reused
     m.hangingCount = 0
 
@@ -67,7 +71,7 @@ class InteriorScene extends ThirdPersonScene
 
     m.addLight(new BGE.AmbientLight(m.place.ambientColor, m.place.ambientIntensity))
 
-    solids = InteriorMap.solidWorld(m.layout)
+    solids = m.layout.toSolidWorld()
     m.addWalls()
     m.addDoor()
     m.addFurniture(solids)
@@ -77,18 +81,18 @@ class InteriorScene extends ThirdPersonScene
 
     ' Just inside the door, facing into the room
     door = m.layout.exits[0]
-    inside = InteriorMap.cellCenter(m.layout, door.col + (m.layout.exits.Count() - 1) / 2, door.row - 1)
+    inside = m.layout.cellCenter(door.col + (m.layout.exits.Count() - 1) / 2, door.row - 1)
     heading = 0.0
     at = m.parseAt()
     if invalid <> at
       ' Measuring: starts in another cell
-      inside = InteriorMap.cellCenter(m.layout, at.col, at.row)
+      inside = m.layout.cellCenter(at.col, at.row)
       heading = at.heading
     end if
     m.addKnight(inside.x, inside.z, heading)
     ' Each door cell leads back out to where he came in
     for each doorCell in m.layout.exits
-      m.exits.add(InteriorMap.cellArea(m.layout, doorCell), m.place.outside, {from: m.place.id})
+      m.exits.add(World.cellsArea(m.layout, doorCell.col, doorCell.row), m.place.outside, {from: m.place.id})
     end for
     ' Long enough to see across the keep's hall from its door
     m.setUpCamera(m.drawDistance(30), 0.5, m.wallTopCameraTilt)
@@ -104,9 +108,10 @@ class InteriorScene extends ThirdPersonScene
     map = new BGE.GridWallsMap(m.place.layout, {
       cellSize: size,
       wallHeight: World.metres(m.place.wallMetres),
-      origin: BGE.Math.VectorOps.create(-m.layout.cols * size / 2, 0, -m.layout.rows * size / 2),
+      origin: m.layout.origin,
       solid: {"#": "stone"}
     })
+    m.wallsMap = map
     walls = new BGE.DrawableGridWalls(m, map, {stone: region}, {isShaded: true, lightWrap: 0.5, castsFogSilhouette: true})
     m.addDrawable("Walls", walls)
   end sub
@@ -123,9 +128,9 @@ class InteriorScene extends ThirdPersonScene
     end if
     boxesByKind = {}
     size = World.metres(InteriorMap.CELL_METRES)
-    for each group in InteriorMap.groups(m.layout, kinds)
+    for each group in m.layout.findRectGroups(kinds)
       piece = m.furnitureFor(group.kind)
-      center = InteriorMap.cellCenter(m.layout, group.col + (group.cols - 1) / 2, group.row + (group.rows - 1) / 2)
+      center = m.layout.groupCenter(group)
       width = group.cols * size - 2 * World.metres(piece.insetX)
       depth = group.rows * size - 2 * World.metres(piece.insetZ)
       if invalid = boxesByKind[group.kind]
@@ -155,21 +160,19 @@ class InteriorScene extends ThirdPersonScene
     end if
     first = exits[0]
     outward = "s"
-    for each side in InteriorMap.sides()
-      delta = InteriorMap.sideStep(side)
-      col = first.col + delta[0]
-      row = first.row + delta[1]
-      if col < 0 or row < 0 or col >= m.layout.cols or row >= m.layout.rows
+    for each side in BGE.GridSides.all()
+      delta = BGE.GridSides.offset(side)
+      if not m.layout.isInside(first.col + delta[0], first.row + delta[1])
         outward = side
       end if
     end for
     ' the middle of the gap's cells
-    middle = InteriorMap.cellCenter(m.layout, first.col, first.row)
-    last = InteriorMap.cellCenter(m.layout, exits[exits.Count() - 1].col, exits[exits.Count() - 1].row)
+    middle = m.layout.cellCenter(first.col, first.row)
+    last = m.layout.cellCenter(exits[exits.Count() - 1].col, exits[exits.Count() - 1].row)
     middle = BGE.Math.VectorOps.create((middle.x + last.x) / 2, 0, (middle.z + last.z) / 2)
     spot = m.onWall(middle, outward, World.metres(0.05))
     doorProp = new Prop(m.game)
-    m.game.addEntity(doorProp, {x: spot.x, z: spot.z, bitmap: m.place.door, turn: InteriorMap.awayTurn(outward)})
+    m.game.addEntity(doorProp, {x: spot.x, z: spot.z, bitmap: m.place.door, turn: m.awayTurn(outward)})
   end sub
 
   ' A banner or window flat on the cell's first wall
@@ -178,20 +181,20 @@ class InteriorScene extends ThirdPersonScene
     bitmap = hanging.bitmaps[m.hangingCount mod hanging.bitmaps.Count()]
     m.hangingCount++
     hung = new Prop(m.game)
-    m.game.addEntity(hung, {x: spot.x, z: spot.z, y: World.metres(hanging.bottom), bitmap: bitmap, turn: InteriorMap.awayTurn(side), unlit: hanging.unlit})
+    m.game.addEntity(hung, {x: spot.x, z: spot.z, y: World.metres(hanging.bottom), bitmap: bitmap, turn: m.awayTurn(side), unlit: hanging.unlit})
   end sub
 
   ' Torches, the hearth, candles, the throne, hangings and the people
-  private sub addCellContents(cell as InteriorCell, solids as BGE.SolidWorld)
-    center = InteriorMap.cellCenter(m.layout, cell.col, cell.row)
-    wallSides = InteriorMap.wallSides(m.layout, cell.col, cell.row)
+  private sub addCellContents(cell as BGE.CharGridCell, solids as BGE.SolidWorld)
+    center = m.layout.cellCenter(cell.col, cell.row)
+    wallSides = m.layout.wallSides(cell.col, cell.row)
     ' AA lookups ignore case: don't let `F` take `f`'s hanging
     hanging = m.place.hangings[cell.kind] as InteriorHanging
     if invalid <> hanging and LCase(cell.kind) = cell.kind and wallSides.Count() > 0
       m.addHanging(hanging, center, wallSides[0])
     else if cell.kind = "t" and wallSides.Count() > 0
       spot = m.onWall(center, wallSides[0], 0)
-      Dressing.addWallTorch(m.game, spot.x, spot.z, InteriorMap.awayTurn(wallSides[0]), FlameKind.fire)
+      Dressing.addWallTorch(m.game, spot.x, spot.z, m.awayTurn(wallSides[0]), FlameKind.fire)
     else if cell.kind = "H" and wallSides.Count() > 0
       m.addHearth(center, wallSides[0], solids)
     else if cell.kind = "c"
@@ -207,16 +210,22 @@ class InteriorScene extends ThirdPersonScene
     end if
   end sub
 
+  ' The turn (+z at 0, as Dressing.addWallTorch() takes it) that points away from a wall on
+  ' `side`, into the room
+  private function awayTurn(side as string) as float
+    return -BGE.GridSides.heading(side)
+  end function
+
   ' A point `inset` in from the middle of a cell's wall on `side`
   private function onWall(center as BGE.Math.Vector, side as string, inset as float) as BGE.Math.Vector
-    delta = InteriorMap.sideStep(side)
+    delta = BGE.GridSides.offset(side)
     reach = World.metres(InteriorMap.CELL_METRES) / 2 - inset
     return BGE.Math.VectorOps.create(center.x + delta[0] * reach, 0, center.z + delta[1] * reach)
   end function
 
   ' A stone fireplace against the wall, a fire on the floor in front of it
   private sub addHearth(center as BGE.Math.Vector, side as string, solids as BGE.SolidWorld)
-    delta = InteriorMap.sideStep(side)
+    delta = BGE.GridSides.offset(side)
     ' The block's long side along the wall
     alongX = delta[0] = 0
     deep = World.metres(0.9)
@@ -238,7 +247,7 @@ class InteriorScene extends ThirdPersonScene
 
   ' A high-backed wooden throne against the wall
   private sub addThrone(center as BGE.Math.Vector, side as string, solids as BGE.SolidWorld)
-    delta = InteriorMap.sideStep(side)
+    delta = BGE.GridSides.offset(side)
     alongX = delta[0] = 0
     backSpot = m.onWall(center, side, World.metres(0.15))
     seatSpot = m.onWall(center, side, World.metres(0.7))
@@ -299,7 +308,8 @@ class InteriorScene extends ThirdPersonScene
 
   ' Walls stop the camera by the grid, so they need no colliders
   protected override function makeCameraBoom(args as roAssociativeArray) as BGE.CameraBoom
-    return new InteriorCameraBoom(m.game, m.layout, args)
+    args.stepLength = World.metres(0.2)
+    return new BGE.GridWallsCameraBoom(m.game, m.wallsMap, args)
   end function
 
 end class
