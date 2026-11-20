@@ -119,6 +119,10 @@ namespace BGE
     private impostorDepthRatio as float = 0.0
     private impostorStripResidual as float = -1.0
     private impostorStripAllowed as float = -1.0
+    ' strip attempts still to skip, after a fit failed on its capture's first try (walking past
+    ' a deep model: parallax a frame's step already outgrows), and how many the last backoff was
+    private stripBackoff as integer = 0
+    private stripBackoffLength as integer = 0
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -347,7 +351,8 @@ namespace BGE
       if m.drawable.impostorRedrawOnNewFace and not isBackFaceDrawMode(drawMode)
         samples.hiddenPlanes = m.captureHiddenPlanes(rendererObj.camera.position)
       end if
-      if m.drawable.useImpostorStrips
+      ' no hints while backing off: no strip attempt will use them
+      if m.drawable.useImpostorStrips and m.stripBackoff = 0
         start = 0
         if rendererObj.profileStages
           start = rendererObj.getProfileClockMs()
@@ -711,17 +716,39 @@ namespace BGE
     ' attemptImpostorStrips(), timed as the stripFitHit or stripFitMiss stage while the renderer
     ' profiles stages.
     private function timeImpostorStrips(renderObj as Renderer, capture as roAssociativeArray, diagonal as float, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      if m.stripBackoff > 0
+        m.stripBackoff--
+        return m.missImpostor("stripsBackoff")
+      end if
+      firstTry = invalid = capture.stripTried
+      capture.stripTried = true
       if not renderObj.profileStages
-        return m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+        details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+      else
+        start = renderObj.getProfileClockMs()
+        details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+        stage = "stripFitMiss"
+        if invalid <> details
+          stage = "stripFitHit"
+        end if
+        renderObj.addStageMs(stage, renderObj.getProfileClockMs() - start)
       end if
-      start = renderObj.getProfileClockMs()
-      details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
-      stage = "stripFitMiss"
       if invalid <> details
-        stage = "stripFitHit"
+        m.stripBackoffLength = 0
+      else if firstTry and m.isStripMissFromMotion()
+        ' it couldn't follow one frame's motion, so the next frames' likely won't either: skip
+        ' the fits (and redraw, as it would anyway) for longer while that keeps happening
+        m.stripBackoffLength = Int(BGE.Math.Min(BGE.Math.Max(2, m.stripBackoffLength * 2), 16))
+        m.stripBackoff = m.stripBackoffLength
       end if
-      renderObj.addStageMs(stage, renderObj.getProfileClockMs() - start)
       return details
+    end function
+
+    ' Whether the last strip miss was the warp failing to follow the motion, not something
+    ' about the capture.
+    private function isStripMissFromMotion() as boolean
+      reason = m.impostorMissReason
+      return reason = "stripsError" or reason = "stripsStretch" or reason = "stripsScale"
     end function
 
     ' The strip redraw of the capture that fits this frame, or invalid. The details returned
@@ -1128,6 +1155,11 @@ namespace BGE
       return not m.drawable.useImpostorStrips and m.impostorDepthRatio > m.getImpostorBlitMaxDepthRatio(settings)
     end function
 
+    ' Whether strip fits are backing off for a model only strips could reuse a capture of.
+    private function isBackingOffTooDeepForBlit(settings as BGE.RenderQualitySettings) as boolean
+      return m.stripBackoff > 0 and m.impostorDepthRatio > m.getImpostorBlitMaxDepthRatio(settings)
+    end function
+
     ' The single blit's depth ratio limit: the drawable's own, or the quality level's.
     private function getImpostorBlitMaxDepthRatio(settings as BGE.RenderQualitySettings) as float
       if m.drawable.impostorBlitMaxDepthRatio > 0
@@ -1531,6 +1563,12 @@ namespace BGE
       ' overlap clusters draw per face, from faces this would leave unprojected
       if m.impostorTooNear
         m.impostorMissReason = "near"
+      else if m.drawable.useImpostor and m.isBackingOffTooDeepForBlit(rendererObj.qualitySettings) and m.objMovedInRelationToCamera(rendererObj.camera)
+        ' nothing can reuse a capture till the backoff's over: draw straight to the canvas, as
+        ' a near one does, and capture again on its last frame for the next fit
+        m.stripBackoff--
+        m.impostorTooNear = m.stripBackoff > 0
+        m.impostorMissReason = "stripsBackoff"
       else if m.drawable.useImpostor and not rendererObj.computeOverlapClusters and not m.cachedDrawingInvalidated() and m.mayReuseTransformedTempBitmap(drawMode) and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorThisFrame = m.attemptImpostor(rendererObj, drawMode)
         if invalid <> m.impostorThisFrame
@@ -1539,6 +1577,8 @@ namespace BGE
           m.canvasFacesStale = true
           return true
         end if
+        ' a fit that just failed from motion starts a backoff - skip this frame's capture too
+        m.impostorTooNear = m.isBackingOffTooDeepForBlit(rendererObj.qualitySettings)
       else if m.drawable.useImpostor and m.objMovedInRelationToCamera(rendererObj.camera)
         m.impostorMissReason = "notReusable"
       end if
