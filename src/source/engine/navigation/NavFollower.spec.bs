@@ -1,0 +1,211 @@
+import "pkg:/source/math/vector.bs"
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/engine/colliders/CircleSeparation.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+import "pkg:/source/engine/navigation/NavFollower.bs"
+
+namespace tests
+
+  ' Counts sight checks, and sees whatever `sees` says
+  class CountingNavFollower extends BGE.NavFollower
+    sees as boolean = false
+    sightChecks as integer = 0
+
+    sub new(nav as BGE.NavGrid, options as BGE.NavFollowerOptions)
+      super(nav, options)
+    end sub
+
+    protected override function checkSight(from as BGE.Math.Vector, target as BGE.Math.Vector) as boolean
+      m.sightChecks++
+      return m.sees
+    end function
+  end class
+
+  @suite("BGE.NavFollower")
+  class NavFollowerTests extends rooibos.BaseTestSuite
+
+    private world as BGE.SolidWorld
+    private grid as BGE.NavGrid
+
+    ' 10-unit cells over (0,0)-(100,100), with a wall at x 40..50 from y 20 to the top: the way
+    ' from left to right is round its bottom end.
+    protected override function beforeEach()
+      m.world = new BGE.SolidWorld()
+      m.world.addSolid(40, 20, 10, 80)
+      m.grid = new BGE.NavGrid(m.world, {cellSize: 10, minX: 0, minY: 0, width: 100, height: 100})
+    end function
+
+    ' A position on the xz ground plane
+    private function ground(x as float, z as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(x, 0.0, z)
+    end function
+
+    private function lastPoint(follower as BGE.NavFollower) as BGE.NavPoint
+      return follower.path[follower.path.count() - 1]
+    end function
+
+    @describe("steer")
+
+    @it("returns invalid in sight of the target")
+    function _()
+      follower = new BGE.NavFollower(m.grid)
+      m.assertInvalid(follower.steer(m.ground(15, 50), m.ground(25, 80), 0.016))
+      m.assertTrue(follower.canSeeTarget)
+      m.assertEqual(follower.path.count(), 0)
+    end function
+
+    @it("follows a path round a wall on the xz plane")
+    function _()
+      follower = new BGE.NavFollower(m.grid)
+      way = follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      m.assertFalse(follower.canSeeTarget)
+      m.assertTrue(follower.path.count() > 2)
+      m.assertEqual(follower.pathIndex, 1)
+      ' Heads down, round the wall's bottom end
+      m.assertTrue(way.z < 0, "towards the gap")
+      m.assertEqual(way.y, 0.0)
+      m.assertTrue(Abs(way.x * way.x + way.z * way.z - 1) < 0.0001, "unit length")
+    end function
+
+    @it("works on the xy plane")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {plane: BGE.SeparationPlane.xy})
+      way = follower.steer(BGE.Math.VectorOps.create(15, 50), BGE.Math.VectorOps.create(85, 50), 0.016)
+      m.assertTrue(way.y < 0, "towards the gap")
+      m.assertEqual(way.z, 0.0)
+      m.assertInvalid(follower.steer(BGE.Math.VectorOps.create(15, 50), BGE.Math.VectorOps.create(25, 80), 1))
+    end function
+
+    @it("skips waypoints within arriveRadius")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {arriveRadius: 2})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      corner = follower.path[1]
+      follower.steer(m.ground(corner.x + 1, corner.y), m.ground(85, 50), 0.016)
+      m.assertEqual(follower.pathIndex, 2)
+    end function
+
+    @it("returns invalid once the path is used up")
+    function _()
+      ' Every waypoint is within reach, so there's nowhere left to go
+      follower = new BGE.NavFollower(m.grid, {arriveRadius: 1000})
+      m.assertInvalid(follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016))
+      m.assertFalse(follower.canSeeTarget)
+      m.assertTrue(follower.path.count() > 0)
+      m.assertEqual(follower.pathIndex, follower.path.count())
+    end function
+
+    @it("heads for the open cell first when it starts in a blocked one")
+    function _()
+      grid = new BGE.NavGrid(m.world, {cellSize: 10, agentRadius: 4, minX: 0, minY: 0, width: 100, height: 100})
+      follower = new BGE.NavFollower(grid, {sightSnapRings: 0})
+      follower.steer(m.ground(38, 50), m.ground(85, 50), 0.016)
+      m.assertEqual(follower.pathIndex, 0)
+      m.assertEqual(follower.path[0].x, 25.0)
+    end function
+
+    @it("drops the old path when a search fails")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {searchOptions: {snapRings: 0}})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      m.assertTrue(follower.path.count() > 0)
+      ' Buried in the wall, with no snapping: the search fails
+      follower.forceRepath()
+      m.assertInvalid(follower.steer(m.ground(45, 50), m.ground(85, 50), 0.016))
+      m.assertEqual(follower.lastSearch.status, BGE.NavPathStatus.failed)
+      m.assertEqual(follower.path.count(), 0)
+    end function
+
+    @describe("timers")
+
+    @it("checks sight every sightInterval")
+    function _()
+      follower = new tests.CountingNavFollower(m.grid, {sightInterval: 0.1})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.06)
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.06)
+      m.assertEqual(follower.sightChecks, 1)
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.06)
+      m.assertEqual(follower.sightChecks, 2)
+    end function
+
+    @it("uses an overridden sight check")
+    function _()
+      follower = new tests.CountingNavFollower(m.grid, {})
+      follower.sees = true
+      m.assertInvalid(follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016))
+      m.assertTrue(follower.canSeeTarget)
+    end function
+
+    @it("searches again every repathInterval")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {repathInterval: 0.5})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      follower.steer(m.ground(15, 50), m.ground(85, 70), 0.3)
+      m.assertEqual(m.lastPoint(follower).y, 50.0)
+      follower.steer(m.ground(15, 50), m.ground(85, 70), 0.3)
+      m.assertEqual(m.lastPoint(follower).y, 70.0)
+    end function
+
+    @it("searches early when the target moves past repathDistance")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {repathInterval: 3, repathDistance: 15, minRepathInterval: 0.25})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      follower.steer(m.ground(15, 50), m.ground(85, 60), 0.3)
+      m.assertEqual(m.lastPoint(follower).y, 50.0, "moved less than repathDistance")
+      follower.steer(m.ground(15, 50), m.ground(85, 70), 0.1)
+      m.assertEqual(m.lastPoint(follower).y, 70.0)
+    end function
+
+    @it("waits repathAfter() before its first search")
+    function _()
+      follower = new BGE.NavFollower(m.grid)
+      follower.repathAfter(0.2)
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.1)
+      m.assertEqual(follower.path.count(), 0)
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.15)
+      m.assertTrue(follower.path.count() > 0)
+    end function
+
+    @it("drops the path in sight, and searches as soon as it's lost")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {sightInterval: 0.0})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      follower.steer(m.ground(15, 50), m.ground(25, 80), 0.016)
+      m.assertEqual(follower.path.count(), 0)
+      follower.steer(m.ground(15, 50), m.ground(85, 70), 0.016)
+      m.assertEqual(m.lastPoint(follower).y, 70.0)
+    end function
+
+    @it("keeps searching in sight with pathWhileVisible")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {sightInterval: 0.0, pathWhileVisible: true})
+      follower.steer(m.ground(15, 50), m.ground(25, 80), 0.016)
+      m.assertTrue(follower.canSeeTarget)
+      m.assertTrue(follower.path.count() > 0)
+    end function
+
+    @it("forceRepath() searches and checks sight on the next steer")
+    function _()
+      follower = new tests.CountingNavFollower(m.grid, {repathInterval: 5, sightInterval: 5})
+      follower.steer(m.ground(15, 50), m.ground(85, 50), 0.016)
+      follower.forceRepath()
+      follower.steer(m.ground(15, 50), m.ground(85, 70), 0.016)
+      m.assertEqual(follower.sightChecks, 2)
+      m.assertEqual(m.lastPoint(follower).y, 70.0)
+    end function
+
+    @it("spreads a search over steer() calls with searchBudgetMs")
+    function _()
+      follower = new BGE.NavFollower(m.grid, {searchBudgetMs: 1})
+      calls = 0
+      while invalid = follower.lastSearch and calls < 1000
+        follower.steer(m.ground(15, 50), m.ground(85, 50), 0.0)
+        calls++
+      end while
+      m.assertEqual(follower.lastSearch.status, BGE.NavPathStatus.found)
+      m.assertEqual(follower.lastSearchFrames, calls)
+      m.assertTrue(follower.path.count() > 2)
+    end function
+
+  end class
+end namespace
