@@ -52,10 +52,12 @@ pieces adds a cache to invalidate for a cost the scanline fill should already be
     convex shapes keep their exact triangle fill).
   - Otherwise there's no cheaper exact fill, so it always bands. At rest, 1px bands.
   - With `allowQuickDraw`, a shape under `triangleSkipSize` is skipped, and one more than
-    `(n - 2) * POLYGON_SPAN_BANDS_PER_TRIANGLE` px across its banded side uses the
+    `CONCAVE_SPAN_QUICK_MAX_BANDS` (48) px across its banded side uses the
     `triangleQuickDrawStep` band size; both count in `getLossyTriangleFillCount()`, so the
-    object redraws exactly once it stops. The threshold is where a convex polygon with as many
-    sides stops banding, so a concave one goes coarse no earlier than its hull would.
+    object redraws exactly once it stops. (First drafted as the convex fill's
+    `(n - 2) * POLYGON_SPAN_BANDS_PER_TRIANGLE`, but that never coarsens a many-sided shape:
+    a moving 300 px 24-point gear stayed at 1px, 16.5 ms a fill on a Roku Express. A concave
+    fill has no exact fallback, so a fixed cap fits better.)
     `getQuickDrawFillError()` stays right: the error is still the band step.
 - `drawPolygonTo()` is unchanged: hull by default.
 
@@ -110,3 +112,18 @@ on-screen fill check draws them. Device numbers go in the PR.
 5. Benchmark cases, validate rendererTest, device run.
 6. Docs: `docs/drawables-and-scene-objects.md`, `docs/scenegraph-shapes.md`, renderer rule.
 7. `npm run check`, code review, PR.
+
+## Device results (Roku Express, 720p, Roku OS 16.0.4)
+
+Not comparable with #539's Roku Ultra numbers. ms per fill, 30 rotations each.
+
+- Per band: the convex walk (`span1`) costs ~23-31 us a band on big shapes, the scanline
+  fill (`scan1`) ~44-61 us on the same convex shapes and on concave ones: about 1.9x. More
+  active edges (a gear, a pentagram) sit at the top of that range.
+- Per shape, concave fill at rest against what the hull fill draws today (`auto`): chevron 240
+  9.3 vs 1.1, L 240 13.4 vs 2.6, star10 120 6.2 vs 2.9, star10 300 14.6 vs 2.9, gear24 300
+  16.8 vs 9.0. Moving (`concaveQuick`, band step 2 at Medium) roughly halves the big ones.
+- Small shapes (60 px and under) are 2-4 ms either way, dominated by per-call cost.
+
+No triangulation cache: big concave shapes cost 2-5x their hull, but the quick-draw step covers
+the moving case and the shapes this is for (arrows, stars, UI marks) are mostly small.

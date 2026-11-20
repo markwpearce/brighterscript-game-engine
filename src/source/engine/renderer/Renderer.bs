@@ -51,6 +51,12 @@ namespace BGE
   ' "Polygon Fill Benchmark", #539) a band cost ~11 us and a triangle's exact fill ~0.4 ms.
   const POLYGON_SPAN_BANDS_PER_TRIANGLE = 28
 
+  ' Most 1px bands a moving concave polygon is filled with before it uses the quick-draw band
+  ' step (`triangleQuickDrawStep`). A concave fill has no cheaper exact fallback, and on a Roku
+  ' Express a scanline band cost ~45-60 us (rendererTest "Polygon Fill Benchmark", #547), so
+  ' this caps a moving one at ~2-3 ms of 1px bands there.
+  const CONCAVE_SPAN_QUICK_MAX_BANDS = 48
+
   ' A scene object id no other renderer has handed out. Shared across renderers, since one
   ' Drawable registered with two renderers keys its scene objects by id (issue #343).
   function newSceneObjectId() as string
@@ -3058,6 +3064,11 @@ namespace BGE
           return false
         end if
       end if
+      return m.drawConvexInOrderTo(canvasDrawTo, hull, x, y, rgba, allowQuickDraw)
+    end function
+
+    ' Fills a convex polygon whose points are in order: bands if cheaper, else triangles.
+    private function drawConvexInOrderTo(canvasDrawTo as ifDraw2d, hull as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw as boolean) as boolean
       if m.drawConvexWithSpansIfCheaperTo(canvasDrawTo, hull, x, y, rgba, allowQuickDraw, invalid, (hull.count() - 2) * BGE.POLYGON_SPAN_BANDS_PER_TRIANGLE)
         return true
       end if
@@ -3383,8 +3394,8 @@ namespace BGE
     ' Fills `points` as drawn - concave, or self-intersecting by `fillRule` - rather than
     ' their hull. Points already convex in order go to `drawPolygonTo()`. Anything else is
     ' filled with `DrawRect` bands (`drawPolygonAsSpansTo()`): 1px at rest; with
-    ' allowQuickDraw, coarser for a shape wider than a convex polygon with as many sides would
-    ' band, and skipped when tiny (both lossy).
+    ' allowQuickDraw, coarser past `CONCAVE_SPAN_QUICK_MAX_BANDS` across, and skipped when tiny
+    ' (both lossy).
     '
     ' @param {ifDraw2d} canvasDrawTo
     ' @param {BGE.Math.Vector[]} points the outline's corners in order
@@ -3399,8 +3410,11 @@ namespace BGE
       if invalid = canvasDrawTo or points.count() < 3
         return false
       end if
+      if points.count() = 3
+        return m.drawTriangleTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
+      end if
       if m.isStrictlyConvexInOrder(points)
-        return m.drawPolygonTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
+        return m.drawConvexInOrderTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
       end if
       bounds = BGE.Math.getBounds(points)
       width = bounds[1].x - bounds[0].x
@@ -3416,7 +3430,7 @@ namespace BGE
         bandedSide = height
       end if
       bandSize = 1
-      if allowQuickDraw and params.step > 1 and bandedSide > (points.count() - 2) * BGE.POLYGON_SPAN_BANDS_PER_TRIANGLE
+      if allowQuickDraw and params.step > 1 and bandedSide > BGE.CONCAVE_SPAN_QUICK_MAX_BANDS
         bandSize = params.step
         m.lossyTriangleFillCount++
       end if
