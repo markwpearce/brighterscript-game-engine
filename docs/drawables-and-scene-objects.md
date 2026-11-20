@@ -585,9 +585,6 @@ class Chapel extends BGE.GameEntity
 end class
 ```
 
-An occluder that's fading out with distance only hides things while fog fills in behind it
-(`castsFogSilhouette` with `camera.fog` on), since otherwise it's drawn see-through.
-
 Game code can ask what happened to an entity last frame, for example to skip purely visual
 work for a tree nobody can see:
 
