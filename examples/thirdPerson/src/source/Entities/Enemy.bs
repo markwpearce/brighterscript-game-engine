@@ -3,6 +3,7 @@ import "../CombatDirector.bs"
 import "Fighter.bs"
 import "pkg:/source/utils/StateClock.bs"
 import "pkg:/source/engine/drawables/ParticlePresets.bs"
+import "pkg:/source/engine/navigation/NavFollower.bs"
 
 ' How an enemy closes in once it's allowed to attack.
 enum EnemyApproach
@@ -146,12 +147,7 @@ class Enemy extends Fighter
 
   ' With a nav grid it finds its way round walls to the player, and only wakes when it can see
   ' them. Without one it goes straight at them.
-  private nav as BGE.NavGrid = invalid
-  private path as BGE.NavPoint[] = []
-  private pathIndex as integer = 0
-  private repathSeconds as float = 0
-  private sightSeconds as float = 0
-  private seesPlayer as boolean = true
+  private follower as BGE.NavFollower = invalid
 
   sub new(game as BGE.Game)
     super(game)
@@ -179,7 +175,11 @@ class Enemy extends Fighter
       m.clock.set(EnemyState.dormant)
     end if
     if invalid <> args.nav
-      m.nav = args.nav
+      m.follower = new BGE.NavFollower(args.nav, {
+        sightInterval: 0.25,
+        repathInterval: 0.5,
+        arriveRadius: World.metres(0.5)
+      })
     end if
     m.director.addEnemy(m)
 
@@ -468,61 +468,19 @@ class Enemy extends Fighter
   ' True when nothing in the nav grid stands between it and `other` (always, without a grid).
   ' Looked at a few times a second, not every frame.
   private function canSee(other as Fighter, dt as float) as boolean
-    if invalid = m.nav
+    if invalid = m.follower
       return true
     end if
-    m.sightSeconds -= dt
-    if m.sightSeconds <= 0
-      m.sightSeconds = 0.25
-      from = m.openPointNear(m.position.x, m.position.z)
-      target = m.openPointNear(other.position.x, other.position.z)
-      m.seesPlayer = m.nav.hasLineOfSight(from.x, from.y, target.x, target.y)
-    end if
-    return m.seesPlayer
-  end function
-
-  ' The grid's walls are grown by the biggest body, so someone hugging a wall stands in a blocked
-  ' cell - and hasLineOfSight is always false from one. Moves such a point to the nearest open cell.
-  private function openPointNear(x as float, z as float) as BGE.NavPoint
-    if m.nav.isWalkable(x, z)
-      return {x: x, y: z}
-    end if
-    cell = m.nav.findNearestOpenCell(x, z, 2)
-    if invalid = cell
-      return {x: x, y: z}
-    end if
-    return m.nav.cellCenter(cell.col, cell.row)
+    return m.follower.canSee(m.position, other.position, dt)
   end function
 
   ' With a wall between it and `player`, the unit direction along a path round it; invalid when
   ' it can see them (or has no nav grid, or no path)
   private function wayRound(player as Fighter, dt as float) as dynamic
-    if invalid = m.nav or m.canSee(player, dt)
-      m.path = []
-      ' Path at once when it next loses sight
-      m.repathSeconds = 0
+    if invalid = m.follower
       return invalid
     end if
-    m.repathSeconds -= dt
-    ' Only on the timer: an empty or used-up path mustn't search again every frame
-    if m.repathSeconds <= 0
-      m.repathSeconds = 0.5
-      m.path = m.nav.findPath(m.position.x, m.position.z, player.position.x, player.position.z)
-      m.pathIndex = 1
-    end if
-    closeEnough = World.metres(0.5)
-    while m.pathIndex < m.path.Count()
-      point = m.path[m.pathIndex]
-      ' NavPoint's y is the world's z
-      dx = point.x - m.position.x
-      dz = point.y - m.position.z
-      length = Sqr(dx * dx + dz * dz)
-      if length > closeEnough
-        return BGE.Math.VectorOps.create(dx / length, 0, dz / length)
-      end if
-      m.pathIndex++
-    end while
-    return invalid
+    return m.follower.steer(m.position, player.position, dt)
   end function
 
   private function comboChance() as float

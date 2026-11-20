@@ -1,0 +1,236 @@
+import "pkg:/source/math/vector.bs"
+import "pkg:/source/engine/colliders/CircleSeparation.bs"
+import "pkg:/source/engine/navigation/NavTypes.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+import "pkg:/source/engine/navigation/NavPathSearch.bs"
+
+namespace BGE
+
+  ' Steers an agent to a target round the walls of a `BGE.NavGrid`. While the agent can see the
+  ' target, `steer()` returns invalid and the game moves it however it likes (straight at it,
+  ' circling, attacking). Otherwise it follows a path, searched again on a timer.
+  '
+  ' Sight is checked a few times a second, not every frame. Override `checkSight()` for another
+  ' test (e.g. a raycast, or a view cone).
+  '
+  ' @example
+  ' m.follower = new BGE.NavFollower(nav, {plane: BGE.SeparationPlane.xz, arriveRadius: 0.5})
+  ' ' each frame:
+  ' way = m.follower.steer(m.position, player.position, dt)
+  ' if invalid <> way
+  '   m.moveBy(way, m.speed * dt)
+  ' else if m.follower.canSeeTarget
+  '   m.moveToward(player.position, dt)
+  ' end if
+  class NavFollower
+
+    nav as BGE.NavGrid
+    ' Options: see BGE.NavFollowerOptions
+    plane as BGE.SeparationPlane = BGE.SeparationPlane.xz
+    sightInterval as float = 0.25
+    repathInterval as float = 0.5
+    repathDistance as float = 0.0
+    minRepathInterval as float = 0.25
+    arriveRadius as float = 0.0
+    searchBudgetMs as integer = 0
+    searchOptions as BGE.NavSearchOptions
+    pathWhileVisible as boolean = false
+    sightSnapRings as integer = 2
+
+    ' The last line-of-sight result
+    canSeeTarget as boolean = false
+    ' The path being followed, in the grid's coordinates, and the waypoint it's heading for
+    path as BGE.NavPoint[]
+    pathIndex as integer = 0
+    ' The last search to finish (a BGE.NavPathSearch), and how many steer() calls it took;
+    ' for a debug display
+    lastSearch as dynamic = invalid
+    lastSearchFrames as integer = 0
+
+    private search as dynamic = invalid
+    private searchFrames as integer = 0
+    private sightIn as float = 0.0
+    private repathIn as float = 0.0
+    private hasGoal as boolean = false
+    private goalX as float = 0.0
+    private goalY as float = 0.0
+
+    ' @param {BGE.NavGrid} nav - the grid to path across
+    ' @param {BGE.NavFollowerOptions} [options={}]
+    sub new(nav as BGE.NavGrid, options = {} as BGE.NavFollowerOptions)
+      m.nav = nav
+      m.path = []
+      m.searchOptions = {}
+      m.arriveRadius = nav.cellSize / 2
+      if invalid = options
+        return
+      end if
+      for each key in options.Keys()
+        m[key] = options[key]
+      end for
+    end sub
+
+    ' Which way to go: a unit vector on the plane along the path, or invalid when the agent can
+    ' see the target (check `canSeeTarget`) or has no path yet or left (e.g. the target is
+    ' walled off and it's as close as it can get).
+    '
+    ' @param {BGE.Math.Vector} from - the agent's position
+    ' @param {BGE.Math.Vector} target - where it's going
+    ' @param {float} dt - seconds since the last call
+    ' @return {dynamic} a BGE.Math.Vector, or invalid
+    function steer(from as BGE.Math.Vector, target as BGE.Math.Vector, dt as float) as dynamic
+      if m.canSee(from, target, dt)
+        if m.pathWhileVisible
+          m.updatePath(from, target, dt)
+        else
+          m.clearPath()
+        end if
+        return invalid
+      end if
+      m.updatePath(from, target, dt)
+      return m.alongPath(from)
+    end function
+
+    ' Whether the agent can see the target, checked every `sightInterval` seconds. `steer()`
+    ' calls it; call it yourself for sight without steering (e.g. to wake a guard). Calls share
+    ' one timer, so call it once per frame.
+    '
+    ' @param {BGE.Math.Vector} from
+    ' @param {BGE.Math.Vector} target
+    ' @param {float} dt - seconds since the last call
+    ' @return {boolean}
+    function canSee(from as BGE.Math.Vector, target as BGE.Math.Vector, dt as float) as boolean
+      m.sightIn -= dt
+      if m.sightIn <= 0
+        m.sightIn = m.sightInterval
+        m.canSeeTarget = m.checkSight(from, target)
+      end if
+      return m.canSeeTarget
+    end function
+
+    ' Searches again on the next `steer()` and checks sight again, e.g. after a door opened.
+    ' The current path is kept until the new one is found.
+    sub forceRepath()
+      m.cancelSearch()
+      m.repathIn = 0.0
+      m.sightIn = 0.0
+    end sub
+
+    ' Waits this long before the next search, e.g. to spread several agents' first searches
+    ' over different frames.
+    '
+    ' @param {float} seconds
+    sub repathAfter(seconds as float)
+      m.repathIn = seconds
+    end sub
+
+    ' Drops the path (and any running search); the next `steer()` out of sight searches at once.
+    sub clearPath()
+      m.cancelSearch()
+      m.path = []
+      m.pathIndex = 0
+      m.repathIn = 0.0
+    end sub
+
+    ' The line-of-sight test. By default, a clear line across the grid; override for another.
+    '
+    ' @param {BGE.Math.Vector} from
+    ' @param {BGE.Math.Vector} target
+    ' @return {boolean}
+    protected function checkSight(from as BGE.Math.Vector, target as BGE.Math.Vector) as boolean
+      return m.nav.hasLineOfSight(from.x, m.planeY(from), target.x, m.planeY(target), m.sightSnapRings)
+    end function
+
+    ' A position's second coordinate on the plane: y on xy, z on xz.
+    protected function planeY(position as BGE.Math.Vector) as float
+      if m.plane = BGE.SeparationPlane.xy
+        return position.y
+      end if
+      return position.z ?? 0.0
+    end function
+
+    ' Starts a search when it's due, and runs any search in progress
+    private sub updatePath(from as BGE.Math.Vector, target as BGE.Math.Vector, dt as float)
+      targetY = m.planeY(target)
+      if m.search = invalid
+        m.repathIn -= dt
+        if m.repathIn <= 0 or m.targetMoved(target.x, targetY)
+          m.search = m.nav.startSearch(from.x, m.planeY(from), target.x, targetY, m.searchOptions)
+          m.searchFrames = 0
+          m.hasGoal = true
+          m.goalX = target.x
+          m.goalY = targetY
+          m.repathIn = m.repathInterval
+        end if
+      end if
+      if m.search = invalid
+        return
+      end if
+      m.searchFrames++
+      search = m.search as BGE.NavPathSearch
+      budget = m.searchBudgetMs
+      if budget <= 0
+        budget = 1000000
+      end if
+      if not search.step(budget)
+        return
+      end if
+      m.search = invalid
+      m.lastSearch = search
+      m.lastSearchFrames = m.searchFrames
+      if search.status = BGE.NavPathStatus.failed
+        return
+      end if
+      m.path = search.path
+      ' path[0] is the start, unless that was in a blocked cell (pushed against a wall): then
+      ' it's the open cell nearest, so head there first.
+      m.pathIndex = 1
+      fromY = m.planeY(from)
+      if not m.nav.isWalkable(from.x, fromY)
+        m.pathIndex = 0
+      end if
+    end sub
+
+    ' Whether the target has moved far enough from the last search's goal to search early
+    private function targetMoved(x as float, y as float) as boolean
+      if m.repathDistance <= 0 or m.repathInterval - m.repathIn <= m.minRepathInterval
+        return false
+      end if
+      if not m.hasGoal
+        return true
+      end if
+      dx = x - m.goalX
+      dy = y - m.goalY
+      return dx * dx + dy * dy > m.repathDistance * m.repathDistance
+    end function
+
+    ' Skips waypoints within arriveRadius; the unit direction to the next, or invalid
+    private function alongPath(from as BGE.Math.Vector) as dynamic
+      fromY = m.planeY(from)
+      while m.pathIndex < m.path.count()
+        point = m.path[m.pathIndex]
+        dx = point.x - from.x
+        dy = point.y - fromY
+        length = Sqr(dx * dx + dy * dy)
+        if length > m.arriveRadius
+          if m.plane = BGE.SeparationPlane.xy
+            return BGE.Math.VectorOps.create(dx / length, dy / length, 0.0)
+          end if
+          return BGE.Math.VectorOps.create(dx / length, 0.0, dy / length)
+        end if
+        m.pathIndex++
+      end while
+      return invalid
+    end function
+
+    private sub cancelSearch()
+      if m.search <> invalid
+        search = m.search as BGE.NavPathSearch
+        search.cancel()
+        m.search = invalid
+      end if
+    end sub
+
+  end class
+
+end namespace
