@@ -583,11 +583,11 @@ end sub
 The size is in canvas pixels, so the bar stays the same size at any distance.
 `examples/rendererTest`'s `combat-helpers` demo shows the bars and the arc test together.
 
-## Health, stamina and state timers
+## Health, stamina, state timers and respawning
 
-Three small classes cover state that most action games keep per entity. None of them is
-required, and none registers itself: the entity owns one and calls its `update(dt)` from
-`onUpdate()`. Each has hooks you can override in a subclass.
+Four small classes cover state that most action games keep per entity. None of them is
+required, and none registers itself: the entity (or scene) owns one and calls its `update(dt)`
+from `onUpdate()`. Each has hooks you can override in a subclass.
 
 **Health.** `BGE.Health` holds `current` and `max`. `damage()` returns true when the hit killed,
 and ignores hits while dead or while invulnerable:
@@ -672,8 +672,34 @@ animations with the state, set `clock.sprite` (or `clock.orientedSprite`) and ca
 `clock.play(name)`, which only switches when the name changes. Override `onEnter(previousState)`
 for anything else.
 
-`examples/thirdPerson`'s `Knight` uses all three; the rpg's `Goblin`, `GoblinKing` and `Witch`
-and the platformer's `PlantBoss` use `StateClock` and `Health`.
+**Respawning.** `BGE.RespawnTimer` is the wait between a death and coming back. Call `start()`
+when the player dies; `update(dt)` returns true on the frame the delay runs out, and what a
+respawn means is up to you:
+
+```
+import "pkg:/source/utils/RespawnTimer.bs"
+
+m.respawn = new BGE.RespawnTimer(2.0)  ' seconds; 3 by default
+
+' When the player's health runs out:
+m.respawn.start()
+
+' In onUpdate(dt):
+if m.respawn.update(dt, not m.game.isTransitioning())
+  m.game.resetScene()  ' or move the player to a spawn point and refill() their health
+end if
+```
+
+`start()` does nothing while already waiting, so it's safe to call every frame the player is
+dead; `start(true)` starts the delay over, and `cancel()` stops waiting. The second argument to
+`update()` holds a due respawn back until it's true, e.g. while a scene transition runs.
+`progress()` (0 rising to 1) and `remaining()` can drive a fade or a countdown. Override
+`onRespawn()` in a subclass to do the respawn there instead.
+
+`examples/thirdPerson`'s `Knight` uses the first three, and its scenes respawn him with
+`RespawnTimer`; the rpg's `Goblin`, `GoblinKing` and `Witch`
+and the platformer's `PlantBoss` use `StateClock` and `Health`, and the rpg's `Player` waits out
+a defeat with `RespawnTimer`.
 
 ## Picking targets
 

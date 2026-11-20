@@ -202,7 +202,7 @@ a `ThirdPersonScene` base class both scenes extend.
   - `afterBodiesMoved`: `m.walls.resolve()`.
   - `onUpdate`: HUD update, director update; when the knight's cell is `exit`, call
     `m.game.changeSceneWithFade("FieldScene")` once; knight death respawns at `start`
-    after `respawnSeconds` (3) as in `FieldScene`.
+    after `respawnTimer` (3 s) as in `FieldScene`.
   - `onDestroy`: remove `lights`; `unloadBitmap` the six crypt bitmaps.
 - `main.bs`: `defineScene(new CryptScene(game))`; deep link `scene=crypt` starts it
   (default `FieldScene`); add `walls` to the passed-through keys; update the deep-link
