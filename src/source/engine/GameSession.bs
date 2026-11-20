@@ -1,0 +1,386 @@
+import "Game.bs"
+import "GameEntity.bs"
+import "GameInput.bs"
+import "GameScene.bs"
+import "controller/ControlMap.bs"
+import "ui/Label.bs"
+import "../utils/SaveSlot.bs"
+
+namespace BGE
+
+  ' Where a BGE.GameSession is: waiting to start, playing, paused, game over, or a level won.
+  enum GameSessionState
+    ready = "ready"
+    playing = "playing"
+    paused = "paused"
+    over = "over"
+    levelComplete = "levelComplete"
+  end enum
+
+  ' Options for BGE.GameSession. Every field is optional.
+  interface GameSessionOptions extends roAssociativeArray
+    ' Lives at the start of a game (default 0: lives aren't used, so loseLife() does nothing).
+    optional lives as integer
+    ' Show the stock prompt for each state (default false)? See readyPrompt and overPrompt.
+    optional prompts as boolean
+    ' Prompt text while ready (default "Press OK To Play").
+    optional readyPrompt as string
+    ' Prompt text once the game's over (default "Game Over!" and "Press OK To Play").
+    optional overPrompt as string
+    ' Prompt text while paused (default none).
+    optional pausedPrompt as string
+    ' Prompt text once a level's complete (default none).
+    optional levelCompletePrompt as string
+    ' Remote button that starts (or restarts) the game, e.g. "ok" (default "": the game
+    ' calls start() itself).
+    optional startButton as string
+    ' ControlMap action that starts (or restarts) the game (default "": none).
+    optional startAction as string
+    ' Game event posted when the state changes (default "sessionStateChanged"; "" for none).
+    optional stateEventName as string
+  end interface
+
+  ' Data for the game event a BGE.GameSession posts when its state changes.
+  interface GameSessionStateEvent extends roAssociativeArray
+    ' a BGE.GameSessionState value
+    state as string
+    ' the state before it
+    previousState as string
+  end interface
+
+  ' Score, lives and the ready / playing / paused / over / levelComplete flow of an arcade
+  ' game, as an entity. It keeps the numbers and the state, and posts a game event
+  ' (`stateEventName`) when the state changes. Your game keeps its own rules and screens:
+  ' it calls addScore(), loseLife(), start(), gameOver() and completeLevel() when its own
+  ' events happen.
+  '
+  ' Opt in to more: `prompts` shows a centered "Press OK To Play" / "Game Over!" label (the
+  ' text is yours to change), `startButton`/`startAction` start the game for you, and
+  ' persistHighScore() keeps the best score in the registry. Subclass and override
+  ' onStateChanged(), onGameOver() or onLevelComplete() for anything else.
+  '
+  ' @example
+  ' session = new BGE.GameSession(game, {lives: 3, prompts: true, startButton: "ok"})
+  ' session.persistHighScore("my-game")
+  ' game.addEntity(session)
+  ' ' When something scores:
+  ' session.addScore(10)
+  ' ' When the player's hit:
+  ' if session.loseLife()
+  '   ' that was the last life - the session is now over
+  ' end if
+  class GameSession extends BGE.GameEntity
+
+    score as integer = 0
+    ' Lives left. 0 when lives aren't used.
+    lives as integer = 0
+    ' Lives a new game starts with. 0 means lives aren't used.
+    startLives as integer = 0
+    ' The best score from the registry (see persistHighScore()), updated when a game ends.
+    highScore as integer = 0
+    state as BGE.GameSessionState = BGE.GameSessionState.ready
+    previousState as BGE.GameSessionState = BGE.GameSessionState.ready
+    ' Game event posted with a GameSessionStateEvent when the state changes. "" for none.
+    stateEventName as string = "sessionStateChanged"
+
+    ' Show the stock prompt label? Its text comes from the *Prompt fields below.
+    prompts as boolean = false
+    readyPrompt as string = "Press OK To Play"
+    overPrompt as string = ""
+    pausedPrompt as string = ""
+    levelCompletePrompt as string = ""
+    ' The prompt: a centered label in the current scene's UI. Restyle or move it freely.
+    promptLabel as BGE.UI.Label
+
+    ' Remote button that starts the game from ready or over. "" for none.
+    startButton as string = ""
+    ' ControlMap action that starts the game from ready or over. "" for none.
+    startAction as string = ""
+
+    ' Set by persistHighScore().
+    profile as BGE.SaveProfile = invalid
+    highScoreTable as string = "highScore"
+
+    private promptAttached as boolean = false
+
+    ' @param {BGE.Game} game
+    ' @param {BGE.GameSessionOptions} [options={}]
+    sub new(game as BGE.Game, options = {} as BGE.GameSessionOptions)
+      super(game)
+      m.name = "GameSession"
+      m.overPrompt = "Game Over!" + Chr(10) + "Press OK To Play"
+      for each key in options.Keys()
+        m[key] = options[key]
+      end for
+      if options.lives <> invalid
+        m.startLives = options.lives
+      end if
+      m.promptLabel = new BGE.UI.Label(m.game)
+      m.promptLabel.horizAlign = "center"
+      m.promptLabel.vertAlign = "center"
+    end sub
+
+    ' @return {boolean} is the game being played (not ready, paused or ended)?
+    function isPlaying() as boolean
+      return m.state = BGE.GameSessionState.playing
+    end function
+
+    ' @return {boolean} is the game over, or the level complete?
+    function hasEnded() as boolean
+      return m.state = BGE.GameSessionState.over or m.state = BGE.GameSessionState.levelComplete
+    end function
+
+    ' Does this session count lives?
+    '
+    ' @return {boolean}
+    function usesLives() as boolean
+      return m.startLives > 0
+    end function
+
+    ' Starts playing. From game over it's a new game: the score and lives are reset first.
+    ' Does nothing while playing or paused.
+    '
+    ' @return {boolean} whether it started
+    function start() as boolean
+      if m.state = BGE.GameSessionState.playing or m.state = BGE.GameSessionState.paused
+        return false
+      end if
+      if m.state = BGE.GameSessionState.over
+        m.resetScore()
+      end if
+      return m.setState(BGE.GameSessionState.playing)
+    end function
+
+    ' Back to ready with a fresh score and lives.
+    sub reset()
+      m.resetScore()
+      m.setState(BGE.GameSessionState.ready)
+    end sub
+
+    ' Pauses a game that's playing. Only the state: pausing the game itself is up to you
+    ' (e.g. BGE.PauseMenu).
+    '
+    ' @return {boolean} whether it paused
+    function pause() as boolean
+      if m.state <> BGE.GameSessionState.playing
+        return false
+      end if
+      return m.setState(BGE.GameSessionState.paused)
+    end function
+
+    ' Carries on after pause().
+    '
+    ' @return {boolean} whether it resumed
+    function resume() as boolean
+      if m.state <> BGE.GameSessionState.paused
+        return false
+      end if
+      return m.setState(BGE.GameSessionState.playing)
+    end function
+
+    ' Ends the game: records a high score (see persistHighScore()) and calls onGameOver().
+    '
+    ' @return {boolean} false if it was already over
+    function gameOver() as boolean
+      return m.setState(BGE.GameSessionState.over)
+    end function
+
+    ' Marks the level won and calls onLevelComplete(). Ignored once the game's over.
+    '
+    ' @return {boolean} whether the state changed
+    function completeLevel() as boolean
+      if m.state = BGE.GameSessionState.over
+        return false
+      end if
+      return m.setState(BGE.GameSessionState.levelComplete)
+    end function
+
+    ' Adds points. Ignored once the game's over or the level's complete.
+    '
+    ' @param {integer} [points=1]
+    sub addScore(points = 1 as integer)
+      if m.hasEnded()
+        return
+      end if
+      m.score += points
+    end sub
+
+    ' Takes lives; the game's over when they run out. Does nothing when lives aren't used
+    ' (startLives is 0), or once the game's over or the level's complete.
+    '
+    ' @param {integer} [count=1]
+    ' @return {boolean} true if this ended the game
+    function loseLife(count = 1 as integer) as boolean
+      if not m.usesLives() or m.hasEnded()
+        return false
+      end if
+      m.lives -= count
+      if m.lives > 0
+        return false
+      end if
+      m.lives = 0
+      return m.gameOver()
+    end function
+
+    ' Adds lives.
+    '
+    ' @param {integer} [count=1]
+    sub addLife(count = 1 as integer)
+      m.lives += count
+    end sub
+
+    ' Moves to a state: records a game-over high score, calls the hooks, posts
+    ' `stateEventName` and updates the prompt. Prefer start(), gameOver() etc., which check
+    ' the move makes sense.
+    '
+    ' @param {BGE.GameSessionState} newState
+    ' @return {boolean} false if it was already in that state
+    function setState(newState as BGE.GameSessionState) as boolean
+      if newState = m.state
+        return false
+      end if
+      m.previousState = m.state
+      m.state = newState
+      if newState = BGE.GameSessionState.over
+        m.recordHighScore()
+      end if
+      m.updatePrompt()
+      m.onStateChanged(m.previousState, newState)
+      if newState = BGE.GameSessionState.over
+        m.onGameOver()
+      else if newState = BGE.GameSessionState.levelComplete
+        m.onLevelComplete()
+      end if
+      if m.stateEventName <> ""
+        m.game.postGameEvent(m.stateEventName, {state: newState, previousState: m.previousState} as BGE.GameSessionStateEvent)
+      end if
+      return true
+    end function
+
+    ' Keeps the best score in the registry: reads it into `highScore` now, and records the
+    ' score whenever the game's over. Uses BGE.SaveProfile, so it shares that profile's
+    ' registry key with anything else you keep there.
+    '
+    ' @param {string} section - registry section, e.g. your game's id
+    ' @param {string} [table="highScore"] - the profile value it's kept under
+    sub persistHighScore(section as string, table = "highScore" as string)
+      m.profile = new BGE.SaveProfile(section)
+      m.highScoreTable = table
+      m.highScore = m.profile.getHighScore(table)
+    end sub
+
+    ' Saves the score if it's a new best (once persistHighScore() is set up), and updates
+    ' `highScore`. Called for you on game over.
+    '
+    ' @return {boolean} true if it's a new best
+    function recordHighScore() as boolean
+      if m.profile = invalid
+        if m.score > m.highScore
+          m.highScore = m.score
+          return true
+        end if
+        return false
+      end if
+      isBest = m.profile.recordHighScore(m.highScoreTable, m.score)
+      m.highScore = m.profile.getHighScore(m.highScoreTable)
+      return isBest
+    end function
+
+    ' Called on every state change, before the event is posted. Does nothing by default.
+    '
+    ' @param {BGE.GameSessionState} previousState
+    ' @param {BGE.GameSessionState} newState
+    sub onStateChanged(previousState as BGE.GameSessionState, newState as BGE.GameSessionState)
+    end sub
+
+    ' Called when the game's over, after onStateChanged(). Does nothing by default.
+    sub onGameOver()
+    end sub
+
+    ' Called when the level's complete, after onStateChanged(). Does nothing by default.
+    sub onLevelComplete()
+    end sub
+
+    ' The prompt text for a state ("" for none). Override to make your own.
+    '
+    ' @param {BGE.GameSessionState} forState
+    ' @return {string}
+    function getPromptText(forState as BGE.GameSessionState) as string
+      if forState = BGE.GameSessionState.ready
+        return m.readyPrompt
+      else if forState = BGE.GameSessionState.over
+        return m.overPrompt
+      else if forState = BGE.GameSessionState.paused
+        return m.pausedPrompt
+      else if forState = BGE.GameSessionState.levelComplete
+        return m.levelCompletePrompt
+      end if
+      return ""
+    end function
+
+    ' Shows the current state's prompt, or hides it when `prompts` is off. Call it after
+    ' changing `prompts` or a prompt's text.
+    sub updatePrompt()
+      if not m.prompts
+        m.promptLabel.setText("")
+        return
+      end if
+      m.attachPrompt()
+      m.promptLabel.setText(m.getPromptText(m.state))
+    end sub
+
+    override sub onCreate(args as roAssociativeArray)
+      m.updatePrompt()
+    end sub
+
+    ' A persistent session puts its prompt back in the next scene's UI.
+    override sub onUpdate(deltaTime as float)
+      if m.prompts and not m.promptAttached
+        m.updatePrompt()
+      end if
+    end sub
+
+    override sub onChangeScene(newScene as BGE.GameScene)
+      m.promptAttached = false
+    end sub
+
+    override sub onInput(input as BGE.GameInput)
+      if m.startButton <> "" and input.press and input.isButton(m.startButton) and m.canStartFromInput()
+        m.start()
+      end if
+    end sub
+
+    override sub onControls(controls as BGE.Controller.ControlMap)
+      if m.startAction = "" or not m.canStartFromInput()
+        return
+      end if
+      if controls.hasAction(m.startAction) and controls.isActionPressed(m.startAction)
+        m.start()
+      end if
+    end sub
+
+    ' The prompt label goes in the current scene's UI, so it's removed with the scene.
+    private sub attachPrompt()
+      if m.promptAttached
+        return
+      end if
+      scene = m.game.getScene()
+      if scene = invalid
+        return
+      end if
+      scene.addUi(m.promptLabel)
+      m.promptAttached = true
+    end sub
+
+    private function canStartFromInput() as boolean
+      return m.state = BGE.GameSessionState.ready or m.state = BGE.GameSessionState.over
+    end function
+
+    private sub resetScore()
+      m.score = 0
+      m.lives = m.startLives
+    end sub
+
+  end class
+
+end namespace

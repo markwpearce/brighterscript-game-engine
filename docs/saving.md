@@ -55,3 +55,6 @@ if m.profile.recordHighScore("arcade", score)
 end if
 best = m.profile.getHighScore("arcade")
 ```
+
+For an arcade game, `BGE.GameSession.persistHighScore(section)` does this for you at every game
+over (see [Game Sessions](/game-session)).
