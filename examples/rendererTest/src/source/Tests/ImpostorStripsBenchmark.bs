@@ -1,0 +1,328 @@
+' Impostor strips (#556, #599) against a single blit and redrawing: a 3x3 block of textured
+' gabled houses, seen from eye height looking a little down, as in a town. Left/right picks the
+' method, OK the motion: orbiting the block, walking down a street, or turning on the spot.
+' Every case logs an `IMPSTRIPS` console line: average frame interval, draw calls, render time,
+' and how the houses were drawn (blit, strips, or redrawn) and why the impostor missed most.
+' Launch params: method=0-3, motion=0-2, tilt=<degrees down> (default 12), quality=0-4 (pins
+' the render quality level), sweep=1 (every case by itself, or those in the comma lists
+' methods= and motions=), runid= (printed first, as the console replays old output).
+class ImpostorStripsBenchmark extends RendererTest
+
+  ' frames to settle after a change, then frames to average
+  private warmupFrames as integer = 30
+  private sampleFrames as integer = 150
+  private frameCount as integer = 0
+  private sampleMs as float = 0
+  private sampleCalls as integer = 0
+  private frameClock = CreateObject("roTimespan")
+  private renderClockUs as float = 0
+  private renderClock = CreateObject("roTimespan")
+  ' model frames by how they were drawn, and strips drawn
+  private blitFrames as integer = 0
+  private stripFrames as integer = 0
+  private redrawFrames as integer = 0
+  private stripCount as integer = 0
+  private missReasons as roAssociativeArray = {}
+  private sweeping as boolean = false
+  private sweepIndex as integer = 0
+  private sweepCases = [] as integer[][]
+
+  private camera as BGE.Camera3d
+  private previousCamera as BGE.Camera
+  private previousQuality as BGE.RenderQualitySettings
+  private rendererRef as BGE.Renderer
+  private texture as BGE.RendererHelpers.RegionWithId
+  private roofTexture as BGE.RendererHelpers.RegionWithId
+  private houses = [] as BGE.SceneObjectModel[]
+  private methodIndex as integer = 2
+  private motionIndex as integer = 0
+  private methodNames = ["redraw", "blit only", "strips (level)", "strips (canvas)"]
+  private motionNames = ["orbit", "walk", "turn"]
+  private clock as float = 0
+  private tiltDegrees as float = 12
+  private eyeHeight as float = 70
+
+  sub new()
+    super("Impostor Strips (L/R method, OK motion)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.rendererRef = renderer
+    m.camera = new BGE.Camera3d()
+    m.camera.maxDrawDistance = 3000
+    m.previousCamera = renderer.camera
+    renderer.setCamera(m.camera)
+    m.previousQuality = renderer.qualitySettings
+    if invalid <> m.launchParams.quality
+      renderer.setQualitySettings(BGE.getRenderQualityPreset(m.launchParams.quality.toInt() as BGE.RenderQualityLevel))
+    end if
+    if invalid <> m.launchParams.tilt
+      m.tiltDegrees = m.launchParams.tilt.toFloat()
+    end if
+    if invalid <> m.launchParams.method
+      m.methodIndex = m.launchParams.method.toInt() mod m.methodNames.count()
+    end if
+    if invalid <> m.launchParams.motion
+      m.motionIndex = m.launchParams.motion.toInt() mod m.motionNames.count()
+    end if
+    m.texture = BGE.RendererHelpers.createRegionWithId(CreateObject("roRegion", m.createWallTexture(), 0, 0, 128, 128), "impostor-strips-wall")
+    m.roofTexture = BGE.RendererHelpers.createRegionWithId(CreateObject("roRegion", m.createRoofTexture(), 0, 0, 64, 64), "impostor-strips-roof")
+    print "IMPSTRIPS start "; m.launchParams.runid; " tilt "; m.tiltDegrees
+    m.sweeping = m.launchParams.sweep = "1"
+    if m.sweeping
+      for each method in m.indexList(m.launchParams.methods, m.methodNames.count())
+        for each motion in m.indexList(m.launchParams.motions, m.motionNames.count())
+          m.sweepCases.push([method, motion])
+        end for
+      end for
+      m.applySweepCase()
+    end if
+    m.buildScene()
+  end sub
+
+  ' A comma list of indexes, or all of 0 to count - 1.
+  private function indexList(text as dynamic, count as integer) as integer[]
+    list = [] as integer[]
+    if invalid = text or text = ""
+      for i = 0 to count - 1
+        list.push(i)
+      end for
+      return list
+    end if
+    for each item in text.split(",")
+      list.push(item.toInt() mod count)
+    end for
+    return list
+  end function
+
+  private sub applySweepCase()
+    item = m.sweepCases[m.sweepIndex]
+    m.methodIndex = item[0]
+    m.motionIndex = item[1]
+  end sub
+
+  private sub buildScene()
+    m.resetSample()
+    m.clock = 0
+    for each sceneObj in m.rendererRef.getSceneObjectsCopy()
+      m.rendererRef.removeSceneObject(sceneObj)
+    end for
+    m.houses = []
+    model = m.createHouseModel(160, 110, 90, 60)
+    for row = -1 to 1
+      for col = -1 to 1
+        drawable = new BGE.DrawableModel(invalid, model, {drawMode: BGE.SceneObjectDrawMode.oriented, offset: BGE.Math.VectorOps.create(col * 420, 0, row * 500), rotation: BGE.Math.VectorOps.create(0, (row + col) * 0.3, 0)})
+        drawable.useImpostor = m.methodIndex > 0
+        drawable.useImpostorStrips = m.methodIndex >= 2
+        drawable.impostorStripLevel = m.methodIndex <> 3
+        m.houses.push(drawable.addToRenderer(m.rendererRef) as BGE.SceneObjectModel)
+      end for
+    end for
+  end sub
+
+  ' A house with its base on y = 0, centred on x and z: walls `width` by `depth` and `wallHeight`
+  ' tall, under a gable roof `roofHeight` higher along x.
+  private function createHouseModel(width as float, depth as float, wallHeight as float, roofHeight as float) as BGE.Model3d
+    x = width / 2
+    z = depth / 2
+    h = wallHeight
+    top = wallHeight + roofHeight
+    corners = [BGE.Math.VectorOps.create(-x, 0, -z), BGE.Math.VectorOps.create(x, 0, -z), BGE.Math.VectorOps.create(x, 0, z), BGE.Math.VectorOps.create(-x, 0, z), BGE.Math.VectorOps.create(-x, h, -z), BGE.Math.VectorOps.create(x, h, -z), BGE.Math.VectorOps.create(x, h, z), BGE.Math.VectorOps.create(-x, h, z)]
+    centre = BGE.Math.VectorOps.create(0, h * 0.6, 0)
+    faces = [] as BGE.Model3dFace[]
+    ' the four walls, bottom left, bottom right, top right, top left from outside
+    for each wall in [[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]]
+      m.addQuad(faces, [corners[wall[0]], corners[wall[1]], corners[wall[2]], corners[wall[3]]], m.texture, 128, centre)
+    end for
+    ridgeLeft = BGE.Math.VectorOps.create(-x, top, 0)
+    ridgeRight = BGE.Math.VectorOps.create(x, top, 0)
+    ' the roof's two slopes, then the gables
+    m.addQuad(faces, [corners[4], corners[5], ridgeRight, ridgeLeft], m.roofTexture, 64, centre)
+    m.addQuad(faces, [corners[6], corners[7], ridgeLeft, ridgeRight], m.roofTexture, 64, centre)
+    faces.push(m.texturedFace([corners[5], corners[6], ridgeRight], [[0, 64], [128, 64], [64, 0]], m.texture, centre))
+    faces.push(m.texturedFace([corners[7], corners[4], ridgeLeft], [[0, 64], [128, 64], [64, 0]], m.texture, centre))
+    return new BGE.Model3d(faces)
+  end function
+
+  ' Two textured triangles for a quad given bottom left, bottom right, top right, top left.
+  private sub addQuad(faces as BGE.Model3dFace[], quad as BGE.Math.Vector[], texture as BGE.RendererHelpers.RegionWithId, size as integer, centre as BGE.Math.Vector)
+    faces.push(m.texturedFace([quad[0], quad[1], quad[2]], [[0, size], [size, size], [size, 0]], texture, centre))
+    faces.push(m.texturedFace([quad[0], quad[2], quad[3]], [[0, size], [size, 0], [0, 0]], texture, centre))
+  end sub
+
+  ' A textured triangle turned to face away from `centre`.
+  private function texturedFace(vertices as BGE.Math.Vector[], uvs as object, texture as BGE.RendererHelpers.RegionWithId, centre as BGE.Math.Vector) as BGE.Model3dFace
+    face = BGE.Model3dFaceOps.create(vertices)
+    a = vertices[0]
+    b = vertices[1]
+    c = vertices[2]
+    outward = BGE.Math.VectorOps.create((a.x + b.x + c.x) / 3 - centre.x, (a.y + b.y + c.y) / 3 - centre.y, (a.z + b.z + c.z) / 3 - centre.z)
+    if BGE.Math.VectorOps.dotProduct(face.normal, outward) < 0
+      face = BGE.Model3dFaceOps.create([b, a, c])
+      uvs = [uvs[1], uvs[0], uvs[2]]
+    end if
+    points = [] as BGE.Math.Vector[]
+    for each uv in uvs
+      points.push(BGE.Math.VectorOps.create(uv[0], uv[1]))
+    end for
+    face.Texture = new BGE.Model3dTexture(texture, points)
+    return face
+  end function
+
+  ' Plaster with timber framing and two windows, so warps and seams show.
+  private function createWallTexture() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 128, height: 128, alphaEnable: false})
+    bmp.Clear(&hD8D0C0FF)
+    for each x in [0, 62, 124]
+      bmp.DrawRect(x, 0, 4, 128, &h4A3020FF)
+    end for
+    for each y in [0, 60, 124]
+      bmp.DrawRect(0, y, 128, 4, &h4A3020FF)
+    end for
+    for each x in [18, 80]
+      bmp.DrawRect(x, 22, 28, 26, &h303A60FF)
+      bmp.DrawRect(x + 12, 22, 4, 26, &h4A3020FF)
+    end for
+    bmp.DrawRect(20, 80, 26, 44, &h5A3A24FF)
+    bmp.Finish()
+    return bmp
+  end function
+
+  ' Rows of tiles.
+  private function createRoofTexture() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 64, height: 64, alphaEnable: false})
+    bmp.Clear(&h8A3A2AFF)
+    for y = 0 to 63 step 8
+      bmp.DrawRect(0, y, 64, 2, &h5A2418FF)
+      offset = (y \ 8) mod 2 * 8
+      for x = offset to 63 step 16
+        bmp.DrawRect(x, y, 2, 8, &h5A2418FF)
+      end for
+    end for
+    bmp.Finish()
+    return bmp
+  end function
+
+  override sub update(dt as float)
+    ' a fixed step a frame, so every case samples the same stretch of the path however fast it draws
+    m.clock += 1 / 30
+    eye = m.eyeHeight
+    tilt = Tan(BGE.Math.DegreesToRadians(m.tiltDegrees))
+    if m.motionIndex = 0
+      ' round the block, 1100 out
+      angle = m.clock * 0.25
+      m.camera.position = BGE.Math.VectorOps.create(1100 * Sin(angle), eye, 1100 * Cos(angle))
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, eye - 1100 * tilt, 0))
+    else if m.motionIndex = 1
+      ' down the street between the first two rows and back, looking ahead
+      along = -900 * Cos(m.clock * 0.3)
+      heading = 1.0
+      if Sin(m.clock * 0.3) < 0
+        heading = -1.0
+      end if
+      m.camera.position = BGE.Math.VectorOps.create(along, eye, 250)
+      m.camera.setTarget(BGE.Math.VectorOps.create(along + heading * 600, eye - 600 * tilt, 250))
+    else
+      ' on the spot in the street, looking round
+      angle = m.clock * 0.35
+      m.camera.position = BGE.Math.VectorOps.create(0, eye, 250)
+      m.camera.setTarget(BGE.Math.VectorOps.create(600 * Sin(angle), eye - 600 * tilt, 250 - 600 * Cos(angle)))
+    end if
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    m.renderClock.Mark()
+    renderer.setupCameraForFrame()
+    renderer.render()
+    m.renderClockUs += m.renderClock.TotalMicroseconds()
+    m.sampleFrame(renderer)
+    renderer.drawText(`${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]} | tilt ${m.tiltDegrees}`, 20, 80, BGE.Colors.White)
+  end sub
+
+  ' Averages the frame interval (everything, swap included) and logs it once per case.
+  private sub sampleFrame(renderer as BGE.Renderer)
+    elapsed = m.frameClock.TotalMilliseconds()
+    m.frameClock.Mark()
+    m.frameCount++
+    if m.frameCount <= m.warmupFrames
+      m.renderClockUs = 0
+      return
+    end if
+    m.sampleMs += elapsed
+    m.sampleCalls += renderer.getDrawCallsLastFrame()
+    for each house in m.houses
+      if house.getVisibility() = BGE.VisibilityState.visible
+        kind = house.getImpostorKindThisFrame()
+        if kind = "strips"
+          m.stripFrames++
+          m.stripCount += house.getImpostorStripsThisFrame()
+        else if kind <> ""
+          m.blitFrames++
+        else
+          m.redrawFrames++
+          reason = house.getImpostorMissThisFrame().reason
+          if reason <> ""
+            m.missReasons[reason] = (m.missReasons[reason] ?? 0) + 1
+          end if
+        end if
+      end if
+    end for
+    if m.frameCount < m.warmupFrames + m.sampleFrames
+      return
+    end if
+    n = m.sampleFrames * 1000
+    drawn = BGE.Math.Max(1, m.blitFrames + m.stripFrames + m.redrawFrames)
+    stripsEach = 0.0
+    if m.stripFrames > 0
+      stripsEach = Int(m.stripCount / m.stripFrames * 10) / 10
+    end if
+    print `IMPSTRIPS ${m.methodNames[m.methodIndex]} | ${m.motionNames[m.motionIndex]} | ${Int(m.sampleMs / m.sampleFrames * 10) / 10} ms | ${m.sampleCalls \ m.sampleFrames} calls | render ${Int(m.renderClockUs / n * 10) / 10} ms | blit ${m.blitFrames * 100 \ drawn}% strips ${m.stripFrames * 100 \ drawn}% (${stripsEach} each) redraw ${m.redrawFrames * 100 \ drawn}% | misses ${FormatJson(m.missReasons)}`
+    m.resetSample()
+    if m.sweeping
+      m.sweepIndex++
+      if m.sweepIndex >= m.sweepCases.count()
+        print "IMPSTRIPS done"
+        m.sweeping = false
+        return
+      end if
+      m.applySweepCase()
+      m.buildScene()
+    end if
+  end sub
+
+  private sub resetSample()
+    m.frameCount = 0
+    m.sampleMs = 0
+    m.sampleCalls = 0
+    m.renderClockUs = 0
+    m.blitFrames = 0
+    m.stripFrames = 0
+    m.redrawFrames = 0
+    m.stripCount = 0
+    m.missReasons = {}
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "left" or buttonName = "right"
+      delta = 1
+      if buttonName = "left"
+        delta = m.methodNames.count() - 1
+      end if
+      m.methodIndex = (m.methodIndex + delta) mod m.methodNames.count()
+      m.buildScene()
+    else if buttonName = "OK"
+      m.motionIndex = (m.motionIndex + 1) mod m.motionNames.count()
+      m.clock = 0
+      m.resetSample()
+    end if
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    for each sceneObj in renderer.getSceneObjectsCopy()
+      renderer.removeSceneObject(sceneObj)
+    end for
+    renderer.setCamera(m.previousCamera)
+    renderer.setQualitySettings(m.previousQuality)
+  end sub
+
+end class
