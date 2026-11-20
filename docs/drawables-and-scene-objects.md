@@ -352,11 +352,15 @@ A concave polygon is filled with one `DrawRect` per run of equal pixel bands
 bounding box. The bands never overlap, so a translucent polygon blends once everywhere, even where
 a self-crossing outline overlaps itself. There's no exact triangle fill to fall back on, so a big
 concave polygon costs more than its hull would: roughly one rect per pixel row, more where the row
-crosses several arms. While it moves it uses coarser bands (`RenderQualitySettings.triangleQuickDrawStep`)
-once it's more than 48 px across its banded side, and is redrawn exactly when it stops. Points that happen to be convex in order take the normal hull path, so the flag costs
-nothing on a convex shape.
+crosses several arms (a 300 px star is ~15 ms on a Roku Express). So in every draw mode, a concave
+polygon is filled into a cached bitmap and that is blitted while nothing changes: at rest it costs
+one blit a frame. Moving or turning, the cached bitmap is moved into place where it fits, otherwise
+the fill is redone with coarser bands (`RenderQualitySettings.triangleQuickDrawStep`) once it's
+more than 48 px across its banded side; either way it's redrawn exactly when it stops. Points that
+happen to be convex in order take the normal hull path, so the flag costs nothing on a convex
+shape.
 
-Changing `concave` or `fillRule` redraws the polygon. If a corner fails to project (behind a 3D camera), the polygon fills its hull for that frame, since dropping a corner would join two that aren't neighbours. A polygon is depth sorted by its hull, so an
+Changing `points`, `concave`, `fillRule` or the color redraws the polygon. If a corner fails to project (behind a 3D camera), the polygon fills its hull for that frame, since dropping a corner would join two that aren't neighbours. A polygon is depth sorted by its hull, so an
 object in a notch may be ordered against it when it needn't be, but never wrongly, and polygons
 are never occluders (see "Occluders and visibility"), so a notch can't hide what's behind it.
 
