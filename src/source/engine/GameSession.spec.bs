@@ -1,0 +1,313 @@
+import "pkg:/source/engine/GameSession.bs"
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameEntity.bs"
+import "pkg:/source/engine/GameScene.bs"
+import "pkg:/source/engine/GameInput.bs"
+import "pkg:/source/utils/registry.bs"
+
+namespace tests
+
+  const GAME_SESSION_TEST_SECTION = "bge-test-game-session"
+
+  ' Counts the hooks a subclass gets.
+  class HookedGameSession extends BGE.GameSession
+    changes as string[] = []
+    gameOvers as integer = 0
+    levelCompletes as integer = 0
+
+    sub new(game as BGE.Game, options = {} as BGE.GameSessionOptions)
+      super(game, options)
+    end sub
+
+    override sub onStateChanged(previousState as BGE.GameSessionState, newState as BGE.GameSessionState)
+      m.changes.push(previousState + ">" + newState)
+    end sub
+
+    override sub onGameOver()
+      m.gameOvers++
+    end sub
+
+    override sub onLevelComplete()
+      m.levelCompletes++
+    end sub
+  end class
+
+  ' Keeps the session state events it hears.
+  class SessionEventListener extends BGE.GameEntity
+    events as roAssociativeArray[] = []
+
+    sub new(game as BGE.Game)
+      super(game)
+      m.name = "SessionEventListener"
+    end sub
+
+    override sub onGameEvent(eventName as string, data as roAssociativeArray)
+      if eventName = "sessionStateChanged"
+        m.events.push(data)
+      end if
+    end sub
+  end class
+
+  @suite("BGE.GameSession")
+  class GameSessionTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    mainScene as BGE.GameScene
+
+    protected override function beforeEach()
+      BGE.registryDelete(GAME_SESSION_TEST_SECTION, "profile")
+      m.game = new BGE.Game(640, 480)
+      m.mainScene = new BGE.GameScene(m.game, {name: "Main"})
+      m.game.defineScene(m.mainScene)
+      m.game.changeScene("Main")
+    end function
+
+    protected override function afterEach()
+      BGE.registryDelete(GAME_SESSION_TEST_SECTION, "profile")
+    end function
+
+    @describe("state")
+
+    @it("starts ready with no score and no lives")
+    function _()
+      session = new BGE.GameSession(m.game)
+      m.assertEqual("ready", session.state)
+      m.assertEqual(0, session.score)
+      m.assertEqual(0, session.lives)
+      m.assertFalse(session.usesLives())
+    end function
+
+    @it("start() plays, pause() and resume() go to paused and back")
+    function _()
+      session = new BGE.GameSession(m.game)
+      m.assertTrue(session.start())
+      m.assertTrue(session.isPlaying())
+      m.assertFalse(session.start())
+      m.assertTrue(session.pause())
+      m.assertEqual("paused", session.state)
+      m.assertFalse(session.start())
+      m.assertTrue(session.resume())
+      m.assertTrue(session.isPlaying())
+      m.assertFalse(session.resume())
+    end function
+
+    @it("posts the state change as a game event")
+    function _()
+      listener = new tests.SessionEventListener(m.game)
+      m.game.addEntity(listener)
+      session = new BGE.GameSession(m.game)
+      session.start()
+      session.gameOver()
+      m.assertEqual(2, listener.events.count())
+      m.assertEqual("playing", listener.events[0].state)
+      m.assertEqual("ready", listener.events[0].previousState)
+      m.assertEqual("over", listener.events[1].state)
+    end function
+
+    @it("posts nothing when stateEventName is empty")
+    function _()
+      listener = new tests.SessionEventListener(m.game)
+      m.game.addEntity(listener)
+      session = new BGE.GameSession(m.game, {stateEventName: ""})
+      session.start()
+      m.assertEqual(0, listener.events.count())
+    end function
+
+    @it("calls the hooks")
+    function _()
+      session = new tests.HookedGameSession(m.game)
+      session.start()
+      session.completeLevel()
+      session.gameOver()
+      m.assertEqual("ready>playing,playing>levelComplete,levelComplete>over", session.changes.join(","))
+      m.assertEqual(1, session.levelCompletes)
+      m.assertEqual(1, session.gameOvers)
+    end function
+
+    @it("completeLevel() is ignored once the game's over")
+    function _()
+      session = new BGE.GameSession(m.game)
+      session.start()
+      session.gameOver()
+      m.assertFalse(session.completeLevel())
+      m.assertEqual("over", session.state)
+      m.assertTrue(session.hasEnded())
+    end function
+
+    @it("start() after game over is a new game")
+    function _()
+      session = new BGE.GameSession(m.game, {lives: 2})
+      session.start()
+      session.addScore(5)
+      session.loseLife(2)
+      m.assertEqual("over", session.state)
+      session.start()
+      m.assertTrue(session.isPlaying())
+      m.assertEqual(0, session.score)
+      m.assertEqual(2, session.lives)
+    end function
+
+    @it("start() from ready keeps the score and lives")
+    function _()
+      session = new BGE.GameSession(m.game, {lives: 3})
+      session.start()
+      session.addScore(5)
+      session.loseLife()
+      session.setState(BGE.GameSessionState.ready)
+      session.start()
+      m.assertEqual(5, session.score)
+      m.assertEqual(2, session.lives)
+    end function
+
+    @it("reset() goes back to ready with a fresh score")
+    function _()
+      session = new BGE.GameSession(m.game, {lives: 3})
+      session.start()
+      session.addScore(5)
+      session.loseLife()
+      session.reset()
+      m.assertEqual("ready", session.state)
+      m.assertEqual(0, session.score)
+      m.assertEqual(3, session.lives)
+    end function
+
+    @describe("score and lives")
+
+    @it("addScore() adds, and is ignored once the game has ended")
+    function _()
+      session = new BGE.GameSession(m.game)
+      session.start()
+      session.addScore()
+      session.addScore(10)
+      m.assertEqual(11, session.score)
+      session.completeLevel()
+      session.addScore(10)
+      m.assertEqual(11, session.score)
+    end function
+
+    @it("loseLife() ends the game when the last life goes")
+    function _()
+      session = new tests.HookedGameSession(m.game, {lives: 2})
+      session.start()
+      m.assertFalse(session.loseLife())
+      m.assertEqual(1, session.lives)
+      m.assertTrue(session.loseLife())
+      m.assertEqual(0, session.lives)
+      m.assertEqual("over", session.state)
+      m.assertEqual(1, session.gameOvers)
+      m.assertFalse(session.loseLife())
+      m.assertEqual(0, session.lives)
+    end function
+
+    @it("loseLife() does nothing when lives aren't used")
+    function _()
+      session = new BGE.GameSession(m.game)
+      session.start()
+      m.assertFalse(session.loseLife())
+      m.assertEqual(0, session.lives)
+      m.assertTrue(session.isPlaying())
+    end function
+
+    @it("addLife() adds lives")
+    function _()
+      session = new BGE.GameSession(m.game, {lives: 1})
+      session.addLife()
+      m.assertEqual(2, session.lives)
+    end function
+
+    @describe("high score")
+
+    @it("without persistHighScore() it's kept in memory")
+    function _()
+      session = new BGE.GameSession(m.game)
+      session.start()
+      session.addScore(7)
+      session.gameOver()
+      m.assertEqual(7, session.highScore)
+    end function
+
+    @it("persistHighScore() reads the saved best and records a new one at game over")
+    function _()
+      profile = new BGE.SaveProfile(GAME_SESSION_TEST_SECTION)
+      profile.recordHighScore("highScore", 20)
+      session = new BGE.GameSession(m.game)
+      session.persistHighScore(GAME_SESSION_TEST_SECTION)
+      m.assertEqual(20, session.highScore)
+
+      session.start()
+      session.addScore(15)
+      session.gameOver()
+      m.assertEqual(20, session.highScore)
+
+      session.start()
+      session.addScore(30)
+      session.gameOver()
+      m.assertEqual(30, session.highScore)
+      saved = new BGE.SaveProfile(GAME_SESSION_TEST_SECTION)
+      m.assertEqual(30, saved.getHighScore("highScore"))
+    end function
+
+    @it("persistHighScore() can use its own table")
+    function _()
+      session = new BGE.GameSession(m.game)
+      session.persistHighScore(GAME_SESSION_TEST_SECTION, "arcade")
+      session.start()
+      session.addScore(4)
+      m.assertTrue(session.recordHighScore())
+      saved = new BGE.SaveProfile(GAME_SESSION_TEST_SECTION)
+      m.assertEqual(4, saved.getHighScore("arcade"))
+    end function
+
+    @describe("prompts")
+
+    @it("are off by default")
+    function _()
+      session = new BGE.GameSession(m.game)
+      m.game.addEntity(session)
+      m.assertEqual(0, m.mainScene.uiCount())
+      m.assertEqual("", session.promptLabel.drawableText.text)
+    end function
+
+    @it("show the text for each state in the scene's UI")
+    function _()
+      session = new BGE.GameSession(m.game, {prompts: true, readyPrompt: "Go?"})
+      m.game.addEntity(session)
+      m.assertEqual(1, m.mainScene.uiCount())
+      m.assertEqual("Go?", session.promptLabel.drawableText.text)
+      session.start()
+      m.assertEqual("", session.promptLabel.drawableText.text)
+      session.gameOver()
+      m.assertEqual("Game Over!" + Chr(10) + "Press OK To Play", session.promptLabel.drawableText.text)
+    end function
+
+    @it("turning them off hides the label")
+    function _()
+      session = new BGE.GameSession(m.game, {prompts: true})
+      m.game.addEntity(session)
+      session.prompts = false
+      session.updatePrompt()
+      m.assertEqual("", session.promptLabel.drawableText.text)
+    end function
+
+    @describe("start input")
+
+    @it("startButton starts from ready, and not while playing")
+    function _()
+      session = new BGE.GameSession(m.game, {startButton: "ok"})
+      session.onInput(new BGE.GameInput(6, 0, 0))
+      m.assertTrue(session.isPlaying())
+      session.pause()
+      session.onInput(new BGE.GameInput(6, 0, 0))
+      m.assertEqual("paused", session.state)
+    end function
+
+    @it("without startButton, OK does nothing")
+    function _()
+      session = new BGE.GameSession(m.game)
+      session.onInput(new BGE.GameInput(6, 0, 0))
+      m.assertEqual("ready", session.state)
+    end function
+
+  end class
+
+end namespace
