@@ -196,5 +196,5 @@ Some things deliberately don't change:
   zoomed view loses things very close to the camera first.
 
 An `OrbitCamera`'s lock-on dead zone is a fraction of the screen, so it tightens in world terms
-as you zoom in. `examples/3d` zooms on fast-forward, and `examples/thirdPerson` takes a
+as you zoom in. `examples/collisions3d` zooms on Replay, and `examples/thirdPerson` takes a
 `zoom=<n>` deep link.

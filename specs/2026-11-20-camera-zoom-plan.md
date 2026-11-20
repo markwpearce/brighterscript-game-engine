@@ -72,6 +72,6 @@ eased `zoomTo()`.
 
 - [ ] `docs/third-person-cameras.md` (zoom section), `docs/game-engine-overview.md` and
   `docs/engine-internals.md` mentions, `.claude/rules/cameras.md`.
-- [ ] `examples/rpg`: Replay toggles `zoomTo(2)`/`zoomTo(1)`. `examples/3d`: fast-forward
+- [ ] `examples/rpg`: Replay toggles `zoomTo(2)`/`zoomTo(1)`. `examples/collisions3d`: Replay
   does the same. `examples/thirdPerson`: `zoom=<n>` deep link.
 - [ ] `npm run check`, validate the touched examples, device screenshots at zoom 1 and 2.

@@ -32,6 +32,9 @@ What's there now, and why it isn't enough:
   world distance (a telephoto lens doesn't see through fog). Raise `maxDrawDistance` if a scene
   needs it.
 - Scaling line and outline widths in 2D. They stay in pixels.
+- A `Camera2d` cull margin that shrinks with zoom. `isInView()`'s margin is `frameSize * 0.2` world
+  units: it covers objects whose anchor is off screen while their body isn't, and those
+  extents are in world units. Zoomed in, that means a few more off-screen objects drawn.
 
 ## Design
 
@@ -73,7 +76,8 @@ curves match.
   (mid-`zoomTo`), because neighbouring tiles share each rounded edge. Rotated drawables can't
   share edges, so they just scale by zoom.
 - Particles and parallax layers draw in pixels, so with a `Camera2d` their sizes and tile
-  steps scale by the zoom too. In 2D a pixel and a world unit are the same thing at zoom 1, so
+  steps scale by the zoom too. A repeating parallax layer draws at most 48 tiles per axis, so zooming far out can't queue
+  thousands of draws. In 2D a pixel and a world unit are the same thing at zoom 1, so
   `sizeInWorldUnits` makes no difference there.
 - `directToCamera` with a `Camera3d` is left alone. That mode means "this many pixels" in 3D
   (HUD-like markers), and an optical zoom shouldn't change it.
@@ -106,9 +110,12 @@ Scaling the projection keeps one meaning.
 | Fog silhouettes | Projected with `projectPointsWithDepth()` (focal-aware); `fogSilhouetteBand` is in pixels; the repeat key includes `projectionVersion`. Reach is a depth. | None. A zoom change re-projects them. |
 | Fog backdrop | Its top and foot are projected points. | None. |
 | Impostor reuse thresholds | Fits and residuals are measured between projected canvas points, so error limits are in on-screen pixels. Angle limits are view directions (which faces show, and their shading), which zoom doesn't change. `modelImpostorMaxSizeChange` bounds how far a capture is stretched while zooming, then it recaptures. | None. |
-| Ground plane draw distance | `getPlaneDrawDistance()` is world units and doesn't use the FOV. The plane's corner rays did (`fieldOfViewDegrees`). | Corner rays use the effective FOV. The top-down bitmap stays sized from the unzoomed FOV: it always holds just the visible ground, so a zoomed-in view (a narrower wedge in the same pixel budget) gets *more* texels per world unit, which a magnified view needs anyway. Resizing it while zooming would reallocate a big bitmap every frame. |
+| Ground plane draw distance | `getPlaneDrawDistance()` is world units and doesn't use the FOV. The plane's corner rays did (`fieldOfViewDegrees`). | Corner rays use the effective FOV. The top-down bitmap stays sized from the unzoomed FOV: it always holds just the visible ground, so a zoomed-in view (a narrower wedge in the same pixel budget) gets *more* texels per world unit, which a magnified view needs anyway. Resizing it while zooming would reallocate a big bitmap every frame. Zooming out (below 1) spreads the same pixels over a wider wedge, so the ground gets blurrier. |
 | Near cut (`QuadColumnNearZ`, `getNearDepth()`) | `focal / 64`, so it moves out as zoom grows. | None. It exists to keep projected points within 64x the frame, which scales the same way. Documented. |
-| Occlusion span map, walls, draw replay, cull latches | Keyed on `projectionVersion` / focal length. | None, once zoom bumps `projectionVersion`. |
+| Occlusion span map, walls, cull latches | Keyed on `projectionVersion` / focal length. | None, once zoom bumps `projectionVersion`. |
+| Cached temp bitmaps and draw replay (found on device) | `SceneObject.objMovedInRelationToCamera()` only looked at movement, so a still object under a still, zooming camera blitted its old temp bitmap at the new position, and captured that as a "still frame" replay. A field-of-view change had the same bug; nothing changed the FOV at runtime before. | A projection change counts as moving relative to the camera, and a frame where the projection changed isn't a still frame for draw replay. |
+| Collider debug outlines | Projected position, raw world size. | Sized by the zoom under a `Camera2d`. |
+| Near cut (high zoom) | See above. At zoom 30 with the camera 200 units behind the player, the player is inside the near cut. | Documented, not changed. |
 
 ## Testing
 
@@ -121,5 +128,5 @@ Scaling the projection keeps one meaning.
   change bumps `projectionVersion`.
 - Scene objects: a 2D image/rectangle draws twice as big at zoom 2; adjacent tiles still meet at
   zoom 1.5; 2D particles scale; parallax tile steps scale.
-- Device: `examples/rpg` (2D, Replay toggles zoom) and `examples/3d` (fast-forward toggles
+- Device: `examples/rpg` (2D, Replay toggles zoom) and `examples/collisions3d` (Replay toggles
   zoom), plus `examples/thirdPerson zoom=2` for fog, ground, impostors and particles together.
