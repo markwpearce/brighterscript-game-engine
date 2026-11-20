@@ -53,6 +53,25 @@ m.polygon.vertices = [{x: 100, y: 0}, {x: 200, y: 100}, {x: 100, y: 200}, {x: 0,
 `Triangle.vertices` is optional - when empty (the default), it draws a right triangle sized
 from `width`/`height` instead. `Polygon.vertices` is required; nothing is drawn until it's set.
 
+`Polygon` fills the vertices' convex hull by default, in whatever order they're given. Set
+`concave="true"` to fill the outline as drawn instead (notches and all); the vertices must then go
+round the outline in order. For an outline that crosses itself, `fillRule` picks what's inside:
+`"nonzero"` (the default, as in SVG: a star drawn as one line is solid) or `"evenodd"` (hollow
+centre):
+
+```xml
+<Polygon
+  translation="[860, 420]"
+  width="200" height="200"
+  color="0xF2C14EFF"
+  concave="true"
+  vertices="[[100,0],[124,68],[195,69],[138,111],[159,181],[100,139],[41,181],[62,111],[5,69],[76,68]]" />
+```
+
+The concave fill is `BGE.Renderer.drawConcavePolygonTo()`: pixel-row `DrawRect` bands, which never
+overlap, so a translucent `color` blends evenly. Either way the draw is a small part of a redraw's
+cost (see "Animating a shape" below).
+
 ### Common fields
 
 | Field | Type | Notes |
@@ -67,6 +86,8 @@ from `width`/`height` instead. `Polygon.vertices` is required; nothing is drawn 
 - `RoundedRectangle.cornerRadius` (`float`) - clamped to at most half of `width`/`height`.
 - `Circle.outlineSegments` (`integer`) - number of line segments approximating the outline circle.
 - `Triangle.vertices` / `Polygon.vertices` (`vector2darray`, optional/required respectively) - see above.
+- `Polygon.concave` (`boolean`, default `false`) - fill the outline as drawn rather than the vertices' convex hull - see above.
+- `Polygon.fillRule` (`string`, `"nonzero"` or `"evenodd"`, default `"nonzero"`) - with `concave`, what's inside a self-crossing outline.
 
 ## How it works
 
