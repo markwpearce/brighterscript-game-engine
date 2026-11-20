@@ -4,7 +4,9 @@ import "../World/TileMapEntity.bs"
 import "../World/Prop.bs"
 import "../Entities/Player.bs"
 import "../UI/InputRoles.bs"
-import "../World/Door.bs"
+import "../World/DoorExits.bs"
+import "../World/AreaSpawn.bs"
+import "pkg:/source/engine/sceneFlow/SpawnPoints.bs"
 import "../Entities/Rat.bs"
 import "../Entities/Bat.bs"
 import "../Entities/Goblin.bs"
@@ -26,6 +28,8 @@ import "../Audio/PlayAudio.bs"
 
 ' Outline colour for SolidWorld walls in the debug overlay (packed RGBA).
 const SOLID_DEBUG_RGBA = &h00FFFFFF
+' Outline colour for door exits in the debug overlay (packed RGBA).
+const DOOR_DEBUG_RGBA = &hFFFF00FF
 
 ' Shared setup for an area: builds the ground and props from map data, has the camera follow the
 ' player inside the map, and exits the channel on Back. Subclasses supply getRows()/getPlacements().
@@ -34,8 +38,10 @@ class AreaScene extends BGE.GameScene
   solidWorld as BGE.SolidWorld = invalid
   mapWidth as float = 0
   mapHeight as float = 0
-  ' Spawn id -> {x, y, facing}: player feet position on arrival.
-  spawns as roAssociativeArray = {}
+  ' AreaSpawns: player feet position and facing on arrival, by the `spawn` arg.
+  spawns as BGE.SpawnPoints = new BGE.SpawnPoints()
+  ' The doors out, checked against the player's feet after everyone has moved.
+  exits as DoorExits = invalid
   ' Feet points {x, y} of every drain (the sewer's rats and the witch's goblins appear here).
   drains as Point[] = []
   ' Feet points {x, y} of every perch placement (where the witch can blink to).
@@ -46,6 +52,7 @@ class AreaScene extends BGE.GameScene
   liveEntities as roAssociativeArray = {}
   private numRows as integer = 0
   private enemiesPlaced as integer = 0
+  private player as Player = invalid
 
   sub new(game as BGE.Game)
     super(game)
@@ -66,7 +73,8 @@ class AreaScene extends BGE.GameScene
     m.mapWidth = rows[0].len() * TILE_SIZE
     m.mapHeight = numRows * TILE_SIZE
     m.solidWorld = new BGE.SolidWorld()
-    m.spawns = {}
+    m.spawns = new BGE.SpawnPoints()
+    m.exits = new DoorExits(m.game)
     m.drains = [] as Point[]
     m.perches = [] as Point[]
     m.enemiesPlaced = 0
@@ -87,17 +95,21 @@ class AreaScene extends BGE.GameScene
     m.liveEntities = {}
     m.refreshLivePlacements()
 
-    spawnId = args.spawn
-    if spawnId = invalid or m.spawns[spawnId] = invalid
-      spawnId = m.spawns.Keys()[0]
-    end if
-    spawn = m.spawns[spawnId]
+    ' An unknown spawn (deep links) arrives at the area's first one
+    spawn = m.spawns.resolve(args) as AreaSpawn
     playerEntity = m.game.getEntityByName("Player") as Player
-    playerEntity.placeAt(spawn.x, spawn.y, spawn.facing, m.solidWorld, spawnId)
+    m.player = playerEntity
+    playerEntity.placeAt(spawn.position.x, spawn.position.y, spawn.facing, m.solidWorld, spawn.id)
     camera = m.game.canvas.renderer.camera as BGE.Camera2d
     camera.setBounds(0, 0, m.mapWidth, m.mapHeight)
     camera.follow(playerEntity)
-    storyEntity.arrivedAt(m.name, spawnId)
+    storyEntity.arrivedAt(m.name, spawn.id)
+  end sub
+
+  override sub onPostUpdate(dt as float)
+    if m.player <> invalid and m.player.isValid()
+      m.exits.update(m.player.position)
+    end if
   end sub
 
   private function addEnemy(item as MapPlacement, numRows as integer) as BGE.GameEntity
@@ -139,9 +151,8 @@ class AreaScene extends BGE.GameScene
       m.game.addEntity(newProp, {atlasKey: item.atlasKey, x: x, y: y, solidWorld: m.solidWorld, floor: item.floor <> invalid and item.floor})
       return newProp
     else if item.type = "door"
-      newDoor = new Door(m.game)
-      m.game.addEntity(newDoor, {x: x, y: y, w: item.w * TILE_SIZE, h: item.h * TILE_SIZE, target: item.target, spawn: item.spawn})
-      return newDoor
+      ' Not an entity, so a door can't be a live placement
+      m.exits.addDoor(x, y, item.w * TILE_SIZE, item.h * TILE_SIZE, item.target, item.spawn)
     else if item.type = "enemy"
       if storyEntity.peaceful
         return invalid
@@ -165,7 +176,8 @@ class AreaScene extends BGE.GameScene
       return newNpc
     else if item.type = "spawn"
       ' Feet a little above the cell's bottom edge, so the 12px-tall feet box sits inside the cell.
-      m.spawns[item.id] = {x: x, y: y + 10, facing: item.facing}
+      newSpawn = new AreaSpawn(item.id, BGE.Math.VectorOps.create(x, y + 10), item.facing)
+      m.spawns.addPoint(newSpawn)
     else if item.type = "gate"
       newGate = new Gate(m.game)
       m.game.addEntity(newGate, {x: x, y: y, w: item.w * TILE_SIZE, h: item.h * TILE_SIZE, style: item.style, side: item.side, unlock: item.unlock, solidWorld: m.solidWorld})
@@ -250,6 +262,14 @@ class AreaScene extends BGE.GameScene
       topLeft = gameRenderer.worldPointToCanvasPoint(BGE.Math.VectorOps.create(solid.x, solid.y + solid.h))
       if topLeft <> invalid
         gameRenderer.drawRectangleOutline(topLeft.x, topLeft.y, solid.w, solid.h, SOLID_DEBUG_RGBA)
+      end if
+    end for
+    ' Where the player's feet point takes each door
+    for each doorExit in m.exits.getAll()
+      area = doorExit.area as BGE.RectExitArea
+      topLeft = gameRenderer.worldPointToCanvasPoint(BGE.Math.VectorOps.create(area.x, area.y + area.height))
+      if topLeft <> invalid
+        gameRenderer.drawRectangleOutline(topLeft.x, topLeft.y, area.width, area.height, DOOR_DEBUG_RGBA)
       end if
     end for
   end sub

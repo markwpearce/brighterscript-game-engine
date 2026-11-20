@@ -8,6 +8,7 @@ import "../Crypt/CryptMap.bs"
 import "../Crypt/CryptLevels.bs"
 import "../Crypt/CryptCameraBoom.bs"
 import "ThirdPersonScene.bs"
+import "pkg:/source/engine/sceneFlow/SpawnPoints.bs"
 
 ' A torch-lit stone maze under the graveyard, three levels deep (CryptLevels; args.level, 1 by
 ' default). The undead sleep in its corridors until they see the knight, then find their way
@@ -93,30 +94,52 @@ class CryptScene extends ThirdPersonScene
       m.addCellContents(cell)
     end for
 
-    ' Down from above: just inside the way up, facing into the maze. Up from below: just inside
-    ' the way down - unless its boss still lives (only by deep link), which would wake beside you.
-    start = m.layout.startCell
-    heading = 0.0
-    bossAlive = invalid <> m.levelInfo.boss and not m.isBossSlain()
-    if args.from = "below" and invalid <> m.layout.downCell and not bossAlive
-      start = m.insideOf(m.layout.downCell)
-      heading = m.awayFrom(m.layout.downCell)
-    else if args.from <> invalid or invalid = start
-      start = m.insideOf(m.layout.exitCell)
-      heading = m.awayFrom(m.layout.exitCell)
-    else
-      heading = m.openHeading(start)
+    ' Where he arrives, by the way he came in (args.from). Down from above (or the graveyard):
+    ' just inside the way up, facing into the maze. Up from below: just inside the way down -
+    ' unless its boss still lives (only by deep link), which would wake beside you. A fresh
+    ' start: the `S` cell, or the way up without one.
+    spawns = new BGE.SpawnPoints("from")
+    if invalid <> m.layout.startCell
+      spawns.add("start", m.centerOf(m.layout.startCell), m.openHeading(m.layout.startCell))
     end if
+    bossAlive = invalid <> m.levelInfo.boss and not m.isBossSlain()
+    belowOpen = invalid <> m.layout.downCell and not bossAlive
+    if invalid <> m.layout.exitCell
+      wayUp = m.centerOf(m.insideOf(m.layout.exitCell))
+      upHeading = m.awayFrom(m.layout.exitCell)
+      spawns.add("above", wayUp, upHeading)
+      spawns.add("graveyard", wayUp, upHeading)
+      if not belowOpen
+        spawns.add("below", wayUp, upHeading)
+      end if
+    end if
+    if belowOpen
+      spawns.add("below", m.centerOf(m.insideOf(m.layout.downCell)), m.awayFrom(m.layout.downCell))
+    end if
+    spawn = spawns.resolve(args, "start")
+    startCenter = spawn.position
+    heading = spawn.heading
     at = m.parseAt()
     if invalid <> at
       start = {col: at.col, row: at.row, kind: "."} as CryptCell
+      startCenter = m.centerOf(start)
       heading = m.openHeading(start)
       if at.hasHeading
         heading = at.heading
       end if
     end if
-    startCenter = CryptMap.cellCenter(m.layout, start.col, start.row)
     m.addKnight(startCenter.x, startCenter.z, heading)
+    ' Back up the way in (to the graveyard from the first level), and down the way down
+    if invalid <> m.layout.exitCell
+      if m.level = 1
+        m.exits.add(CryptMap.cellArea(m.layout, m.layout.exitCell), "GraveyardScene", {from: "crypt"})
+      else
+        m.exits.add(CryptMap.cellArea(m.layout, m.layout.exitCell), "CryptScene", {level: m.level - 1, from: "below"})
+      end if
+    end if
+    if invalid <> m.layout.downCell
+      m.exits.add(CryptMap.cellArea(m.layout, m.layout.downCell), "CryptScene", {level: m.level + 1, from: "above"})
+    end if
     ' Short: the maze's corridors turn every cell or two, so little past it would show
     m.setUpCamera(m.drawDistance(24), 0.5, m.wallTopCameraTilt)
     m.useDarkFog()
@@ -164,6 +187,11 @@ class CryptScene extends ThirdPersonScene
   private function awayFrom(doorway as CryptCell) as float
     delta = CryptMap.sideStep(m.firstOpenSide(doorway))
     return BGE.Math.headingOf(BGE.Math.VectorOps.create(delta[0], 0, delta[1]))
+  end function
+
+  ' World x/z of the middle of a cell
+  private function centerOf(cell as CryptCell) as BGE.Math.Vector
+    return CryptMap.cellCenter(m.layout, cell.col, cell.row)
   end function
 
   ' The floor cell next to a doorway cell (`E` or `D`), into the maze
@@ -364,16 +392,7 @@ class CryptScene extends ThirdPersonScene
     if skip
       return
     end if
-    here = CryptMap.cellAt(m.layout, m.knight.position.x, m.knight.position.z)
-    if m.isCell(here, m.layout.exitCell)
-      if m.level = 1
-        m.leaving = m.game.changeSceneWithFade("GraveyardScene", {from: "crypt"})
-      else
-        m.leaving = m.game.changeSceneWithFade("CryptScene", {level: m.level - 1, from: "below"})
-      end if
-    else if m.isCell(here, m.layout.downCell)
-      m.leaving = m.game.changeSceneWithFade("CryptScene", {level: m.level + 1, from: "above"})
-    end if
+    m.exits.update(m.knight.position)
   end sub
 
   private function isCell(colRow as integer[], cell as CryptCell) as boolean

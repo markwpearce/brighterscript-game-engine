@@ -120,6 +120,58 @@ works exactly the same way, so `onCreate()` can always add its drawables from sc
 
 `game.getSceneNames()` lists the scenes in the order you defined them.
 
+### Exits and spawn points
+
+A scene that the player walks out of, into another scene, can keep its ways out in a
+`BGE.SceneExits` and the places it starts the player in a `BGE.SpawnPoints`. Both are optional
+helpers the scene owns. Scenes are reused, so make new ones (or `clear()` them) in `onCreate()`:
+
+```
+override sub onCreate(args as roAssociativeArray)
+  ' Where to start, by the `spawn` arg the last scene's exit passed
+  spawns = new BGE.SpawnPoints()
+  spawns.add("start", BGE.Math.VectorOps.create(0, 0, 0))
+  spawns.add("gate", BGE.Math.VectorOps.create(0, 0, 400), BGE.Math.PI)
+  spawn = spawns.resolve(args, "start")
+  m.player.position.x = spawn.position.x
+  m.player.position.z = spawn.position.z
+  m.player.rotation.y = spawn.heading
+
+  ' Ways out, and the args each passes on
+  m.exits = new BGE.SceneExits(m.game)
+  m.exits.add(new BGE.RectExitArea(-64, 420, 128, 40), "TownScene", {spawn: "gate"})
+  m.exits.add(new BGE.CircleExitArea(m.chapelDoor, 40), "ChapelScene")
+end sub
+
+override sub onPostUpdate(dt as float)
+  m.exits.update(m.player.position)
+end sub
+```
+
+`resolve()` picks the spawn the args name, else the default you pass, else the first one added.
+Pass `new BGE.SpawnPoints("from")` to read another arg. Each spawn has a `heading`; for
+something else, like a 2D sprite's four-way facing, subclass `BGE.SpawnPoint` and add it with
+`addPoint()`.
+
+`update()` takes the first exit whose area the position is in, fading to its scene
+(`fadeSeconds`, 0 for a straight change). A scene is only left once: after that, `hasLeft()` is
+true and nothing more is taken, so standing in a doorway while the screen fades doesn't ask
+again. If the change is refused because another transition is running, the exit isn't used up
+and the next `update()` tries again (an exit to a scene that doesn't exist is disabled instead). `trigger(exit)` takes an exit straight away, e.g. from a
+collider's `onCollisionEnter()`.
+
+Areas work on the ground (`BGE.SeparationPlane.xz`, the default) or in 2D (`xy`):
+`BGE.RectExitArea`, `BGE.CircleExitArea` and `BGE.GridCellsExitArea` (a block of tile map
+cells). To change how exits work:
+
+- Another shape: subclass `BGE.ExitArea` and override `contains()`.
+- Another condition, e.g. a locked door or one that needs OK pressed: subclass `BGE.SceneExit`,
+  override `isTriggeredBy()`, and add it with `addExit()`. Or set an exit's `enabled`.
+- Another transition, or something on leaving (a door sound): subclass `BGE.SceneExits` and
+  override `changeSceneFor()` or `onLeave()`.
+
+`examples/rpg` (`DoorExits`, `AreaSpawn`) and `examples/thirdPerson` use both.
+
 ### Demo apps: stepping through scenes
 
 For an app that shows one thing per scene, add a `BGE.SceneCycler`: Fast Forward/Rewind change
