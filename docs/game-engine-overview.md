@@ -112,7 +112,11 @@ m.game.resetScene() ' the current scene again, with the same args
 ```
 
 The old scene gets `onChangeScene()` then `onDestroy()`, its non-`persistent` entities, `addUi()`
-widgets and its own drawables are removed, and the new scene's `onLoad()`/`onCreate()` run.
+widgets, its own drawables and the lights it added with `addLight()` are removed, and the new
+scene's `onLoad()`/`onCreate()` run. Assets it loaded with `loadSceneBitmap()` and friends are
+freed then too, unless the new scene asks for them (see
+[Loading Assets](/loading-assets#assets-a-scene-owns)). Anything added to the game directly
+(`game.addLight()`, `loader.loadBitmap()`, `game.gameUi.addChild()`) stays.
 Changing to the scene you're already in (the next level of a level scene, or `resetScene()`)
 works exactly the same way, so `onCreate()` can always add its drawables from scratch. Set
 `persistDrawablesAcrossSceneChange = true` on a scene to keep its own drawables, or override

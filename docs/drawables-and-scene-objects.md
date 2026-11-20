@@ -421,9 +421,20 @@ lower it to 0 if your lights (an `AmbientLight`, say) should decide how dark sha
 
 Lights can be changed any time - move a lamp, change its color, set `enabled = false` - and
 the renderer notices and relights whatever they reach. `game.removeLight(light)` and
-`game.clearLights()` take them away again (clearing them all goes back to the headlight). Lights
-belong to the game canvas's renderer, not a scene, so remove a scene's own lights in its
-`onDestroy()`.
+`game.clearLights()` take them away again (clearing them all goes back to the headlight).
+
+A light added with `game.addLight()` stays across scene changes until you remove it. For a light
+that belongs to a scene or an entity, add it with theirs instead:
+
+```brighterscript
+' in a scene's onCreate(): removed when the game leaves the scene (after onDestroy())
+m.addLight(new BGE.AmbientLight(&h3A4C8A, 0.7))
+
+' in a torch entity's onCreate(): removed when the torch is destroyed
+m.addLight(new BGE.PointLight(m.position, 300, &hFF9440, 1.6))
+```
+
+`entity.removeLight(light)` removes one early, and `entity.getLights()` lists them.
 
 Ground planes take lights too: set `isShaded = true` on a `DrawablePlane`. A plane is flat, so
 directional and ambient light it evenly - its cached drawing is just tinted as it's drawn, which
