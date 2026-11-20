@@ -532,6 +532,33 @@ camera.follow(playerEntity)
 never a frame behind. `setBounds()` stops the view showing past the level's edges (and centres a
 level that's smaller than the screen); it also applies to plain `setTarget()` calls.
 
+### Zooming
+
+Every camera has a `zoom`: 1 is the normal view, 2 draws the area round the middle of the view
+twice as big, 0.5 half as big. Set it directly, or ease it:
+
+```
+camera.zoomTo(2, 0.5) ' to 2x over half a second
+camera.zoomTo(1, 0.5, BGE.Tweens.Easing.QuadraticEaseOut)
+```
+
+`zoomTo()` runs on the camera's own clock, so it works without a `Game` too. It eases the zoom's
+logarithm, so going from 1 to 4 looks even all the way rather than rushing through 1 to 2.
+`isZooming()` says whether it's still going, and `stopZooming()`, or setting `zoom` yourself,
+stops it.
+
+With a `Camera2d` the world is scaled about the middle of the canvas: images, text, rectangles,
+circles, particles and parallax layers all draw `zoom` times as big, `follow()` keeps the entity
+in the middle, and `setBounds()` clamps against the smaller view (`frameSize / zoom` world units),
+so a zoomed-in camera can get nearer the level's edges. Line and outline widths stay in pixels.
+Edge-to-edge tiles still meet exactly at a fractional zoom (part way through a `zoomTo()`). The
+UI canvas has its own camera and isn't zoomed.
+
+With a `Camera3d`, zoom multiplies the focal length, which narrows the field of view
+(`getEffectiveFieldOfViewDegrees()`) - see [Third-Person Cameras](/third-person-cameras#zooming).
+
+`examples/rpg` zooms in and out on Replay.
+
 ## Melee combat helpers
 
 A few small pieces cover what most melee games redo by hand. `examples/thirdPerson` uses all
