@@ -352,11 +352,12 @@ A concave polygon is filled with one `DrawRect` per run of equal pixel bands
 bounding box. The bands never overlap, so a translucent polygon blends once everywhere, even where
 a self-crossing outline overlaps itself. There's no exact triangle fill to fall back on, so a big
 concave polygon costs more than its hull would: roughly one rect per pixel row, more where the row
-crosses several arms (a 300 px star is ~15 ms on a Roku Express). So in every draw mode, a concave
-polygon is filled into a cached bitmap and that is blitted while nothing changes: at rest it costs
-one blit a frame. Moving or turning, the cached bitmap is moved into place where it fits, otherwise
-the fill is redone with coarser bands (`RenderQualitySettings.triangleQuickDrawStep`) once it's
-more than 48 px across its banded side; either way it's redrawn exactly when it stops. Points that
+crosses several arms (a 300 px star is ~15 ms on a Roku Express). So once a concave polygon is
+still, in every draw mode, it's filled into a cached bitmap that is blitted while nothing changes:
+at rest it costs one blit a frame. While it (or the camera) moves, the cached bitmap is moved into
+place where it fits; otherwise it's filled straight onto the canvas, with coarser bands
+(`RenderQualitySettings.triangleQuickDrawStep`) once it's more than 48 px across its banded side.
+Either way it's redrawn exactly when it stops. Points that
 happen to be convex in order take the normal hull path, so the flag costs nothing on a convex
 shape.
 

@@ -127,3 +127,18 @@ Not comparable with #539's Roku Ultra numbers. ms per fill, 30 rotations each.
 
 No triangulation cache: big concave shapes cost 2-5x their hull, but the quick-draw step covers
 the moving case and the shapes this is for (arrows, stars, UI marks) are mostly small.
+
+## Review follow-up: caching a still polygon
+
+`SceneObjectPolygon` only used its temp bitmap in the oriented draw modes, so in the default
+(screen-aligned) modes a still concave polygon re-ran the scanline fill every frame, and since
+`drawToCanvas()` always passes `allowQuickDraw`, it stayed in coarse bands at rest. Now a concave
+polygon uses the temp bitmap once still, in every draw mode: filled once (exactly), then blitted.
+While it moves it tries moving the cached bitmap into place and otherwise bands straight onto the
+canvas: refilling the temp bitmap every moving frame measured slower (its `forceDraw()` flush per
+object). The cache is also redrawn when the fill color changes, and never moved into place when
+the points, fill rule or color changed.
+
+rendererTest `concave-polygons` (a 300 px star, an L, a 220 px gear, two pentagrams), Roku Express,
+`render()` ms per frame: at rest 30 ms (436 draw calls) before, 5 ms (5 draw calls) after;
+turning 41 ms before, 42 ms after (a temp bitmap refilled every frame measured 67 ms).

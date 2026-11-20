@@ -19,6 +19,10 @@ namespace BGE
     private polygonWorldPoints as BGE.Math.Vector[] = []
     ' Whether every world point projected this frame: a concave fill needs them all, in order
     private allPointsProjected as boolean = true
+    ' Whether this draw moved relative to the camera, and whether a cached concave fill is
+    ' being tried for moving into place (see usesTempBitmap())
+    private movingThisDraw as boolean = false
+    private tryingCachedMove as boolean = false
 
     sub new(name as string, drawableObj as DrawablePolygon)
       super(name, drawableObj, SceneObjectType.Polygon)
@@ -30,12 +34,22 @@ namespace BGE
       return m.lastConcave <> m.drawable.concave or m.lastFillRule <> m.drawable.fillRule or m.lastFillColor <> m.drawable.getFillColorRGBA() or not BGE.Math.vectorArraysEqual(m.lastPolygonPoints, m.drawable.points)
     end function
 
-    ' A concave fill is DrawRect bands, too dear to redo every frame (a 300px star took
-    ' ~15ms on a Roku Express), so it's cached in a temp bitmap in every draw mode and only
-    ' re-rasterized when the polygon, its color or the camera changes.
+    ' A concave fill is DrawRect bands, too dear to redo every frame (a 300px star took ~15ms
+    ' on a Roku Express), so once still it's cached in a temp bitmap in every draw mode and
+    ' blitted until the polygon, its color or the camera changes. While it moves, refilling
+    ' the cache (and flushing it) every frame cost more than banding onto the canvas, so it's
+    ' drawn straight there unless the cache can just be moved into place.
+    protected override function performDraw(rendererObj as BGE.Renderer, drawMode as SceneObjectDrawMode) as boolean
+      m.movingThisDraw = m.objMovedInRelationToCamera(rendererObj.camera)
+      return super.performDraw(rendererObj, drawMode)
+    end function
+
     protected override function usesTempBitmap(drawMode as SceneObjectDrawMode) as boolean
       usesTemp = super.usesTempBitmap(drawMode)
-      return usesTemp or (m.drawable.concave and not isWireFrameDrawMode(drawMode))
+      if usesTemp or not m.drawable.concave or isWireFrameDrawMode(drawMode)
+        return usesTemp
+      end if
+      return not m.movingThisDraw or m.tryingCachedMove
     end function
 
     ' A cached fill of old points, fill rule or color can't be moved into place.
@@ -43,7 +57,10 @@ namespace BGE
       if m.didRegionToDrawChange()
         return invalid
       end if
-      return super.attemptTransformTempBitmap(renderObj, drawMode)
+      m.tryingCachedMove = true
+      details = super.attemptTransformTempBitmap(renderObj, drawMode)
+      m.tryingCachedMove = false
+      return details
     end function
 
 
@@ -51,6 +68,9 @@ namespace BGE
       worked = false
       if isWireFrameDrawMode(drawMode)
         worked = rendererObj.drawPolygonOutline(m.polygonCanvasPoints, m.getCanvasOutlineDrawColorRGBA(rendererObj), m.drawable.outlineWidth)
+      else if m.drawable.concave and m.allPointsProjected
+        ' only while moving (see usesTempBitmap()), so coarse bands are fine
+        worked = rendererObj.drawConcavePolygon(m.polygonCanvasPoints, 0, 0, m.getCanvasDrawColorRGBA(rendererObj), true, m.drawable.fillRule)
       else
         worked = rendererObj.drawPolygon(m.polygonCanvasPoints, 0, 0, m.getCanvasDrawColorRGBA(rendererObj), true)
       end if
