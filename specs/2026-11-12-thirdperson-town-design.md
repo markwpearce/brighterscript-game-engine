@@ -110,7 +110,7 @@ Render them the way the README describes for the knight and monsters: convert wi
 
 An NPC entity, `Entities/Townsfolk.bs`, is a `DrawableOrientedSprite` drawn like the knight (`axisAligned`, `isShaded`, `lightWrap` 0.5), playing its idle loop. Each one starts at a random point in the loop, so a crowd doesn't bob in step. It has a round solid body so the knight bumps into it. It isn't a `Fighter` and can't be hit.
 
-**Which NPC goes on which `n` spot**, and its facing, is chosen from a cell-fixed random number (`cellRandom`), like the graveyard's graves and trees. The town looks the same every time, and the people near the square face roughly toward the well. If the builder wants explicit choices, add a small table in the scene keyed by spot.
+**Which NPC goes on which `n` spot**, and its facing, is chosen from a cell-fixed random number (`BGE.Math.hash2`), like the graveyard's graves and trees. The town looks the same every time, and the people near the square face roughly toward the well. If the builder wants explicit choices, add a small table in the scene keyed by spot.
 
 **Pigs**: a `Pig` entity that idles, and if there's a walk cycle, now and then picks a point inside its pen and ambles there, kept in by the pen's fence solids. Three or four pigs.
 

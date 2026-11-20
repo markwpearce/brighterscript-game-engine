@@ -192,8 +192,8 @@ spin).
 
 ### Keeping things on screen
 
-`BGE.Math` has three helpers for a body inside a `BGE.Math.Rectangle`. Each one changes
-`position` (and `velocity`) in place:
+`BGE.Math` has three helpers for a body inside a `BGE.Math.Rectangle`. They change `position` in
+place, and `bounceInRect` changes `velocity` too:
 
 ```
 ' A ball that bounces off the walls and ceiling but can fall out of the bottom
@@ -226,7 +226,7 @@ game.maxDeltaTime = 1 / 30.0
 ```
 
 A slower frame then counts as `1 / 30` of a second everywhere update code sees it: `onUpdate`,
-velocity, tweens and `getDeltaTime()`. The game runs slower than real time while frames are that
+velocity and `getDeltaTime()` (tweens run on wall-clock time, so they aren't capped). The game runs slower than real time while frames are that
 slow, so pick a cap above your normal frame time. It's off (0) by default.
 
 ### Random numbers
