@@ -63,7 +63,8 @@ within a second. When the camera moves again, the level drops straight back to t
 that held the last time it moved, before that first moving frame draws. Then, if frames
 still fall short, it steps down after just 0.3s of frames, by a level plus one per halving of
 the frame rate under the target, and keeps doing that until moving frames hold the
-target. Set
+target. Together these drop at most `cameraMoveMaxStepDown` (2) levels below the still level;
+past that the usual step-down timings take over (`cameraMoveMaxStepDown: 0` for no limit). Set
 `stillCameraSeconds: 0` to turn this off.
 
 ### How it decides

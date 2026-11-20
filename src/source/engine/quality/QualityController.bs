@@ -49,6 +49,9 @@ namespace BGE
     optional stillSettleSeconds as float
     ' Seconds of frames a still camera needs before stepping up (default 0.2)
     optional stillSampleSeconds as float
+    ' Most levels the camera starting to move from still may drop the level, before the usual
+    ' step-down timings take over; 0 for no limit (default 2)
+    optional cameraMoveMaxStepDown as integer
   end interface
 
   ' A scene's own render quality settings (`GameScene.qualityOptions`), in force while it's the
@@ -90,6 +93,7 @@ namespace BGE
     stillCameraSeconds as float = 0.2
     stillSettleSeconds as float = 0.1
     stillSampleSeconds as float = 0.2
+    cameraMoveMaxStepDown as integer = 2
 
     private samples as float[] = []
     private sampleTime as float = 0
@@ -113,6 +117,8 @@ namespace BGE
     ' the level last in force with the camera moving, -1 until it has moved
     private movingLevel as integer = -1
     private movedThisFrame as boolean = false
+    ' the still level the camera started moving from, -1 when not just moved
+    private moveStartLevel as integer = -1
 
     ' @param {BGE.AdaptiveQualityOptions} [options={}] - any subset of the options
     sub new(options = {} as AdaptiveQualityOptions)
@@ -180,6 +186,9 @@ namespace BGE
       if options.DoesExist("stillSampleSeconds")
         m.stillSampleSeconds = options.stillSampleSeconds
       end if
+      if options.DoesExist("cameraMoveMaxStepDown")
+        m.cameraMoveMaxStepDown = options.cameraMoveMaxStepDown
+      end if
     end sub
 
     ' Sets the frame rate and range to hold, e.g. for a scene with its own. Backoffs are
@@ -215,6 +224,7 @@ namespace BGE
         if not m.isStill and m.stillTime >= m.stillCameraSeconds
           m.isStill = true
           m.justMoved = false
+          m.moveStartLevel = -1
           ' frames from while it moved say nothing about the still view
           m.resetWindow()
         end if
@@ -240,10 +250,22 @@ namespace BGE
     ' @param {integer} currentLevel - the level currently applied
     ' @return {integer}
     function levelForCameraStart(currentLevel as integer) as integer
-      if not m.isStill or m.movingLevel < 0 or m.movingLevel >= currentLevel
+      if not m.isStill
         return currentLevel
       end if
-      return BGE.Math.Max(m.movingLevel, m.minLevel)
+      m.moveStartLevel = currentLevel
+      if m.movingLevel < 0 or m.movingLevel >= currentLevel
+        return currentLevel
+      end if
+      return BGE.Math.Max(BGE.Math.Max(m.movingLevel, m.minLevel), m.cameraMoveFloor())
+    end function
+
+    ' The lowest level a camera starting to move may drop to (cameraMoveMaxStepDown)
+    private function cameraMoveFloor() as integer
+      if m.cameraMoveMaxStepDown <= 0 or m.moveStartLevel < 0
+        return m.minLevel
+      end if
+      return BGE.Math.Max(m.moveStartLevel - m.cameraMoveMaxStepDown, m.minLevel)
     end function
 
     ' Feed one frame's duration; returns the level to use (currentLevel if no change).
@@ -295,11 +317,16 @@ namespace BGE
       upThreshold = BGE.Math.Min(m.targetFps * m.stepUpHeadroomFraction, m.maxMeasurableFps * 0.97)
 
       if m.justMoved
-        if avgFps < m.targetFps * m.stepDownBelowFraction and currentLevel > m.minLevel
+        if m.moveStartLevel < 0
+          ' no levelForCameraStart() call (the controller used on its own)
+          m.moveStartLevel = currentLevel
+        end if
+        if avgFps < m.targetFps * m.stepDownBelowFraction and currentLevel > m.cameraMoveFloor()
           return m.stepDownMoved(avgFps, currentLevel)
         end if
-        ' holding up, so back to the usual timings
+        ' holding up (or dropped as far as a move may), so back to the usual timings
         m.justMoved = false
+        m.moveStartLevel = -1
         if not trusted
           return currentLevel
         end if
@@ -378,6 +405,7 @@ namespace BGE
     ' Call after a scene change, for the same reason as notifyLevelChanged().
     sub notifySceneChanged()
       m.justMoved = false
+      m.moveStartLevel = -1
       ' the last scene's moving level says little about this one's
       m.movingLevel = -1
       m.resetWindow()
@@ -388,7 +416,8 @@ namespace BGE
     private function stepDownMoved(avgFps as float, currentLevel as integer) as integer
       newLevel = m.stepDown(currentLevel)
       bar = m.targetFps / 2
-      while avgFps < bar and newLevel > m.minLevel
+      floor = m.cameraMoveFloor()
+      while avgFps < bar and newLevel > floor
         newLevel--
         bar = bar / 2
       end while
