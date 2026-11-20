@@ -119,6 +119,10 @@ namespace BGE
     private impostorDepthRatio as float = 0.0
     private impostorStripResidual as float = -1.0
     private impostorStripAllowed as float = -1.0
+    ' strip attempts still to skip, after a fit failed on its capture's first try (walking past
+    ' a deep model: parallax a frame's step already outgrows), and how many the last backoff was
+    private stripBackoff as integer = 0
+    private stripBackoffLength as integer = 0
 
     sub new(name as string, drawableObj as DrawableModel)
       super(name, drawableObj, SceneObjectType.Model)
@@ -347,7 +351,8 @@ namespace BGE
       if m.drawable.impostorRedrawOnNewFace and not isBackFaceDrawMode(drawMode)
         samples.hiddenPlanes = m.captureHiddenPlanes(rendererObj.camera.position)
       end if
-      if m.drawable.useImpostorStrips
+      ' no hints while backing off: no strip attempt will use them
+      if m.drawable.useImpostorStrips and m.stripBackoff <= 1
         start = 0
         if rendererObj.profileStages
           start = rendererObj.getProfileClockMs()
@@ -711,17 +716,39 @@ namespace BGE
     ' attemptImpostorStrips(), timed as the stripFitHit or stripFitMiss stage while the renderer
     ' profiles stages.
     private function timeImpostorStrips(renderObj as Renderer, capture as roAssociativeArray, diagonal as float, drawMode as SceneObjectDrawMode) as TransformTempBitmapDetails
+      if m.stripBackoff > 0
+        m.stripBackoff--
+        return m.missImpostor("stripsBackoff")
+      end if
+      firstTry = invalid = capture.stripTried
+      capture.stripTried = true
       if not renderObj.profileStages
-        return m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+        details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+      else
+        start = renderObj.getProfileClockMs()
+        details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
+        stage = "stripFitMiss"
+        if invalid <> details
+          stage = "stripFitHit"
+        end if
+        renderObj.addStageMs(stage, renderObj.getProfileClockMs() - start)
       end if
-      start = renderObj.getProfileClockMs()
-      details = m.attemptImpostorStrips(renderObj, capture, diagonal, drawMode)
-      stage = "stripFitMiss"
       if invalid <> details
-        stage = "stripFitHit"
+        m.stripBackoffLength = 0
+      else if firstTry and m.isStripMissFromMotion()
+        ' it couldn't follow one frame's motion, so the next frames' likely won't either: skip
+        ' the fits (and redraw, as it would anyway) for longer while that keeps happening
+        m.stripBackoffLength = Int(BGE.Math.Min(BGE.Math.Max(2, m.stripBackoffLength * 2), 16))
+        m.stripBackoff = m.stripBackoffLength
       end if
-      renderObj.addStageMs(stage, renderObj.getProfileClockMs() - start)
       return details
+    end function
+
+    ' Whether the last strip miss was the warp failing to follow the motion, not something
+    ' about the capture.
+    private function isStripMissFromMotion() as boolean
+      reason = m.impostorMissReason
+      return reason = "stripsError" or reason = "stripsStretch" or reason = "stripsScale"
     end function
 
     ' The strip redraw of the capture that fits this frame, or invalid. The details returned
