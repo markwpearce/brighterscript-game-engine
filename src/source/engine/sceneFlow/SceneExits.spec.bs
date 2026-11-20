@@ -1,0 +1,185 @@
+import "pkg:/source/engine/sceneFlow/SceneExits.bs"
+import "pkg:/source/engine/sceneFlow/SceneExit.bs"
+import "pkg:/source/engine/sceneFlow/ExitArea.bs"
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameScene.bs"
+import "pkg:/source/math/vector.bs"
+
+namespace tests
+  @suite("BGE.SceneExits")
+  class SceneExitsTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Here"}))
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "There"}))
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Elsewhere"}))
+      m.game.changeScene("Here")
+    end function
+
+    @describe("update")
+
+    @it("does nothing outside every exit")
+    function _()
+      exits = m.twoExits()
+      m.assertFalse(exits.update(m.at(50, 50)))
+      m.assertFalse(exits.hasLeft())
+      m.assertFalse(m.game.isTransitioning())
+    end function
+
+    @it("fades to the exit's scene with its args")
+    function _()
+      exits = m.twoExits()
+      m.assertTrue(exits.update(m.at(5, 5)))
+      m.assertTrue(exits.hasLeft())
+      m.assertTrue(m.game.isTransitioning())
+      m.runFrames(10, 0.05)
+      m.assertEqual("There", m.game.currentScene.name)
+      m.assertEqual("here", m.game.currentSceneArgs.from)
+    end function
+
+    @it("fires once")
+    function _()
+      exits = m.twoExits()
+      m.assertTrue(exits.update(m.at(5, 5)))
+      m.assertFalse(exits.update(m.at(5, 5)))
+      m.assertFalse(exits.update(m.at(95, 95)))
+      m.runFrames(10, 0.05)
+      m.assertEqual("There", m.game.currentScene.name)
+    end function
+
+    @it("the first exit added wins where they overlap")
+    function _()
+      exits = new BGE.SceneExits(m.game)
+      exits.add(new BGE.RectExitArea(0, 0, 10, 10), "Elsewhere")
+      exits.add(new BGE.RectExitArea(0, 0, 10, 10), "There")
+      exits.update(m.at(5, 5))
+      m.runFrames(10, 0.05)
+      m.assertEqual("Elsewhere", m.game.currentScene.name)
+    end function
+
+    @it("tries again next update when a transition is already running")
+    function _()
+      exits = m.twoExits()
+      m.game.changeSceneWithFade("Here", {}, 0.05)
+      m.assertFalse(exits.update(m.at(5, 5)))
+      m.assertFalse(exits.hasLeft())
+      m.runFrames(10, 0.05)
+      m.assertTrue(exits.update(m.at(5, 5)))
+    end function
+
+    @it("does nothing while disabled")
+    function _()
+      exits = m.twoExits()
+      exits.enabled = false
+      m.assertFalse(exits.update(m.at(5, 5)))
+    end function
+
+    @it("skips a disabled exit")
+    function _()
+      exits = m.twoExits()
+      exits.getAll()[0].enabled = false
+      m.assertFalse(exits.update(m.at(5, 5)))
+    end function
+
+    @it("changes straight away with fadeSeconds 0")
+    function _()
+      exits = new BGE.SceneExits(m.game)
+      ' not running, so the change applies straight away
+      m.game.End()
+      instant = exits.add(new BGE.RectExitArea(0, 0, 10, 10), "There")
+      instant.fadeSeconds = 0
+      m.assertTrue(exits.update(m.at(5, 5)))
+      m.assertEqual("There", m.game.currentScene.name)
+      m.assertFalse(m.game.isTransitioning())
+    end function
+
+    @describe("trigger")
+
+    @it("leaves through an exit whatever the position, once")
+    function _()
+      exits = m.twoExits()
+      second = exits.getAll()[1]
+      m.assertTrue(exits.trigger(second))
+      m.assertFalse(exits.trigger(second))
+      m.runFrames(10, 0.05)
+      m.assertEqual("Elsewhere", m.game.currentScene.name)
+    end function
+
+    @it("calls onLeave() with the exit taken")
+    function _()
+      exits = new tests.RecordingExitsForTests(m.game)
+      exits.add(new BGE.RectExitArea(0, 0, 10, 10), "There")
+      exits.update(m.at(5, 5))
+      m.assertEqual("There", exits.leftTo)
+    end function
+
+    @describe("custom exits")
+
+    @it("a subclassed exit decides when it's taken")
+    function _()
+      exits = new BGE.SceneExits(m.game)
+      gated = new tests.GatedExitForTests(new BGE.RectExitArea(0, 0, 10, 10), "There")
+      exits.addExit(gated)
+      m.assertFalse(exits.update(m.at(5, 5)))
+      gated.open = true
+      m.assertTrue(exits.update(m.at(5, 5)))
+    end function
+
+    @describe("clear")
+
+    @it("forgets the exits and that it left")
+    function _()
+      exits = m.twoExits()
+      exits.update(m.at(5, 5))
+      exits.clear()
+      m.assertEqual(0, exits.count())
+      m.assertFalse(exits.hasLeft())
+    end function
+
+    private function twoExits() as BGE.SceneExits
+      exits = new BGE.SceneExits(m.game)
+      exits.add(new BGE.RectExitArea(0, 0, 10, 10), "There", {from: "here"})
+      exits.add(new BGE.CircleExitArea(BGE.Math.VectorOps.create(100, 0, 100), 10), "Elsewhere")
+      return exits
+    end function
+
+    private function at(x as float, z as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(x, 0, z)
+    end function
+
+    private sub runFrames(count as integer, dt as float)
+      for i = 1 to count
+        m.game.updateFadeTransitionForTest(dt)
+      end for
+    end sub
+
+  end class
+
+  ' Only taken once `open` is set, e.g. a locked door
+  class GatedExitForTests extends BGE.SceneExit
+    open as boolean = false
+
+    sub new(area as BGE.ExitArea, sceneName as string)
+      super(area, sceneName, {})
+    end sub
+
+    override function isTriggeredBy(position as BGE.Math.Vector) as boolean
+      return m.open and super.isTriggeredBy(position)
+    end function
+  end class
+
+  class RecordingExitsForTests extends BGE.SceneExits
+    leftTo as string = ""
+
+    sub new(game as BGE.Game)
+      super(game)
+    end sub
+
+    protected override sub onLeave(sceneExit as BGE.SceneExit)
+      m.leftTo = sceneExit.sceneName
+    end sub
+  end class
+end namespace
