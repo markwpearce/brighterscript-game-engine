@@ -1,0 +1,407 @@
+import "../../math/math.bs"
+import "../../math/vector.bs"
+import "../colliders/SolidWorld.bs"
+import "GridSides.bs"
+
+namespace BGE
+
+  interface CharGridArgs
+    ' World units per cell, along x and z
+    cellSize as float
+    ' The -x/-z corner of cell (0, 0). By default the grid is centred on the world origin.
+    optional origin as BGE.Math.Vector
+    ' Characters isSolid() counts as solid ("#" by default; "" for none)
+    optional solidKinds as string
+  end interface
+
+  ' One cell of a BGE.CharGrid
+  interface CharGridCell
+    col as integer
+    row as integer
+    ' Its character ("" outside the grid)
+    kind as string
+  end interface
+
+  ' A rectangle of cells (a group, a run or a bounding box) found in a BGE.CharGrid
+  interface CharGridGroup
+    kind as string
+    col as integer
+    row as integer
+    cols as integer
+    rows as integer
+  end interface
+
+  ' A level written as rows of characters, one per cell: what each character means is up to the
+  ' game. Finds cells, groups and runs of characters, maps cells to world positions on the
+  ' ground (x/z), and builds a BGE.SolidWorld from the solid ones. Row 0 is -z, column 0 is -x.
+  '
+  ' Subclass it to keep a level's own findings (start cell, exits) with the grid, or override
+  ' isSolid() for solids that aren't a fixed set of characters.
+  class CharGrid
+
+    colCount as integer
+    rowCount as integer
+    cellSize as float
+    ' The -x/-z corner of cell (0, 0)
+    origin as BGE.Math.Vector
+    solidKinds as string = "#"
+    ' Each row's characters, [row][col]; rows shorter than colCount are padded with ""
+    grid as string[][]
+
+    sub new(rows as string[], args as BGE.CharGridArgs)
+      m.cellSize = args.cellSize
+      m.solidKinds = args.solidKinds ?? "#"
+      m.rowCount = rows.count()
+      m.colCount = 0
+      for each line in rows
+        if len(line) > m.colCount
+          m.colCount = len(line)
+        end if
+      end for
+      m.origin = args.origin ?? BGE.Math.VectorOps.create(-m.colCount * m.cellSize / 2, 0, -m.rowCount * m.cellSize / 2)
+      m.grid = []
+      for each line in rows
+        chars = [] as string[]
+        for col = 0 to m.colCount - 1
+          chars.push(mid(line, col + 1, 1))
+        end for
+        m.grid.push(chars)
+      end for
+    end sub
+
+    ' Whether (col, row) is on the grid.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {boolean}
+    function isInside(col as integer, row as integer) as boolean
+      return col >= 0 and row >= 0 and col < m.colCount and row < m.rowCount
+    end function
+
+    ' The character at (col, row), "" outside the grid.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {string}
+    function kindAt(col as integer, row as integer) as string
+      if col < 0 or row < 0 or col >= m.colCount or row >= m.rowCount
+        return ""
+      end if
+      return m.grid[row][col]
+    end function
+
+    ' Whether the character at (col, row) is one of `kinds` (case-sensitive). False outside the grid.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @param {string} kinds - characters to match, e.g. "=-"
+    ' @return {boolean}
+    function isKindOf(col as integer, row as integer, kinds as string) as boolean
+      kind = m.kindAt(col, row)
+      return kind <> "" and instr(1, kinds, kind) > 0
+    end function
+
+    ' Whether a cell blocks: one of solidKinds, or outside the grid. Override for other rules.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {boolean}
+    function isSolid(col as integer, row as integer) as boolean
+      if col < 0 or row < 0 or col >= m.colCount or row >= m.rowCount
+        return true
+      end if
+      kind = m.grid[row][col]
+      return kind <> "" and instr(1, m.solidKinds, kind) > 0
+    end function
+
+    ' World position of a cell's centre on the ground (y 0). Takes fractions, e.g. the middle
+    ' of a group.
+    '
+    ' @param {float} col
+    ' @param {float} row
+    ' @return {BGE.Math.Vector}
+    function cellCenter(col as float, row as float) as BGE.Math.Vector
+      return BGE.Math.VectorOps.create(m.origin.x + (col + 0.5) * m.cellSize, 0, m.origin.z + (row + 0.5) * m.cellSize)
+    end function
+
+    ' World position of the middle of a group of cells (y 0).
+    '
+    ' @param {BGE.CharGridGroup} group
+    ' @return {BGE.Math.Vector}
+    function groupCenter(group as BGE.CharGridGroup) as BGE.Math.Vector
+      return m.cellCenter(group.col + (group.cols - 1) / 2, group.row + (group.rows - 1) / 2)
+    end function
+
+    ' The cell a world position is in (may be outside the grid, with kind "").
+    '
+    ' @param {float} x
+    ' @param {float} z
+    ' @return {BGE.CharGridCell}
+    function cellAt(x as float, z as float) as BGE.CharGridCell
+      size = m.cellSize
+      col = int(x / size - m.origin.x / size)
+      row = int(z / size - m.origin.z / size)
+      return {col: col, row: row, kind: m.kindAt(col, row)} as BGE.CharGridCell
+    end function
+
+    ' Every cell whose character is one of `kinds`, row by row.
+    '
+    ' @param {string} kinds
+    ' @return {BGE.CharGridCell[]}
+    function cellsOf(kinds as string) as BGE.CharGridCell[]
+      return m.collectCells(kinds, true)
+    end function
+
+    ' Every cell whose character isn't one of `kinds`, row by row, e.g. every floor cell with
+    ' cellsExcept("#").
+    '
+    ' @param {string} kinds
+    ' @return {BGE.CharGridCell[]}
+    function cellsExcept(kinds as string) as BGE.CharGridCell[]
+      return m.collectCells(kinds, false)
+    end function
+
+    private function collectCells(kinds as string, matching as boolean) as BGE.CharGridCell[]
+      found = [] as BGE.CharGridCell[]
+      for row = 0 to m.rowCount - 1
+        for col = 0 to m.colCount - 1
+          kind = m.grid[row][col]
+          if kind <> "" and (instr(1, kinds, kind) > 0) = matching
+            found.push({col: col, row: row, kind: kind} as BGE.CharGridCell)
+          end if
+        end for
+      end for
+      return found
+    end function
+
+    ' Sides of a cell (BGE.GridSides, in the order n, e, s, w) with a solid neighbour.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {string[]}
+    function wallSides(col as integer, row as integer) as string[]
+      return m.sidesWhereSolid(col, row, true)
+    end function
+
+    ' Sides of a cell (in the order n, e, s, w) with an open neighbour.
+    '
+    ' @param {integer} col
+    ' @param {integer} row
+    ' @return {string[]}
+    function openSides(col as integer, row as integer) as string[]
+      return m.sidesWhereSolid(col, row, false)
+    end function
+
+    private function sidesWhereSolid(col as integer, row as integer, solid as boolean) as string[]
+      found = [] as string[]
+      for each side in BGE.GridSides.all()
+        delta = BGE.GridSides.offset(side)
+        if m.isSolid(col + delta[0], row + delta[1]) = solid
+          found.push(side)
+        end if
+      end for
+      return found
+    end function
+
+    ' Rectangles of cells of one kind each, for things drawn as blocks of characters (a table
+    ' drawn `===` over two rows). Row by row: each new cell starts a group as wide as the run
+    ' of its kind to the right, grown down while whole rows below match.
+    '
+    ' @param {string} kinds - characters to group
+    ' @return {BGE.CharGridGroup[]}
+    function findRectGroups(kinds as string) as BGE.CharGridGroup[]
+      found = [] as BGE.CharGridGroup[]
+      taken = {}
+      for row = 0 to m.rowCount - 1
+        for col = 0 to m.colCount - 1
+          kind = m.grid[row][col]
+          if kind <> "" and instr(1, kinds, kind) > 0 and invalid = taken[`${col},${row}`]
+            cols = 1
+            ' not into a cell an earlier group took growing down (an L shape)
+            while col + cols < m.colCount and m.grid[row][col + cols] = kind and invalid = taken[`${col + cols},${row}`]
+              cols++
+            end while
+            rows = 1
+            while row + rows < m.rowCount and m.isRowOf(kind, col, row + rows, cols)
+              rows++
+            end while
+            for r = row to row + rows - 1
+              for c = col to col + cols - 1
+                taken[`${c},${r}`] = true
+              end for
+            end for
+            found.push({kind: kind, col: col, row: row, cols: cols, rows: rows} as BGE.CharGridGroup)
+          end if
+        end for
+      end for
+      return found
+    end function
+
+    ' True when `cols` cells from col along row are all `kind`
+    private function isRowOf(kind as string, col as integer, row as integer, cols as integer) as boolean
+      for c = col to col + cols - 1
+        if m.grid[row][c] <> kind
+          return false
+        end if
+      end for
+      return true
+    end function
+
+    ' Each connected block (4-way) of one kind, as its bounding rectangle, in the order their
+    ' first cells come row by row. For blocks that aren't rectangles, e.g. a building's outline.
+    '
+    ' @param {string} kinds - characters to group
+    ' @return {BGE.CharGridGroup[]}
+    function findConnectedGroups(kinds as string) as BGE.CharGridGroup[]
+      found = [] as BGE.CharGridGroup[]
+      seen = {}
+      for row = 0 to m.rowCount - 1
+        for col = 0 to m.colCount - 1
+          kind = m.grid[row][col]
+          key = `${col},${row}`
+          if kind <> "" and instr(1, kinds, kind) > 0 and not seen.doesExist(key)
+            found.push(m.floodGroup(kind, col, row, seen))
+          end if
+        end for
+      end for
+      return found
+    end function
+
+    private function floodGroup(kind as string, col as integer, row as integer, seen as roAssociativeArray) as BGE.CharGridGroup
+      group = {kind: kind, col: col, row: row, cols: 1, rows: 1} as BGE.CharGridGroup
+      lastCol = col
+      lastRow = row
+      stack = [[col, row]]
+      seen[`${col},${row}`] = true
+      while stack.count() > 0
+        here = stack.pop()
+        if here[0] < group.col
+          group.col = here[0]
+        end if
+        if here[0] > lastCol
+          lastCol = here[0]
+        end if
+        if here[1] > lastRow
+          lastRow = here[1]
+        end if
+        for each offset in [[1, 0], [-1, 0], [0, 1], [0, -1]]
+          c = here[0] + offset[0]
+          r = here[1] + offset[1]
+          nextKey = `${c},${r}`
+          if c >= 0 and r >= 0 and c < m.colCount and r < m.rowCount and not seen.doesExist(nextKey)
+            if m.grid[r][c] = kind
+              seen[nextKey] = true
+              stack.push([c, r])
+            end if
+          end if
+        end for
+      end while
+      group.cols = lastCol - group.col + 1
+      group.rows = lastRow - group.row + 1
+      return group
+    end function
+
+    ' The rectangle round every cell whose character is one of `kinds`, wherever they are; its
+    ' kind is the first such cell's. Invalid when there are none.
+    '
+    ' @param {string} kinds
+    ' @return {BGE.CharGridGroup}
+    function boundsOf(kinds as string) as BGE.CharGridGroup
+      group = invalid
+      lastCol = -1
+      lastRow = -1
+      for row = 0 to m.rowCount - 1
+        for col = 0 to m.colCount - 1
+          kind = m.grid[row][col]
+          if kind <> "" and instr(1, kinds, kind) > 0
+            if invalid = group
+              group = {kind: kind, col: col, row: row, cols: 1, rows: 1} as BGE.CharGridGroup
+              lastCol = col
+            else if col < group.col
+              group.col = col
+            else if col > lastCol
+              lastCol = col
+            end if
+            lastRow = row
+          end if
+        end for
+      end for
+      if invalid <> group
+        group.cols = lastCol - group.col + 1
+        group.rows = lastRow - group.row + 1
+      end if
+      return group
+    end function
+
+    ' Straight runs of one kind at least `minLength` long: along each row (rows 1 high), then
+    ' down each column (cols 1 wide). A cell where runs cross, e.g. a fence's corner, is in both.
+    '
+    ' @param {string} kinds - characters that make runs
+    ' @param {integer} minLength - shortest run to keep
+    ' @return {BGE.CharGridGroup[]}
+    function findRuns(kinds as string, minLength = 2 as integer) as BGE.CharGridGroup[]
+      found = [] as BGE.CharGridGroup[]
+      for row = 0 to m.rowCount - 1
+        col = 0
+        while col < m.colCount
+          kind = m.grid[row][col]
+          length = 0
+          if kind <> "" and instr(1, kinds, kind) > 0
+            while col + length < m.colCount and m.grid[row][col + length] = kind
+              length++
+            end while
+          end if
+          if length >= minLength
+            found.push({kind: kind, col: col, row: row, cols: length, rows: 1} as BGE.CharGridGroup)
+          end if
+          col += BGE.Math.Max(length, 1)
+        end while
+      end for
+      for col = 0 to m.colCount - 1
+        row = 0
+        while row < m.rowCount
+          kind = m.grid[row][col]
+          length = 0
+          if kind <> "" and instr(1, kinds, kind) > 0
+            while row + length < m.rowCount and m.grid[row + length][col] = kind
+              length++
+            end while
+          end if
+          if length >= minLength
+            found.push({kind: kind, col: col, row: row, cols: 1, rows: length} as BGE.CharGridGroup)
+          end if
+          row += BGE.Math.Max(length, 1)
+        end while
+      end for
+      return found
+    end function
+
+    ' A BGE.SolidWorld (its y is the world's z) with a cell-sized solid for each solid cell, row
+    ' by row, and a wall one cell thick round the grid.
+    '
+    ' @param {string} kinds - characters to make solid; "" (the default) uses isSolid()
+    ' @return {BGE.SolidWorld}
+    function toSolidWorld(kinds = "" as string) as BGE.SolidWorld
+      solids = new BGE.SolidWorld()
+      size = m.cellSize
+      for row = 0 to m.rowCount - 1
+        for col = 0 to m.colCount - 1
+          solid = false
+          if kinds = ""
+            solid = m.isSolid(col, row)
+          else
+            solid = m.isKindOf(col, row, kinds)
+          end if
+          if solid
+            center = m.cellCenter(col, row)
+            solids.addSolid(center.x - size / 2, center.z - size / 2, size, size)
+          end if
+        end for
+      end for
+      solids.addBounds(m.origin.x, m.origin.z, m.colCount * size, m.rowCount * size, size)
+      return solids
+    end function
+
+  end class
+
+end namespace
