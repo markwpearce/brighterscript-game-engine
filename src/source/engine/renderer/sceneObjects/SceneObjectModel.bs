@@ -488,17 +488,8 @@ namespace BGE
             wallFront.push(verts[j])
           end if
         end for
-        if vertical and verts.count() = 3
+        if vertical and verts.count() >= 3
           a = verts[0]
-          ux = verts[1].x - a.x
-          uy = verts[1].y - a.y
-          uz = verts[1].z - a.z
-          wx = verts[2].x - a.x
-          wy = verts[2].y - a.y
-          wz = verts[2].z - a.z
-          cx = uy * wz - uz * wy
-          cy = uz * wx - ux * wz
-          cz = ux * wy - uy * wx
           ' coplanar faces share a key, as captureHiddenPlanes()
           key = Int(n.x * 64 + 0.5).toStr() + "," + Int(n.z * 64 + 0.5).toStr() + "," + Int(n.x * a.x + n.y * a.y + n.z * a.z + 0.5).toStr()
           plane = planes[key]
@@ -507,7 +498,19 @@ namespace BGE
             planes[key] = plane
             planeOrder.push(key)
           end if
-          plane.area += 0.5 * Sqr(cx * cx + cy * cy + cz * cz)
+          ' a polygon's area as a fan of triangles from its first vertex
+          for v = 1 to verts.count() - 2
+            ux = verts[v].x - a.x
+            uy = verts[v].y - a.y
+            uz = verts[v].z - a.z
+            wx = verts[v + 1].x - a.x
+            wy = verts[v + 1].y - a.y
+            wz = verts[v + 1].z - a.z
+            cx = uy * wz - uz * wy
+            cy = uz * wx - ux * wz
+            cz = ux * wy - uy * wx
+            plane.area += 0.5 * Sqr(cx * cx + cy * cy + cz * cz)
+          end for
           plane.verts.append(verts)
         end if
       end for
@@ -561,19 +564,22 @@ namespace BGE
       if front.count() <> allFront.count()
         checkX = [] as float[]
         checkY = [] as float[]
-        if BGE.ImpostorFit.projectToBasis(level, allFront, checkX, checkY)
-          checkWorld = [] as BGE.Math.Vector[]
-          keptX = [] as float[]
-          keptY = [] as float[]
-          for each i in BGE.ImpostorFit.subsetWithExtremes(checkX, checkY, maxPoints)
-            checkWorld.push(allFront[i])
-            keptX.push(checkX[i])
-            keptY.push(checkY[i])
-          end for
-          capture.checkWorld = checkWorld
-          capture.checkXs = keptX
-          capture.checkYs = keptY
+        if not BGE.ImpostorFit.projectToBasis(level, allFront, checkX, checkY)
+          ' the roof can't be measured, so no strips: they'd warp it unchecked
+          capture.frontWorld = invalid
+          return
         end if
+        checkWorld = [] as BGE.Math.Vector[]
+        keptX = [] as float[]
+        keptY = [] as float[]
+        for each i in BGE.ImpostorFit.subsetWithExtremes(checkX, checkY, maxPoints)
+          checkWorld.push(allFront[i])
+          keptX.push(checkX[i])
+          keptY.push(checkY[i])
+        end for
+        capture.checkWorld = checkWorld
+        capture.checkXs = keptX
+        capture.checkYs = keptY
       end if
       if knots >= 2 or m.modelWorldBounds.count() <> 2
         return
@@ -800,6 +806,12 @@ namespace BGE
       if transforms.count() = 0
         return m.missImpostor("stripsProject")
       end if
+      ' a strip that would flip or collapse would leave a gap, so redraw instead
+      for k = 2 to transforms.count() - 1 step 5
+        if transforms[k] <= 0
+          return m.missImpostor("stripsFlip")
+        end if
+      end for
       if capture.clipped
         ' as the single blit: what the capture left out must stay off the canvas
         clip = capture.clipRect
@@ -875,20 +887,23 @@ namespace BGE
       bitmap = region.GetBitmap()
       width = region.GetWidth()
       height = region.GetHeight()
-      ' the strips' regions, kept with the capture: its knots are fixed, so the cuts mostly repeat
-      ' frame to frame (and Roku needs a source kept until its queued draws have run)
-      regions = capture.stripRegions
-      if invalid = regions
-        regions = {}
-        capture.stripRegions = regions
+      ' the strips' regions: last frame's reused where the cuts repeat, and only this frame's
+      ' kept, as cuts drift while the camera moves (last frame's stay referenced one more
+      ' frame, as Roku needs a source kept until its queued draws have run)
+      previous = capture.stripRegions
+      if invalid = previous
+        previous = {}
       end if
+      regions = {}
+      capture.previousStripRegions = previous
+      capture.stripRegions = regions
       drew = false
       for i = 0 to cuts.count() - 2
         k = i * 5
         if transforms[k + 2] > 0
           x0 = cuts[i]
           key = x0.toStr() + "_" + cuts[i + 1].toStr()
-          strip = regions[key]
+          strip = previous[key]
           if invalid = strip
             ' a pixel more of the source past its right edge, at the same scale: overlapping the
             ' next strip with what's really there hides the seam
@@ -897,8 +912,8 @@ namespace BGE
               stripWidth++
             end if
             strip = CreateObject("roRegion", bitmap, x0, 0, stripWidth, height)
-            regions[key] = strip
           end if
+          regions[key] = strip
           if rendererObj.drawTransformedObject(transforms[k], transforms[k + 1], transforms[k + 2], transforms[k + 3], transforms[k + 4], strip, blitColor)
             drew = true
           end if
