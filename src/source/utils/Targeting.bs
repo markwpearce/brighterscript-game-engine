@@ -1,0 +1,140 @@
+import "../math/math.bs"
+import "../math/vector.bs"
+import "../math/heading.bs"
+import "../engine/colliders/CircleSeparation.bs"
+
+namespace BGE
+
+  ' Anything BGE.Targeting can pick: an entity (or subclass), or an AA with a `position`.
+  interface TargetCandidate
+    position as BGE.Math.Vector
+  end interface
+
+  ' Options for BGE.Targeting's functions. Every field is optional.
+  interface TargetingOptions extends roAssociativeArray
+    ' Which axes positions use: xz (default) for the ground in a 3D game, xy for a 2D game.
+    ' On xy, heading 0 faces -y (up on a y-down screen) and PI/2 faces +x.
+    optional plane as BGE.SeparationPlane
+    ' How much pickInView() favours targets near the view heading over near ones: a target's
+    ' score is distance * (1 + angleWeight * radians off the heading), lowest wins. Default 1.
+    optional angleWeight as float
+  end interface
+
+end namespace
+
+' Picks targets for lock-on, auto-aim or homing: which candidate is roughly where the player
+' looks, and which is next round to the left or right. Pure functions over positions; filter
+' the candidates (alive, visible, hostile) before passing them in.
+'
+' Headings follow BGE.Math's convention (heading 0 faces -z, clockwise from above), so a
+' Camera3d or OrbitCamera heading can be passed straight in.
+'
+' @example
+' living = []
+' for each foe in m.enemies
+'   if foe.isAlive()
+'     living.push(foe)
+'   end if
+' end for
+' target = BGE.Targeting.pickInView(living, m.position, m.cameraRig.heading, 480, BGE.Math.PI * 0.4)
+' if invalid <> target
+'   m.cameraRig.lockOn(target)
+' end if
+namespace BGE.Targeting
+
+  ' The candidate within `range` of `from` and `halfAngle` radians of `viewHeading` that's
+  ' nearest, counting one straight ahead as closer (see BGE.TargetingOptions.angleWeight).
+  '
+  ' @param {BGE.TargetCandidate[]} candidates
+  ' @param {BGE.Math.Vector} from - e.g. the player's position
+  ' @param {float} viewHeading - radians, e.g. the camera's heading
+  ' @param {float} range - world units; a candidate exactly at range counts
+  ' @param {float} halfAngle - radians either side of viewHeading; PI or more is all round
+  ' @param {BGE.TargetingOptions} [options={}]
+  ' @return {BGE.TargetCandidate} or invalid if none qualifies
+  function pickInView(candidates as BGE.TargetCandidate[], from as BGE.Math.Vector, viewHeading as float, range as float, halfAngle as float, options = {} as BGE.TargetingOptions) as BGE.TargetCandidate
+    plane = options.plane ?? BGE.SeparationPlane.xz
+    angleWeight = options.angleWeight ?? 1.0
+    best = invalid
+    bestScore = 0.0
+    for each candidate in candidates
+      distance = BGE.Targeting.distance(from, candidate.position, plane)
+      angle = Abs(BGE.Math.wrapAngle(BGE.Targeting.bearing(from, candidate.position, plane) - viewHeading))
+      if distance <= range and angle <= halfAngle
+        score = distance * (1 + angleWeight * angle)
+        if invalid = best or score < bestScore
+          best = candidate
+          bestScore = score
+        end if
+      end if
+    end for
+    return best
+  end function
+
+  ' The candidate whose bearing from `from` is next round from `current`'s, to the right
+  ' (`side` 1, clockwise) or left (-1): for switching lock-on targets with a stick flick. Only
+  ' candidates within `range` and `halfAngle` of `viewHeading` count. `current` itself, and any
+  ' candidate at exactly its bearing, is skipped.
+  '
+  ' @param {BGE.TargetCandidate[]} candidates
+  ' @param {BGE.Math.Vector} from
+  ' @param {BGE.Math.Vector} current - the current target's position
+  ' @param {float} side - 1 for right, -1 for left
+  ' @param {float} viewHeading - radians
+  ' @param {float} range - world units
+  ' @param {float} halfAngle - radians either side of viewHeading
+  ' @param {BGE.TargetingOptions} [options={}] - only `plane` is used
+  ' @return {BGE.TargetCandidate} or invalid if there's none that way
+  function nextByBearing(candidates as BGE.TargetCandidate[], from as BGE.Math.Vector, current as BGE.Math.Vector, side as float, viewHeading as float, range as float, halfAngle as float, options = {} as BGE.TargetingOptions) as BGE.TargetCandidate
+    plane = options.plane ?? BGE.SeparationPlane.xz
+    currentBearing = BGE.Targeting.bearing(from, current, plane)
+    best = invalid
+    bestTurn = 0.0
+    for each candidate in candidates
+      bearing = BGE.Targeting.bearing(from, candidate.position, plane)
+      inView = Abs(BGE.Math.wrapAngle(bearing - viewHeading)) <= halfAngle
+      if inView and BGE.Targeting.distance(from, candidate.position, plane) <= range
+        turn = BGE.Math.wrapAngle(bearing - currentBearing) * side
+        if turn > 0 and (invalid = best or turn < bestTurn)
+          best = candidate
+          bestTurn = turn
+        end if
+      end if
+    end for
+    return best
+  end function
+
+  ' The heading from `from` to `target` on `plane`. 0 when they're (almost) on top of each other.
+  '
+  ' @param {BGE.Math.Vector} from
+  ' @param {BGE.Math.Vector} target
+  ' @param {BGE.SeparationPlane} [plane="xz"]
+  ' @return {float} radians, -PI..PI
+  function bearing(from as BGE.Math.Vector, target as BGE.Math.Vector, plane = BGE.SeparationPlane.xz as BGE.SeparationPlane) as float
+    du = target.x - from.x
+    dv = target.z - from.z
+    if plane = BGE.SeparationPlane.xy
+      dv = target.y - from.y
+    end if
+    if du * du + dv * dv < 0.000001
+      return 0.0
+    end if
+    return BGE.Math.Atan2(du, -dv)
+  end function
+
+  ' Distance from `from` to `target` on `plane`, ignoring the third axis.
+  '
+  ' @param {BGE.Math.Vector} from
+  ' @param {BGE.Math.Vector} target
+  ' @param {BGE.SeparationPlane} [plane="xz"]
+  ' @return {float}
+  function distance(from as BGE.Math.Vector, target as BGE.Math.Vector, plane = BGE.SeparationPlane.xz as BGE.SeparationPlane) as float
+    du = target.x - from.x
+    dv = target.z - from.z
+    if plane = BGE.SeparationPlane.xy
+      dv = target.y - from.y
+    end if
+    return Sqr(du * du + dv * dv)
+  end function
+
+end namespace
