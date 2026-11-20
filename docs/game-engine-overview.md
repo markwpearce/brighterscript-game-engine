@@ -480,12 +480,104 @@ drawn when the point is behind the camera:
 ```
 override sub onDrawEnd(gameRenderer as BGE.Renderer, uiRenderer as BGE.Renderer)
   head = BGE.Math.VectorOps.create(m.position.x, m.height, m.position.z)
-  gameRenderer.drawWorldBar(head, 42, 6, m.health / m.maxHealth, &hD03030FF, &h000000C0)
+  gameRenderer.drawWorldBar(head, 42, 6, m.health.fraction(), &hD03030FF, &h000000C0)
 end sub
 ```
 
 The size is in canvas pixels, so the bar stays the same size at any distance.
 `examples/rendererTest`'s `combat-helpers` demo shows the bars and the arc test together.
+
+## Health, stamina and state timers
+
+Three small classes cover state that most action games keep per entity. None of them is
+required, and none registers itself: the entity owns one and calls its `update(dt)` from
+`onUpdate()`. Each has hooks you can override in a subclass.
+
+**Health.** `BGE.Health` holds `current` and `max`. `damage()` returns true when the hit killed,
+and ignores hits while dead or while invulnerable:
+
+```
+import "pkg:/source/utils/Health.bs"
+
+class Bandit extends BGE.GameEntity
+  health as BGE.Health = new BGE.Health(3)
+
+  sub hurt(amount as float)
+    if m.health.damage(amount)
+      m.die()
+    else
+      m.sprite.flash(&hFF5050, 0.15)
+    end if
+  end sub
+end class
+```
+
+Set `invulnerableSeconds` to ignore hits for a while after each one (call `update(dt)` each
+frame so it runs out), or call `makeInvulnerable(seconds)` yourself, e.g. on respawn.
+`canTakeDamage()` asks before you play a hit sound, `invulnerableRemaining()` can drive a blink,
+and `fraction()` feeds a health bar. `heal()` stops at `max` and doesn't revive; `refill()` does,
+and `reset(max)` sets a new max and refills. Override `onDamaged(amount)` and `onDeath()` in a
+subclass to react there instead.
+
+**Stamina, mana, ammo.** `BGE.RegenPool` is a resource that actions spend and that refills after a
+pause:
+
+```
+import "pkg:/source/utils/RegenPool.bs"
+
+m.stamina = new BGE.RegenPool(100)  ' starts full
+m.stamina.regenPerSecond = 50
+m.stamina.regenDelaySeconds = 0.6   ' after the last spend
+
+' In onUpdate(dt):
+if dodgePressed and m.stamina.spend(28)
+  m.startDodge()
+end if
+m.stamina.update(dt, m.isBlocking)  ' true: regenerate at slowedRegenFactor (0.35) of the rate
+```
+
+By default any amount left is enough, and the pool stops at zero. That's souls-style stamina;
+set `requireFullAmount = true` when an action needs its whole cost, like mana or ammo. A refused
+`spend()` returns false and makes `isDenied()` true for `deniedSeconds` (0.4), for the HUD to
+flash the bar (`deniedRemaining()` jumps back up on each refusal). `drain(amount)` always takes
+it, for costs you can't refuse such as a blocked hit, and returns false if the pool ran dry.
+`refill()` and `fraction()` work like `Health`'s.
+
+**States.** `BGE.StateClock` keeps a state name and the seconds spent in it. Call `update(dt)` at
+the top of `onUpdate()`, then branch on `state`:
+
+```
+import "pkg:/source/utils/StateClock.bs"
+
+m.clock = new BGE.StateClock("walk")
+
+' In onUpdate(dt):
+m.clock.update(dt)
+if m.clock.state = "walk" and m.isNearPlayer()
+  m.clock.setTimed("tell", 0.4)
+else if m.clock.state = "tell" and m.clock.isTimeUp()
+  m.clock.setTimed("lunge", 0.25)
+else if m.clock.state = "lunge"
+  if m.clock.justEntered()
+    m.game.playSound("swing")
+  end if
+  if m.clock.isTimeUp()
+    m.clock.set("walk")
+  end if
+end if
+```
+
+`set(state)` enters an open-ended state and does nothing if it's already the current one, so
+it's safe to call every frame; `set(state, true)` re-enters it. `setTimed(state, seconds)` always
+(re-)enters, and `isTimeUp()`, `remaining()` and `remainingFraction()` (1 falling to 0) follow its
+time; the clock never leaves a state by itself. `seconds` counts up in either kind, and
+`justEntered()` is true for one update after entering, for one-off entry work. To switch
+animations with the state, set `clock.sprite` (or `clock.orientedSprite`) and call
+`clock.play(name)`, which only switches when the name changes. Override `onEnter(previousState)`
+for anything else.
+
+`examples/thirdPerson`'s `Knight` uses all three; the rpg's `Goblin`, `GoblinKing` and `Witch`
+and the platformer's `PlantBoss` use `StateClock` and `Health`.
 
 ## The game loop
 
