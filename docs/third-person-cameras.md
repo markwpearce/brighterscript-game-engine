@@ -158,6 +158,28 @@ wantedPosition, dt)`. Call `boom.reset()` after a cut so the camera snaps instea
 `boom.isClose()` is true within `closeDistance` of the look-at point, e.g. to fade out a player
 the camera is pushed right up against.
 
+### Walls on a grid
+
+For walls built from a `BGE.GridWallsMap`, use a `BGE.GridWallsCameraBoom`.
+Instead of casting rays at colliders, it walks the line to the camera in
+`stepLength` steps and stops a step short of the first one where the camera's
+probe square touches a solid cell. The walls need no colliders, so they cost
+nothing to check each frame.
+
+```brighterscript
+map = new BGE.GridWallsMap(rows, {cellSize: 192, wallHeight: 128, origin: corner, solid: {"#": "stone"}})
+m.orbit = new BGE.OrbitCamera(camera, m.player, {
+  boom: new BGE.GridWallsCameraBoom(m.game, map, {
+    probeRadius: 10,
+    minDistance: 25,
+    stepLength: 6      ' keep it well under the cell size
+  })
+})
+```
+
+It takes the same fields as `BGE.CameraBoom`. Override `isBlockedAt(x, z)` to
+block on something besides the map's solid cells.
+
 ## Camera-relative movement
 
 With an orbit camera, pushing the stick up should run away from the camera, whichever way it

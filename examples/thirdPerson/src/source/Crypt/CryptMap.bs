@@ -1,161 +1,39 @@
 import "../World.bs"
-import "pkg:/source/engine/sceneFlow/ExitArea.bs"
+import "pkg:/source/engine/gridMaps/CharGrid.bs"
 
-' One cell of the crypt's grid
-interface CryptCell extends roAssociativeArray
-  col as integer
-  row as integer
-  ' Its character in the level's layout (see CryptLevels)
-  kind as string
-end interface
-
-' A parsed level layout (see CryptLevels)
-interface CryptLayout extends roAssociativeArray
-  cols as integer
-  rows as integer
-  ' Rows of single-character kinds, [row][col]
-  grid as string[][]
-  ' Every cell that isn't solid
-  cells as CryptCell[]
-  ' Every solid cell
-  solids as CryptCell[]
-  ' The `S` cell, if there is one
-  startCell as CryptCell
-  ' The way up (`E`) and down (`D`, if any)
-  exitCell as CryptCell
-  downCell as CryptCell
-end interface
-
-' Reads a crypt level's text grid (CryptLevels): walls, colliders, torches and props all come
-' from it.
+' The crypt's cell sizes, in metres
 namespace CryptMap
 
   const CELL_METRES = 6
   const WALL_METRES = 4
   const SEGMENT_METRES = 2
 
-  function parse(rows as string[]) as CryptLayout
-    layout = {cols: Len(rows[0]), rows: rows.Count(), grid: [], cells: [], solids: [], startCell: invalid, exitCell: invalid, downCell: invalid} as CryptLayout
-    for row = 0 to rows.Count() - 1
-      kinds = [] as string[]
-      for col = 0 to layout.cols - 1
-        kind = Mid(rows[row], col + 1, 1)
-        kinds.push(kind)
-        cell = {col: col, row: row, kind: kind} as CryptCell
-        if kind = "#"
-          layout.solids.push(cell)
-        else
-          layout.cells.push(cell)
-          if kind = "S"
-            layout.startCell = cell
-          else if kind = "E"
-            layout.exitCell = cell
-          else if kind = "D"
-            layout.downCell = cell
-          end if
-        end if
-      end for
-      layout.grid.push(kinds)
-    end for
-    return layout
-  end function
-
-  ' Outside the grid counts as solid
-  function isSolid(layout as CryptLayout, col as integer, row as integer) as boolean
-    if col < 0 or row < 0 or col >= layout.cols or row >= layout.rows
-      return true
-    end if
-    return layout.grid[row][col] = "#"
-  end function
-
-  ' World x/z of a cell's centre (y 0), with the grid centred on the origin
-  function cellCenter(layout as CryptLayout, col as integer, row as integer) as BGE.Math.Vector
-    size = World.metres(CryptMap.CELL_METRES)
-    return BGE.Math.VectorOps.create((col - (layout.cols - 1) / 2) * size, 0, (row - (layout.rows - 1) / 2) * size)
-  end function
-
-  ' A scene exit over one cell
-  function cellArea(layout as CryptLayout, cell as CryptCell) as BGE.GridCellsExitArea
-    return World.cellsArea(layout.cols, layout.rows, CryptMap.CELL_METRES, cell.col, cell.row)
-  end function
-
-  ' The cell a world point is in, as [col, row]
-  function cellAt(layout as CryptLayout, x as float, z as float) as integer[]
-    size = World.metres(CryptMap.CELL_METRES)
-    return [Int(x / size + layout.cols / 2), Int(z / size + layout.rows / 2)]
-  end function
-
-  ' Sides of a cell ("n" is -z, "e" +x, "s" +z, "w" -x), in that order
-  function sides() as string[]
-    return ["n", "e", "s", "w"]
-  end function
-
-  ' The [col, row] step to the neighbour across a side
-  function sideStep(side as string) as integer[]
-    if side = "n"
-      return [0, -1]
-    else if side = "e"
-      return [1, 0]
-    else if side = "s"
-      return [0, 1]
-    end if
-    return [-1, 0]
-  end function
-
-  ' The y rotation that turns an oriented drawable (facing +z at 0) to face out through a side.
-  ' A positive rotation turns +z toward -x.
-  function sideTurn(side as string) as float
-    if side = "n"
-      return BGE.Math.PI
-    else if side = "e"
-      return -BGE.Math.HALF_PI
-    else if side = "s"
-      return 0
-    end if
-    return BGE.Math.HALF_PI
-  end function
-
-  ' Unit vector out through a side
-  function sideNormal(side as string) as BGE.Math.Vector
-    delta = CryptMap.sideStep(side)
-    return BGE.Math.VectorOps.create(delta[0], 0, delta[1])
-  end function
-
-  ' Sides of a floor cell that are walls
-  function wallSides(layout as CryptLayout, col as integer, row as integer) as string[]
-    walls = [] as string[]
-    for each side in CryptMap.sides()
-      delta = CryptMap.sideStep(side)
-      if CryptMap.isSolid(layout, col + delta[0], row + delta[1])
-        walls.push(side)
-      end if
-    end for
-    return walls
-  end function
-
-  ' The solid cells, and walls round the grid (the exit's gap leads out of it), for tracked bodies to slide along
-  function solidWorld(layout as CryptLayout) as BGE.SolidWorld
-    solids = new BGE.SolidWorld()
-    size = World.metres(CryptMap.CELL_METRES)
-    for each cell in layout.solids
-      center = CryptMap.cellCenter(layout, cell.col, cell.row)
-      ' SolidWorld's y is the world's z
-      solids.addSolid(center.x - size / 2, center.z - size / 2, size, size)
-    end for
-    solids.addBounds(-layout.cols * size / 2, -layout.rows * size / 2, layout.cols * size, layout.rows * size, size)
-    return solids
-  end function
-
-  ' Sides of a solid cell that face floor
-  function openSides(layout as CryptLayout, col as integer, row as integer) as string[]
-    open = [] as string[]
-    for each side in CryptMap.sides()
-      delta = CryptMap.sideStep(side)
-      if not CryptMap.isSolid(layout, col + delta[0], row + delta[1])
-        open.push(side)
-      end if
-    end for
-    return open
-  end function
-
 end namespace
+
+' A crypt level's text grid (CryptLevels): walls, colliders, torches and props all come from it.
+' `#` is solid.
+class CryptLayout extends BGE.CharGrid
+
+  ' Every cell that isn't solid
+  cells as BGE.CharGridCell[]
+  ' The `S` cell, if there is one
+  startCell as BGE.CharGridCell
+  ' The way up (`E`) and down (`D`, if any)
+  exitCell as BGE.CharGridCell
+  downCell as BGE.CharGridCell
+
+  sub new(rows as string[])
+    super(rows, {cellSize: World.metres(CryptMap.CELL_METRES)})
+    m.cells = m.cellsExcept("#")
+    for each cell in m.cells
+      if cell.kind = "S"
+        m.startCell = cell
+      else if cell.kind = "E"
+        m.exitCell = cell
+      else if cell.kind = "D"
+        m.downCell = cell
+      end if
+    end for
+  end sub
+
+end class
