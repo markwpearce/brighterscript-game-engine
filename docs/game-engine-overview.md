@@ -579,6 +579,39 @@ for anything else.
 `examples/thirdPerson`'s `Knight` uses all three; the rpg's `Goblin`, `GoblinKing` and `Witch`
 and the platformer's `PlantBoss` use `StateClock` and `Health`.
 
+## Picking targets
+
+`BGE.Targeting` answers "which enemy is the player looking at?" for lock-on, auto-aim or homing
+shots. Its functions take a list of candidates (anything with a `position`, such as entities),
+so filter out the dead or friendly ones first:
+
+```
+import "pkg:/source/utils/Targeting.bs"
+
+living = []
+for each foe in m.enemies
+  if foe.isAlive()
+    living.push(foe)
+  end if
+end for
+' Within 15 m and 0.4 * PI either side of where the camera looks
+target = BGE.Targeting.pickInView(living, m.player.position, m.orbit.heading, 480, BGE.Math.PI * 0.4)
+' A flick of the look stick to the right (side 1) or left (-1)
+nextTarget = BGE.Targeting.nextByBearing(living, m.player.position, target.position, 1, m.orbit.heading, 480, BGE.Math.PI * 0.4)
+```
+
+`pickInView()` picks the nearest candidate in range and view, but counts one straight ahead as
+closer: its score is `distance * (1 + angleWeight * angle)`, lowest wins. Pass
+`{angleWeight: 0.0}` for plain nearest, or a bigger weight to favour aim over distance.
+`nextByBearing()` returns invalid when there's nothing further that way, so a flick at the end of
+the row keeps the current target. Both return the candidate itself; cast it back to your class.
+
+Headings follow the engine's convention, 0 facing -z, so a camera's heading goes straight in.
+Positions are on the ground (x and z) by default. For a 2D game such as a twin-stick or top-down
+shooter, pass `{plane: BGE.SeparationPlane.xy}`: heading 0 then faces -y (up the screen) and PI/2
+faces +x. `BGE.Targeting.bearing()` and `distance()` measure the same way, e.g. to aim a turret.
+`examples/thirdPerson`'s `CombatDirector` uses both for the knight's lock-on.
+
 ## The game loop
 
 `Game.Play()` runs one main loop. Every frame goes through six steps, always in this order:

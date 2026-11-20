@@ -1355,6 +1355,42 @@ m.bursts.play(hitPoint, swingDirection, {
 })
 ```
 
+`BGE.ParticlePresets` has ready-made styles for melee hits: `blood(color)`, `blockSparks()` and
+`parrySparks()`. They're authored in metres, so pass your world's scale. Each call returns a
+new style, so change any field before playing it:
+
+```brighterscript
+import "pkg:/source/engine/drawables/ParticlePresets.bs"
+
+style = BGE.ParticlePresets.blood(&h306020, {unitsPerMetre: 32})  ' green slime
+style.count = 30
+m.bursts.play(hitPoint, awayFromAttacker, style)
+m.bursts.play(hitPoint, awayFromAttacker, BGE.ParticlePresets.parrySparks({unitsPerMetre: 32}))
+```
+
+In a 2D game whose y grows downward, add `yDown: true` so the lift and gravity point up the
+screen. `examples/thirdPerson`'s fighters spray all three.
+
+### Procedural flame frames
+
+A particle emitter costs about 1 ms a frame on a device, too much for a scene full of torches.
+`BGE.ProceduralFrames.flame()` draws a looping flame once into a strip bitmap instead (squares
+that rise, shrink, fade and cool from one colour to another) and returns its frames for an
+animated image, so every torch shares one bitmap and draws one image a frame:
+
+```brighterscript
+import "pkg:/source/engine/drawables/ProceduralFrames.bs"
+
+frames = BGE.ProceduralFrames.flame(m.game, "blueFlame", {startColor: &hE0F4FF, endColor: &h2050FF})
+flame = m.addAnimatedImage("flame", frames, {drawMode: BGE.SceneObjectDrawMode.axisAligned, animationDurationMs: 560})
+flame.setAnchor(0.5, 1)
+```
+
+The strip is kept in the game under its name and reused by later calls with that name, so give
+each look its own name. `BGE.FlameFrameOptions` sets the frame count and size, how many squares
+are in flight, their sizes, alpha and sideways drift. `drawFlameStrip()` draws a strip without
+caching it. `examples/thirdPerson`'s `Torch` draws its fire, spirit and grave flames this way.
+
 ### Animated sprite-sheet particles (`shape = BGE.ParticleShape.Image`)
 
 A `BGE.ParticleShape.Image` emitter can optionally animate each particle through a sprite sheet

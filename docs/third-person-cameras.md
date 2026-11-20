@@ -71,15 +71,21 @@ camera where it is; it also lets go by itself when the entity is invalidated.
 if m.game.controls.isActionPressed("lockOn")
   if m.orbit.isLocked()
     m.orbit.releaseLock()
-  else if invalid <> m.nearestEnemy
-    m.orbit.lockOn(m.nearestEnemy)
   else
-    m.orbit.recenter()
+    ' m.livingEnemies() is the game's own filter
+    target = BGE.Targeting.pickInView(m.livingEnemies(), m.player.position, m.orbit.heading, 480, BGE.Math.PI * 0.4)
+    if invalid <> target
+      m.orbit.lockOn(target)
+    else
+      m.orbit.recenter()
+    end if
   end if
 end if
 ```
 
-Choosing the target and dropping it when it dies or gets away is up to the game.
+`BGE.Targeting` (see [Picking targets](/game-engine-overview)) chooses what's roughly where the
+camera looks, and `nextByBearing()` the next one left or right for a stick flick. Dropping the
+target when it dies or gets away is up to the game.
 
 By default the camera turns to keep the locked entity right behind the target, so every step
 either takes turns the whole view, and a turning camera redraws the whole frame. Give it a

@@ -1,0 +1,118 @@
+import "pkg:/source/utils/Targeting.bs"
+
+namespace tests
+
+  interface TargetFixture
+    id as string
+    position as BGE.Math.Vector
+  end interface
+
+  @suite("BGE.Targeting")
+  class TargetingTests extends rooibos.BaseTestSuite
+
+    function at(id as string, x as float, z as float) as tests.TargetFixture
+      return {id: id, position: BGE.Math.VectorOps.create(x, 0, z)}
+    end function
+
+    function idOf(target as BGE.TargetCandidate) as string
+      if invalid = target
+        return "invalid"
+      end if
+      return (target as tests.TargetFixture).id
+    end function
+
+    @describe("pickInView")
+
+    @it("picks the nearest candidate in range and view")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      candidates = [m.at("far", 0, -50), m.at("near", 0, -20), m.at("behind", 0, 10), m.at("outOfRange", 0, -200)]
+      picked = BGE.Targeting.pickInView(candidates, origin, 0, 100, BGE.Math.PI / 4)
+      m.assertEqual(m.idOf(picked), "near")
+    end function
+
+    @it("favours a candidate straight ahead over a slightly nearer one off to the side")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      ' 40 straight ahead scores 40; 30 at ~0.7 rad off scores ~51
+      candidates = [m.at("side", 21.4, -21), m.at("ahead", 0, -40)]
+      picked = BGE.Targeting.pickInView(candidates, origin, 0, 100, BGE.Math.PI / 2)
+      m.assertEqual(m.idOf(picked), "ahead")
+      ' With no angle weight, plain distance wins
+      picked = BGE.Targeting.pickInView(candidates, origin, 0, 100, BGE.Math.PI / 2, {angleWeight: 0.0})
+      m.assertEqual(m.idOf(picked), "side")
+    end function
+
+    @it("measures from the view heading, not -z")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      candidates = [m.at("ahead", 0, -20), m.at("right", 30, 0)]
+      picked = BGE.Targeting.pickInView(candidates, origin, BGE.Math.PI / 2, 100, BGE.Math.PI / 4)
+      m.assertEqual(m.idOf(picked), "right")
+    end function
+
+    @it("returns invalid when nothing qualifies")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      m.assertInvalid(BGE.Targeting.pickInView([m.at("behind", 0, 10)], origin, 0, 100, BGE.Math.PI / 4))
+      m.assertInvalid(BGE.Targeting.pickInView([], origin, 0, 100, BGE.Math.PI / 4))
+    end function
+
+    @it("ignores height on the xz plane")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      high = {id: "high", position: BGE.Math.VectorOps.create(0, 500, -20)} as tests.TargetFixture
+      picked = BGE.Targeting.pickInView([high], origin, 0, 30, BGE.Math.PI / 4)
+      m.assertEqual(m.idOf(picked), "high")
+    end function
+
+    @it("uses x and y on the xy plane, with heading 0 facing -y")
+    function _()
+      origin = BGE.Math.VectorOps.create(100, 100, 0)
+      up = {id: "up", position: BGE.Math.VectorOps.create(100, 60, 0)} as tests.TargetFixture
+      right = {id: "right", position: BGE.Math.VectorOps.create(130, 100, 0)} as tests.TargetFixture
+      options = {plane: BGE.SeparationPlane.xy} as BGE.TargetingOptions
+      m.assertEqual(m.idOf(BGE.Targeting.pickInView([up, right], origin, 0, 100, 0.5, options)), "up")
+      m.assertEqual(m.idOf(BGE.Targeting.pickInView([up, right], origin, BGE.Math.PI / 2, 100, 0.5, options)), "right")
+    end function
+
+    @describe("nextByBearing")
+
+    @it("steps to the next candidate round to the right or left")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      left = m.at("left", -20, -20)
+      middle = m.at("middle", 0, -20)
+      right = m.at("right", 20, -20)
+      farRight = m.at("farRight", 40, -20)
+      candidates = [farRight, left, middle, right]
+      m.assertEqual(m.idOf(BGE.Targeting.nextByBearing(candidates, origin, middle.position, 1, 0, 100, BGE.Math.PI / 2)), "right")
+      m.assertEqual(m.idOf(BGE.Targeting.nextByBearing(candidates, origin, middle.position, -1, 0, 100, BGE.Math.PI / 2)), "left")
+      m.assertEqual(m.idOf(BGE.Targeting.nextByBearing(candidates, origin, right.position, 1, 0, 100, BGE.Math.PI / 2)), "farRight")
+    end function
+
+    @it("returns invalid at the end of the row, and skips out-of-view candidates")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      middle = m.at("middle", 0, -20)
+      candidates = [middle, m.at("left", -20, -20), m.at("behindRight", 20, 20), m.at("farRight", 200, -20)]
+      m.assertInvalid(BGE.Targeting.nextByBearing(candidates, origin, middle.position, 1, 0, 100, BGE.Math.PI / 2))
+      m.assertInvalid(BGE.Targeting.nextByBearing(candidates, origin, candidates[1].position, -1, 0, 100, BGE.Math.PI / 2))
+    end function
+
+    @describe("bearing and distance")
+
+    @it("follows the heading convention on both planes")
+    function _()
+      origin = BGE.Math.VectorOps.create()
+      m.assertEqual(BGE.Targeting.bearing(origin, BGE.Math.VectorOps.create(0, 0, -5)), 0.0)
+      m.assertTrue(Abs(BGE.Targeting.bearing(origin, BGE.Math.VectorOps.create(5, 0, 0)) - BGE.Math.PI / 2) < 0.0001)
+      m.assertTrue(Abs(BGE.Targeting.bearing(origin, BGE.Math.VectorOps.create(-5, 0, 0), BGE.SeparationPlane.xy) + BGE.Math.PI / 2) < 0.0001)
+      m.assertEqual(BGE.Targeting.bearing(origin, origin), 0.0)
+      m.assertEqual(BGE.Targeting.distance(origin, BGE.Math.VectorOps.create(3, 99, 4)), 5.0)
+      m.assertEqual(BGE.Targeting.distance(origin, BGE.Math.VectorOps.create(3, 4, 99), BGE.SeparationPlane.xy), 5.0)
+    end function
+
+  end class
+
+end namespace
