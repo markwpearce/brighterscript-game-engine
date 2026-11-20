@@ -785,9 +785,44 @@ A few things fall out of this that matter in practice:
 
 ## Debugging tools worth knowing early
 
+Add the standard debug panels, then bind a button that cycles through debug overlays:
+
+```brighterscript
+game.enableStandardDebugUi({memory: false, garbageCollector: false})
+' * (options) steps: off, panels, + entity details, + colliders, then back to off
+game.enableDebugToggle()
+```
+
+Each press of the button applies the next level and wraps back to the first. Pass your own
+`levels` to change the cycle; each is a set of flags (`showUi`, `colliders`, `entityDetails`,
+`safeZones`, `occlusion`), optional `panels` (rebuilds the panels with
+`enableStandardDebugUi(panels)`) and an optional `apply` callback for anything else:
+
+```brighterscript
+game.enableDebugToggle({
+  button: "replay", ' or action: "debug" to use a bound ControlMap action
+  levels: [
+    {},
+    {showUi: true, panels: {input: false, memory: false, garbageCollector: false, log: false}},
+    {showUi: true, panels: {}, colliders: true, apply: sub(game as BGE.Game)
+      game.debugDrawSafeZones(true)
+    end sub}
+  ]
+})
+```
+
+Nothing is bound unless you call `enableDebugToggle()`. The toggle only touches flags one of its
+levels sets (a level leaving out one of those turns it off), so a game can still set the others
+itself. `startLevel` says which level the game starts in without applying it - e.g. 1 when
+`main.bs` already called `debugShowUi(true)`. The press isn't consumed, so pick a button gameplay
+doesn't use, or set `game.debugToggle.enabled = false` while it does. Each change posts a
+`"debugLevelChanged"` game event (`{level, previousLevel}`) for example-specific overlays, and a
+`BGE.Debug.DebugToggle` subclass (override `applyLevel()` or `onLevelChanged()`) can be assigned
+to `game.debugToggle`.
+
 - `Game.debugDrawColliders(true)` / `Game.debugDrawEntityDetails(true)` / `Game.debugShowUi(true)`
-  - toggle these from an `onInput` handler (most examples bind them to the `options` remote
-    button) to get the collider-outline view above, plus per-entity name/position labels.
+  set the same flags directly - the collider-outline view above, plus per-entity name/position
+  labels.
 - `Game.getDebugUI().addChild(new BGE.Debug.FpsDisplay(game))` and
   `BGE.Debug.InputDisplay`/`MemoryDisplay`/`GarbageCollectorDisplay`/`LogDisplay` are ready-made
   debug widgets - every example wires up at least the FPS display in `main.bs`. `InputDisplay`
