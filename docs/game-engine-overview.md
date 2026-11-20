@@ -190,6 +190,58 @@ end sub
 "rotational velocity" convenience - update `rotation` yourself in `onUpdate` if you want continuous
 spin).
 
+### Keeping things on screen
+
+`BGE.Math` has three helpers for a body inside a `BGE.Math.Rectangle`. They change `position` in
+place, and `bounceInRect` changes `velocity` too:
+
+```
+' A ball that bounces off the walls and ceiling but can fall out of the bottom
+playArea = new BGE.Math.Rectangle(0, 0, m.game.canvas.getWidth(), m.game.canvas.getHeight())
+edge = BGE.Math.bounceInRect(m.position, m.velocity, playArea, radius, radius, [BGE.Math.RectEdge.bottom])
+if edge <> BGE.Math.RectEdge.none
+  m.game.playSound("bounce")
+end if
+
+' A player who can't leave the screen
+BGE.Math.clampToRect(m.position, playArea, radius, radius)
+
+' A rock that flies off one side and comes back on the other
+BGE.Math.wrapInRect(m.position, playArea)
+```
+
+The edges are named for world space, where +y is up: `bottom` is the rectangle's `y` and `top`
+is `y + height`. `bounceInRect` returns the edge it bounced off, and only flips the velocity of a
+body heading out, so a ball resting on an edge doesn't buzz. See `examples/pong` (open ends),
+`examples/breakout` (open bottom), `examples/hybrid` (clamp) and `examples/asteroids` (wrap).
+
+### Long frames
+
+A slow frame (the first one on a device can take ~0.4s) makes `deltaTime` big, and a falling
+body can move clean through the ground in one step. Set `game.maxDeltaTime` to cap it:
+
+```
+game = new BGE.Game(640, 360)
+game.maxDeltaTime = 1 / 30.0
+```
+
+A slower frame then counts as `1 / 30` of a second everywhere update code sees it: `onUpdate`,
+velocity and `getDeltaTime()` (tweens run on wall-clock time, so they aren't capped). The game runs slower than real time while frames are that
+slow, so pick a cap above your normal frame time. It's off (0) by default.
+
+### Random numbers
+
+`BGE.Math.randomFloat(min, max)` gives a float from `min` up to `max`, `BGE.Math.randomSign()` gives
+1 or -1, and `BGE.Math.RandomInRange(low, high)` gives an integer from `low` to `high`.
+
+For scenery that should land in the same place every time, `BGE.Math.hash2(x, y, salt)` gives a
+repeatable number in [0, 1) for a grid cell. Use a different `salt` for each thing you pick:
+
+```
+x = cellCenter.x + (BGE.Math.hash2(col, row, 1) - 0.5) * jitter
+tree = trees[Int(BGE.Math.hash2(col, row, 2) * trees.Count())]
+```
+
 ## Tweens
 
 For movement that isn't velocity-driven - a UI panel sliding in, a paddle easing into position,

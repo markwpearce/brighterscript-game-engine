@@ -271,6 +271,10 @@ sprite.addOrientedAnimationColumns("run", [4, 5, 6, 7, 8, 9, 10, 11], 24, 9.5)
 sprite.addOrientedAnimationColumns("windup", [12, 13, 14], 24, BGE.frameRateFor(3, 1.1), BGE.SpritePlayMode.Forward)
 ```
 
+For a walk or run, `BGE.frameRateForStride(frameCount, stride, speed)` gives the rate that keeps
+the feet from sliding: one loop of the cycle per `stride` travelled. `examples/thirdPerson` plays
+its 8-frame run at `BGE.frameRateForStride(8, World.metres(3.3), speed)`.
+
 Both `Sprite` and `DrawableOrientedSprite` accept an array of sheet bitmaps instead of one, so a
 large character can be split across sheets that each fit the device's bitmap size limit (or by
 animation, loading only what a scene needs). Every sheet uses the same cell size, and frame
@@ -391,6 +395,14 @@ game.addLight(lamp)
 
 ' a little light everywhere, so nothing in shadow is flat black
 game.addLight(new BGE.AmbientLight(BGE.ColorsRGB.White, 0.15))
+```
+
+To aim a light from a point in the sky, `BGE.Math.directionFromYawPitch(yaw, pitch)` points at
+it (a heading, and radians above the horizon); negate it for the way the light travels:
+
+```brighterscript
+towardMoon = BGE.Math.directionFromYawPitch(BGE.Math.DegreesToRadians(150), BGE.Math.DegreesToRadians(35))
+game.addLight(new BGE.DirectionalLight(BGE.Math.VectorOps.scale(towardMoon, -1), &h9DB4F0, 0.75))
 ```
 
 There are three kinds:
