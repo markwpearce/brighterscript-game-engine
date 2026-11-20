@@ -1,0 +1,272 @@
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameScene.bs"
+import "pkg:/source/engine/loading/AssetLoader.bs"
+import "pkg:/source/engine/loading/SceneAsset.bs"
+import "pkg:/source/engine/loading/AssetLoaderSpriteAtlas.spec.bs"
+import "pkg:/source/engine/loading/TextureLoader.spec.bs"
+
+namespace tests
+
+  @suite("BGE.GameScene scene-owned assets")
+  class GameSceneAssetsTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    textureLoader as tests.FakeTextureLoader
+    first as tests.SceneAssetsTestScene
+    second as tests.SceneAssetsTestScene
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.textureLoader = new tests.FakeTextureLoader()
+      m.game.textureLoader = m.textureLoader
+      bitmap = CreateObject("roBitmap", {width: 4, height: 2, AlphaEnable: true})
+      bitmap.GetPng(0, 0, 4, 2).WriteFile("tmp:/bge_scene_asset.png")
+      m.first = new tests.SceneAssetsTestScene(m.game, "First")
+      m.second = new tests.SceneAssetsTestScene(m.game, "Second")
+      m.game.defineScene(m.first)
+      m.game.defineScene(m.second)
+      m.game.defineScene(new BGE.GameScene(m.game, {name: "Empty"}))
+    end function
+
+    @describe("loadSceneBitmap")
+
+    @it("loads a bitmap the scene owns")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.assertEqual(4, m.game.getBitmap("ground").GetWidth())
+      m.assertTrue(m.first.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "ground"))
+      m.assertEqual(1, m.first.getSceneAssets().count())
+    end function
+
+    @it("unloads it when the game leaves the scene")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.goTo("Empty")
+      m.assertInvalid(m.game.Bitmaps["ground"])
+      m.assertEqual(1, m.textureLoader.unloaded.count())
+      m.assertFalse(m.first.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "ground"))
+    end function
+
+    @it("unloads it even when the scene was invalidated before the change")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.first.invalidate()
+      m.goTo("Empty")
+      m.assertInvalid(m.game.Bitmaps["ground"])
+    end function
+
+    @it("unloads it before the next scene's loads run")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.second.bitmaps = {grass: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.game.changeScene("Second")
+      m.game.runEndOfFrameForTest()
+      m.assertTrue(m.game.isLoading())
+      m.assertTrue(m.second.sawInLoad["ground"])
+      m.assertInvalid(m.game.Bitmaps["ground"])
+    end function
+
+    @it("keeps it, without loading it again, through a change to the same scene")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.goTo("First")
+      m.assertEqual(1, m.textureLoader.requests.count())
+      m.assertEqual(0, m.textureLoader.unloaded.count())
+      m.assertNotInvalid(m.game.Bitmaps["ground"])
+      m.assertEqual(0, m.first.queued.count())
+      m.assertTrue(m.first.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "ground"))
+    end function
+
+    @it("frees last visit's bitmap the same scene doesn't ask for again")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png", level1: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.assertNotInvalid(m.game.Bitmaps["ground"])
+      m.assertInvalid(m.game.Bitmaps["level1"])
+    end function
+
+    @it("hands it over to the next scene that asks for it, which frees it in turn")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.second.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.goTo("Second")
+      m.assertEqual(1, m.textureLoader.requests.count())
+      m.assertNotInvalid(m.game.Bitmaps["ground"])
+      m.assertTrue(m.second.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "ground"))
+      m.goTo("Empty")
+      m.assertInvalid(m.game.Bitmaps["ground"])
+    end function
+
+    @it("leaves a bitmap that's already loaded by something else alone")
+    function _()
+      m.game.loadBitmap("ground", {width: 2, height: 2, alphaEnable: false})
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.assertEqual(0, m.first.queued.count())
+      m.assertFalse(m.first.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "ground"))
+      m.goTo("Empty")
+      m.assertEqual(2, m.game.getBitmap("ground").GetWidth())
+    end function
+
+    @it("loads it again when last visit's load failed")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset_missing.png"}
+      m.goTo("First")
+      m.assertInvalid(m.game.Bitmaps["ground"])
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.assertEqual(4, m.game.getBitmap("ground").GetWidth())
+    end function
+
+    @describe("shared")
+
+    @it("loads a shared bitmap and keeps it after the scene ends")
+    function _()
+      m.first.sharedBitmaps = {sky: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.assertFalse(m.first.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "sky"))
+      m.goTo("Empty")
+      m.assertNotInvalid(m.game.Bitmaps["sky"])
+    end function
+
+    @it("doesn't load a shared bitmap that's already loaded")
+    function _()
+      m.first.sharedBitmaps = {sky: "tmp:/bge_scene_asset.png"}
+      m.second.sharedBitmaps = {sky: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.goTo("Second")
+      m.assertEqual(1, m.textureLoader.requests.count())
+      m.assertEqual(0, m.second.queued.count())
+    end function
+
+    @it("keeps a bitmap the last scene owned when the next asks for it shared")
+    function _()
+      m.first.bitmaps = {sky: "tmp:/bge_scene_asset.png"}
+      m.second.sharedBitmaps = {sky: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.goTo("Second")
+      m.assertFalse(m.second.ownsSceneAsset(BGE.SceneAssetKind.bitmap, "sky"))
+      m.goTo("Empty")
+      m.assertNotInvalid(m.game.Bitmaps["sky"])
+      m.assertEqual(1, m.textureLoader.requests.count())
+    end function
+
+    @describe("plain loads")
+
+    @it("keeps a bitmap loaded straight on the loader after the scene ends")
+    function _()
+      m.first.plainBitmaps = {logo: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.goTo("Empty")
+      m.assertNotInvalid(m.game.Bitmaps["logo"])
+    end function
+
+    @describe("unloadSceneAssets")
+
+    @it("frees what the scene owns now")
+    function _()
+      m.first.bitmaps = {ground: "tmp:/bge_scene_asset.png"}
+      m.goTo("First")
+      m.first.unloadSceneAssets()
+      m.assertInvalid(m.game.Bitmaps["ground"])
+      m.assertEqual(0, m.first.getSceneAssets().count())
+    end function
+
+    @describe("other kinds")
+
+    @it("loads and frees a sprite atlas, with its sheets")
+    function _()
+      CreateObject("roFileSystem").CreateDirectory("tmp:/bge_atlas")
+      tests.writeAtlasSheet("tmp:/bge_atlas/hero.png", 8, 4)
+      tests.writeAtlasSheet("tmp:/bge_atlas/hero_1.png", 6, 2)
+      WriteAsciiFile("tmp:/bge_atlas/hero.json", tests.atlasJson())
+      m.first.atlases = {hero: "tmp:/bge_atlas/hero.json"}
+      m.goTo("First")
+      m.assertNotInvalid(m.game.getSpriteAtlas("hero"))
+      m.assertTrue(m.first.ownsSceneAsset(BGE.SceneAssetKind.spriteAtlas, "hero"))
+      m.goTo("First")
+      m.assertEqual(2, m.textureLoader.requests.count())
+      m.goTo("Empty")
+      m.assertInvalid(m.game.getSpriteAtlas("hero"))
+      m.assertInvalid(m.game.Bitmaps["hero#0"])
+    end function
+
+    @it("loads and frees a model")
+    function _()
+      WriteAsciiFile("tmp:/bge_scene_tri.obj", ["v 0 0 0", "v 1 0 0", "v 0 1 0", "f 1 2 3"].join(chr(10)))
+      m.first.models = {tri: "tmp:/bge_scene_tri.obj"}
+      m.goTo("First")
+      m.assertNotInvalid(m.game.Models["tri"])
+      m.assertTrue(m.first.ownsSceneAsset(BGE.SceneAssetKind.model, "tri"))
+      m.goTo("Empty")
+      m.assertInvalid(m.game.Models["tri"])
+    end function
+
+    ' Changes scene and runs frames until it has loaded
+    private sub goTo(sceneName as string)
+      m.game.changeScene(sceneName)
+      for i = 1 to 40
+        m.game.runSceneTransitionFrameForTest(0.016)
+      end for
+    end sub
+
+  end class
+
+  ' Loads what its fields list in onLoad()
+  class SceneAssetsTestScene extends BGE.GameScene
+    ' name: path, owned by the scene
+    bitmaps as roAssociativeArray = {}
+    ' name: path, shared
+    sharedBitmaps as roAssociativeArray = {}
+    ' name: path, loaded straight on the loader
+    plainBitmaps as roAssociativeArray = {}
+    atlases as roAssociativeArray = {}
+    models as roAssociativeArray = {}
+    ' names this visit's onLoad() queued
+    queued as string[] = []
+    ' bitmap names seen loaded during onLoad()
+    sawInLoad as roAssociativeArray = {}
+
+    sub new(game as BGE.Game, name as string)
+      super(game, {name: name})
+    end sub
+
+    override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+      m.queued = []
+      m.sawInLoad = {}
+      for each name in m.game.Bitmaps
+        m.sawInLoad[name] = invalid <> m.game.Bitmaps[name]
+      end for
+      for each name in m.bitmaps
+        m.noteQueued(name, m.loadSceneBitmap(loader, name, m.bitmaps[name]))
+      end for
+      for each name in m.sharedBitmaps
+        m.noteQueued(name, m.loadSceneBitmap(loader, name, m.sharedBitmaps[name], {}, true))
+      end for
+      for each name in m.plainBitmaps
+        loader.loadBitmap(name, m.plainBitmaps[name])
+      end for
+      for each name in m.atlases
+        m.noteQueued(name, m.loadSceneSpriteAtlas(loader, name, m.atlases[name]))
+      end for
+      for each name in m.models
+        m.noteQueued(name, m.loadSceneModel(loader, name, m.models[name]))
+      end for
+    end sub
+
+    private sub noteQueued(name as string, task as BGE.LoadTask)
+      if invalid <> task
+        m.queued.push(name)
+      end if
+    end sub
+  end class
+
+end namespace

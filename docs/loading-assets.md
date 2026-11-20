@@ -53,7 +53,7 @@ loader.loadBitmap("mapThumb", "pkg:/images/worldMap.png", {width: 320, height: 1
 loader.loadBitmap("hero", "pkg:/images/hero.png", {width: 64, height: 64, smooth: false})
 ```
 
-Give both `width` and `height`. `game.unloadBitmap(name)` frees the texture manager's copy too, so unload a scene's big images when you leave it.
+Give both `width` and `height`. `game.unloadBitmap(name)` frees the texture manager's copy too, so free a scene's big images when you leave it (or let the scene own them, below).
 
 > Before Roku OS 16, you can't draw into a bitmap from the texture manager. If you'll draw into a loaded image, pass `drawable: true`. That image is decoded the slower way, in a single frame. Drawing *from* a loaded bitmap (regions, sprites, `DrawObject`) works either way.
 
@@ -85,6 +85,38 @@ A missing or malformed `.json`, or a sheet that won't load, fails the task with 
 ## Tiled maps
 
 `loader.loadTiledMap("level1", path)` loads a map made in Tiled, its external `.tsj` tilesets and every tileset image, from a local path or a URL; `game.getTiledMap("level1")` then returns it. See [Tile Maps](/tile-maps#loading).
+
+## Assets a scene owns
+
+Everything a loader loads stays loaded until you unload it, so a game can keep what several
+scenes use. For assets only one scene needs, load them with the scene's own loaders instead, and
+the game frees them when it leaves the scene:
+
+```brightscript
+override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+  ' this scene's: freed when the game leaves it
+  m.loadSceneBitmap(loader, "townGround", "pkg:/sprites/town_ground.webp")
+  m.loadSceneModel(loader, "keep", "pkg:/models/keep.obj")
+  m.loadSceneSpriteAtlas(loader, "townsfolk", "pkg:/sprites/townsfolk.json")
+  m.loadSceneTiledMap(loader, "town", "pkg:/maps/town.tmj")
+  ' shared: loaded unless it already is, and kept
+  m.loadSceneBitmap(loader, "nightSky", "pkg:/sprites/night_sky.webp", {}, true)
+end sub
+```
+
+They take the same arguments as the loader's own `loadBitmap()`, `load3dModel()`,
+`loadSpriteAtlas()` and `loadTiledMap()`, plus `shared`, and return the task, or `invalid` when
+there was nothing to load:
+
+- An asset that's already loaded by anything else (the loader directly, `game.assets`, a shared
+  load) isn't loaded again, and the scene doesn't own it.
+- The scene's assets are freed after its `onDestroy()`, once the next scene's `onLoad()` has run
+  but before any of its loads start. If the next scene asks for one of them too (the same scene
+  again, for the next level or `resetScene()`, or another scene that uses the same model), it
+  takes it over without loading it again, and frees it when it's left in turn.
+- `scene.unloadSceneAssets()` frees them early; `getSceneAssets()` and `ownsSceneAsset(kind,
+  name)` say what the scene owns. Override `unloadSceneAsset(asset)` (and
+  `isSceneAssetLoaded()`) to change how they're freed.
 
 ## Your own work
 

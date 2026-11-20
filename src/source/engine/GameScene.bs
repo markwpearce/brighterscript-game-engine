@@ -3,6 +3,8 @@ import "GameEntity.bs"
 import "colliders/SolidWorld.bs"
 import "loading/AssetLoader.bs"
 import "loading/LoadingScreen.bs"
+import "loading/SceneAsset.bs"
+import "drawables/Model3d.bs"
 import "ui/UiWidget.bs"
 
 namespace BGE
@@ -25,9 +27,11 @@ namespace BGE
   '
   ' A scene is defined once and reused: leaving it (or resetting it) calls `onChangeScene()`
   ' then `onDestroy()` on it, and entering it again runs `onLoad()`/`onCreate()` again. Free
-  ' whatever a visit set up (bitmaps loaded for it) in either hook. Widgets added with
-  ' `addUi()` are removed for you after `onDestroy()`; ones added straight to `game.gameUi`
-  ' stay until you remove them (use that for UI that should outlive the scene).
+  ' whatever a visit set up in either hook, or let the scene do it: widgets added with
+  ' `addUi()`, lights added with `addLight()` and assets loaded with `loadSceneBitmap()` (and
+  ' friends) go when the game leaves the scene. Widgets added straight to `game.gameUi`, lights
+  ' added with `game.addLight()` and assets loaded straight on the loader stay until you remove
+  ' them (use those for things that should outlive the scene).
   class GameScene extends GameEntity
 
     ' Whether this scene's own directly-added drawables survive a scene change (including one
@@ -50,6 +54,11 @@ namespace BGE
 
     ' Widgets added with addUi(), removed when this visit ends.
     protected sceneUi as BGE.UI.UiWidget[] = []
+    ' BGE.SceneAsset by key: what this visit owns (loadSceneBitmap() and friends)
+    protected sceneAssets as roAssociativeArray = {}
+    ' BGE.SceneAsset by key: the last visit's, between leaving and the next scene's onLoad(),
+    ' which can take them over
+    protected releasingSceneAssets as roAssociativeArray = {}
 
     function new(gameEngine as Game, args = {} as roAssociativeArray)
       super(gameEngine, args)
@@ -117,6 +126,205 @@ namespace BGE
     ' @param {object} args - the args passed to `changeScene()`
     sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
     end sub
+
+    ' Queues a bitmap this scene owns: it's unloaded when the game leaves the scene, unless the
+    ' next scene (this one again, on a reset or the next level) asks for it too, in which case
+    ' it's kept for that scene without loading it again. A bitmap that's already loaded by
+    ' anything else isn't queued, and stays theirs. Pass `shared = true` for one other scenes
+    ' use too: it's loaded unless it's already loaded, and never unloaded by a scene.
+    '
+    ' @example
+    ' override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    '   m.loadSceneBitmap(loader, "townGround", "pkg:/sprites/town_ground.webp")
+    '   m.loadSceneBitmap(loader, "nightSky", "pkg:/sprites/night_sky.webp", {}, true)
+    ' end sub
+    '
+    ' @param {BGE.AssetLoader} loader - the loader `onLoad()` was given
+    ' @param {string} bitmapName - the name to get it by later (`game.getBitmap()`)
+    ' @param {string} pathOrUrl - local file path or URL
+    ' @param {BGE.BitmapLoadOptions} [options={}] - as `AssetLoader.loadBitmap()`
+    ' @param {boolean} [shared=false] - keep it after the scene ends
+    ' @return {BGE.LoadTask} the queued task, or invalid if it didn't need loading
+    function loadSceneBitmap(loader as BGE.AssetLoader, bitmapName as string, pathOrUrl as string, options = {} as BGE.BitmapLoadOptions, shared = false as boolean) as BGE.LoadTask
+      if not m.claimSceneAsset(BGE.SceneAssetKind.bitmap, bitmapName, shared)
+        return invalid
+      end if
+      return loader.loadBitmap(bitmapName, pathOrUrl, options)
+    end function
+
+    ' Queues a .obj or .stl model this scene owns. See `loadSceneBitmap()` for when it's loaded
+    ' and freed.
+    '
+    ' @param {BGE.AssetLoader} loader - the loader `onLoad()` was given
+    ' @param {string} modelName - the name to get it by later (`game.get3dModel()`)
+    ' @param {string} pathOrUrl - local file path or URL
+    ' @param {BGE.Model3dLoadOptions} [options={}] - as `AssetLoader.load3dModel()`
+    ' @param {BGE.DownloadOptions} [downloadOptions={}] - as `AssetLoader.load3dModel()`
+    ' @param {boolean} [shared=false] - keep it after the scene ends
+    ' @return {BGE.LoadTask} the queued task, or invalid if it didn't need loading
+    function loadSceneModel(loader as BGE.AssetLoader, modelName as string, pathOrUrl as string, options = {} as BGE.Model3dLoadOptions, downloadOptions = {} as BGE.DownloadOptions, shared = false as boolean) as BGE.LoadTask
+      if not m.claimSceneAsset(BGE.SceneAssetKind.model, modelName, shared)
+        return invalid
+      end if
+      return loader.load3dModel(modelName, pathOrUrl, options, downloadOptions)
+    end function
+
+    ' Queues a packed sprite atlas (and its sheets) this scene owns. See `loadSceneBitmap()` for
+    ' when it's loaded and freed.
+    '
+    ' @param {BGE.AssetLoader} loader - the loader `onLoad()` was given
+    ' @param {string} atlasName - the name to get it by later (`game.getSpriteAtlasFrames()`)
+    ' @param {string} pathOrUrl - the `.json`'s local file path or URL
+    ' @param {BGE.DownloadOptions} [options={}] - as `AssetLoader.loadSpriteAtlas()`
+    ' @param {boolean} [shared=false] - keep it after the scene ends
+    ' @return {BGE.LoadTask} the queued task, or invalid if it didn't need loading
+    function loadSceneSpriteAtlas(loader as BGE.AssetLoader, atlasName as string, pathOrUrl as string, options = {} as BGE.DownloadOptions, shared = false as boolean) as BGE.LoadTask
+      if not m.claimSceneAsset(BGE.SceneAssetKind.spriteAtlas, atlasName, shared)
+        return invalid
+      end if
+      return loader.loadSpriteAtlas(atlasName, pathOrUrl, options)
+    end function
+
+    ' Queues a Tiled map (and its tileset images) this scene owns. See `loadSceneBitmap()` for
+    ' when it's loaded and freed.
+    '
+    ' @param {BGE.AssetLoader} loader - the loader `onLoad()` was given
+    ' @param {string} mapName - the name to get it by later (`game.getTiledMap()`)
+    ' @param {string} pathOrUrl - local file path or URL of the map
+    ' @param {BGE.DownloadOptions} [options={}] - as `AssetLoader.loadTiledMap()`
+    ' @param {boolean} [shared=false] - keep it after the scene ends
+    ' @return {BGE.LoadTask} the queued task, or invalid if it didn't need loading
+    function loadSceneTiledMap(loader as BGE.AssetLoader, mapName as string, pathOrUrl as string, options = {} as BGE.DownloadOptions, shared = false as boolean) as BGE.LoadTask
+      if not m.claimSceneAsset(BGE.SceneAssetKind.tiledMap, mapName, shared)
+        return invalid
+      end if
+      return loader.loadTiledMap(mapName, pathOrUrl, options)
+    end function
+
+    ' Whether this visit owns an asset (loaded with `loadSceneBitmap()` and friends).
+    '
+    ' @param {BGE.SceneAssetKind} kind
+    ' @param {string} name
+    ' @return {boolean}
+    function ownsSceneAsset(kind as BGE.SceneAssetKind, name as string) as boolean
+      return m.sceneAssets.DoesExist(m.sceneAssetKey(kind, name))
+    end function
+
+    ' The assets this visit owns.
+    '
+    ' @return {BGE.SceneAsset[]}
+    function getSceneAssets() as BGE.SceneAsset[]
+      assets = [] as BGE.SceneAsset[]
+      for each key in m.sceneAssets
+        assets.push(m.sceneAssets[key])
+      end for
+      return assets
+    end function
+
+    ' Unloads every asset this visit owns now, e.g. to free memory early. The game frees them
+    ' anyway when it leaves the scene.
+    sub unloadSceneAssets()
+      assets = m.sceneAssets
+      m.sceneAssets = {}
+      for each key in assets
+        m.unloadSceneAsset(assets[key])
+      end for
+    end sub
+
+    ' Whether an asset is loaded in the game, by anyone. Override it along with
+    ' `unloadSceneAsset()` to track assets of your own.
+    '
+    ' @param {BGE.SceneAssetKind} kind
+    ' @param {string} name
+    ' @return {boolean}
+    protected function isSceneAssetLoaded(kind as BGE.SceneAssetKind, name as string) as boolean
+      if kind = BGE.SceneAssetKind.bitmap
+        return invalid <> m.game.Bitmaps[name]
+      else if kind = BGE.SceneAssetKind.model
+        return invalid <> m.game.Models[name]
+      else if kind = BGE.SceneAssetKind.spriteAtlas
+        return invalid <> m.game.getSpriteAtlas(name)
+      else if kind = BGE.SceneAssetKind.tiledMap
+        return invalid <> m.game.getTiledMap(name)
+      end if
+      return false
+    end function
+
+    ' Frees one asset this scene owned. Override it to do something else, e.g. keep some.
+    '
+    ' @param {BGE.SceneAsset} asset
+    protected sub unloadSceneAsset(asset as BGE.SceneAsset)
+      if asset.kind = BGE.SceneAssetKind.bitmap
+        m.game.unloadBitmap(asset.name)
+      else if asset.kind = BGE.SceneAssetKind.model
+        m.game.unload3dModel(asset.name)
+      else if asset.kind = BGE.SceneAssetKind.spriteAtlas
+        m.game.unloadSpriteAtlas(asset.name)
+      else if asset.kind = BGE.SceneAssetKind.tiledMap
+        m.game.unloadTiledMap(asset.name)
+      end if
+    end sub
+
+    ' Called by the game once this scene has been left (after `onDestroy()`): what this visit
+    ' owned waits for the next scene's `onLoad()`, which can take it over.
+    sub beginReleasingSceneAssets()
+      m.releasingSceneAssets.Append(m.sceneAssets)
+      m.sceneAssets = {}
+    end sub
+
+    ' Called by the game right after the next scene's `onLoad()`: frees what this scene owned
+    ' last visit that the next scene didn't take over.
+    sub unloadReleasedSceneAssets()
+      assets = m.releasingSceneAssets
+      m.releasingSceneAssets = {}
+      for each key in assets
+        m.unloadSceneAsset(assets[key])
+      end for
+    end sub
+
+    ' Gives up an asset this scene owned last visit, so the next scene can have it. Used by
+    ' the next scene's `loadSceneBitmap()` and friends.
+    '
+    ' @param {string} key
+    ' @return {boolean} true if this scene was releasing it
+    function handOverSceneAsset(key as string) as boolean
+      if not m.releasingSceneAssets.DoesExist(key)
+        return false
+      end if
+      m.releasingSceneAssets.Delete(key)
+      return true
+    end function
+
+    ' Records a scene-owned (or shared) load. True when it needs queueing.
+    private function claimSceneAsset(kind as BGE.SceneAssetKind, name as string, shared as boolean) as boolean
+      key = m.sceneAssetKey(kind, name)
+      if m.sceneAssets.DoesExist(key)
+        ' asked for twice this visit; shared wins
+        if shared
+          m.sceneAssets.Delete(key)
+        end if
+        return false
+      end if
+      loaded = m.isSceneAssetLoaded(kind, name)
+      leaving = m.game.getLeavingScene()
+      handedOver = false
+      if invalid <> leaving
+        handedOver = leaving.handOverSceneAsset(key)
+      end if
+      if loaded and not handedOver
+        ' someone else's (or already shared): left as it is
+        return false
+      end if
+      if not shared
+        m.sceneAssets[key] = {kind: kind, name: name} as BGE.SceneAsset
+      end if
+      ' a handed-over asset that failed to load last visit is queued again
+      return not loaded
+    end function
+
+    private function sceneAssetKey(kind as BGE.SceneAssetKind, name as string) as string
+      return kind + ":" + name
+    end function
 
     ' The loading screen to show while this scene loads. Return `invalid` (the default) to use
     ' `game.loadingScreen`, or the engine's default if that isn't set.
