@@ -510,3 +510,69 @@ Strips are now on by default with the tuned values: `useImpostorStrips = true`,
 `impostorBlitAngleScale = 0.75`, `impostorStripErrorScale = 2`. They were tuned at Basic in the
 thirdPerson town; High/Ultra are untested, and moving them into `RenderQualityPresets` per level
 is still to do.
+
+## Strips in a level view, and other accuracy fixes
+
+The column warp is exact only where world verticals project vertical, i.e. for a camera with
+no pitch or roll. thirdPerson's chase camera always looks down (~8.5° at rest, more with tilt),
+so verticals converge and their lean changes as a model crosses the view; upright strips can't
+follow that. Headless, a box corner (~310x200px, left of centre) with knots right on the crease
+was off 2.1-2.7px at 8.5° pitch and 5-5.9px at 20°, against ~0 level.
+
+- **Level view**: hints, knots and the fit now live in the camera turned level at the same eye
+  (`ImpostorFit.levelBasis()`, no pitch or roll). A strip's corners are mapped capture canvas →
+  capture level view → warp → current level view → current canvas (`mapCaptureToNow()`), and each
+  strip is drawn turned to follow the line through its middle (`stripTransforms()`), still one
+  `DrawTransformedObject`. A pitched turn is exact again (the same corner: < 0.01px).
+  `DrawableModel.impostorStripLevel` (default true; deep link `stripLevel=0`) fits on the canvas
+  with upright strips instead, as before.
+- **Knots**: placed from every visible vertex before the hint points are cut down to
+  `impostorStripMaxPoints`, and the cut keeps the outline's leftmost, rightmost, top and bottom
+  vertices (`subsetWithExtremes()`), so the outer knots reach the outline and its error is
+  measured. With 3+ knots, the inner knot nearest the box's nearest vertical edge moves onto it
+  (`snapKnotTo()`): a segment then spans one wall, which the perspective warp is exact for.
+- **Cuts**: a projective segment is cut evenly in current x (`levelStripCuts()`), where a flat
+  wall's top and bottom are straight, instead of evenly in capture x. The stretch limit still
+  checks a segment's average stretch: checking its worst end refused ~5x as many strip frames on
+  device (each a redraw) and cost ~8ms on the orbit.
+- **Mapping**: views from one eye differ by a 3x3 homography (`homographyBetween()`), kept on
+  the capture for its camera to and from its level view, so cuts, strip corners, bounds and
+  sample points are mapped in inlined batch loops (`mapPointsCaptureToNow()`).
+- **Seams**: a strip's region takes a pixel more of the source past its right edge, drawn at the
+  true scale, instead of the strip being stretched a pixel wider.
+- **Per level**: `modelImpostorStripMaxAngleDegrees` (25, 25, 25, 15, 10) and
+  `modelImpostorStripErrorScale` (2, 2, 2, 1.5, 1.25) are quality settings now; the drawable's
+  `impostorStripMaxAngleDegrees` / `impostorStripErrorScale` default to 0 (the level's).
+- Hint points are projected exactly rather than taken from the capture's whole-pixel positions,
+  which also lowers residuals: the close-orbit linear fit went from ~3.4px to ~1.6px.
+
+thirdPerson town orbit, Basic (`strips=1 orbit=0.4 perf=phases quality=0`), Roku Ultra, same
+session, average of the last 5 lines:
+
+| build | frame ms | blit / strips / redraw | stripsError / stripsStretch per 3s |
+| --- | --- | --- | --- |
+| main | 95.4 | 18 / 63 / 19% | 3-8 / 1-3 |
+| level view, worst-end stretch check | 109.7 | 18 / 59 / 23% | 0-1 / 7-17 |
+| same, `stripLevel=0` | 108.3 | 18 / 59 / 24% | 4-7 / 5-10 |
+| level view, homographies, average stretch | 100.6 | 19 / 61 / 21% | 0-2 / 6-8 |
+| same, no crease knot | 101.7 | 17 / 63 / 20% | 1-2 / 1-5 |
+
+So the level view costs ~5ms (~5%) at Basic over main, for strip error that's almost gone; how
+it looks needs eyes on the device (`stripLevel=0` for the upright strips).
+
+### Walls only, and a pixel cap (the "chevron")
+
+In play, flat house fronts bent at the middle knot as the camera walked, and the middle bobbed
+up and down. The least-squares knots were pulled by vertices the column model can't follow: a
+gable roof's ridge, set back from the walls over the middle of the house, and the side wall
+when the box's nearest edge (the old crease) sat inside the front wall, e.g. past an overhang.
+Now:
+
+- Strips are fitted only to the vertices of walls (faces within ~20° of vertical); the error is
+  still measured on every drawn vertex (roofs too), so anything the walls' warp can't follow
+  redraws instead of drifting.
+- The crease knot is where the two biggest visible wall planes meet (both sizeable, sharing an
+  edge on screen), not the bounding box's nearest edge.
+- The strip error allowance is capped in pixels per quality level
+  (`modelImpostorStripMaxErrorPixels`: 6, 5, 4, 3, 2) - before, up to 20% of the model's size
+  on screen at Basic.
