@@ -157,7 +157,7 @@ something else, like a 2D sprite's four-way facing, subclass `BGE.SpawnPoint` an
 (`fadeSeconds`, 0 for a straight change). A scene is only left once: after that, `hasLeft()` is
 true and nothing more is taken, so standing in a doorway while the screen fades doesn't ask
 again. If the change is refused because another transition is running, the exit isn't used up
-and the next `update()` tries again. `trigger(exit)` takes an exit straight away, e.g. from a
+and the next `update()` tries again (an exit to a scene that doesn't exist is disabled instead). `trigger(exit)` takes an exit straight away, e.g. from a
 collider's `onCollisionEnter()`.
 
 Areas work on the ground (`BGE.SeparationPlane.xz`, the default) or in 2D (`xy`):
