@@ -25,6 +25,7 @@ import "FogSilhouettes.bs"
 import "lighting/Light.bs"
 import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
+import "ScanlinePolygonFill.bs"
 import "sceneObjects/SceneObject.bs"
 import "sceneObjects/SceneObjectWalls.bs"
 import "walls/WallsView.bs"
@@ -188,6 +189,8 @@ namespace BGE
     private occlusionTestsLastFrame as integer = 0
     private occlusionTimer as roTimespan = CreateObject("roTimespan")
     private occlusionBuildMsLastFrame as integer = 0
+    ' Created on first concave fill (drawPolygonAsSpansTo())
+    private scanlineFill as BGE.ScanlinePolygonFill = invalid
 
     ' When true, render() times each of its stages, and each scene object type's draws -
     ' see getStageMsLastFrame(). Costs a timer read per scene object drawn, so leave it off
@@ -3368,6 +3371,79 @@ namespace BGE
         end if
         rects++
       end if
+      m.drawCallsLastFrame += rects
+      return rects
+    end function
+
+
+    function drawConcavePolygon(points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, fillRule = BGE.PolygonFillRule.nonZero as BGE.PolygonFillRule) as boolean
+      return m.drawConcavePolygonTo(m.draw2d, points, x, y, rgba, allowQuickDraw, fillRule)
+    end function
+
+    ' Fills `points` as drawn - concave, or self-intersecting by `fillRule` - rather than
+    ' their hull. Points already convex in order go to `drawPolygonTo()`. Anything else is
+    ' filled with `DrawRect` bands (`drawPolygonAsSpansTo()`): 1px at rest; with
+    ' allowQuickDraw, coarser for a shape wider than a convex polygon with as many sides would
+    ' band, and skipped when tiny (both lossy).
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the outline's corners in order
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {boolean} [allowQuickDraw=false] allow a coarser fill (or skipping a tiny
+    '   polygon) for something that's moving - see `getLossyTriangleFillCount()`
+    ' @param {BGE.PolygonFillRule} [fillRule=nonZero] what's inside a self-intersecting outline
+    ' @return {boolean} true if anything was drawn (or deliberately skipped)
+    function drawConcavePolygonTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, allowQuickDraw = false as boolean, fillRule = BGE.PolygonFillRule.nonZero as BGE.PolygonFillRule) as boolean
+      if invalid = canvasDrawTo or points.count() < 3
+        return false
+      end if
+      if m.isStrictlyConvexInOrder(points)
+        return m.drawPolygonTo(canvasDrawTo, points, x, y, rgba, allowQuickDraw)
+      end if
+      bounds = BGE.Math.getBounds(points)
+      width = bounds[1].x - bounds[0].x
+      height = bounds[1].y - bounds[0].y
+      params = m.triangleQuickDrawParams
+      if allowQuickDraw and width < params.skipSize and height < params.skipSize
+        m.lossyTriangleFillCount++
+        return true
+      end if
+      bandAcrossY = height <= width
+      bandedSide = width
+      if bandAcrossY
+        bandedSide = height
+      end if
+      bandSize = 1
+      if allowQuickDraw and params.step > 1 and bandedSide > (points.count() - 2) * BGE.POLYGON_SPAN_BANDS_PER_TRIANGLE
+        bandSize = params.step
+        m.lossyTriangleFillCount++
+      end if
+      m.drawPolygonAsSpansTo(canvasDrawTo, points, x, y, rgba, bandSize, bandAcrossY, fillRule)
+      return true
+    end function
+
+    ' Fills any polygon - concave, or self-intersecting by `fillRule` - with one `DrawRect`
+    ' per run of matching band spans (`BGE.ScanlinePolygonFill`). Spans never overlap, so a
+    ' translucent fill blends once. At 1px it's accurate; edges come out stepped by up to
+    ' `bandSize` pixels. Bands off the canvas are skipped.
+    '
+    ' @param {ifDraw2d} canvasDrawTo
+    ' @param {BGE.Math.Vector[]} points the outline's corners in order
+    ' @param {float} x offset added to every point
+    ' @param {float} y offset added to every point
+    ' @param {integer} rgba fill color
+    ' @param {integer} [bandSize=1] band thickness in pixels
+    ' @param {dynamic} [bandAcrossY=invalid] true for horizontal bands, false for vertical,
+    '   invalid to pick by the polygon's own shape
+    ' @param {BGE.PolygonFillRule} [fillRule=nonZero] what's inside a self-intersecting outline
+    ' @return {integer} rects drawn
+    function drawPolygonAsSpansTo(canvasDrawTo as ifDraw2d, points as BGE.Math.Vector[], x as float, y as float, rgba as integer, bandSize = 1 as integer, bandAcrossY = invalid as dynamic, fillRule = BGE.PolygonFillRule.nonZero as BGE.PolygonFillRule) as integer
+      if invalid = m.scanlineFill
+        m.scanlineFill = new BGE.ScanlinePolygonFill()
+      end if
+      rects = m.scanlineFill.fill(canvasDrawTo, points, x, y, rgba, bandSize, bandAcrossY, fillRule)
       m.drawCallsLastFrame += rects
       return rects
     end function
