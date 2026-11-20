@@ -374,6 +374,11 @@ fourth argument for moves that shouldn't be eased around corners, like a knockba
 `addSolid` returns an id. Pass it to `removeSolid(id)` to take that rectangle back out, for
 example when a door opens.
 
+When knockback and `BGE.separateCircles()` also move a body, track it with
+`m.solidWorld.track(entity, radius)` and call `m.solidWorld.resolveTracked()` once everything has
+moved, e.g. in `onPostUpdate()`. Setting the scene's `trackedSolidWorld` makes the game do that for
+you after `onPostUpdate()`. See [Tile maps](tile-maps.md#tracking-bodies).
+
 ### Hit flash and knockback
 
 A hit usually tints the sprite for a moment and shoves the entity away from the attacker.

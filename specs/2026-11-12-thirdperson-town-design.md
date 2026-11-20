@@ -123,7 +123,7 @@ An NPC entity, `Entities/Townsfolk.bs`, is a `DrawableOrientedSprite` drawn like
 
 - `src/maps/town.txt`: the layout.
 - `Town/TownMap.bs`: parse, connected groups, wall runs, cell ↔ world, like `GraveyardMap` but its own file. The builder may pull shared helpers out of `GraveyardMap` into one small grid helper if it helps; don't change graveyard behaviour.
-- `Scenes/TownScene.bs`: extends `ThirdPersonScene`. It loads the knight's sheet, the NPC sheets, the town ground, the sky, the props atlas and the models. It places everything from the map, sets up `SolidWorld` and `SolidTracker`, and handles the gate exit. It has no enemies, so no `CombatDirector` spawning, but the knight still needs whatever `ThirdPersonScene` expects (HUD, camera rig). In `onDestroy` it frees what only it uses, keeping the shared bitmaps (`nightSky`) as the graveyard does.
+- `Scenes/TownScene.bs`: extends `ThirdPersonScene`. It loads the knight's sheet, the NPC sheets, the town ground, the sky, the props atlas and the models. It places everything from the map, sets up its `SolidWorld` (tracked bodies, `SolidWorld.track()`), and handles the gate exit. It has no enemies, so no `CombatDirector` spawning, but the knight still needs whatever `ThirdPersonScene` expects (HUD, camera rig). In `onDestroy` it frees what only it uses, keeping the shared bitmaps (`nightSky`) as the graveyard does.
 - `Entities/Townsfolk.bs`, `Entities/Pig.bs`.
 - Reuse `PropModel` (buildings, with camera blockers), `Fence`, `Torch` and `Pillar` as they are.
 - Building heights matter for the camera: the walls are 10 m and the keep 14 m. The `PropModel` camera blockers should stop the chase camera ending up inside them; check that it behaves near the walls.

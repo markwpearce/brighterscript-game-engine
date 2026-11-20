@@ -252,6 +252,41 @@ steer, like being knocked back.
 Using only the feet lets a character's head overlap a wall drawn above it,
 which is what you want with a top-down camera.
 
+### Tracking bodies
+
+When several things move a character in one frame (its own walking, a
+knockback, `BGE.separateCircles()` pushing it off another character), track it
+instead and resolve everyone once they have all moved. Each tracked body's move
+since the last resolve is replayed through `moveAndSlide()`:
+
+```brighterscript
+' Once, after adding the player: a 24x24 feet box centred on its position, on x and y
+m.solidWorld.track(player, 12, {plane: BGE.SeparationPlane.xy})
+
+' Each frame, in the scene's onPostUpdate(), after everything has moved:
+override sub onPostUpdate(dt as float)
+  BGE.separateCircles(m.bodies, BGE.SeparationPlane.xy)
+  m.solidWorld.resolveTracked()
+end sub
+```
+
+Or set the scene's `trackedSolidWorld = m.solidWorld` and the game calls
+`resolveTracked()` for you, right after `onPostUpdate()`. It's off until you
+set it. Call it yourself when something has to see the resolved positions in
+the same frame, like a camera that follows the player.
+
+`plane` defaults to `xz`, the ground in a 3D game. Pass `{slide: {cornerNudge:
+0}}` to give a body its own `moveAndSlide()` options. Track a body again after
+teleporting it (a respawn), or the jump is replayed as a move. `untrack()`
+stops tracking one body and `untrackAll()` everyone; invalidated entities are
+dropped on the next resolve. Override `resolveTrackedBody()` in a subclass to
+resolve some bodies differently, e.g. let a bat fly over walls.
+
+Move inline when an entity needs the result straight away, e.g. to give up on a
+target once a wall stops it. `examples/thirdPerson` tracks its fighters;
+`examples/rpg` moves inline, since its NPCs read the result straight away and
+its knockbacks and lunges use different slide options from walking.
+
 Colliders are still useful for things that *trigger* rather than block: a
 door, a pickup, an enemy's attack. `examples/rpg` uses `onCollisionEnter()`
 on a `feet` collider for doors.

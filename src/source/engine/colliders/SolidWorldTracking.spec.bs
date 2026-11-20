@@ -1,0 +1,198 @@
+import "pkg:/source/engine/colliders/SolidWorld.bs"
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameEntity.bs"
+import "pkg:/source/engine/GameScene.bs"
+
+namespace tests
+  @suite("BGE.SolidWorld tracking")
+  class SolidWorldTrackingTests extends rooibos.BaseTestSuite
+
+    private game as BGE.Game
+    private world as BGE.SolidWorld
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.world = new BGE.SolidWorld()
+    end function
+
+    private sub assertClose(expected as float, actual as float, label as string)
+      m.assertTrue(Abs(expected - actual) < 0.01, label + ": expected " + expected.toStr() + " but got " + actual.toStr())
+    end sub
+
+    private function newBody(x as float, y as float, z as float) as BGE.GameEntity
+      body = new BGE.GameEntity(m.game, {name: "Body"})
+      m.game.addEntity(body)
+      body.position.x = x
+      body.position.y = y
+      body.position.z = z
+      return body
+    end function
+
+    @describe("track and resolveTracked")
+
+    @it("does nothing when nothing is tracked")
+    function _()
+      body = m.newBody(0, 0, 50)
+      m.world.addSolid(30, -100, 32, 300)
+      body.position.x = 100
+      m.world.resolveTracked()
+      m.assertClose(100, body.position.x, "x")
+      m.assertEqual(m.world.getTrackedCount(), 0)
+    end function
+
+    @it("replays the move since the last resolve on the ground plane (x, z) by default")
+    function _()
+      body = m.newBody(0, 77, 0)
+      ' wall from x 30 to 62
+      m.world.addSolid(30, -100, 32, 300)
+      m.world.track(body, 10)
+      body.position.x = 100
+      body.position.z = 5
+      m.world.resolveTracked()
+      ' the 20 px box stops flush at x 30, so its centre is at 20
+      m.assertClose(20, body.position.x, "x")
+      m.assertClose(5, body.position.z, "z")
+      m.assertClose(77, body.position.y, "y untouched")
+    end function
+
+    @it("uses x and y with plane xy")
+    function _()
+      body = m.newBody(0, 0, 9)
+      m.world.addSolid(-100, 30, 300, 32)
+      m.world.track(body, 10, {plane: BGE.SeparationPlane.xy})
+      body.position.y = 100
+      m.world.resolveTracked()
+      m.assertClose(20, body.position.y, "y")
+      m.assertClose(9, body.position.z, "z untouched")
+    end function
+
+    @it("remembers the resolved position for the next frame")
+    function _()
+      body = m.newBody(0, 0, 0)
+      m.world.addSolid(30, -100, 32, 300)
+      m.world.track(body, 10)
+      body.position.x = 100
+      m.world.resolveTracked()
+      body.position.x = 10
+      m.world.resolveTracked()
+      m.assertClose(10, body.position.x, "x")
+    end function
+
+    @it("passes the track's slide options to moveAndSlide")
+    function _()
+      body = m.newBody(0, 0, 0)
+      ' a wall whose top edge the box clips by 2 px: eased round by default, stopped with cornerNudge 0
+      m.world.addSolid(30, -100, 32, 92)
+      m.world.track(body, 10, {slide: {cornerNudge: 0}})
+      body.position.x = 100
+      m.world.resolveTracked()
+      m.assertClose(20, body.position.x, "x")
+    end function
+
+    @it("tracking again forgets the move so far, e.g. after a teleport")
+    function _()
+      body = m.newBody(0, 0, 0)
+      m.world.addSolid(30, -100, 32, 300)
+      m.world.track(body, 10)
+      body.position.x = 100
+      m.world.track(body, 10)
+      m.world.resolveTracked()
+      m.assertClose(100, body.position.x, "x")
+      m.assertEqual(m.world.getTrackedCount(), 1)
+    end function
+
+    @describe("untrack")
+
+    @it("stops resolving an untracked body")
+    function _()
+      body = m.newBody(0, 0, 0)
+      m.world.addSolid(30, -100, 32, 300)
+      m.world.track(body, 10)
+      m.assertTrue(m.world.isTracked(body))
+      m.assertTrue(m.world.untrack(body))
+      m.assertFalse(m.world.isTracked(body))
+      m.assertFalse(m.world.untrack(body))
+      body.position.x = 100
+      m.world.resolveTracked()
+      m.assertClose(100, body.position.x, "x")
+    end function
+
+    @it("untrackAll stops tracking everyone")
+    function _()
+      m.world.track(m.newBody(0, 0, 0), 10)
+      m.world.track(m.newBody(50, 0, 0), 10)
+      m.assertEqual(m.world.getTrackedCount(), 2)
+      m.world.untrackAll()
+      m.assertEqual(m.world.getTrackedCount(), 0)
+    end function
+
+    @it("drops invalidated bodies when it next resolves")
+    function _()
+      gone = m.newBody(0, 0, 0)
+      kept = m.newBody(100, 0, 0)
+      m.world.track(gone, 10)
+      m.world.track(kept, 10)
+      gone.invalidate()
+      m.assertFalse(m.world.isTracked(gone))
+      m.world.resolveTracked()
+      m.assertEqual(m.world.getTrackedCount(), 1)
+      m.assertTrue(m.world.isTracked(kept))
+    end function
+
+    @it("ignores an invalid body")
+    function _()
+      body = m.newBody(0, 0, 0)
+      body.invalidate()
+      m.world.track(body, 10)
+      m.assertEqual(m.world.getTrackedCount(), 0)
+    end function
+
+    @describe("GameScene.trackedSolidWorld")
+
+    @it("is off by default: the game resolves nothing")
+    function _()
+      testScene = new BGE.GameScene(m.game, {name: "Plain"})
+      m.game.defineScene(testScene)
+      m.game.changeScene("Plain")
+      m.assertInvalid(testScene.trackedSolidWorld)
+      body = m.newBody(0, 0, 0)
+      m.world.addSolid(30, -100, 32, 300)
+      m.world.track(body, 10)
+      body.position.x = 100
+      m.game.processEntityUpdatesForTest()
+      m.assertClose(100, body.position.x, "x")
+    end function
+
+    @it("once set, resolves tracked bodies after onPostUpdate")
+    function _()
+      testScene = new PostUpdateMoverScene(m.game, {name: "Mover"})
+      m.game.defineScene(testScene)
+      m.game.changeScene("Mover")
+      body = m.newBody(0, 0, 0)
+      m.world.addSolid(30, -100, 32, 300)
+      m.world.track(body, 10)
+      testScene.trackedSolidWorld = m.world
+      testScene.mover = body
+      m.game.processEntityUpdatesForTest()
+      ' onPostUpdate moved it into the wall, then the game slid it back out
+      m.assertClose(20, body.position.x, "x")
+    end function
+
+  end class
+
+  ' Moves `mover` 100 px along x in onPostUpdate
+  class PostUpdateMoverScene extends BGE.GameScene
+    mover as BGE.GameEntity = invalid
+
+    sub new(game as BGE.Game, args = {} as roAssociativeArray)
+      super(game, args)
+    end sub
+
+    override sub onPostUpdate(deltaTime as float)
+      if invalid <> m.mover
+        m.mover.position.x += 100
+      end if
+    end sub
+  end class
+
+end namespace

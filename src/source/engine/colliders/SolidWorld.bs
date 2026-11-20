@@ -1,3 +1,6 @@
+import "../../math/vector.bs"
+import "CircleSeparation.bs"
+
 namespace BGE
 
   ' Options for `BGE.SolidWorld.moveAndSlide()`.
@@ -19,6 +22,37 @@ namespace BGE
     blockedX as boolean
     ' True if a solid stopped movement along y
     blockedY as boolean
+  end interface
+
+  ' Options for `BGE.SolidWorld.track()`.
+  interface SolidTrackOptions extends roAssociativeArray
+    ' Which two position axes are the SolidWorld's x and y: `xz` (default, the ground in a 3D
+    ' game) or `xy` (a 2D game). The other axis is left alone.
+    optional plane as BGE.SeparationPlane
+    ' Passed to `moveAndSlide()` each time the body is resolved
+    optional slide as BGE.SlideOptions
+  end interface
+
+  ' What `BGE.SolidWorld.track()` needs from a body. Any `BGE.GameEntity` fits.
+  interface SolidTrackable
+    ' Invalid once the body is gone (e.g. an invalidated entity), so it's dropped
+    id as dynamic
+    position as BGE.Math.Vector
+  end interface
+
+  ' A body `BGE.SolidWorld.track()` keeps out of solids, and where it was after the last resolve.
+  interface SolidWorldTrackedBody extends roAssociativeArray
+    entity as BGE.SolidTrackable
+    ' The entity's id when it was tracked: it no longer matches once the entity is invalidated
+    entityId as string
+    ' Half the side of the square feet box, centred on the entity's position
+    radius as float
+    ' True to use position.y as the SolidWorld's y, false for position.z
+    useY as boolean
+    slide as BGE.SlideOptions
+    ' Where the box centre was after the last resolve
+    lastX as float
+    lastY as float
   end interface
 
   ' One solid rectangle in a `BGE.SolidWorld`.
@@ -50,12 +84,24 @@ namespace BGE
   ' result = world.moveAndSlide({x: feetX, y: feetY, w: 20, h: 12}, dx, dy)
   ' feetX = result.x
   ' feetY = result.y
+  '
+  ' Or track a body and resolve every tracked body once everything has moved it (its own
+  ' movement, knockback, being pushed apart): each one's move since the last resolve is replayed
+  ' through the solids.
+  '
+  ' @example
+  ' world.track(knight, 12) ' a 24x24 feet box centred on the knight, on the x/z ground plane
+  ' ' In GameScene.onPostUpdate(), after BGE.separateCircles():
+  ' world.resolveTracked()
+  ' ' Or have the game call it right after onPostUpdate():
+  ' m.trackedSolidWorld = world
   class SolidWorld
 
     private bucketSize as float = 128
     private buckets as roAssociativeArray = {}
     private solids as BGE.SolidWorldSolid[] = []
     private nextId as integer = 0
+    protected tracked as BGE.SolidWorldTrackedBody[] = []
 
     ' @param {integer} [bucketSize=128] - solids are grouped in square cells this size (px), so
     '   a move only tests nearby solids. Roughly the size of a typical solid works well. 0 or less
@@ -218,6 +264,129 @@ namespace BGE
         end if
       end for
       return result
+    end function
+
+    ' Starts keeping `entity` out of solids from where it is now: `resolveTracked()` replays each
+    ' move it makes after this. Its feet box is a square, `radius * 2` wide, centred on its
+    ' position. Tracking an entity again updates its settings and forgets its move so far: do
+    ' that after teleporting it (e.g. a respawn), or the jump is replayed as a move. The entity
+    ' must start clear of every solid.
+    '
+    ' @param {BGE.SolidTrackable} entity
+    ' @param {float} radius - half the feet box's side
+    ' @param {BGE.SolidTrackOptions} [options={}] - `plane` (default xz) and `slide` options
+    sub track(entity as BGE.SolidTrackable, radius as float, options = {} as BGE.SolidTrackOptions)
+      if invalid = entity or invalid = entity.id
+        return
+      end if
+      if invalid = options
+        options = {}
+      end if
+      useY = options.DoesExist("plane") and options.plane = BGE.SeparationPlane.xy
+      slide = {} as BGE.SlideOptions
+      if options.DoesExist("slide") and invalid <> options.slide
+        slide = options.slide
+      end if
+      entry = m.findTracked(entity)
+      if invalid = entry
+        entry = {entity: entity, entityId: entity.id} as BGE.SolidWorldTrackedBody
+        m.tracked.push(entry)
+      end if
+      entry.radius = radius
+      entry.useY = useY
+      entry.slide = slide
+      entry.lastX = entity.position.x
+      if useY
+        entry.lastY = entity.position.y
+      else
+        entry.lastY = entity.position.z
+      end if
+    end sub
+
+    ' Stops keeping `entity` out of solids.
+    '
+    ' @param {BGE.SolidTrackable} entity
+    ' @return {boolean} true if it was tracked
+    function untrack(entity as BGE.SolidTrackable) as boolean
+      if invalid = entity or invalid = entity.id
+        return false
+      end if
+      for i = m.tracked.count() - 1 to 0 step -1
+        if m.tracked[i].entityId = entity.id
+          m.tracked.Delete(i)
+          return true
+        end if
+      end for
+      return false
+    end function
+
+    ' Stops tracking every body.
+    sub untrackAll()
+      m.tracked = []
+    end sub
+
+    ' @param {BGE.SolidTrackable} entity
+    ' @return {boolean} whether `entity` is tracked (an invalidated entity never is)
+    function isTracked(entity as BGE.SolidTrackable) as boolean
+      return invalid <> m.findTracked(entity)
+    end function
+
+    ' @return {integer} how many bodies are tracked, counting invalidated ones not yet dropped by
+    '   `resolveTracked()`
+    function getTrackedCount() as integer
+      return m.tracked.count()
+    end function
+
+    ' Slides every tracked body back out of the solids: its move since the last resolve (or since
+    ' `track()`) is replayed through `moveAndSlide()`, so it stops flush against solids and slides
+    ' along them. Call once a frame after everything has moved the bodies, e.g. at the end of
+    ' `GameScene.onPostUpdate()`, or set the scene's `trackedSolidWorld` to have the game call it.
+    ' Invalidated entities are dropped.
+    sub resolveTracked()
+      for i = m.tracked.count() - 1 to 0 step -1
+        entry = m.tracked[i]
+        if invalid <> entry.entity.id and entry.entity.id = entry.entityId
+          m.resolveTrackedBody(entry)
+        else
+          m.tracked.Delete(i)
+        end if
+      end for
+    end sub
+
+    ' Resolves one tracked body. Override to change how a body is kept out of solids, e.g. to
+    ' skip one that flies.
+    '
+    ' @param {BGE.SolidWorldTrackedBody} entry
+    protected sub resolveTrackedBody(entry as BGE.SolidWorldTrackedBody)
+      position = entry.entity.position
+      if entry.useY
+        nowY = position.y
+      else
+        nowY = position.z
+      end if
+      side = entry.radius * 2
+      feet = {x: entry.lastX - entry.radius, y: entry.lastY - entry.radius, w: side, h: side}
+      result = m.moveAndSlide(feet, position.x - entry.lastX, nowY - entry.lastY, entry.slide)
+      position.x = result.x + entry.radius
+      if entry.useY
+        position.y = result.y + entry.radius
+      else
+        position.z = result.y + entry.radius
+      end if
+      entry.lastX = position.x
+      entry.lastY = result.y + entry.radius
+    end sub
+
+    private function findTracked(entity as BGE.SolidTrackable) as BGE.SolidWorldTrackedBody
+      if invalid = entity or invalid = entity.id
+        return invalid
+      end if
+      for each entry in m.tracked
+        if entry.entityId = entity.id
+          return entry
+        end if
+      end for
+      return invalid
     end function
 
     private sub stepAxis(result as object, w as float, h as float, delta as float, alongX as boolean, singleAxis as boolean, cornerNudge as float)
