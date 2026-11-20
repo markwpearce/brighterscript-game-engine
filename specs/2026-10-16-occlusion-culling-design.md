@@ -76,7 +76,7 @@ Findings:
 
 An occluder contributes this frame only if all of these hold:
 - it is enabled;
-- `distanceFadeAlpha = 1`, or above 0 with a fog silhouette drawn behind it (`castsFogSilhouette`, fog on, past `silhouetteStartAlpha`): model plus fog count as opaque, and anything behind is lost in the fog anyway;
+- `distanceFadeAlpha = 1`, or above 0 with a fog silhouette drawn behind it (`castsFogSilhouette`, fog on, past `silhouetteStartAlpha`, within `silhouetteReach`): model plus fog count as opaque, and anything behind is lost in the fog anyway. Objects with `fadeDistanceScale > 1` (torch flames) past where the fade starts are never judged, since they show through;
 - `Drawable.alpha = 255`;
 - its draw mode isn't `wireFrame*`, and isn't a screen-aligned mode (`matchCamera`, `directToCamera`, `directScaled`);
 - the camera is a `Camera3d`.
@@ -86,7 +86,7 @@ An occluder contributes this frame only if all of these hold:
 
 What it contributes:
 - **Quads:** only if all 4 corners project. A quad facing away from the camera counts only in a `*DrawBackFace` mode.
-- **Models:** their faces, under the same rules - front-facing, or any face in `*DrawBackFace` modes. A panel reaching behind the camera is cut at `BGE.QuadColumnNearZ()`, where its faces are cut as they're drawn (`Camera3d.projectOutlineCutAtNear()`), rather than dropped: otherwise the nearest, biggest buildings hid nothing.
+- **Models:** their faces, under the same rules - front-facing, or any face in `*DrawBackFace` modes. A panel reaching nearer than `BGE.QuadColumnNearZ()` is cut there, where its faces are cut as they're drawn (`Camera3d.projectOutlineCutAtNear()`), rather than dropped: otherwise the nearest, biggest buildings hid nothing.
 
 **Coplanar merge for models:**
 - *My call:* when a static model is first registered as an occluder, merge its coplanar, edge-sharing triangles into convex panels.

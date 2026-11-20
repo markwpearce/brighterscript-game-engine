@@ -586,7 +586,8 @@ end class
 ```
 
 An occluder that's fading out with distance only hides things while fog fills in behind it
-(`castsFogSilhouette` with `camera.fog` on), since otherwise it's drawn see-through.
+(`castsFogSilhouette` with `camera.fog` on), since otherwise it's drawn see-through. Even then it
+doesn't hide a drawable with `fadeDistanceScale` above 1, which is meant to show through fog.
 
 Game code can ask what happened to an entity last frame, for example to skip purely visual
 work for a tree nobody can see:
