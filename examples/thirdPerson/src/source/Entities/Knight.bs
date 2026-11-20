@@ -1,6 +1,7 @@
 import "../World.bs"
 import "../CombatDirector.bs"
-import "../Stamina.bs"
+import "pkg:/source/utils/RegenPool.bs"
+import "pkg:/source/utils/StateClock.bs"
 import "Fighter.bs"
 
 enum KnightState
@@ -23,7 +24,8 @@ class Knight extends Fighter
   scriptedMove as BGE.Math.Vector = invalid
 
   cameraRig as BGE.OrbitCamera = invalid
-  state as KnightState = KnightState.idle
+  ' state is a KnightState
+  clock as BGE.StateClock = new BGE.StateClock(KnightState.idle)
   ' True during the middle of a dodge
   invulnerable as boolean = false
   ' The enemy he's locked onto, or invalid
@@ -56,7 +58,8 @@ class Knight extends Fighter
   blockLeak as float = 0.2
   hurtSeconds as float = 0.35
 
-  stamina as Stamina = new Stamina()
+  ' Any stamina left is enough to start an action, which can take it down to zero (souls-style)
+  stamina as BGE.RegenPool = new BGE.RegenPool(100)
   attackStamina as float = 22
   dodgeStamina as float = 28
   parryStamina as float = 15
@@ -65,7 +68,6 @@ class Knight extends Fighter
   ' Stunned this long when a block runs out of stamina
   guardBreakSeconds as float = 0.9
 
-  private stateSeconds as float = 0
   private attackQueued as boolean = false
   private attackLanded as boolean = false
   private dodgeDirection as BGE.Math.Vector = BGE.Math.VectorOps.create()
@@ -110,36 +112,37 @@ class Knight extends Fighter
     ' There's no hit or death art, so these hold a frame and the colour does the rest
     m.sprite.addOrientedAnimationColumns("hurt", [21], m.framesPerDirection, m.frameRate)
     m.sprite.addOrientedAnimationColumns("dead", [22], m.framesPerDirection, m.frameRate)
-    m.sprite.playOrientedAnimation("idle")
+    m.clock.orientedSprite = m.sprite
+    m.clock.play("idle")
   end sub
 
   ' The story's `heal` post (a priest's blessing). Runs even while a conversation pauses the game.
   override sub onGameEvent(eventName as string, data as roAssociativeArray)
     if eventName = "heal" and m.isAlive()
-      m.health = m.maxHealth
+      m.health.refill()
       m.stamina.refill()
     end if
   end sub
 
   override sub onUpdate(dt as float)
     controls = m.game.controls
-    m.stateSeconds += dt
+    m.clock.update(dt)
     move = m.cameraRelativeMove()
     m.updateLockOn()
 
-    if m.state = KnightState.dead
+    if m.clock.state = KnightState.dead
       ' Waits for the scene to respawn him
-    else if m.state = KnightState.hurt
-      if m.stateSeconds >= m.hurtForSeconds
+    else if m.clock.state = KnightState.hurt
+      if m.clock.seconds >= m.hurtForSeconds
         m.setState(KnightState.idle)
       end if
-    else if m.state = KnightState.attack
+    else if m.clock.state = KnightState.attack
       m.updateAttack(dt, controls.isActionPressed("attack"))
-    else if m.state = KnightState.parry
-      if m.stateSeconds >= m.parrySeconds
+    else if m.clock.state = KnightState.parry
+      if m.clock.seconds >= m.parrySeconds
         m.setState(KnightState.idle)
       end if
-    else if m.state = KnightState.dodge
+    else if m.clock.state = KnightState.dodge
       m.updateDodge(dt)
     else if controls.isActionPressed("dodge") and m.stamina.spend(m.dodgeStamina)
       m.startDodge(move)
@@ -168,7 +171,7 @@ class Knight extends Fighter
     end if
 
     ' Holding the shield up slows recovery
-    m.stamina.update(dt, m.state = KnightState.block)
+    m.stamina.update(dt, m.clock.state = KnightState.block)
     m.updateCombatEffects(dt)
   end sub
 
@@ -256,14 +259,12 @@ class Knight extends Fighter
 
   ' `restart` re-enters the current state, e.g. to chain an attack.
   private sub setState(state as KnightState, restart = false as boolean)
-    if m.state = state and not restart
+    if not m.clock.set(state, restart)
       return
     end if
-    m.state = state
-    m.stateSeconds = 0
     m.invulnerable = false
     if state <> KnightState.dodge
-      m.sprite.playOrientedAnimation(state, restart)
+      m.clock.play(state, restart)
     end if
   end sub
 
@@ -285,11 +286,11 @@ class Knight extends Fighter
       m.attackQueued = true
     end if
     lungeSeconds = m.attackSeconds * 0.5
-    if m.stateSeconds < lungeSeconds
+    if m.clock.seconds < lungeSeconds
       m.moveBy(BGE.Math.headingForward(m.rotation.y), m.attackLunge * dt / lungeSeconds)
     end if
     ' The blade connects about halfway through the swing
-    if not m.attackLanded and m.stateSeconds >= m.attackSeconds * 0.45
+    if not m.attackLanded and m.clock.seconds >= m.attackSeconds * 0.45
       m.attackLanded = true
       if invalid <> m.director
         for each target in m.director.enemiesInArc(m, m.attackReach, m.attackHalfAngle)
@@ -297,7 +298,7 @@ class Knight extends Fighter
         end for
       end if
     end if
-    if m.stateSeconds >= m.attackSeconds
+    if m.clock.seconds >= m.attackSeconds
       if m.attackQueued and m.stamina.spend(m.attackStamina)
         m.startAttack(m.cameraRelativeMove())
       else
@@ -312,15 +313,15 @@ class Knight extends Fighter
     if BGE.Math.VectorOps.length(move) > 0.3
       m.dodgeDirection = BGE.Math.VectorOps.scale(move, 1 / BGE.Math.VectorOps.length(move))
       m.rotation.y = BGE.Math.headingOf(move)
-      m.sprite.playOrientedAnimation("roll")
+      m.clock.play("roll")
     else
       m.dodgeDirection = BGE.Math.VectorOps.scale(BGE.Math.headingForward(m.rotation.y), -1)
-      m.sprite.playOrientedAnimation("backstep")
+      m.clock.play("backstep")
     end if
   end sub
 
   private sub updateDodge(dt as float)
-    t = m.stateSeconds / m.dodgeSeconds
+    t = m.clock.seconds / m.dodgeSeconds
     m.invulnerable = t > 0.1 and t < 0.75
     ' Fast out, easing to a stop
     speed = 2 * (1 - BGE.Math.Min(t, 1)) * m.dodgeDistance / m.dodgeSeconds
@@ -334,13 +335,13 @@ class Knight extends Fighter
     if not m.isAlive() or m.invulnerable
       return HitResult.dodged
     end if
-    if m.state = KnightState.parry and m.stateSeconds < m.parrySeconds and m.isFacing(attacker, BGE.Math.PI / 2)
+    if m.clock.state = KnightState.parry and m.clock.seconds < m.parrySeconds and m.isFacing(attacker, BGE.Math.PI / 2)
       attacker.parried()
       m.spray(HitEffects.parrySparks(), attacker)
       return HitResult.parried
     end if
     guardBroken = false
-    if m.state = KnightState.block and m.isFacing(attacker, BGE.Math.PI * 0.45)
+    if m.clock.state = KnightState.block and m.isFacing(attacker, BGE.Math.PI * 0.45)
       guardBroken = not m.stamina.drain(damage * m.blockStaminaPerDamage)
       push = World.metres(0.5)
       if guardBroken
@@ -367,7 +368,7 @@ class Knight extends Fighter
   end function
 
   protected override function attackArc() as AttackArc
-    if m.state = KnightState.attack
+    if m.clock.state = KnightState.attack
       return {reach: m.attackReach, halfAngle: m.attackHalfAngle}
     end if
     return invalid
@@ -381,7 +382,7 @@ class Knight extends Fighter
   ' Back on his feet at full health.
   sub respawn(x as float, z as float)
     m.setLockTarget(invalid)
-    m.health = m.maxHealth
+    m.health.refill()
     m.stamina.refill()
     m.position = BGE.Math.VectorOps.create(x, 0, z)
     m.knockback.stop()
@@ -399,7 +400,7 @@ class Knight extends Fighter
   end sub
 
   protected override function restingColor() as integer
-    if m.state = KnightState.dead
+    if m.clock.state = KnightState.dead
       return &h803030
     end if
     return &hFFFFFF

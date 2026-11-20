@@ -1,4 +1,6 @@
 import "pkg:/source/engine/colliders/RectangleCollider.bs"
+import "pkg:/source/utils/Health.bs"
+import "pkg:/source/utils/StateClock.bs"
 import "Fireball.bs"
 
 ' Level 7's boss - a giant Venus fly trap rooted in the floor. position is the root
@@ -23,12 +25,10 @@ class PlantBoss extends BGE.GameEntity
   ' standing right above it flips every frame.
   facingDeadZone = 16.0
 
-  maxHealth = 3
-  health = 3
+  ' Three stomps
+  health as BGE.Health = new BGE.Health(3)
   ' rising | up | hurt | sinking | hidden | dying | dead
-  state = "hidden"
-  stateTimer = new BGE.CountdownTimer()
-  stateDuration = 0.0
+  clock as BGE.StateClock = new BGE.StateClock("hidden")
   volleyTimer = new BGE.CountdownTimer()
   telegraphTimer = new BGE.CountdownTimer()
   telegraphing = false
@@ -78,34 +78,34 @@ class PlantBoss extends BGE.GameEntity
 
   override sub onUpdate(dt as float)
     m.updateFacing()
-    m.stateTimer.tick(dt)
+    m.clock.update(dt)
 
-    if m.state = "rising"
-      m.setSinkDepth(m.fullSinkDepth * m.stateRemainingFraction())
-      if not m.stateTimer.isActive()
+    if m.clock.state = "rising"
+      m.setSinkDepth(m.fullSinkDepth * m.clock.remainingFraction())
+      if m.clock.isTimeUp()
         m.enterUp()
       end if
-    else if m.state = "up"
+    else if m.clock.state = "up"
       m.updateVolleys(dt)
-      if not m.stateTimer.isActive()
+      if m.clock.isTimeUp()
         m.enterSink("sinking", m.sinkTime)
       end if
-    else if m.state = "hurt" or m.state = "sinking" or m.state = "dying"
-      m.setSinkDepth(m.fullSinkDepth * (1.0 - m.stateRemainingFraction()))
-      if m.state <> "sinking"
+    else if m.clock.state = "hurt" or m.clock.state = "sinking" or m.clock.state = "dying"
+      m.setSinkDepth(m.fullSinkDepth * (1.0 - m.clock.remainingFraction()))
+      if m.clock.state <> "sinking"
         m.shake()
       end if
-      if not m.stateTimer.isActive()
-        if m.state = "dying"
-          m.state = "dead"
+      if m.clock.isTimeUp()
+        if m.clock.state = "dying"
+          m.clock.set("dead")
           ' MainScene spawns the goal flag here; touching it wins.
           m.game.postGameEvent("bossDefeated", {x: m.position.x, y: m.position.y})
         else
           m.enterHidden()
         end if
       end if
-    else if m.state = "hidden"
-      if not m.stateTimer.isActive()
+    else if m.clock.state = "hidden"
+      if m.clock.isTimeUp()
         m.enterRising()
       end if
     end if
@@ -113,13 +113,13 @@ class PlantBoss extends BGE.GameEntity
 
   ' Called by Player on a head stomp. Returns true if it counted (only while fully up).
   function stomp() as boolean
-    if m.state <> "up"
+    if m.clock.state <> "up"
       return false
     end if
-    m.health -= 1
+    killed = m.health.damage(1)
     m.game.playSound("stomp")
     m.game.postGameEvent("enemyStomped", {})
-    if m.health <= 0
+    if killed
       m.game.playSound("monsterDie")
       m.game.destroyAllEntities("Fireball")
       m.enterSink("dying", m.dyingSinkTime)
@@ -131,14 +131,14 @@ class PlantBoss extends BGE.GameEntity
 
   override sub onGameEvent(eventName as string, data as roAssociativeArray)
     ' A player death restarts the fight at full health - but never undoes a win.
-    if eventName <> "playerHurt" or m.state = "dying" or m.state = "dead"
+    if eventName <> "playerHurt" or m.clock.state = "dying" or m.clock.state = "dead"
       return
     end if
-    m.health = m.maxHealth
+    m.health.refill()
     m.game.destroyAllEntities("Fireball")
-    if m.state = "hidden" or m.state = "rising"
+    if m.clock.state = "hidden" or m.clock.state = "rising"
       m.enterHidden()
-    else if m.state = "up"
+    else if m.clock.state = "up"
       m.enterSink("sinking", m.sinkTime)
     end if
   end sub
@@ -164,51 +164,34 @@ class PlantBoss extends BGE.GameEntity
   end sub
 
   private sub enterRising()
-    m.state = "rising"
-    m.startState(m.riseTime)
+    m.clock.setTimed("rising", m.riseTime)
   end sub
 
   private sub enterUp()
-    m.state = "up"
+    m.clock.setTimed("up", m.upTime)
     m.setSinkDepth(0)
     m.setCollidersEnabled(true)
-    m.startState(m.upTime)
     m.telegraphing = false
     m.volleyTimer.start(m.getVolleyInterval())
   end sub
 
   ' kind: "hurt" | "sinking" | "dying"
   private sub enterSink(kind as string, duration as float)
-    m.state = kind
+    m.clock.setTimed(kind, duration)
     m.setCollidersEnabled(false)
     m.stopTelegraph()
-    m.startState(duration)
     if kind <> "sinking"
       m.sprite.flash(&hFF4040, duration, m.flashInterval)
     end if
   end sub
 
   private sub enterHidden()
-    m.state = "hidden"
+    m.clock.setTimed("hidden", m.hiddenTime)
     m.setSinkDepth(m.fullSinkDepth)
     m.setCollidersEnabled(false)
     m.sprite.stopFlash()
     m.sprite.offset.x = 0
-    m.startState(m.hiddenTime)
   end sub
-
-  private sub startState(duration as float)
-    m.stateDuration = duration
-    m.stateTimer.start(duration)
-  end sub
-
-  ' 1.0 at the start of the current state, 0.0 once its timer runs out.
-  private function stateRemainingFraction() as float
-    if m.stateDuration <= 0
-      return 0.0
-    end if
-    return m.stateTimer.remaining() / m.stateDuration
-  end function
 
   private sub setCollidersEnabled(enabled as boolean)
     m.head.enabled = enabled
@@ -220,7 +203,7 @@ class PlantBoss extends BGE.GameEntity
   end sub
 
   private function getPhase() as integer
-    return m.maxHealth + 1 - m.health
+    return cint(m.health.max + 1 - m.health.current)
   end function
 
   private function getVolleyInterval() as float
