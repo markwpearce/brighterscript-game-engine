@@ -1,0 +1,199 @@
+import "pkg:/source/engine/renderer/voxel/VoxelTerrainView.bs"
+import "pkg:/source/engine/voxel/VoxelMaps.bs"
+
+namespace tests
+
+  @suite("BGE.VoxelTerrainView")
+  class VoxelTerrainViewTests extends rooibos.BaseTestSuite
+
+    private green as integer = &h00FF00FF
+    private red as integer = &hFF0000FF
+
+    @describe("march")
+
+    @it("draws one merged span per column over flat ground")
+    function _()
+      view = m.newView(m.flatMap(0, 0, {}))
+      view.march(m.pose({}))
+      m.assertEqual(32, view.spanCount)
+      for i = 0 to 31
+        record = view.columnSpans[i]
+        m.assertEqual(4, record.count(), `column ${i}`)
+        m.assertEqual(m.green, record[2])
+        ' from the view's bottom
+        m.assertEqual(180, record[0] + record[1])
+      end for
+    end function
+
+    @it("puts a wall above the ground in front of it, with the depth it starts at")
+    function _()
+      view = m.newView(m.wallMap())
+      view.march(m.pose({}))
+      record = view.columnSpans[16]
+      m.assertEqual(8, record.count())
+      ' ground: the last step before the wall is z = 39, at 90 + 10 * 160 / 39
+      m.assertEqual(m.green, record[2])
+      m.assertEqual(131, record[0])
+      m.assertEqual(180, record[0] + record[1])
+      m.assertEqual(18.0, record[3])
+      ' wall: first seen from step z = 41 (band 1 steps by 2), tall enough to reach the top
+      m.assertEqual(m.red, record[6])
+      m.assertEqual(0, record[4])
+      m.assertEqual(131, record[5])
+      m.assertEqual(41.0, record[7])
+    end function
+
+    @it("keeps spans in whole pixels, rising and never overlapping")
+    function _()
+      view = m.newView(m.wallMap())
+      view.march(m.pose({forwardX: 0.6, forwardZ: 0.8, rightX: 0.8, rightZ: -0.6}))
+      for each record in view.columnSpans
+        bottom = 180
+        for r = 0 to record.count() - 1 step 4
+          m.assertTrue(record[r] = int(record[r]), "whole pixels")
+          m.assertEqual(bottom, record[r] + record[r + 1])
+          bottom = record[r]
+        end for
+      end for
+    end function
+
+    @it("finds what hides a depth in a column")
+    function _()
+      view = m.newView(m.wallMap())
+      view.march(m.pose({}))
+      m.assertEqual(180.0, view.occluderTopAt(16, 5))
+      m.assertEqual(131.0, view.occluderTopAt(16, 30))
+      m.assertEqual(0.0, view.occluderTopAt(16, 50))
+    end function
+
+    @it("doubles the step every band")
+    function _()
+      view = m.newView(m.flatMap(0, 0, {}))
+      view.march(m.pose({}))
+      ' 20 steps from z 1 by 1, 20 from 21 by 2, 20 from 61 by 4, then 141 to 197 by 8
+      m.assertEqual(68 * 32, view.stepCount)
+    end function
+
+    @it("samples the coarser of the column gap and the step's mip level")
+    function _()
+      view = m.newView(m.flatMap(0, 0, {}))
+      view.march(m.pose({}))
+      m.assertEqual([0, 1, 2, 3], view.getBandLevels())
+    end function
+
+    @describe("pitch")
+
+    @it("projects the same with exact pitch when level")
+    function _()
+      shifted = m.newView(m.wallMap())
+      shifted.march(m.pose({}))
+      exact = m.newView(m.wallMap())
+      exact.march(m.pose({exactPitch: true}))
+      for i = 0 to 31
+        m.assertEqual(shifted.columnSpans[i], exact.columnSpans[i], `column ${i}`)
+      end for
+    end function
+
+    @it("projects each step with the pitched camera")
+    function _()
+      pitch = -20 * 3.14159265 / 180
+      view = m.newView(m.wallMap())
+      view.march(m.pose({exactPitch: true, pitch: pitch}))
+      ' the ground at z = 39, 10 below: 90 - 160 * (-10 cos - 39 sin) / (39 cos - 10 sin) = 74.26
+      m.assertEqual(74, view.columnSpans[16][0])
+      ' the horizon shift puts it at 90 + 160 tan(-20) + 1600 / 39 = 72.8
+      shifted = m.newView(m.wallMap())
+      shifted.march(m.pose({horizon: 90 + 160 * tan(pitch)}))
+      m.assertEqual(73, shifted.columnSpans[16][0])
+    end function
+
+    @describe("edges")
+
+    @it("sees the flat floor past a flat edge")
+    function _()
+      view = m.newView(m.flatMap(0, 0, {edgeMode: "flat", flatHeight: 100, flatColor: 1}))
+      view.march(m.pose({camZ: 60}))
+      for i = 0 to 31
+        m.assertEqual(m.red, view.columnSpans[i][2], `column ${i}`)
+      end for
+      ' looking back over the map, the ground is in front
+      view.march(m.pose({camZ: 60, forwardZ: -1, rightX: -1}))
+      m.assertEqual(m.green, view.columnSpans[16][2])
+    end function
+
+    @it("never leaves the map when it wraps")
+    function _()
+      view = m.newView(m.flatMap(0, 0, {}))
+      view.march(m.pose({camZ: 60}))
+      m.assertEqual(32, view.spanCount)
+    end function
+
+    @describe("fog")
+
+    @it("blends far spans towards the fog colour, leaving the near half")
+    function _()
+      view = m.newView(m.flatMap(0, 0, {}))
+      view.fogColor = &hFFFFFF
+      view.march(m.pose({}))
+      record = view.columnSpans[16]
+      m.assertTrue(record.count() > 4)
+      m.assertEqual(m.green, record[2])
+      far = record[record.count() - 2]
+      m.assertTrue(((far >> 24) and 255) > 0, "far span is lighter")
+    end function
+
+    @it("draws a colour index past the palette as colour 0")
+    function _()
+      map = m.flatMap(0, 0, {})
+      map.colorLevels[0][0] = 200
+      view = m.newView(map)
+      view.march(m.pose({camX: 0.5, camZ: -17.5}))
+      m.assertEqual(m.green, view.columnSpans[16][2])
+    end function
+
+    private function newView(map as object) as BGE.VoxelTerrainView
+      view = new BGE.VoxelTerrainView(map)
+      view.columns = 32
+      view.bandSteps = 20
+      return view
+    end function
+
+    ' A 320 x 180 view, focal 160, from (32, 0.5) 10 up, looking +z, 200 cells
+    private function pose(overrides as roAssociativeArray) as BGE.VoxelTerrainPose
+      pose = {camX: 32.0, camZ: 0.5, camHeight: 10.0, forwardX: 0.0, forwardZ: 1.0, rightX: 1.0, rightZ: 0.0, focal: 160.0, viewWidth: 320.0, viewHeight: 180.0, horizon: 90.0, pitch: 0.0, exactPitch: false, distance: 200.0, cellSize: 1.0, heightScale: 1.0}
+      pose.append(overrides)
+      return pose
+    end function
+
+    ' 64 cells, every cell the same height and palette index, palette [green, red]
+    private function flatMap(height as integer, color as integer, options as BGE.VoxelMapOptions) as object
+      heights = CreateObject("roArray", 64 * 64, false)
+      colors = CreateObject("roArray", 64 * 64, false)
+      for i = 0 to 64 * 64 - 1
+        heights[i] = height
+        colors[i] = color
+      end for
+      return BGE.VoxelMaps.fromArrays(64, heights, colors, [&h00FF00, &hFF0000], options)
+    end function
+
+    ' Flat ground, with rows z 40 and 41 a wall 200 high in red
+    private function wallMap() as object
+      heights = CreateObject("roArray", 64 * 64, false)
+      colors = CreateObject("roArray", 64 * 64, false)
+      for z = 0 to 63
+        for x = 0 to 63
+          isWall = z = 40 or z = 41
+          heights[z * 64 + x] = 0
+          colors[z * 64 + x] = 0
+          if isWall
+            heights[z * 64 + x] = 200
+            colors[z * 64 + x] = 1
+          end if
+        end for
+      end for
+      return BGE.VoxelMaps.fromArrays(64, heights, colors, [&h00FF00, &hFF0000])
+    end function
+
+  end class
+
+end namespace
