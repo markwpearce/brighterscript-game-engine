@@ -133,11 +133,10 @@ Design: `specs/2026-11-21-voxel-terrain-drawable-design.md` (PR 1 section).
   bit depth 8 or 16; all five filters), heights scaled to 0-255 (16-bit: `>> 8`), alpha ignored,
   colours exact if ≤ 256 distinct else quantised by median cut to 256, mips by the global rules,
   `--edge wrap|flat --flat-height N --flat-color RRGGBB` (flat colour added to the palette if
-  missing), `--hex` prints the file as hex instead of writing it (for test fixtures).
+  missing), `--write-test-pngs DIR` writes the fixture source PNGs.
 - [ ] **Step 2:** make two 64x64 PNGs with the tool's own `--write-test-pngs DIR` (a ramp
-  heightmap and a 3-colour checker) and run `python3 tools/voxel-map.py h.png c.png --hex`.
-- [ ] **Step 3: test**: `VoxelMapTool.spec.bs` holds that hex as a string constant; it loads via
-  `fromByteArray` and must equal `fromArrays` on the same data built in BrightScript (the ramp
+  heightmap and a 3-colour checker) and bake them to `src/source/engine/voxel/VoxelMapTool.spec.bvox` (`--edge flat --flat-height 10`); `bsconfig.build.json` excludes `**/*.spec.*` so it never ships.
+- [ ] **Step 3: test**: `VoxelMapTool.spec.bs` loads that fixture via `fromFile` and must equal `fromArrays` on the same data built in BrightScript (the ramp
   and checker formulas), level by level.
 - [ ] **Step 4:** run → passes. Rules file: paths `src/source/engine/voxel/**`, `tools/voxel-map.py`;
   points at the design spec and states the mip rules shared with the tool.
