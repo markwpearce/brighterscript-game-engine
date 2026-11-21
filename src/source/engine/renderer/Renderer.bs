@@ -74,7 +74,7 @@ namespace BGE
   interface TriangleQuickDrawParams
     ' While moving, triangles smaller than this many pixels on both axes are skipped
     skipSize as float
-    ' A triangle whose shorter bounding-hideBox side, divided by the band size, is at most this
+    ' A triangle whose shorter bounding-box side, divided by the band size, is at most this
     ' is filled with `DrawRect` bands rather than the exact fill
     maxBands as integer
     ' Band size, in pixels, of the coarse fill used while moving
@@ -173,7 +173,7 @@ namespace BGE
     public occlusionBandCount as integer = 45
     ' The most occluders considered per frame.
     public maxOccluders as integer = 32
-    ' Pixels added around each tested object's canvas hideBox (plus its outline width) before
+    ' Pixels added around each tested object's canvas box (plus its outline width) before
     ' it's checked against the occluders, so an object near an occluder's edge still draws.
     public occlusionMargin as float = 2.0
     ' Whether to draw the occlusion debug overlay (see Game.debugDrawOcclusion()).
@@ -248,8 +248,9 @@ namespace BGE
     private activeTerrain as dynamic = invalid
     ' Terrain boxes to redraw over partly hidden cluster members once the cluster pass has drawn.
     private pendingTerrainRedraws = [] as roAssociativeArray[]
-    ' Scratch for a sorted object's points projected for the terrain test.
+    ' Scratch for a sorted object's points projected for the terrain test, and its box.
     private terrainProjected = [] as float[]
+    private terrainHideBox = {} as roAssociativeArray
     private stageMs as roAssociativeArray = {}
     private stageCounts as roAssociativeArray = {}
     ' Scratch for projected occlusion test points: x, y, depth per point.
@@ -1345,7 +1346,7 @@ namespace BGE
       end if
     end sub
 
-    ' Draws a fog-coloured screen hideBox for each caster fading out or past the draw distance, out
+    ' Draws a fog-coloured screen box for each caster fading out or past the draw distance, out
     ' to silhouetteReach times it (see BGE.Fog), repeating the last boxes when nothing that
     ' shapes them changed.
     private sub drawFogSilhouettes(cam as Camera3d)
@@ -1462,7 +1463,7 @@ namespace BGE
       m.drawCallsLastFrame += n
     end sub
 
-    ' Each fog silhouette hideBox's RGBA, as drawn last frame (see BGE.Fog). Don't change it.
+    ' Each fog silhouette box's RGBA, as drawn last frame (see BGE.Fog). Don't change it.
     '
     ' @return {integer[]}
     function getFogSilhouetteRgbas() as integer[]
@@ -1519,7 +1520,7 @@ namespace BGE
           end if
           if alphaByte > 0
             projected++
-            ' each part's clamped screen hideBox; any point behind the eye and the caster is near
+            ' each part's clamped screen box; any point behind the eye and the caster is near
             ' and big enough to cover its own boxes
             partBoxes = m.fogPartBoxes
             partBoxes.Clear()
@@ -1551,7 +1552,7 @@ namespace BGE
                   polys.push(BGE.FogSilhouettes.convexHull(out, 3))
                   outlined = true
                 end if
-                ' too few points to outline: boxed below, then outlined as that hideBox
+                ' too few points to outline: boxed below, then outlined as that box
               end if
               if not outlined
                 x0 = 1.0e30
@@ -1693,7 +1694,7 @@ namespace BGE
       end if
       terrainBox = invalid
       if invalid <> m.activeTerrain and sceneObj.distanceFadeAlpha > 0
-        terrainBox = {}
+        terrainBox = m.terrainHideBox
         if m.profileStages
           testStart = m.occlusionTimer.TotalMilliseconds()
           hidden = m.testHiddenByTerrain(sceneObj, terrainBox)
@@ -1717,7 +1718,8 @@ namespace BGE
       end if
       if invalid <> terrainBox and sceneObj.didDrawLastFrame()
         if sceneObj.clusterMemberCount > 1
-          m.pendingTerrainRedraws.push(terrainBox)
+          ' copied, since the scratch box is reused by the next object
+          m.pendingTerrainRedraws.push({top: terrainBox.top, bottom: terrainBox.bottom, firstColumn: terrainBox.firstColumn, lastColumn: terrainBox.lastColumn, limit: terrainBox.limit})
         else
           terrainObj = m.activeTerrain as SceneObjectVoxelTerrain
           terrainObj.redrawOver(m, terrainBox)
@@ -1750,8 +1752,18 @@ namespace BGE
       cam = m.camera as Camera3d
       projected = m.terrainProjected
       cam.projectPointsWithDepth(points, projected, true)
-      limit = terrainObj.levelDepthOf(sceneObj.getDepthPosition()) - terrainObj.drawable.getHideTolerance()
-      hidden = terrainObj.testHidden(projected, limit, hideBox)
+      tolerance = terrainObj.drawable.getHideTolerance()
+      ' redrawn over: hills nearer than its middle; wholly hidden: only by hills nearer than
+      ' its nearest point, so a hill between its near face and its middle can't hide all of it
+      limit = terrainObj.levelDepthOf(sceneObj.getDepthPosition()) - tolerance
+      nearest = limit + tolerance
+      for each point in points
+        depth = terrainObj.levelDepthOf(point)
+        if depth < nearest
+          nearest = depth
+        end if
+      end for
+      hidden = terrainObj.testHidden(projected, nearest - tolerance, limit, hideBox)
       if hidden = BGE.VoxelHidden.all and not canSkip
         return BGE.VoxelHidden.partly
       end if
@@ -2044,18 +2056,19 @@ namespace BGE
       lap = m.lapStage("objects", lap)
 
       m.drawPendingClusterPrimitives()
-      if m.pendingWallRedraws.count() > 0
-        for each span in m.pendingWallRedraws
-          m.redrawWallsOver(span)
-        end for
-        m.pendingWallRedraws.clear()
-      end if
+      ' hills first: the walls then go back over any hill drawn over them
       if m.pendingTerrainRedraws.count() > 0
         terrainObj = m.activeTerrain as SceneObjectVoxelTerrain
         for each hideBox in m.pendingTerrainRedraws
           terrainObj.redrawOver(m, hideBox)
         end for
         m.pendingTerrainRedraws.clear()
+      end if
+      if m.pendingWallRedraws.count() > 0
+        for each span in m.pendingWallRedraws
+          m.redrawWallsOver(span)
+        end for
+        m.pendingWallRedraws.clear()
       end if
       lap = m.lapStage("clusters", lap)
 
@@ -2091,7 +2104,7 @@ namespace BGE
     end function
 
 
-    ' Draws the covered spans as translucent rectangles and each hidden object's tested hideBox in red.
+    ' Draws the covered spans as translucent rectangles and each hidden object's tested box in red.
     private sub drawOcclusionDebug()
       ' the map is left as it was when occlusion stopped running
       if m.occlusionWasActive and m.occlusionMap <> invalid
@@ -2116,7 +2129,7 @@ namespace BGE
       end for
     end sub
 
-    ' Outlines the canvas hideBox of a wall-hidden object's test points, as drawOcclusionDebug()
+    ' Outlines the canvas box of a wall-hidden object's test points, as drawOcclusionDebug()
     ' does for the span map's.
     private sub drawWallHiddenDebugBox(sceneObj as SceneObject)
       projected = m.occlusionProjected
@@ -3294,7 +3307,7 @@ namespace BGE
 
 
     ' Fills a triangle with `DrawRect` bands of `bandSize` pixels (see
-    ' `drawConvexPolygonAsSpansTo()`), banding across whichever axis of its bounding hideBox is
+    ' `drawConvexPolygonAsSpansTo()`), banding across whichever axis of its bounding box is
     ' shorter (fewest rects) unless `bandAcrossY` says which. Two triangles sharing an edge (a
     ' quad) neither overlap nor leave a seam as long as they band across the same axis - pass
     ' the same `bandAcrossY` for both. Edges come out stepped by up to `bandSize` pixels.
@@ -3317,7 +3330,7 @@ namespace BGE
 
 
     ' Fills a convex polygon with one `DrawRect` per band of `bandSize` pixels (bands with the
-    ' same span merge into one rect), banding across whichever axis of its bounding hideBox is
+    ' same span merge into one rect), banding across whichever axis of its bounding box is
     ' shorter unless `bandAcrossY` says which. Each band's span is the polygon's cross-section
     ' at the band's middle, so at 1px it's as accurate as the exact fill; edges come out
     ' stepped by up to `bandSize` pixels. Bands off the canvas are skipped.
@@ -3706,7 +3719,7 @@ namespace BGE
       return insideCanvas
     end function
 
-    ' Whether the axis-aligned bounding hideBox of the given canvas-space points is entirely
+    ' Whether the axis-aligned bounding box of the given canvas-space points is entirely
     ' outside this renderer's canvas - a cheap, deterministic version of the check
     ' shouldDrawTo()/isInsideCanvas() run against a specific draw call's rectangle. A
     ' SceneObject already holding its own canvas points (e.g. getAllCanvasPoints()) can use

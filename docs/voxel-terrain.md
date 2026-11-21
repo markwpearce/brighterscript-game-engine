@@ -67,7 +67,8 @@ and z, and a height of 255 is `255 * heightScale` above the entity.
 To stand something on the terrain, `terrain.heightAt(worldX, worldZ)` gives the ground's world y
 there, blended between cells.
 
-`setMap(map)` swaps the map.
+`setMap(map)` swaps the map. Call it too after changing a map's heights or colours in place, or
+the terrain keeps drawing what it had.
 
 ## What draws over what
 
@@ -87,7 +88,8 @@ end. Without either, the terrain just stops at the draw distance.
 ## Roll and pitch
 
 Roll works at any angle: the terrain is drawn level into a square bitmap as wide as the screen's
-diagonal, then turned onto the screen.
+diagonal, then turned onto the screen. That bitmap is kept while rolled: ~8.6 MB at 1280x720, ~19 MB
+at 1920x1080, which counts against the device's texture memory.
 
 Pitch is harder: the terrain's columns stay upright, so it can't truly look up or down. `pitchMode`
 picks how it copes:

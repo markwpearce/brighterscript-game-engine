@@ -195,9 +195,18 @@ namespace BGE
       if not exact
         horizon = height / 2 + focal * tan(pitch)
       end if
+      camX = (p.x - origin.x) / cellSize
+      camZ = (p.z - (origin.z ?? 0)) / cellSize
+      map = d.map
+      if map.edgeMode = BGE.VoxelEdgeMode.wrap
+        ' the same view from the copy of the map the camera is over: keeps the march's 16.16
+        ' positions small however far it flies
+        camX -= map.size * int(camX / map.size)
+        camZ -= map.size * int(camZ / map.size)
+      end if
       return {
-        camX: (p.x - origin.x) / cellSize,
-        camZ: (p.z - (origin.z ?? 0)) / cellSize,
+        camX: camX,
+        camZ: camZ,
         camHeight: (p.y - (origin.y ?? 0)) / d.heightScale,
         forwardX: forwardX,
         forwardZ: forwardZ,
@@ -257,15 +266,18 @@ namespace BGE
       return BGE.Math.VectorOps.create(cx + dx * m.rollCos - dy * m.rollSin, cy + dx * m.rollSin + dy * m.rollCos)
     end function
 
-    ' Whether hills nearer than `limit` hide an object, from its projected points (x, y, depth
-    ' triples from Camera3d.projectPointsWithDepth(); points behind the camera are skipped).
+    ' Whether hills hide an object, from its projected points (x, y, depth triples from
+    ' Camera3d.projectPointsWithDepth()). Only partly if any point is behind the camera: its
+    ' on-screen part then reaches past the box of the rest.
     '
     ' @param {float[]} projected
-    ' @param {float} limit level depth (see levelDepthOf()) spans must start nearer than
-    ' @param {roAssociativeArray} hideBox filled with the object's level-view hideBox and columns, for
+    ' @param {float} allLimit level depth (see levelDepthOf()) hills must be nearer than to hide
+    '   all of it: its nearest point's, less the tolerance
+    ' @param {float} limit level depth hills nearer than are drawn back over it
+    ' @param {roAssociativeArray} hideBox filled with the object's level-view box and columns, for
     '   redrawOver()
     ' @return {integer} a BGE.VoxelHidden
-    function testHidden(projected as float[], limit as float, hideBox as roAssociativeArray) as integer
+    function testHidden(projected as float[], allLimit as float, limit as float, hideBox as roAssociativeArray) as integer
       left = 1e9
       top = 1e9
       right = -1e9
@@ -279,8 +291,11 @@ namespace BGE
       rollCos = m.rollCos
       rollSin = m.rollSin
       behind = BGE.PROJECTED_BEHIND_CAMERA_DEPTH
+      anyBehind = false
       for i = 0 to projected.count() - 1 step 3
-        if projected[i + 2] <> behind
+        if projected[i + 2] = behind
+          anyBehind = true
+        else
           px = projected[i]
           py = projected[i + 1]
           if rolled
@@ -326,13 +341,12 @@ namespace BGE
       hideBox.lastColumn = lastCol
       hideBox.limit = limit
       anyHidden = false
-      allHidden = true
+      allHidden = not anyBehind
       for c = firstCol to lastCol
-        occluderTop = view.occluderTopAt(c, limit)
-        if occluderTop < bottom
+        if view.occluderTopAt(c, limit) < bottom
           anyHidden = true
         end if
-        if occluderTop > top
+        if allHidden and view.occluderTopAt(c, allLimit) > top
           allHidden = false
         end if
       end for
@@ -345,7 +359,7 @@ namespace BGE
       return BGE.VoxelHidden.visible
     end function
 
-    ' Draws again, clipped to a hideBox from testHidden() (one column wider each side), the spans
+    ' Draws again, clipped to a box from testHidden() (one column wider each side), the spans
     ' nearer than its limit - to put the hills back over an object drawn after them.
     '
     ' @param {Renderer} rendererObj
