@@ -213,6 +213,16 @@ label.customX = width * 0.1 ' title-safe: at least 10% in from every edge
 label.customY = height * 0.1
 ```
 
+A custom-positioned `Label` lines its text up on `customX` by `horizAlign`, like
+`Renderer.drawText()`: `"center"` centres it there and `"right"` ends it there, so a score can
+sit centred on a point without measuring it:
+
+```
+score.horizAlign = "center"
+score.customX = width / 2
+score.setText(m.score.toStr())
+```
+
 To lay out UI in fixed pixels instead, pass a UI size: `new BGE.Game(1280, 720, 1280, 720)` scales
 a 1280x720 `uiCanvas` up to the screen.
 
