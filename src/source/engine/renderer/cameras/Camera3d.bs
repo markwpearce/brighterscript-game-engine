@@ -189,7 +189,10 @@ namespace BGE
     private viewForwardOrientation as BGE.Math.Vector = invalid
     ' the projection terms projectionChangedThisFrame() last saw for pitch
     private lastProjectionPitchMode as string = "rotate"
-    private lastProjectionPitchShift as float = 0
+    ' getPitchShiftY() as of the last computeWorldToCameraMatrix()
+    private pitchShiftY as float = 0
+    ' a shear frustum's corner directions, rebuilt with its normals
+    private shearCorners as roAssociativeArray = invalid
     ' projectPointsWithDepth()'s focal length, and the frame width, FOV and zoom it was for
     private projectionNear as float = 0
     private projectionNearFrameWidth as float = -1
@@ -253,7 +256,7 @@ namespace BGE
       fov = m.getEffectiveFieldOfViewDegrees()
       vertFov = m.getVerticalFOV()
       if m.pitchMode = CameraPitchMode.shear
-        m.recomputeShearFrustum()
+        m.recomputeShearFrustum(recomputeNormals)
         return
       end if
 
@@ -286,32 +289,38 @@ namespace BGE
     ' The frustum of a shear camera: a level view whose top and bottom edges are moved by the
     ' pitch shift, so they aren't symmetric about the view direction. Each side plane is built
     ' from the rays through the frame's corners.
-    private sub recomputeShearFrustum()
+    private sub recomputeShearFrustum(recomputeNormals as boolean)
       f = m.getViewForward()
-      up = m.getUpVector()
-      right = m.getRightVector()
-      focal = m.getProjectionNear()
-      halfWidth = m.frameSize.x / 2 / focal
-      principalY = m.frameSize.y / 2 + m.getPitchShiftY()
-      topUp = principalY / focal
-      bottomUp = (principalY - m.frameSize.y) / focal
-      topLeft = m.shearCornerRay(f, right, up, -halfWidth, topUp)
-      topRight = m.shearCornerRay(f, right, up, halfWidth, topUp)
-      bottomLeft = m.shearCornerRay(f, right, up, -halfWidth, bottomUp)
-      bottomRight = m.shearCornerRay(f, right, up, halfWidth, bottomUp)
-      ' the ray through the frame's middle, which is inside every side
-      middle = m.shearCornerRay(f, right, up, 0, m.getPitchShiftY() / focal)
-      normals = m.frustumNormals
-      normals.near = BGE.Math.VectorOps.copy(f)
-      normals.top = m.insideNormal(topLeft, topRight, middle)
-      normals.bottom = m.insideNormal(bottomLeft, bottomRight, middle)
-      normals.left = m.insideNormal(topLeft, bottomLeft, middle)
-      normals.right = m.insideNormal(topRight, bottomRight, middle)
+      if recomputeNormals or invalid = m.shearCorners
+        up = m.getUpVector()
+        right = m.getRightVector()
+        focal = m.getProjectionNear()
+        halfWidth = m.frameSize.x / 2 / focal
+        principalY = m.frameSize.y / 2 + m.getPitchShiftY()
+        topUp = principalY / focal
+        bottomUp = (principalY - m.frameSize.y) / focal
+        corners = {
+          topLeft: m.shearCornerRay(f, right, up, -halfWidth, topUp),
+          topRight: m.shearCornerRay(f, right, up, halfWidth, topUp),
+          bottomLeft: m.shearCornerRay(f, right, up, -halfWidth, bottomUp),
+          bottomRight: m.shearCornerRay(f, right, up, halfWidth, bottomUp)
+        }
+        m.shearCorners = corners
+        ' the ray through the frame's middle, which is inside every side
+        middle = m.shearCornerRay(f, right, up, 0, m.getPitchShiftY() / focal)
+        normals = m.frustumNormals
+        normals.near = BGE.Math.VectorOps.copy(f)
+        normals.top = m.insideNormal(corners.topLeft, corners.topRight, middle)
+        normals.bottom = m.insideNormal(corners.bottomLeft, corners.bottomRight, middle)
+        normals.left = m.insideNormal(corners.topLeft, corners.bottomLeft, middle)
+        normals.right = m.insideNormal(corners.topRight, corners.bottomRight, middle)
+      end if
+      corners = m.shearCorners
       rays = m.frustumRays
-      rays.topLeft = {origin: m.position, direction: topLeft}
-      rays.topRight = {origin: m.position, direction: topRight}
-      rays.bottomLeft = {origin: m.position, direction: bottomLeft}
-      rays.bottomRight = {origin: m.position, direction: bottomRight}
+      rays.topLeft = {origin: m.position, direction: corners.topLeft}
+      rays.topRight = {origin: m.position, direction: corners.topRight}
+      rays.bottomLeft = {origin: m.position, direction: corners.bottomLeft}
+      rays.bottomRight = {origin: m.position, direction: corners.bottomRight}
 
       fovRad = BGE.Math.DegreesToRadians(m.getEffectiveFieldOfViewDegrees())
       halfFrameSize = BGE.Math.max(m.frameSize.x, m.frameSize.y) / 2
@@ -386,6 +395,21 @@ namespace BGE
       return m.getProjectionNear() * t
     end function
 
+    ' The side of the square a roll composite must have (drawn level, then turned about the
+    ' image centre onto the frame) to cover the frame at any roll: the frame's diagonal, or under
+    ' shear twice the distance from the moved image centre to the farthest corner.
+    '
+    ' @return {float}
+    function getRollViewSize() as float
+      shift = m.getPitchShiftY()
+      halfWidth = m.frameSize.x / 2
+      halfHeight = m.frameSize.y / 2 + Abs(shift)
+      if shift = 0
+        return Int(Sqr(m.frameSize.x * m.frameSize.x + m.frameSize.y * m.frameSize.y)) + 2
+      end if
+      return Int(2 * Sqr(halfWidth * halfWidth + halfHeight * halfHeight)) + 2
+    end function
+
     ' The canvas row the view direction passes through: the frame's middle, moved by
     ' getPitchShiftY() under shear.
     '
@@ -452,7 +476,8 @@ namespace BGE
       posX = camPos.x
       posY = camPos.y
       posZ = camPos.z ?? 0
-      orient = m.getViewForward()
+      ' the view direction (level under shear), as the near plane faces
+      orient = nearN
       orientZ = orient.z ?? 0
       drawDistance = m.getCurrentDrawDistance()
       if points.Count() = 0
@@ -516,6 +541,8 @@ namespace BGE
     override sub computeWorldToCameraMatrix()
       lookTarget = BGE.Math.VectorOps.add(m.position, m.getViewForward())
       m.worldToCamera = BGE.Math.Matrix44.inverse(BGE.Math.lookAt(m.position, lookTarget, m.getUpVector()))
+      ' kept with the matrix it goes with, for the projections' hot loops
+      m.pitchShiftY = m.getPitchShiftY()
     end sub
 
     override function getDrawMode() as BGE.SceneObjectDrawMode
@@ -545,7 +572,7 @@ namespace BGE
       canvasHeight = m.frameSize.y
       ndcX = (near * pCamera.x / -pCamera.z + canvasWidth * 0.5) / canvasWidth
       ndcY = (near * pCamera.y / -pCamera.z + canvasHeight * 0.5) / canvasHeight
-      return {x: fix(ndcX * canvasWidth), y: cint((1 - ndcY) * canvasHeight + m.getPitchShiftY()), z: 0}
+      return {x: fix(ndcX * canvasWidth), y: cint((1 - ndcY) * canvasHeight + m.pitchShiftY), z: 0}
     end function
 
 
@@ -606,7 +633,7 @@ namespace BGE
       near = m.getProjectionNear()
       canvasWidth = m.frameSize.x
       canvasHeight = m.frameSize.y
-      shiftY = m.getPitchShiftY()
+      shiftY = m.pitchShiftY
       nearNormal = m.frustumNormals.near
       convergence = m.frustrumConvergence
       for each point in points
@@ -707,6 +734,7 @@ namespace BGE
     '
     ' @param {BGE.Math.Plane} plane
     ' @return {BGE.Math.Vector[]} Two points in screen space that define the horizon line of the plane, or an empty array if the plane is not visible.
+    ' With pitchMode "rotate" only: doesn't apply a shear camera's pitch shift.
     function getHorizonOfPlane_AI(plane as BGE.Math.Plane) as BGE.Math.Vector[]
       output as BGE.Math.Vector[] = []
       if invalid = plane or invalid = plane.normal or invalid = plane.point
@@ -884,6 +912,7 @@ namespace BGE
     '
     ' @param {BGE.Math.Plane} plane
     ' @return {BGE.Math.Vector[]} Two points in screen space that define the horizon line of the plane, or invalid if the plane is not visible.
+    ' With pitchMode "rotate" only: doesn't apply a shear camera's pitch shift.
     function getHorizonLine(plane as BGE.Math.Plane) as BGE.Math.Vector[]
       if invalid = m.worldToCamera
         m.computeWorldToCameraMatrix()
@@ -903,6 +932,7 @@ namespace BGE
     ' @param {BGE.Math.Plane} plane
     ' @param {float} canvasSize
     ' @return {BGE.Math.Vector[]}
+    ' With pitchMode "rotate" only: doesn't apply a shear camera's pitch shift.
     function getLevelHorizonLine(plane as BGE.Math.Plane, canvasSize as float) as BGE.Math.Vector[]
       lookTarget = BGE.Math.VectorOps.add(m.position, m.orientation)
       levelWorldToCamera = BGE.Math.Matrix44.inverse(BGE.Math.lookAt(m.position, lookTarget, m.getLevelUpVector()))
@@ -1246,8 +1276,8 @@ namespace BGE
         return 1.0
       end if
       ' dot(point - position, view forward), inlined: this runs for every object each frame the
-      ' camera moves
-      o = m.getViewForward()
+      ' camera moves. The near plane faces the view direction (level under shear).
+      o = m.frustumNormals.near
       ox = o.x
       oy = o.y
       oz = o.z ?? 0
@@ -1313,11 +1343,10 @@ namespace BGE
         changed = true
       end if
 
-      ' under shear the pitch moves the image, so it's part of the projection
-      shift = m.getPitchShiftY()
-      if m.lastProjectionPitchMode <> m.pitchMode or m.lastProjectionPitchShift <> shift
+      ' switching how pitch is shown changes the projection with no movement; a pitch change
+      ' under shear is already a move (orientation changed), which refreshes everything
+      if m.lastProjectionPitchMode <> m.pitchMode
         m.lastProjectionPitchMode = m.pitchMode
-        m.lastProjectionPitchShift = shift
         changed = true
         m.worldToCamera = invalid
       end if
