@@ -1,0 +1,135 @@
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/debug/PerfStats.bs"
+
+namespace tests
+
+  @suite("BGE.Debug.PerfStats")
+  class PerfStatsTests extends rooibos.BaseTestSuite
+
+    ' Adds frames of these times (ms), out of order, with no stages
+    private function statsWithFrames(times as float[], options = {} as BGE.Debug.PerfStatsOptions) as BGE.Debug.PerfStats
+      stats = new BGE.Debug.PerfStats(options)
+      for each ms in times
+        stats.addFrame(ms)
+      end for
+      return stats
+    end function
+
+    ' 1..10 ms, shuffled
+    private function tenFrames() as float[]
+      return [7.0, 2.0, 10.0, 4.0, 1.0, 9.0, 3.0, 6.0, 8.0, 5.0]
+    end function
+
+    @describe("getSummary")
+
+    @it("reports zeros with no frames")
+    function _()
+      stats = new BGE.Debug.PerfStats()
+      summary = stats.getSummary()
+      m.assertEqual(summary.frames, 0)
+      m.assertEqual(summary.fps, 0.0)
+      m.assertEqual(summary.maxMs, 0.0)
+      m.assertEqual(summary.percentileMs.count(), 0)
+      m.assertEqual(summary.stageNames.count(), 0)
+    end function
+
+    @it("works out fps and the mean frame time")
+    function _()
+      summary = m.statsWithFrames([20.0, 40.0]).getSummary()
+      m.assertEqual(summary.frames, 2)
+      m.assertEqual(summary.frameMs, 30.0)
+      m.assertEqual(Int(summary.fps * 100 + 0.5), 3333)
+      m.assertEqual(summary.seconds, 0.06)
+    end function
+
+    @it("sorts frame times for the median, percentiles and max")
+    function _()
+      summary = m.statsWithFrames(m.tenFrames()).getSummary()
+      m.assertEqual(summary.medianMs, 6.0)
+      m.assertEqual(summary.percentileMs.count(), 2)
+      m.assertEqual(summary.percentileMs[0], 6.0)
+      m.assertEqual(summary.percentileMs[1], 10.0)
+      m.assertEqual(summary.maxMs, 10.0)
+    end function
+
+    @it("takes custom percentiles")
+    function _()
+      summary = m.statsWithFrames(m.tenFrames(), {percentiles: [0.0, 0.25, 1.0]}).getSummary()
+      m.assertEqual(summary.percentileMs[0], 1.0)
+      m.assertEqual(summary.percentileMs[1], 3.0)
+      m.assertEqual(summary.percentileMs[2], 10.0)
+    end function
+
+    @it("counts frames over spikeFactor times the median as spikes")
+    function _()
+      times = [10.0, 10.0, 10.0, 10.0, 16.0, 30.0] as float[]
+      m.assertEqual(m.statsWithFrames(times).getSummary().spikes, 2)
+      m.assertEqual(m.statsWithFrames(times, {spikeFactor: 2.0}).getSummary().spikes, 1)
+    end function
+
+    @it("averages each stage's time and count per frame, in the order first seen")
+    function _()
+      stats = new BGE.Debug.PerfStats()
+      stats.addFrame(30.0, {walls: 4, sort: 1}, {walls: 2, sort: 1})
+      stats.addFrame(30.0, {walls: 6, planes: 3}, {walls: 4, planes: 1})
+      summary = stats.getSummary()
+      m.assertEqual(summary.stageNames.count(), 3)
+      m.assertEqual(summary.stageNames[2], "planes")
+      walls = summary.stages.walls as BGE.Debug.PerfStageStats
+      m.assertEqual(walls.ms, 5.0)
+      m.assertEqual(walls.count, 3.0)
+      planes = summary.stages.planes as BGE.Debug.PerfStageStats
+      m.assertEqual(planes.ms, 1.5)
+    end function
+
+    @it("reports only stageNames, in that order")
+    function _()
+      stats = new BGE.Debug.PerfStats({stageNames: ["sort", "missing", "walls"]})
+      stats.addFrame(30.0, {walls: 4, sort: 1, planes: 2}, {walls: 2, sort: 1, planes: 1})
+      summary = stats.getSummary()
+      m.assertEqual(summary.stageNames.count(), 2)
+      m.assertEqual(summary.stageNames[0], "sort")
+      m.assertEqual(summary.stageNames[1], "walls")
+      m.assertInvalid(summary.stages.planes)
+    end function
+
+    @it("starts over after reset()")
+    function _()
+      stats = m.statsWithFrames(m.tenFrames())
+      stats.addFrame(5.0, {walls: 4}, {walls: 1})
+      stats.reset()
+      m.assertEqual(stats.getFrameCount(), 0)
+      stats.addFrame(8.0)
+      summary = stats.getSummary()
+      m.assertEqual(summary.frames, 1)
+      m.assertEqual(summary.maxMs, 8.0)
+      m.assertEqual(summary.stageNames.count(), 0)
+    end function
+
+    @describe("format")
+
+    @it("prints fps, stages, frame times and the run id")
+    function _()
+      stats = new BGE.Debug.PerfStats({runId: "abc"})
+      stats.addFrame(20.0, {walls: 4}, {walls: 2})
+      stats.addFrame(40.0, {walls: 6}, {walls: 2})
+      line = stats.format(stats.getSummary())
+      m.assertEqual(line, "fps " + (2000.0 / 60.0).toStr() + " frameMs 30 | walls 5ms x2 | med 40 p90 40 max 40 spikes 0/2 | run abc")
+    end function
+
+    @it("labels percentiles other than the median by percent")
+    function _()
+      stats = m.statsWithFrames(m.tenFrames(), {percentiles: [0.5, 0.95, 0.99]})
+      m.assertEqual(stats.formatFrameTimes(stats.getSummary()), " | med 6 p95 10 p99 10 max 10 spikes 1/10")
+    end function
+
+    @it("leaves out frame times with no frames")
+    function _()
+      stats = new BGE.Debug.PerfStats()
+      m.assertEqual(stats.formatFrameTimes(stats.getSummary()), "")
+      m.assertEqual(stats.formatStages(stats.getSummary()), "")
+    end function
+
+  end class
+
+end namespace

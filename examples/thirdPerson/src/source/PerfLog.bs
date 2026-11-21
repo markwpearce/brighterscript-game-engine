@@ -1,23 +1,23 @@
+import "pkg:/source/engine/debug/PerfStats.bs"
+
 ' Prints the game renderer's average frame time and stage times (Renderer.profileStages) to
 ' the console every few seconds. Turned on with the `perf=1` deep link; `perf=phases` prints the
-' frame time alone, without the per-object timers' own cost.
+' frame time alone, without the per-object timers' own cost. The frame and stage times come from
+' BGE.Debug.PerfStats; the object, occlusion, impostor and MOVE figures are this game's own.
 class PerfLog
 
   intervalSeconds as float = 3
 
   private renderer as BGE.Renderer
+  private stats as BGE.Debug.PerfStats
   private elapsed as float = 0
-  private frames as integer = 0
   ' objects occlusion culling hid, summed over the frames
   private occluded as integer = 0
-  private stageTotals as roAssociativeArray = {}
-  private stageCounts as roAssociativeArray = {}
   ' Impostor outcomes over the interval (#556): models with an impostor, refreshed each interval
   private impostorModels as BGE.SceneObjectModel[] = []
   private impostorCounts as roAssociativeArray = {}
   private runId as string = ""
-  ' Frame times over the interval, and the most redraws in one frame, for spikes
-  private frameTimes as float[] = []
+  ' The most redraws in one frame over the interval
   private maxRedrawsInFrame as integer = 0
   ' The frames after the camera starts moving from still (MOVE lines): ms and quality level
   private stillSeconds as float = 0
@@ -27,6 +27,8 @@ class PerfLog
   sub new(rendererObj as BGE.Renderer, stages = true as boolean, runId = "" as string)
     m.renderer = rendererObj
     m.runId = runId
+    stats = new BGE.Debug.PerfStats({runId: runId})
+    m.stats = stats
     rendererObj.profileStages = stages
     m.resetImpostorCounts()
     if runId <> ""
@@ -37,45 +39,26 @@ class PerfLog
   ' Adds last frame's stage times (render runs after the update this is called from)
   sub update(dt as float, qualityLevel = -1 as integer)
     m.traceMove(dt, qualityLevel)
-    m.frames++
     m.elapsed += dt
-    m.frameTimes.push(dt * 1000)
-    stageMs = m.renderer.getStageMsLastFrame()
-    stageCounts = m.renderer.getStageCountsLastFrame()
-    for each name in stageMs
-      if m.stageTotals[name] = invalid
-        m.stageTotals[name] = 0
-        m.stageCounts[name] = 0
-      end if
-      m.stageTotals[name] += stageMs[name]
-      m.stageCounts[name] += stageCounts[name]
-    end for
+    m.stats.addFrame(dt * 1000, m.renderer.getStageMsLastFrame(), m.renderer.getStageCountsLastFrame())
     m.countImpostors()
     m.occluded += m.renderer.getOccludedCountLastFrame()
     if m.elapsed < m.intervalSeconds
       return
     end if
-    frameMs = 1000 * m.elapsed / m.frames
-    line = `PERF fps ${(m.frames / m.elapsed).toStr()} frameMs ${frameMs.toStr()} objects ${m.renderer.getSceneObjectCount().toStr()} occluded ${(m.occluded / m.frames).toStr()}`
-    for each name in m.stageTotals
-      avgMs = m.stageTotals[name] / m.frames
-      avgCount = m.stageCounts[name] / m.frames
-      line += ` | ${name} ${avgMs.toStr()}ms x${avgCount.toStr()}`
-    end for
-    line += m.describeSpikes() + m.describeImpostors()
+    summary = m.stats.getSummary()
+    line = `PERF fps ${summary.fps.toStr()} frameMs ${summary.frameMs.toStr()} objects ${m.renderer.getSceneObjectCount().toStr()} occluded ${(m.occluded / summary.frames).toStr()}`
+    line += `${m.stats.formatStages(summary)}${m.stats.formatFrameTimes(summary)} maxRedraws ${m.maxRedrawsInFrame.toStr()}${m.describeImpostors(summary.frames)}`
     if m.runId <> ""
       line = `${line} | run ${m.runId}`
     end if
     print line
     m.findImpostorModels()
     m.resetImpostorCounts()
-    m.frameTimes = []
+    m.stats.reset()
     m.maxRedrawsInFrame = 0
     m.elapsed = 0
-    m.frames = 0
     m.occluded = 0
-    m.stageTotals = {}
-    m.stageCounts = {}
   end sub
 
   ' Prints the first frames after the camera starts moving from a still spell of 1s or more.
@@ -142,35 +125,13 @@ class PerfLog
     m.maxRedrawsInFrame = BGE.Math.Max(m.maxRedrawsInFrame, counts.redraw - redraws)
   end sub
 
-  ' Median, 90th percentile and longest frame, and how many frames ran over 1.5x the median
-  private function describeSpikes() as string
-    count = m.frameTimes.count()
-    if count = 0
-      return ""
-    end if
-    sorted = []
-    for each ms in m.frameTimes
-      sorted.push({ms: ms})
-    end for
-    sorted.SortBy("ms")
-    median = sorted[count \ 2].ms
-    p90 = sorted[BGE.Math.Min(count - 1, Int(count * 0.9))].ms
-    spikes = 0
-    for each ms in m.frameTimes
-      if ms > median * 1.5
-        spikes++
-      end if
-    end for
-    return ` | med ${Int(median).toStr()} p90 ${Int(p90).toStr()} max ${Int(sorted[count - 1].ms).toStr()} spikes ${spikes.toStr()}/${count.toStr()} maxRedraws ${m.maxRedrawsInFrame.toStr()}`
-  end function
-
-  private function describeImpostors() as string
+  private function describeImpostors(frames as integer) as string
     counts = m.impostorCounts
     total = counts.blit + counts.strips + counts.redraw
     if total = 0
       return ""
     end if
-    line = ` | impostors x${(total / m.frames).toStr()}/frame blit ${m.percentOf(counts.blit, total)} strips ${m.percentOf(counts.strips, total)}`
+    line = ` | impostors x${(total / frames).toStr()}/frame blit ${m.percentOf(counts.blit, total)} strips ${m.percentOf(counts.strips, total)}`
     if counts.strips > 0
       line += ` (avg ${(Int(10 * counts.stripTotal / counts.strips + 0.5) / 10).toStr()})`
     end if

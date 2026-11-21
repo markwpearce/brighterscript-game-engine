@@ -1,0 +1,246 @@
+import "../Game.bs"
+import "../../math/math.bs"
+
+namespace BGE.Debug
+
+  ' Options for BGE.Debug.PerfStats and Game.debugPrintPerfStats(). Every field is optional.
+  interface PerfStatsOptions extends roAssociativeArray
+    ' Game.debugPrintPerfStats() only: turn on the game canvas renderer's profileStages and
+    ' include its stage times (default false). Costs a timer read per scene object drawn.
+    optional stages as boolean
+    ' Only these stages, in this order (default: every stage the frames report)
+    optional stageNames as string[]
+    ' Frame time percentiles to report, 0 to 1 (default [0.5, 0.9]); 0.5 prints as "med"
+    optional percentiles as float[]
+    ' A frame over spikeFactor times the median frame time counts as a spike (default 1.5)
+    optional spikeFactor as float
+    ' Added to the summary and the printed line, to tell runs apart in a log (default "")
+    optional runId as string
+    ' Game.debugPrintPerfStats() only: print the stats to the console (default true)
+    optional printToConsole as boolean
+    ' Game.debugPrintPerfStats() only: called with each interval's stats, e.g. to show or send
+    ' them. `m` is this options bag.
+    optional onStats as sub(stats as BGE.Debug.PerfStatsSummary, game as BGE.Game) as void
+  end interface
+
+  ' One stage's average per frame over an interval
+  interface PerfStageStats extends roAssociativeArray
+    ' Milliseconds per frame
+    ms as float
+    ' Times the stage ran per frame
+    count as float
+  end interface
+
+  ' Frame and stage times over an interval, from BGE.Debug.PerfStats.getSummary()
+  interface PerfStatsSummary extends roAssociativeArray
+    frames as integer
+    ' Frame times added up
+    seconds as float
+    fps as float
+    ' Mean frame time
+    frameMs as float
+    ' The options' percentiles, and the frame time at each (same order)
+    percentiles as float[]
+    percentileMs as float[]
+    medianMs as float
+    maxMs as float
+    ' Frames over spikeFactor times the median
+    spikes as integer
+    ' Stage names in report order, and each one's PerfStageStats
+    stageNames as string[]
+    stages as roAssociativeArray
+    runId as string
+    ' Game.debugPrintPerfStats() only: entity and collider counts, and the last frame's phase
+    ' times (uiInput, updateAndCollision, entityDraw, swap)
+    optional entityCount as integer
+    optional colliderCount as integer
+    optional phaseMs as roAssociativeArray
+  end interface
+
+  ' Collects frame times and named stage times (e.g. Renderer.getStageMsLastFrame()) over an
+  ' interval, and summarizes them: fps, mean frame time, percentiles, the longest frame, spikes
+  ' and each stage's average. Game.debugPrintPerfStats() uses one; a game can keep its own for
+  ' its own report.
+  '
+  ' @example
+  ' stats = new BGE.Debug.PerfStats({runId: "a"})
+  ' ' each frame
+  ' stats.addFrame(dt * 1000, renderer.getStageMsLastFrame(), renderer.getStageCountsLastFrame())
+  ' ' every few seconds
+  ' print "PERF " + stats.format(stats.getSummary())
+  ' stats.reset()
+  class PerfStats
+
+    percentiles as float[] = [0.5, 0.9]
+    spikeFactor as float = 1.5
+    ' Stages to report, in order; empty reports every stage in the order first seen
+    stageNames as string[] = []
+    runId as string = ""
+
+    private frameTimes as float[] = []
+    private totalMs as float = 0.0
+    private stageTotals as roAssociativeArray = {}
+    private stageCounts as roAssociativeArray = {}
+    private seenStages as string[] = []
+
+    ' @param {BGE.Debug.PerfStatsOptions} [options={}] - stageNames, percentiles, spikeFactor, runId
+    sub new(options = {} as BGE.Debug.PerfStatsOptions)
+      if options.stageNames <> invalid
+        m.stageNames = options.stageNames
+      end if
+      if options.percentiles <> invalid
+        m.percentiles = options.percentiles
+      end if
+      if options.spikeFactor <> invalid
+        m.spikeFactor = options.spikeFactor
+      end if
+      if options.runId <> invalid
+        m.runId = options.runId
+      end if
+    end sub
+
+    ' Adds one frame.
+    '
+    ' @param {float} frameMs the frame's time in milliseconds
+    ' @param {roAssociativeArray} [stageMs={}] stage name to milliseconds this frame
+    ' @param {roAssociativeArray} [stageCounts={}] stage name to how many times it ran this frame
+    sub addFrame(frameMs as float, stageMs = {} as roAssociativeArray, stageCounts = {} as roAssociativeArray)
+      m.frameTimes.push(frameMs)
+      m.totalMs += frameMs
+      for each name in stageMs
+        if invalid = m.stageTotals[name]
+          m.stageTotals[name] = 0.0
+          m.stageCounts[name] = 0.0
+          m.seenStages.push(name)
+        end if
+        m.stageTotals[name] += stageMs[name]
+        count = stageCounts[name]
+        if count <> invalid
+          m.stageCounts[name] += count
+        end if
+      end for
+    end sub
+
+    ' @return {integer} frames added since the last reset()
+    function getFrameCount() as integer
+      return m.frameTimes.count()
+    end function
+
+    ' Clears the frames, to start the next interval.
+    sub reset()
+      m.frameTimes = []
+      m.totalMs = 0.0
+      m.stageTotals = {}
+      m.stageCounts = {}
+      m.seenStages = []
+    end sub
+
+    ' Summarizes the frames added since the last reset(). With no frames, every time is 0.
+    '
+    ' @return {BGE.Debug.PerfStatsSummary}
+    function getSummary() as BGE.Debug.PerfStatsSummary
+      frames = m.frameTimes.count()
+      summary = {
+        frames: frames,
+        seconds: m.totalMs / 1000.0,
+        fps: 0.0,
+        frameMs: 0.0,
+        percentiles: m.percentiles,
+        percentileMs: [],
+        medianMs: 0.0,
+        maxMs: 0.0,
+        spikes: 0,
+        stageNames: [],
+        stages: {},
+        runId: m.runId
+      } as BGE.Debug.PerfStatsSummary
+      if frames = 0
+        return summary
+      end if
+      if m.totalMs > 0
+        summary.fps = 1000.0 * frames / m.totalMs
+      end if
+      summary.frameMs = m.totalMs / frames
+      ' Sort() on a plain numeric array - SortBy() on a field misorders numbers on brs-cli (#230)
+      sorted = []
+      sorted.append(m.frameTimes)
+      sorted.Sort()
+      for each p in m.percentiles
+        summary.percentileMs.push(sorted[m.percentileIndex(frames, p)])
+      end for
+      summary.medianMs = sorted[m.percentileIndex(frames, 0.5)]
+      summary.maxMs = sorted[frames - 1]
+      for each ms in m.frameTimes
+        if ms > summary.medianMs * m.spikeFactor
+          summary.spikes++
+        end if
+      end for
+      names = m.stageNames
+      if names.count() = 0
+        names = m.seenStages
+      end if
+      for each name in names
+        if m.stageTotals[name] <> invalid
+          summary.stageNames.push(name)
+          summary.stages[name] = {ms: m.stageTotals[name] / frames, count: m.stageCounts[name] / frames} as BGE.Debug.PerfStageStats
+        end if
+      end for
+      return summary
+    end function
+
+    ' A one-line report: "fps 30 frameMs 33.3 | <stages> | med 33 p90 40 max 51 spikes 2/90 | run a"
+    ' (no stages or run when there are none).
+    '
+    ' @param {BGE.Debug.PerfStatsSummary} summary
+    ' @return {string}
+    function format(summary as BGE.Debug.PerfStatsSummary) as string
+      line = `fps ${summary.fps.toStr()} frameMs ${summary.frameMs.toStr()}${m.formatStages(summary)}${m.formatFrameTimes(summary)}`
+      if summary.runId <> ""
+        line += ` | run ${summary.runId}`
+      end if
+      return line
+    end function
+
+    ' " | <name> <ms>ms x<count>" for each stage, or "" with none.
+    '
+    ' @param {BGE.Debug.PerfStatsSummary} summary
+    ' @return {string}
+    function formatStages(summary as BGE.Debug.PerfStatsSummary) as string
+      line = ""
+      for each name in summary.stageNames
+        stage = summary.stages[name] as BGE.Debug.PerfStageStats
+        line += ` | ${name} ${stage.ms.toStr()}ms x${stage.count.toStr()}`
+      end for
+      return line
+    end function
+
+    ' " | med 33 p90 40 max 51 spikes 2/90" (whole milliseconds), or "" with no frames.
+    '
+    ' @param {BGE.Debug.PerfStatsSummary} summary
+    ' @return {string}
+    function formatFrameTimes(summary as BGE.Debug.PerfStatsSummary) as string
+      if summary.frames = 0
+        return ""
+      end if
+      line = " |"
+      for i = 0 to summary.percentiles.count() - 1
+        line += ` ${m.percentileLabel(summary.percentiles[i])} ${Int(summary.percentileMs[i]).toStr()}`
+      end for
+      return line + ` max ${Int(summary.maxMs).toStr()} spikes ${summary.spikes.toStr()}/${summary.frames.toStr()}`
+    end function
+
+    ' "med" for 0.5, otherwise "p" and the percent, e.g. "p90"
+    private function percentileLabel(p as float) as string
+      if p = 0.5
+        return "med"
+      end if
+      return "p" + Int(p * 100 + 0.5).toStr()
+    end function
+
+    private function percentileIndex(count as integer, p as float) as integer
+      return BGE.Math.Max(0, BGE.Math.Min(count - 1, Int(count * p)))
+    end function
+
+  end class
+
+end namespace
