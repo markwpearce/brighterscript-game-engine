@@ -166,6 +166,18 @@ it is. Every ray still closes exactly, so hiding and floors are unchanged.
 | High   | 0.6                       |
 | Ultra  | 1 (never)                 |
 
+A [voxel terrain](/voxel-terrain) marches `voxelColumns` screen columns, each taking
+`voxelBandSteps` depth steps before its step doubles. Its cost is about columns x steps
+(~4 µs each on a Roku Ultra), so these are its two levers.
+
+| Level  | `voxelColumns` | `voxelBandSteps` |
+| ------ | -------------- | ---------------- |
+| Basic  | 50             | 20               |
+| Low    | 64             | 20               |
+| Medium | 80             | 20               |
+| High   | 100            | 20               |
+| Ultra  | 100            | 28               |
+
 ## Scale your own content
 
 Every entity and scene gets `onQualityChanged(level)` when the level changes:
