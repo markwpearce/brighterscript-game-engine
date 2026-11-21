@@ -35,7 +35,7 @@ const SHARDS = [
 ];
 
 const GIB = 1024 * 1024 * 1024;
-// All five at once peaked at ~5.7GB (before drawables split off) of brs-cli memory locally; leave headroom
+// The five shards before drawables split off peaked at ~5.7GB of brs-cli memory together locally; leave headroom
 const MEMORY_PER_SHARD = 2.5 * GIB;
 
 function getShards() {
