@@ -1,0 +1,162 @@
+namespace BGE
+
+  ' What a `BGE.VoxelMap` reads past its edges.
+  enum VoxelEdgeMode
+    ' The map repeats (it should be tileable)
+    wrap = "wrap"
+    ' A floor at `flatHeight`, coloured palette index `flatColor` (sea round an island)
+    flat = "flat"
+  end enum
+
+  ' Options for `BGE.VoxelMaps.fromArrays()`.
+  interface VoxelMapOptions extends roAssociativeArray
+    ' `BGE.VoxelEdgeMode`, default wrap
+    optional edgeMode as string
+    ' Height (0-255) past the edges with `edgeMode` flat
+    optional flatHeight as integer
+    ' Palette index past the edges with `edgeMode` flat
+    optional flatColor as integer
+  end interface
+
+  ' A heightmap terrain's data: a square grid of heights (0-255) and colours (palette indexes),
+  ' with mip levels, where level n averages 2^n x 2^n cells. Each level is an `roByteArray`,
+  ' cell (x, z) at index (z << levelShift) + x. A colour index past the palette draws as
+  ' palette colour 0 (only `fromArrays()` checks them).
+  '
+  ' Make one with `BGE.VoxelMaps.fromFile()` (a `.bvox` from `tools/voxel-map.py`; the fast
+  ' way), `BGE.VoxelMaps.fromArrays()`, `BGE.VoxelMaps.fromLevels()` or
+  ' `BGE.VoxelMapGenerator`.
+  class VoxelMap
+
+    ' Cells along each side, a power of 2
+    size as integer = 0
+    ' log2(size)
+    sizeShift as integer = 0
+    ' size - 1
+    mask as integer = 0
+    ' RGB colours (0xRRGGBB), at most 256
+    palette = [] as integer[]
+    ' Heights per level, level 0 (full size) first
+    heightLevels = [] as roByteArray[]
+    ' Palette indexes per level, level 0 first
+    colorLevels = [] as roByteArray[]
+    ' `BGE.VoxelEdgeMode`
+    edgeMode as string = "wrap"
+    ' Height past the edges with edgeMode flat
+    flatHeight as integer = 0
+    ' Palette index past the edges with edgeMode flat
+    flatColor as integer = 0
+
+    ' Use the `BGE.VoxelMaps` functions, which check their input; this doesn't.
+    '
+    ' @param {integer} sizeShift log2 of the size
+    ' @param {integer[]} palette RGB colours
+    ' @param {roByteArray[]} heightLevels per level, level 0 first
+    ' @param {roByteArray[]} colorLevels per level, level 0 first
+    sub new(sizeShift as integer, palette as integer[], heightLevels as roByteArray[], colorLevels as roByteArray[])
+      m.sizeShift = sizeShift
+      m.size = 1 << sizeShift
+      m.mask = m.size - 1
+      m.palette = palette
+      m.heightLevels = heightLevels
+      m.colorLevels = colorLevels
+    end sub
+
+    ' How many mip levels the map has, level 0 included.
+    '
+    ' @return {integer}
+    function getLevelCount() as integer
+      return m.heightLevels.count()
+    end function
+
+    ' The height (0-255) of a whole cell, past the edges by `edgeMode`.
+    '
+    ' @param {integer} ix
+    ' @param {integer} iz
+    ' @return {integer}
+    function cellHeight(ix as integer, iz as integer) as integer
+      if m.edgeMode = VoxelEdgeMode.flat
+        if ix < 0 or iz < 0 or ix > m.mask or iz > m.mask
+          return m.flatHeight
+        end if
+      end if
+      return m.heightLevels[0][((iz and m.mask) << m.sizeShift) + (ix and m.mask)]
+    end function
+
+    ' The palette index of a whole cell, past the edges by `edgeMode`.
+    '
+    ' @param {integer} ix
+    ' @param {integer} iz
+    ' @return {integer}
+    function colorAt(ix as integer, iz as integer) as integer
+      if m.edgeMode = VoxelEdgeMode.flat
+        if ix < 0 or iz < 0 or ix > m.mask or iz > m.mask
+          return m.flatColor
+        end if
+      end if
+      return m.colorLevels[0][((iz and m.mask) << m.sizeShift) + (ix and m.mask)]
+    end function
+
+    ' The height (0-255, fractional) at a map position in cells, blended between the four
+    ' nearest cell centres (cell i's centre is at i + 0.5): for standing on the terrain.
+    '
+    ' @param {float} x
+    ' @param {float} z
+    ' @return {float}
+    function heightAt(x as float, z as float) as float
+      cx = x - 0.5
+      cz = z - 0.5
+      ix = int(cx)
+      iz = int(cz)
+      fx = cx - ix
+      fz = cz - iz
+      h00 = m.cellHeight(ix, iz)
+      h10 = m.cellHeight(ix + 1, iz)
+      h01 = m.cellHeight(ix, iz + 1)
+      h11 = m.cellHeight(ix + 1, iz + 1)
+      top = h00 + (h10 - h00) * fx
+      bottom = h01 + (h11 - h01) * fx
+      return top + (bottom - top) * fz
+    end function
+
+    ' The map as a `.bvox` file's bytes (see `BGE.VoxelMaps.fromByteArray()` for the layout).
+    '
+    ' @return {roByteArray}
+    function toByteArray() as roByteArray
+      bytes = CreateObject("roByteArray")
+      bytes.FromAsciiString("BGEV")
+      bytes.push(1)
+      bytes.push(m.sizeShift)
+      bytes.push(m.heightLevels.count())
+      edge = 0
+      if m.edgeMode = VoxelEdgeMode.flat
+        edge = 1
+      end if
+      bytes.push(edge)
+      bytes.push(m.flatHeight)
+      bytes.push(m.flatColor)
+      ' 256 colours is written as 0
+      bytes.push(m.palette.count() and 255)
+      for each rgb in m.palette
+        bytes.push((rgb >> 16) and 255)
+        bytes.push((rgb >> 8) and 255)
+        bytes.push(rgb and 255)
+      end for
+      for level = 0 to m.heightLevels.count() - 1
+        bytes.Append(m.heightLevels[level])
+        bytes.Append(m.colorLevels[level])
+      end for
+      return bytes
+    end function
+
+    ' Writes the map as a `.bvox` file.
+    '
+    ' @param {string} path e.g. "tmp:/island.bvox"
+    ' @return {boolean} whether it was written
+    function saveToFile(path as string) as boolean
+      return m.toByteArray().WriteFile(path)
+    end function
+
+  end class
+
+end namespace
