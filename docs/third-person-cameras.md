@@ -153,6 +153,11 @@ collider = wall.addBoxCollider3d("body", 200, 300, 40)
 collider.memberFlags = CAMERA_BLOCKER
 ```
 
+A box collider is axis-aligned unless you turn it: `collider.yaw` (radians) turns it about the
+y axis through its centre, the same way `rotation.y` turns a model, so a building at any angle
+gets a blocker that fits. Set it before the first frame, or call `collider.markChanged()` after
+changing it on a static entity.
+
 You can also use a boom without an orbit camera: `camera.position = boom.update(lookAt,
 wantedPosition, dt)`. Call `boom.reset()` after a cut so the camera snaps instead of easing out.
 `boom.isClose()` is true within `closeDistance` of the look-at point, e.g. to fade out a player

@@ -11,8 +11,8 @@ import "RectangleCollider.bs"
 
 namespace BGE
 
-  ' A collider with the shape of an axis-aligned box CENTERED at (offset.x, offset.y,
-  ' offset.z), with given width (x), height (y), depth (z). Note this offset convention
+  ' A collider with the shape of a box CENTERED at (offset.x, offset.y, offset.z), with given
+  ' width (x), height (y), depth (z), axis-aligned unless turned by `yaw`. Note this offset convention
   ' is center-based, not RectangleCollider's own corner-based convention (see
   ' RectangleCollider's class doc) - deliberately simpler, since BoxCollider3d's own 3D
   ' math (aabbOverlap()) has no reason to inherit RectangleCollider's screen-space corner
@@ -23,15 +23,19 @@ namespace BGE
   ' with COLLIDER_3D_YZ_PLANE_FLAG the same way SphereCollider3d's internal colliders are
   ' (see that class's doc comment for why). Unlike SphereCollider3d, this two-plane broad
   ' phase has NO false-positive case for boxes - AABB overlap decomposes exactly per axis,
-  ' so a pair that passes both plane checks is always a genuine 3D overlap. confirmCollision()
-  ' still runs aabbOverlap(), but only to compute the penetration/normal result for physics
-  ' response, not to reject anything. See specs/2026-09-18-3d-collision-detection-design.md.
+  ' so a pair of unturned boxes that passes both plane checks is always a genuine 3D overlap,
+  ' and confirmCollision() runs aabbOverlap() only for the penetration/normal result. A turned
+  ' box's broad phase uses the axis-aligned box around it, so confirmCollision() then does
+  ' reject (orientedBoxOverlap()/sphereOrientedBoxOverlap()). See specs/2026-09-18-3d-collision-detection-design.md.
   class BoxCollider3d extends Collider
 
     ' Full extent of the box along each axis (this is a full width/height/depth, not a half-extent)
     width as float = 0.0
     height as float = 0.0
     depth as float = 0.0
+    ' Turn about the y axis through the box's centre, in radians, the same way GameEntity.rotation.y
+    ' turns a model. Not taken from the entity's rotation; the offset isn't turned.
+    yaw as float = 0.0
 
     ' The most recent confirmCollision() result, readable from onCollision() to compute a
     ' bounce response - result.normal points away from the other entity, toward this
@@ -58,10 +62,12 @@ namespace BGE
       ' offset.y - height (see TileCollision.bs's own doc comment on this same
       ' RectangleCollider convention) - convert from this collider's own center-based
       ' offset accordingly.
+      extentX = m.getExtentX()
+      extentZ = m.getExtentZ()
       m.xyCollider = new RectangleCollider(m.name + "__xyPlane", {
-        width: m.width,
+        width: extentX,
         height: m.height,
-        offset: BGE.Math.VectorOps.create(m.offset.x - m.width / 2.0, m.offset.y + m.height / 2.0)
+        offset: BGE.Math.VectorOps.create(m.offset.x - extentX / 2.0, m.offset.y + m.height / 2.0)
       })
       m.xyCollider.setupCompositor(gameEngine, entityName, entityId, entityPosition)
       ' setupCompositor() alone leaves the underlying roSprite at its default member/
@@ -75,8 +81,8 @@ namespace BGE
 
       m.yzCollider = new RectangleCollider(m.name + "__yzPlane", {
         width: m.height,
-        height: m.depth,
-        offset: BGE.Math.VectorOps.create(m.offset.y - m.height / 2.0, (m.offset.z ?? 0) + m.depth / 2.0),
+        height: extentZ,
+        offset: BGE.Math.VectorOps.create(m.offset.y - m.height / 2.0, (m.offset.z ?? 0) + extentZ / 2.0),
         memberFlags: COLLIDER_3D_YZ_PLANE_FLAG,
         collidableFlags: COLLIDER_3D_YZ_PLANE_FLAG
       })
@@ -123,14 +129,22 @@ namespace BGE
         otherBox = otherCollider as BoxCollider3d
         otherCenter = BGE.Math.VectorOps.add(otherGameEntity.position, otherBox.offset)
         otherHalf = BGE.Math.VectorOps.create(otherBox.width / 2.0, otherBox.height / 2.0, otherBox.depth / 2.0)
-        otherMin = BGE.Math.VectorOps.subtract(otherCenter, otherHalf)
-        otherMax = BGE.Math.VectorOps.add(otherCenter, otherHalf)
-        m.lastCollisionResult = aabbOverlap(myMin, myMax, otherMin, otherMax)
+        if m.yaw = 0 and otherBox.yaw = 0
+          otherMin = BGE.Math.VectorOps.subtract(otherCenter, otherHalf)
+          otherMax = BGE.Math.VectorOps.add(otherCenter, otherHalf)
+          m.lastCollisionResult = aabbOverlap(myMin, myMax, otherMin, otherMax)
+        else
+          m.lastCollisionResult = orientedBoxOverlap(myCenter, myHalf, m.yaw, otherCenter, otherHalf, otherBox.yaw)
+        end if
       else if otherCollider.colliderType = "sphere3d"
         ' Dynamic access avoids a circular import with SphereCollider3d.bs (which imports this file back).
         otherSphere = otherCollider as object
         otherCenter = BGE.Math.VectorOps.add(otherGameEntity.position, otherSphere.offset)
-        sphereResult = sphereBoxOverlap(otherCenter, otherSphere.radius, myMin, myMax)
+        if m.yaw = 0
+          sphereResult = sphereBoxOverlap(otherCenter, otherSphere.radius, myMin, myMax)
+        else
+          sphereResult = sphereOrientedBoxOverlap(otherCenter, otherSphere.radius, myCenter, myHalf, m.yaw)
+        end if
         ' Flip: sphereBoxOverlap's normal points toward the sphere, but this class's contract wants away from it.
         m.lastCollisionResult = new Box3dCollisionResult(sphereResult.overlapping, BGE.Math.VectorOps.negative(sphereResult.normal), sphereResult.penetrationDepth)
       else
@@ -152,7 +166,26 @@ namespace BGE
       hw = m.width / 2.0
       hh = m.height / 2.0
       hd = m.depth / 2.0
-      return intersectRayAabb3d(rayOrigin, rayDirection, maxDistance, BGE.Math.VectorOps.create(cx - hw, cy - hh, cz - hd), BGE.Math.VectorOps.create(cx + hw, cy + hh, cz + hd))
+      if m.yaw = 0
+        return intersectRayAabb3d(rayOrigin, rayDirection, maxDistance, BGE.Math.VectorOps.create(cx - hw, cy - hh, cz - hd), BGE.Math.VectorOps.create(cx + hw, cy + hh, cz + hd))
+      end if
+      ' in the box's own frame (turning keeps distances), then turned back
+      c = Cos(m.yaw)
+      s = Sin(m.yaw)
+      rx = rayOrigin.x - cx
+      rz = (rayOrigin.z ?? 0.0) - cz
+      dx = rayDirection.x
+      dz = rayDirection.z ?? 0.0
+      localOrigin = BGE.Math.VectorOps.create(rx * c + rz * s, rayOrigin.y - cy, rz * c - rx * s)
+      localDirection = BGE.Math.VectorOps.create(dx * c + dz * s, rayDirection.y, dz * c - dx * s)
+      hit = intersectRayAabb3d(localOrigin, localDirection, maxDistance, BGE.Math.VectorOps.create(-hw, -hh, -hd), BGE.Math.VectorOps.create(hw, hh, hd))
+      if invalid = hit
+        return invalid
+      end if
+      n = hit.normal
+      hit.normal = BGE.Math.VectorOps.create(n.x * c - n.z * s, n.y, n.x * s + n.z * c)
+      hit.point = BGE.Math.VectorOps.add(rayOrigin, BGE.Math.VectorOps.scale(rayDirection, hit.distance))
+      return hit
     end function
 
 
@@ -160,9 +193,9 @@ namespace BGE
       cx = entityPosition.x + m.offset.x
       cy = entityPosition.y + m.offset.y
       cz = (entityPosition.z ?? 0.0) + (m.offset.z ?? 0.0)
-      hw = m.width / 2.0
+      hw = m.getExtentX() / 2.0
       hh = m.height / 2.0
-      hd = m.depth / 2.0
+      hd = m.getExtentZ() / 2.0
       ' written in place: this runs per collider per frame for the camera boom
       out[0] = cx - hw
       out[1] = cy - hh
@@ -194,12 +227,14 @@ namespace BGE
     override sub adjustCompositorObject(entityPosition as BGE.Math.Vector)
       m.xyCollider.enabled = m.enabled
       m.yzCollider.enabled = m.enabled
-      m.xyCollider.width = m.width
+      extentX = m.getExtentX()
+      extentZ = m.getExtentZ()
+      m.xyCollider.width = extentX
       m.xyCollider.height = m.height
-      m.xyCollider.offset = BGE.Math.VectorOps.create(m.offset.x - m.width / 2.0, m.offset.y + m.height / 2.0)
+      m.xyCollider.offset = BGE.Math.VectorOps.create(m.offset.x - extentX / 2.0, m.offset.y + m.height / 2.0)
       m.yzCollider.width = m.height
-      m.yzCollider.height = m.depth
-      m.yzCollider.offset = BGE.Math.VectorOps.create(m.offset.y - m.height / 2.0, (m.offset.z ?? 0) + m.depth / 2.0)
+      m.yzCollider.height = extentZ
+      m.yzCollider.offset = BGE.Math.VectorOps.create(m.offset.y - m.height / 2.0, (m.offset.z ?? 0) + extentZ / 2.0)
       m.xyCollider.adjustCompositorObject(entityPosition)
       m.yzCollider.adjustCompositorObject(m.toYZPosition(entityPosition))
     end sub
@@ -219,9 +254,15 @@ namespace BGE
       hz = m.depth / 2
       bottom = []
       top = []
+      c = Cos(m.yaw)
+      s = Sin(m.yaw)
       for each corner in [[-1, -1], [1, -1], [1, 1], [-1, 1]]
-        bottom.push(BGE.Math.VectorOps.create(center.x + corner[0] * hx, center.y - hy, center.z + corner[1] * hz))
-        top.push(BGE.Math.VectorOps.create(center.x + corner[0] * hx, center.y + hy, center.z + corner[1] * hz))
+        lx = corner[0] * hx
+        lz = corner[1] * hz
+        x = center.x + lx * c - lz * s
+        z = center.z + lx * s + lz * c
+        bottom.push(BGE.Math.VectorOps.create(x, center.y - hy, z))
+        top.push(BGE.Math.VectorOps.create(x, center.y + hy, z))
       end for
       renderObj.drawWorldPolyline(bottom, color, true)
       renderObj.drawWorldPolyline(top, color, true)
@@ -235,6 +276,22 @@ namespace BGE
         end if
       end if
     end sub
+
+    ' Width of the axis-aligned box around this one along x (just width when unturned)
+    private function getExtentX() as float
+      if m.yaw = 0
+        return m.width
+      end if
+      return Abs(Cos(m.yaw)) * m.width + Abs(Sin(m.yaw)) * m.depth
+    end function
+
+    ' Depth of the axis-aligned box around this one along z
+    private function getExtentZ() as float
+      if m.yaw = 0
+        return m.depth
+      end if
+      return Abs(Sin(m.yaw)) * m.width + Abs(Cos(m.yaw)) * m.depth
+    end function
 
     private function toYZPosition(entityPosition as BGE.Math.Vector) as BGE.Math.Vector
       return BGE.Math.VectorOps.create(entityPosition.y, entityPosition.z ?? 0)
