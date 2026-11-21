@@ -754,13 +754,6 @@ separate `Renderer` for the game canvas and the UI canvas). It does three things
    distance) still looks correct sitting on top of the plane. Objects hidden behind an occluder
    are skipped before this point (see "Occluders and visibility").
 
-Once any entity is `isStatic`, step 3 walks a static depth-sort tree instead (`BGE.BSP`): each
-static oriented image or rectangle is a plane, and each static model a solid - its bounding box,
-turned and scaled with it, one plane per face - so everything else is ordered by which side of
-those planes it stands on rather than by distance alone. A player beside a long building draws in
-front of it when they're in front of its face, even if the building's centre is nearer the camera.
-Box-like models fit best: in a concave model's notch, objects sort as if inside its box.
-
 ### Per-object update (`SceneObject.update`/`draw`)
 
 `SceneObject.update(cameraObj)` and `.draw(rendererObj)` are called every frame for every object,
