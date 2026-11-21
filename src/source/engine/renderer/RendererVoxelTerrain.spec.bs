@@ -1,0 +1,259 @@
+import "../../math/vector.bs"
+import "../drawables/DrawableVoxelTerrain.bs"
+import "../drawables/Image.bs"
+import "../Game.bs"
+import "../GameEntity.bs"
+import "../quality/RenderQualityLevel.bs"
+import "../quality/RenderQualityPresets.bs"
+import "../voxel/VoxelMap.bs"
+import "../voxel/VoxelMaps.bs"
+import "cameras/Camera2d.bs"
+import "cameras/Camera3d.bs"
+import "Renderer.bs"
+import "sceneObjects/SceneObject.bs"
+import "sceneObjects/SceneObjectVoxelTerrain.bs"
+
+namespace tests
+
+  ' The eye 50 up at the origin looking down -z, over a 64-cell map of 16-unit cells centred
+  ' on it (owner at -512, 0, -512), height scale 4. Map row 13 (world z -304 to -288) is a
+  ' wall `wallHeight` high.
+  @suite("BGE.Renderer - voxel terrain")
+  class RendererVoxelTerrainTests extends rooibos.BaseTestSuite
+
+    private game as BGE.Game
+    private renderer as BGE.Renderer
+    private camera as BGE.Camera3d
+    private terrain as BGE.SceneObjectVoxelTerrain
+    private target as roBitmap
+
+    protected override sub beforeEach()
+      m.game = new BGE.Game(1280, 720)
+      m.camera = new BGE.Camera3d()
+      m.camera.fieldOfViewDegrees = 90
+      m.camera.maxDrawDistance = 1000
+      m.camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      m.camera.drawDistanceFadeFraction = 0
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.target, m.game, m.camera)
+    end sub
+
+    private function wallMap(wallHeight as integer) as BGE.VoxelMap
+      heights = CreateObject("roArray", 64 * 64, false)
+      colors = CreateObject("roArray", 64 * 64, false)
+      for z = 0 to 63
+        for x = 0 to 63
+          heights[z * 64 + x] = 0
+          colors[z * 64 + x] = 0
+          if z = 13
+            heights[z * 64 + x] = wallHeight
+            colors[z * 64 + x] = 1
+          end if
+        end for
+      end for
+      return BGE.VoxelMaps.fromArrays(64, heights, colors, [&h00FF00, &hFF0000])
+    end function
+
+    private function addTerrain(wallHeight as integer) as BGE.SceneObjectVoxelTerrain
+      owner = new BGE.GameEntity(m.game, {name: "terrain"})
+      owner.position = BGE.Math.VectorOps.create(-512, 0, -512)
+      drawable = new BGE.DrawableVoxelTerrain(owner, m.wallMap(wallHeight), {cellSize: 16, heightScale: 4})
+      m.terrain = drawable.addToRenderer(m.renderer) as BGE.SceneObjectVoxelTerrain
+      return m.terrain
+    end function
+
+    ' A billboard `height` units tall standing at (x, y, z)
+    private function newBillboard(x as float, y as float, z as float, height = 10 as integer) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "billboard"})
+      entity.position = BGE.Math.VectorOps.create(x, y, z)
+      entity.updateTransformationMatrix()
+      bitmap = CreateObject("roBitmap", {width: 10, height: height, alphaEnable: true})
+      bitmap.Clear(&hFF0000FF)
+      region = CreateObject("roRegion", bitmap, 0, 0, 10, height)
+      drawable = new BGE.Image(entity, region, {drawMode: BGE.SceneObjectDrawMode.axisAligned})
+      drawable.setAnchor(0.5, 1)
+      return drawable.addToRenderer(m.renderer)
+    end function
+
+    private sub renderFrames(count = 2 as integer)
+      for i = 1 to count
+        m.renderer.setupCameraForFrame()
+        m.renderer.render()
+      end for
+    end sub
+
+    @describe("drawing")
+
+    @it("draws spans and becomes the active terrain")
+    function _()
+      m.addTerrain(10)
+      m.renderFrames()
+      m.assertTrue(m.terrain.didDrawLastFrame())
+      m.assertTrue(m.terrain.view.spanCount > 0)
+      m.assertEqual(80, m.terrain.view.columns)
+      active = m.renderer.getVoxelTerrain()
+      m.assertNotInvalid(active)
+      m.assertEqual(m.terrain.id, active.id)
+    end function
+
+    @it("draws nothing with a Camera2d")
+    function _()
+      m.renderer = new BGE.Renderer(m.target, m.game, new BGE.Camera2d())
+      m.addTerrain(10)
+      m.renderFrames()
+      m.assertFalse(m.terrain.didDrawLastFrame())
+      m.assertInvalid(m.renderer.getVoxelTerrain())
+    end function
+
+    @it("draws only the first of two terrains")
+    function _()
+      first = m.addTerrain(10)
+      second = m.addTerrain(10)
+      m.renderFrames()
+      m.assertEqual(first.id, m.renderer.getVoxelTerrain().id)
+      m.assertFalse(second.didDrawLastFrame())
+    end function
+
+    @it("puts a pillar where the camera projects it")
+    function _()
+      m.addTerrain(0)
+      ' a single tall cell, right of the middle: map (40, 13) is world x 128 to 144, z -304
+      m.terrain.drawable.map.heightLevels[0][13 * 64 + 40] = 255
+      m.terrain.drawable.setMap(m.terrain.drawable.map)
+      m.renderFrames()
+      expected = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(136, 0, -296))
+      column = int(expected.x / m.terrain.view.columnWidth)
+      record = m.terrain.view.columnSpans[column]
+      m.assertEqual(&hFF0000FF, record[record.count() - 2])
+      m.assertEqual(&h00FF00FF, m.terrain.view.columnSpans[20][2])
+    end function
+
+    @describe("reusing the march")
+
+    @it("draws the same spans again without marching while nothing changes")
+    function _()
+      m.addTerrain(10)
+      m.renderFrames(1)
+      m.assertTrue(m.terrain.marchedLastFrame)
+      m.renderFrames(1)
+      m.assertFalse(m.terrain.marchedLastFrame)
+      m.assertTrue(m.terrain.didDrawLastFrame())
+    end function
+
+    @it("marches again when the camera moves")
+    function _()
+      m.addTerrain(10)
+      m.renderFrames()
+      m.camera.position.x = 5
+      m.renderFrames(1)
+      m.assertTrue(m.terrain.marchedLastFrame)
+    end function
+
+    @it("marches again with the quality's columns")
+    function _()
+      m.addTerrain(10)
+      m.renderFrames()
+      m.renderer.setQualitySettings(BGE.getRenderQualityPreset(BGE.RenderQualityLevel.basic))
+      m.renderFrames(1)
+      m.assertTrue(m.terrain.marchedLastFrame)
+      m.assertEqual(50, m.terrain.view.columns)
+    end function
+
+    @it("blends towards the camera's fog colour")
+    function _()
+      m.addTerrain(0)
+      m.camera.fog.enabled = true
+      m.camera.fog.color = &hFFFFFF
+      m.renderFrames()
+      record = m.terrain.view.columnSpans[40]
+      m.assertTrue(record.count() > 4)
+      m.assertEqual(&hFFFFFFFF, record[record.count() - 2])
+    end function
+
+    @describe("objects behind hills")
+
+    @it("skips an object wholly behind a hill, as occluded")
+    function _()
+      m.addTerrain(50)
+      billboard = m.newBillboard(0, 0, -500)
+      m.renderFrames()
+      m.assertFalse(billboard.didDrawLastFrame())
+      m.assertEqual(1, m.renderer.getOccludedCountLastFrame())
+    end function
+
+    @it("draws an object in front of the hill with nothing over it")
+    function _()
+      m.addTerrain(50)
+      billboard = m.newBillboard(0, 0, -200)
+      m.renderFrames()
+      m.assertTrue(billboard.didDrawLastFrame())
+      m.assertEqual(0, m.terrain.redrawsLastFrame)
+    end function
+
+    @it("draws an object showing over the hill, then the hill over its foot")
+    function _()
+      m.addTerrain(10)
+      ' the hill's top (40) is 10 under the eye; the billboard stands behind it, 30 tall
+      billboard = m.newBillboard(0, 20, -500, 30)
+      m.renderFrames()
+      m.assertTrue(billboard.didDrawLastFrame())
+      m.assertTrue(m.terrain.redrawsLastFrame > 0)
+    end function
+
+    @describe("roll")
+
+    @it("marches a level view as wide as the diagonal and maps target points into it")
+    function _()
+      m.addTerrain(10)
+      point = BGE.Math.VectorOps.create(100, 20, -400)
+      level = m.camera.worldPointToCanvasPoint(point)
+      m.camera.rollDegrees = 30
+      m.renderFrames()
+      m.assertTrue(m.terrain.rolledLastFrame)
+      ' sqrt(1280^2 + 720^2) = 1468.6, plus 2
+      m.assertEqual(1470 / 80, m.terrain.view.columnWidth)
+      onTarget = m.camera.worldPointToCanvasPoint(point)
+      mapped = m.terrain.levelPointOf(onTarget.x, onTarget.y)
+      ' the level view's frame-sized middle is the unrolled view
+      m.assertTrue(abs(mapped.x - (level.x + 95)) < 2, `x ${mapped.x} vs ${level.x + 95}`)
+      m.assertTrue(abs(mapped.y - (level.y + 375)) < 2, `y ${mapped.y} vs ${level.y + 375}`)
+    end function
+
+    @it("still hides an object behind a hill when rolled")
+    function _()
+      m.addTerrain(50)
+      billboard = m.newBillboard(0, 0, -500)
+      m.camera.rollDegrees = 30
+      m.renderFrames()
+      m.assertFalse(billboard.didDrawLastFrame())
+    end function
+
+    @it("redraws hill spans over an object when rolled")
+    function _()
+      m.addTerrain(10)
+      billboard = m.newBillboard(0, 20, -500, 30)
+      m.camera.rollDegrees = 20
+      m.renderFrames()
+      m.assertTrue(billboard.didDrawLastFrame())
+      m.assertTrue(m.terrain.redrawsLastFrame > 0)
+    end function
+
+    @describe("DrawableVoxelTerrain.heightAt")
+
+    @it("gives world heights from an offset owner")
+    function _()
+      m.addTerrain(10)
+      d = m.terrain.drawable
+      d.owner.position.y = 100
+      ' row 13's centre is world z -512 + 13.5 * 16; the wall is 10 * 4 high
+      m.assertEqual(140.0, d.heightAt(0, -296))
+      m.assertEqual(100.0, d.heightAt(0, -100))
+      ' halfway between row 12's centre and row 13's
+      m.assertEqual(120.0, d.heightAt(0, -304))
+    end function
+
+  end class
+
+end namespace
