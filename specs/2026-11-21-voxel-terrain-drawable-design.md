@@ -40,16 +40,22 @@ One spec, three PRs:
 
 Pure data, no rendering.
 
-- Square, size a power of 2 from 64 to 1024. Flat arrays: `heights` (0-255) and `colors` (palette
-  indexes 0-255), and `palette` (up to 256 RGB colours, `0xRRGGBB`).
+- Square, size a power of 2 from 64 to 1024. Each level's heights (0-255) and colours (palette
+  indexes) are an `roByteArray` (a 1024 map as integer roArrays would be tens of MB and slow to
+  load), with `palette` up to 256 RGB colours (`0xRRGGBB`). A colour index past the palette draws
+  as palette colour 0; only `fromArrays` checks them.
 - Mip levels `heightLevels[n]`/`colorLevels[n]`: level n covers 2ⁿ×2ⁿ cells; level 0 is the map
   itself. Up to 6 levels (fewer for small maps: a level is never under 8x8).
-- `BGE.VoxelMap.fromArrays(size, heights, colors, palette, options)`: validates sizes, then builds
-  the mips: heights averaged over each 2x2 (integer), colours the most common of the 4 (ties: the
-  first in row order). `options.heightLevels`/`colorLevels` supply mips instead (the generator's
-  re-shaded ones). Invalid input logs why and returns `invalid`.
-- `BGE.VoxelMap.fromFile(path)` / `map.saveToFile(path)`: `.bvox` through `roByteArray`. Mips are
-  in the file, so loading never computes them. A bad magic, unknown version, wrong size or
+- Builders live in `BGE.VoxelMaps` (a namespace function returning a class from its own file can
+  corrupt types). Each logs why and returns `invalid` on bad input:
+  - `fromArrays(size, heights, colors, palette, options)`: integer arrays; validates values, then
+    builds the mips: heights averaged over each 2x2 (rounded down), colours the most common of the
+    4 (ties: the first in row order).
+  - `fromLevels(sizeShift, palette, heightLevels, colorLevels, options)`: mips already built (the
+    generator's re-shaded ones); checks counts and sizes.
+  - `fromFile(path)`: a `.bvox`, each level read straight into its byte array with a ranged
+    `ReadFile` (no loop over cells). `fromByteArray(bytes)` for one in memory.
+- `map.saveToFile(path)` / `map.toByteArray()`. A bad magic, unknown version, wrong size or
   truncated file logs why and returns `invalid`.
 - Edges, `edgeMode`:
   - `wrap` (default): the map repeats, as in the spike. Needs a tileable map to look right.
@@ -61,7 +67,7 @@ Pure data, no rendering.
 
 ### `.bvox` format (version 1)
 
-Little-endian, all one-byte values unless stated:
+Every field is one byte:
 
 | Field | Size |
 |---|---|
@@ -88,10 +94,11 @@ The spike's diamond-square and biome generator, moved into the engine.
 
 ### `tools/voxel-map.py`
 
-`voxel-map.py heights.png colors.png out.bvox [--edge wrap|flat --flat-height N --flat-color-rgb RRGGBB]`
+`voxel-map.py heights.png colors.png out.bvox [--edge wrap|flat --flat-height N --flat-color RRGGBB]`
 
-- Heights: a grayscale PNG (any bit depth, scaled to 0-255). Colours: an RGB PNG of the same size,
-  quantised to 256 colours or fewer (exact if it already has ≤256).
+- Heights: a grayscale PNG (any bit depth, scaled to 0-255). Colours: a PNG of the same size,
+  quantised by median cut to 256 colours or fewer (exact if it already has ≤256; 255 with a flat
+  edge whose colour isn't in the map, leaving it a slot). Standard library only, non-interlaced.
 - Bakes the mips with the same rules as `fromArrays`, so the tool's file and `fromArrays` on the
   same data are identical.
 - Size must be a power of 2 from 64 to 1024; anything else is an error with a clear message.
@@ -101,7 +108,9 @@ The spike's diamond-square and biome generator, moved into the engine.
 Rooibos: mip averaging and most-common-of-4 (with ties); save → load round trip; bad magic, version,
 size, truncated file; `heightAt` bilinear values, including across the wrap and into the flat edge;
 generator deterministic for a seed, heights in 0-255, palette has 4 shades per biome. A small fixture
-`.bvox` made by the tool loads and matches `fromArrays` on the same data.
+`.bvox` made by the tool (`VoxelMapTool.spec.bvox`; `*.spec.*` is kept out of the package build),
+whose heights and colours exercise rounding and every kind of colour tie, loads and matches
+`fromArrays` on the same data.
 
 ## PR 2: the terrain drawable
 

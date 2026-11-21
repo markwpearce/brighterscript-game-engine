@@ -5,10 +5,11 @@
 #   python3 tools/voxel-map.py heights.png colors.png out.bvox \
 #     [--edge wrap|flat] [--flat-height N] [--flat-color RRGGBB]
 #
-# heights.png: grayscale (or RGB, its red channel is used), 8 or 16 bits; black is height 0,
+# heights.png: grayscale (or RGB, its red channel is used), any bit depth; black is height 0,
 #   white 255. colors.png: the same size, any colour type. Up to 256 distinct colours are kept
 #   exactly (palette in order of first appearance, row by row); more are reduced to 256 by
-#   median cut. Alpha is ignored.
+#   median cut (255 with --edge flat, leaving room for the flat colour). Alpha is ignored.
+#   Non-interlaced PNGs only.
 # Size: square, a power of 2 from 64 to 1024.
 # --edge flat: past the map's edges is a floor at --flat-height in --flat-color (added to the
 #   palette if it isn't in it). The default, wrap, repeats the map, so it should tile.
@@ -63,11 +64,17 @@ def read_png(path):
     if interlace:
         fail(f"{path} is interlaced; save it without interlacing")
     channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
-    if channels is None or depth not in ((8, 16) if color_type != 3 else (8,)):
+    allowed = {0: (1, 2, 4, 8, 16), 3: (1, 2, 4, 8)}.get(color_type, (8, 16))
+    if channels is None or depth not in allowed:
         fail(f"{path}: unsupported PNG (colour type {color_type}, {depth} bits)")
-    bpp = channels * depth // 8
-    stride = width * bpp
-    raw = zlib.decompress(idat)
+    bpp = max(1, channels * depth // 8)
+    stride = (width * channels * depth + 7) // 8
+    try:
+        raw = zlib.decompress(idat)
+    except zlib.error:
+        fail(f"{path}: its image data is damaged or cut short")
+    if len(raw) < height * (stride + 1):
+        fail(f"{path}: its image data is cut short")
     rows = []
     prev = bytearray(stride)
     p = 0
@@ -90,11 +97,28 @@ def read_png(path):
                 pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
                 line[i] = (line[i] + pred) & 255
         prev = line
-        step = depth // 8
         row = []
+        if depth < 8:
+            # packed samples, high bits first; grayscale scaled to 0-255
+            per_byte = 8 // depth
+            top = (1 << depth) - 1
+            for x in range(width):
+                v = (line[x // per_byte] >> (8 - depth * (x % per_byte + 1))) & top
+                if color_type == 3:
+                    if v >= len(palette):
+                        fail(f"{path}: a pixel uses palette entry {v}, past the end of its palette")
+                    row.append(palette[v])
+                else:
+                    g = v * 255 // top
+                    row.append((g, g, g))
+            rows.append(row)
+            continue
+        step = depth // 8
         for x in range(width):
             px = [line[x * bpp + k * step] for k in range(channels)]
             if color_type == 3:
+                if px[0] >= len(palette):
+                    fail(f"{path}: a pixel uses palette entry {px[0]}, past the end of its palette")
                 row.append(palette[px[0]])
             elif color_type in (0, 4):
                 row.append((px[0], px[0], px[0]))
@@ -123,7 +147,7 @@ def write_png(path, rows):
 # --- colours -----------------------------------------------------------------------------------
 
 def median_cut(colors, count):
-    """Up to `count` representative colours for a list of (r, g, b)."""
+    """Up to `count` boxes of (r, g, b), as lists."""
     boxes = [list(colors)]
     while len(boxes) < count:
         boxes.sort(key=lambda box: max(max(c[k] for c in box) - min(c[k] for c in box) for k in range(3)) if len(box) > 1 else -1)
@@ -135,24 +159,27 @@ def median_cut(colors, count):
         box.sort(key=lambda c: c[axis])
         half = len(box) // 2
         boxes += [box[:half], box[half:]]
-    return [tuple(sum(c[k] for c in box) // len(box) for k in range(3)) for box in boxes if box]
+    return [box for box in boxes if box]
 
 
-def palette_indexes(rows):
-    """(palette as 0xRRGGBB ints, indexes row by row)."""
+def palette_indexes(rows, max_colors=256):
+    """(palette as 0xRRGGBB ints, indexes row by row), at most max_colors colours."""
     order = {}
     for row in rows:
         for px in row:
             if px not in order:
                 order[px] = len(order)
-    if len(order) <= 256:
+    if len(order) <= max_colors:
         palette = list(order)
         lookup = order
     else:
-        palette = median_cut(list(order), 256)
+        # each colour maps to its box's average
+        palette = []
         lookup = {}
-        for px in order:
-            lookup[px] = min(range(len(palette)), key=lambda i: sum((px[k] - palette[i][k]) ** 2 for k in range(3)))
+        for box in median_cut(list(order), max_colors):
+            for px in box:
+                lookup[px] = len(palette)
+            palette.append(tuple(sum(c[k] for c in box) // len(box) for k in range(3)))
     indexes = [lookup[px] for row in rows for px in row]
     return [(r << 16) | (g << 8) | b for r, g, b in palette], indexes
 
@@ -206,13 +233,22 @@ def bvox_bytes(heights, colors, palette, shift, edge_flat, flat_height, flat_col
     return bytes(out)
 
 
+def test_height(x, z):
+    return (x * x * 3 + z * z * 5 + x * z) % 256
+
+
+def test_color(x, z):
+    return ((x * x + 3 * z + ((x * z) >> 2)) % 5) % 3
+
+
 def write_test_pngs(folder):
     import os
     os.makedirs(folder, exist_ok=True)
-    # height x * 4; colours a checker of 8-cell squares in red, green, blue
-    write_png(os.path.join(folder, "heights.png"), [[(x * 4,) * 3 for x in range(64)] for _ in range(64)])
-    checker = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
-    write_png(os.path.join(folder, "colors.png"), [[checker[((x >> 3) + (z >> 3)) % 3] for x in range(64)] for z in range(64)])
+    # chosen so every 2x2 block's heights sum to a non-multiple of 4 (tests rounding down) and
+    # the colours hit every kind of tie; VoxelMapTool.spec.bs builds the same with fromArrays
+    write_png(os.path.join(folder, "heights.png"), [[(test_height(x, z),) * 3 for x in range(64)] for z in range(64)])
+    colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    write_png(os.path.join(folder, "colors.png"), [[colors[test_color(x, z)] for x in range(64)] for z in range(64)])
 
 
 def main():
@@ -245,15 +281,23 @@ def main():
         fail("--flat-height must be 0-255")
 
     heights = [px[0] for row in height_rows for px in row]
-    palette, colors = palette_indexes(color_rows)
     flat_color = 0
     if args.edge == "flat":
-        rgb = int(args.flat_color, 16)
+        try:
+            rgb = int(args.flat_color, 16)
+        except ValueError:
+            fail(f"--flat-color {args.flat_color} isn't RRGGBB hex")
+        if not 0 <= rgb <= 0xFFFFFF:
+            fail(f"--flat-color {args.flat_color} isn't RRGGBB hex")
+        flat_px = ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)
+        # leave a palette slot for the flat colour unless the map already uses it
+        in_map = any(px == flat_px for row in color_rows for px in row)
+        palette, colors = palette_indexes(color_rows, 256 if in_map else 255)
         if rgb not in palette:
-            if len(palette) >= 256:
-                fail("the colour map has 256 colours, so --flat-color must be one of them")
             palette.append(rgb)
         flat_color = palette.index(rgb)
+    else:
+        palette, colors = palette_indexes(color_rows)
 
     data = bvox_bytes(heights, colors, palette, shift, args.edge == "flat", args.flat_height, flat_color)
     with open(args.out, "wb") as f:
