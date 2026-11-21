@@ -1,0 +1,1104 @@
+' Spike for #549: a Comanche-style "Voxel Space" heightmap terrain, no polygons. A tileable
+' heightmap and colour map are generated once (diamond-square) as flat arrays; each frame, for
+' every screen column, a ray marches front to back over the heightmap and draws a vertical span
+' whenever the terrain rises above what that column has drawn so far.
+'
+' The projection is Camera3d's (focal length = half the screen width / tan(fov / 2), map x/y =
+' world x/z, height * heightUnit = world y); pitch is a horizon shift, as in the original.
+'
+' Cost is ~3.5 us per column per depth step, so the levers are columns, depth steps and
+' interlacing (half the columns per frame); the quality levels trade those. The inner loop keeps
+' map coordinates in 16.16 fixed point stepped by a fixed amount per depth band (dz grows by
+' bandGrowth every bandSteps steps), reads per-step values from tables shared by every column,
+' and samples per band a mip level (height and colour maps averaged to about the gap between
+' neighbouring columns, so far terrain doesn't flicker). Same-coloured spans in a column merge.
+'
+' The terrain is drawn into its own bitmap, which keeps the columns an interlaced frame skips.
+' Each frame that bitmap is copied out, then the objects (trees, balloons) are drawn far to near,
+' each followed by the spans in front of it in its columns: every column keeps the spans of its
+' last march with their depths. Spans never overlap within a column, so a hill hides exactly the
+' part of an object behind it, at column resolution, with no depth buffer.
+'
+' Roll: "shear" moves each column's horizon (free, fine to ~30 degrees, objects stay upright);
+' "rotate" renders the level view into a square as wide as the screen's diagonal and rotates it
+' onto the screen in one blit, as SceneObjectPlane does (any angle, objects rotate too, but more
+' columns and a big rotated blit).
+'
+' Controls: left/right turn (and bank), up/down climb/descend, options (*) cycles the quality
+' level, OK switches the roll mode, rewind/fast forward the draw distance, replay toggles mips,
+' play pauses flying (the march is skipped while nothing moves).
+'
+' Launch params:
+'   quality=basic|low|medium|high|ultra   start level (see qualityLevels)
+'   roll=shear|rotate       roll mode; bank= (degrees) holds the bank instead of following turns
+'   columns=, distance=, interlace=0|1, steps=fine|medium|coarse   override the level's values;
+'                           or bandSteps= and bandGrowth=: dz multiplies by bandGrowth every
+'                           bandSteps steps
+'   mips=0                  sample the full map at every depth; mipMode=gap|step|max (what sizes
+'                           a band's mip level, default max); mipBias= levels coarser (negative:
+'                           finer)
+'   fov=                    degrees, default 90
+'   objects=                how many to scatter, default 160; 0 = none
+'   mapSize=                power of 2, default 256
+'   rough=                  noise falloff per octave, default 0.55; lower is smoother
+'   shade=0                 no slope shading
+'   still=1                 hold the camera still but render every frame (for screenshots and
+'                           frame times) and log a `VOXEL still` line; x=, y=, angle= (degrees),
+'                           height= set the pose, nudge= moves it forward (cells)
+'   sweep=1                 fly through every case in the comma list qualityList= (default all
+'                           five levels), warmup= then samples= frames each, logging `VOXEL` lines
+'   runid=                  printed first, as the console replays old output
+class VoxelTerrainTest extends RendererTest
+
+  private mapShift as integer = 8
+  private mapSize as integer = 256
+  private mapMask as integer = 255
+  private heights = [] as integer[]
+  ' biome * 4 + shade, per map cell
+  private paletteIndex = [] as integer[]
+  private paletteSize as integer = 0
+  ' fog level * paletteSize + palette index -> colour
+  private fogTable = [] as integer[]
+  private fogLevels as integer = 16
+  private skyColor as integer = &h8EC5F0FF
+  private seed as longinteger = 12345&
+  private roughness as float = 0.55
+  private slopeShading as boolean = true
+  ' heights are normalised to 0-255
+  private maxHeight as integer = 255
+
+  ' prefiltered height and colour maps: level n averages 2^n x 2^n cells (see generateMap)
+  private heightLevels = [] as integer[][]
+  private paletteLevels = [] as integer[][]
+  private mipLevelCount as integer = 6
+  private mipBias as integer = 0
+  ' what sizes a band's mip level: "gap" between neighbouring columns' rays, "step" along the
+  ' ray, or "max" of the two (default: a sample never skips over cells, so nothing flickers)
+  private mipMode as string = "max"
+  private useMips as boolean = true
+  private bandTops = [] as integer[]
+
+  ' what a quality level sets: name, columns across the screen, step preset, distance, interlace
+  ' (interlace is off at every level: while moving it combs and shimmers, so fewer columns is
+  ' the better way down)
+  private qualityLevels = [
+    {name: "basic", columns: 50, steps: "coarse", distance: 500, interlace: false}
+    {name: "low", columns: 64, steps: "coarse", distance: 600, interlace: false}
+    {name: "medium", columns: 80, steps: "coarse", distance: 700, interlace: false}
+    {name: "high", columns: 100, steps: "coarse", distance: 800, interlace: false}
+    {name: "ultra", columns: 100, steps: "medium", distance: 800, interlace: false}
+  ]
+  private qualityIndex as integer = 3
+  ' step presets: dz multiplies by growth every bandSteps steps. Doubling keeps every band's step
+  ' a whole mip texel, which is what keeps colours steady (x1.5 growth flickered ~5x as much);
+  ' the presets differ in how many steps each band takes
+  private stepPresets = {
+    fine: {bandSteps: 40, growth: 2.0},
+    medium: {bandSteps: 28, growth: 2.0},
+    coarse: {bandSteps: 20, growth: 2.0}
+  }
+  ' the values in use: the quality level's, or the launch params' overrides
+  private columns as integer = 100
+  private distance as integer = 800
+  private interlace as boolean = false
+  private stepsName as string = "coarse"
+  private bandSteps as integer = 20
+  private bandGrowth as float = 2.0
+  private overrides as roAssociativeArray = {}
+  private frameParity as integer = 0
+
+  ' the depth step tables: rebuilt only when what shapes them changes (tablesKey), except the
+  ' projection base, which follows the camera height every frame
+  private tablesKey as string = ""
+  private zs = [] as float[]
+  private invZs = [] as float[]
+  private bases = [] as float[]
+  private fogBases = [] as integer[]
+  private bandStart = [] as integer[]
+  private bandEnd = [] as integer[]
+  private bandDz = [] as float[]
+  private bandLevels = [] as integer[]
+  private lastTablesUs as integer = 0
+
+  ' camera: position in map cells, height in height units; angle 0 looks towards -y
+  private camX as float = 0
+  private camY as float = 0
+  private camAngle as float = 0
+  private camHeight as float = 180
+  private fovDegrees as float = 90
+  ' focal length in pixels, and the view's forward and right vectors on the map
+  private focal as float = 640
+  private forwardX as float = 0
+  private forwardY as float = -1
+  private rightX as float = 1
+  private rightY as float = 0
+  ' screen y of the horizon: below the middle looks down
+  private horizon as float = 220
+  ' world height of one height unit, in map cells
+  private heightUnit as float = 0.375
+  private flySpeed as float = 60
+  ' radians per second; each left/right press adds to it and it eases back to 0
+  private turnRate as float = 0
+  ' bank, right side down
+  private rollDegrees as float = 0
+  private fixedBank as dynamic = invalid
+  private rotateRoll as boolean = false
+  private flying as boolean = true
+  private still as boolean = false
+  private dirty as boolean = true
+
+  ' scattered objects, and this frame's visible ones sorted near to far (see collectVisible)
+  private objects = [] as roAssociativeArray[]
+  private visible = [] as roAssociativeArray[]
+  private sprites as roAssociativeArray = {}
+  ' per march column, its last march's spans: y, height, colour, depth for each
+  private columnSpans = [] as float[][]
+
+  ' the terrain (kept between frames for interlace), and with rotate roll the level view
+  ' composed with the objects before it's rotated onto the screen
+  private terrain as roBitmap = invalid
+  private composite as roBitmap = invalid
+  ' the terrain bitmap's size and its march columns: the screen's, or with rotate roll a square
+  ' as wide as the screen's diagonal with proportionally more columns
+  private viewWidth as integer = 1280
+  private viewHeight as integer = 720
+  private marchColumns as integer = 100
+  private screenWidth as integer = 1280
+  private screenHeight as integer = 720
+
+  private font as roFont = CreateObject("roFontRegistry").GetDefaultFont(20, false, false)
+  private clock = CreateObject("roTimespan")
+  private lastMarchUs as integer = 0
+  private lastComposeUs as integer = 0
+  private lastSpans as integer = 0
+  private lastIters as integer = 0
+  private genMs as integer = 0
+
+  private sweeping as boolean = false
+  private sweepCases = [] as integer[]
+  private sweepIndex as integer = 0
+  private warmupFrames as integer = 20
+  private sampleFrames as integer = 60
+  private frameCount as integer = 0
+  private sampleMarchUs as float = 0
+  private sampleComposeUs as float = 0
+  private sampleFrameUs as float = 0
+  private sampleSpans as float = 0
+  private sampleIters as float = 0
+  private sampleVisible as float = 0
+  private frameClock = CreateObject("roTimespan")
+  private sweepDone as boolean = false
+
+  sub new()
+    super("Voxel Terrain (#549)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    params = m.launchParams
+    print "VOXEL start "; params.runid
+    if invalid <> params.mapSize
+      m.mapShift = 0
+      while (1 << (m.mapShift + 1)) <= params.mapSize.toInt()
+        m.mapShift++
+      end while
+      m.mapSize = 1 << m.mapShift
+      m.mapMask = m.mapSize - 1
+    end if
+    if invalid <> params.rough
+      m.roughness = params.rough.toFloat()
+    end if
+    if invalid <> params.fov
+      m.fovDegrees = params.fov.toFloat()
+    end if
+    objectCount = 160
+    if invalid <> params.objects
+      objectCount = params.objects.toInt()
+    end if
+    m.slopeShading = params.shade <> "0"
+    m.useMips = params.mips <> "0"
+    if invalid <> params.mipBias
+      m.mipBias = params.mipBias.toInt()
+    end if
+    if invalid <> params.mipMode
+      m.mipMode = params.mipMode
+    end if
+    m.rotateRoll = params.roll = "rotate"
+    if invalid <> params.bank
+      m.fixedBank = params.bank.toFloat()
+    end if
+    if invalid <> params.quality
+      m.qualityIndex = m.qualityIndexOf(params.quality)
+    end if
+    ' launch params that override the quality level's values
+    for each key in ["columns", "distance", "interlace", "steps", "bandSteps", "bandGrowth"]
+      if invalid <> params[key]
+        m.overrides[key] = params[key]
+      end if
+    end for
+    if invalid <> params.warmup
+      m.warmupFrames = params.warmup.toInt()
+    end if
+    if invalid <> params.samples
+      m.sampleFrames = params.samples.toInt()
+    end if
+
+    m.clock.Mark()
+    m.generateMap()
+    m.scatterObjects(objectCount)
+    m.genMs = m.clock.TotalMilliseconds()
+    print "VOXEL map "; m.mapSize; " generated in "; m.genMs; " ms"
+
+    m.camX = m.mapSize / 2
+    m.camY = m.mapSize / 2
+    m.still = params.still = "1"
+    if m.still
+      m.flying = false
+    end if
+    if invalid <> params.x
+      m.camX = params.x.toFloat()
+    end if
+    if invalid <> params.y
+      m.camY = params.y.toFloat()
+    end if
+    if invalid <> params.angle
+      m.camAngle = BGE.Math.DegreesToRadians(params.angle.toFloat())
+    end if
+    if invalid <> params.height
+      m.camHeight = params.height.toFloat()
+    end if
+    ' moves the camera forward this many cells, to compare two nearby frames for flicker
+    if invalid <> params.nudge
+      m.camX -= sin(m.camAngle) * params.nudge.toFloat()
+      m.camY -= cos(m.camAngle) * params.nudge.toFloat()
+    end if
+
+    m.sweeping = params.sweep = "1"
+    if m.sweeping
+      names = ["basic", "low", "medium", "high", "ultra"]
+      if invalid <> params.qualityList and params.qualityList <> ""
+        names = params.qualityList.split(",")
+      end if
+      for each name in names
+        m.sweepCases.push(m.qualityIndexOf(name))
+      end for
+      m.qualityIndex = m.sweepCases[0]
+      m.resetSample()
+    end if
+    m.applyQuality()
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    m.terrain = invalid
+    m.composite = invalid
+  end sub
+
+  private function qualityIndexOf(name as string) as integer
+    for i = 0 to m.qualityLevels.count() - 1
+      if m.qualityLevels[i].name = name
+        return i
+      end if
+    end for
+    return m.qualityIndex
+  end function
+
+  ' Takes the quality level's values, the launch param overrides on top, and sizes the bitmaps
+  private sub applyQuality()
+    level = m.qualityLevels[m.qualityIndex]
+    m.columns = level.columns
+    m.distance = level.distance
+    m.interlace = level.interlace
+    m.stepsName = level.steps
+    o = m.overrides
+    if invalid <> o.columns
+      m.columns = o.columns.toInt()
+    end if
+    if invalid <> o.distance
+      m.distance = o.distance.toInt()
+    end if
+    if invalid <> o.interlace
+      m.interlace = o.interlace = "1"
+    end if
+    if invalid <> o.steps and invalid <> m.stepPresets[o.steps]
+      m.stepsName = o.steps
+    end if
+    preset = m.stepPresets[m.stepsName]
+    m.bandSteps = preset.bandSteps
+    m.bandGrowth = preset.growth
+    if invalid <> o.bandSteps
+      m.bandSteps = o.bandSteps.toInt()
+    end if
+    if invalid <> o.bandGrowth
+      m.bandGrowth = o.bandGrowth.toFloat()
+    end if
+    m.sizeView()
+    m.dirty = true
+  end sub
+
+  ' The terrain bitmap and its march columns for the roll mode (see viewWidth)
+  private sub sizeView()
+    m.viewWidth = m.screenWidth
+    m.viewHeight = m.screenHeight
+    if m.rotateRoll
+      diagonal = cint(sqr(m.screenWidth * m.screenWidth + m.screenHeight * m.screenHeight) + 0.5)
+      m.viewWidth = diagonal
+      m.viewHeight = diagonal
+    end if
+    ' the same column width as on the screen
+    m.marchColumns = cint(m.columns * m.viewWidth / m.screenWidth)
+    if invalid = m.terrain or m.terrain.GetWidth() <> m.viewWidth or m.terrain.GetHeight() <> m.viewHeight
+      m.terrain = CreateObject("roBitmap", {width: m.viewWidth, height: m.viewHeight, alphaEnable: false})
+      m.composite = invalid
+      if m.rotateRoll
+        m.composite = CreateObject("roBitmap", {width: m.viewWidth, height: m.viewHeight, alphaEnable: true})
+      end if
+    end if
+    m.columnSpans = []
+    for i = 0 to m.marchColumns - 1
+      m.columnSpans.push([] as float[])
+    end for
+    ' every column has to be marched before interlacing can skip any
+    m.frameParity = -1
+  end sub
+
+  private sub resetSample()
+    m.frameCount = 0
+    m.sampleMarchUs = 0
+    m.sampleComposeUs = 0
+    m.sampleFrameUs = 0
+    m.sampleSpans = 0
+    m.sampleIters = 0
+    m.sampleVisible = 0
+  end sub
+
+  ' The settings that change the cost, for the on-screen line and console
+  private function modeName() as string
+    name = `${m.qualityLevels[m.qualityIndex].name} cols ${m.columns} steps ${m.stepsName} dist ${m.distance}`
+    if m.interlace
+      name += " interlace"
+    end if
+    if m.rotateRoll
+      name += " roll-rotate"
+    else
+      name += " roll-shear"
+    end if
+    if not m.useMips
+      name += " nomips"
+    else if m.mipMode <> "max"
+      name += ` mips-${m.mipMode}`
+    end if
+    return name
+  end function
+
+  ' Deterministic 0-1, so every run (and every sweep) flies over the same terrain
+  private function rand() as float
+    m.seed = (m.seed * 1103515245& + 12345&) mod 2147483648&
+    return m.seed / 2147483648.0
+  end function
+
+  ' Heights by diamond-square on a wrapped (tileable) grid, then the colour map by height band
+  ' and slope shade. Water is flattened to sea level.
+  private sub generateMap()
+    size = m.mapSize
+    mask = m.mapMask
+    shift = m.mapShift
+    h = CreateObject("roArray", size * size, false)
+    for i = 0 to size * size - 1
+      h[i] = 0.0
+    end for
+    scale = 1.0
+    stepSize = size
+    while stepSize > 1
+      half = stepSize \ 2
+      ' diamond: the centre of each square
+      for y = half to size - 1 step stepSize
+        for x = half to size - 1 step stepSize
+          x0 = (x - half) and mask
+          x1 = (x + half) and mask
+          y0 = ((y - half) and mask) << shift
+          y1 = ((y + half) and mask) << shift
+          avg = (h[y0 + x0] + h[y0 + x1] + h[y1 + x0] + h[y1 + x1]) * 0.25
+          h[(y << shift) + x] = avg + (m.rand() - 0.5) * scale
+        end for
+      end for
+      ' square: the middle of each edge
+      for y = 0 to size - 1 step half
+        startX = 0
+        if (y \ half) mod 2 = 0
+          startX = half
+        end if
+        for x = startX to size - 1 step stepSize
+          row = y << shift
+          up = ((y - half) and mask) << shift
+          down = ((y + half) and mask) << shift
+          avg = (h[row + ((x - half) and mask)] + h[row + ((x + half) and mask)] + h[up + x] + h[down + x]) * 0.25
+          h[row + x] = avg + (m.rand() - 0.5) * scale
+        end for
+      end for
+      stepSize = half
+      scale *= m.roughness
+    end while
+
+    minH = h[0]
+    maxH = h[0]
+    for each value in h
+      if value < minH
+        minH = value
+      end if
+      if value > maxH
+        maxH = value
+      end if
+    end for
+    range = maxH - minH
+    if range <= 0
+      range = 1
+    end if
+    seaLevel = 70
+    m.heights = CreateObject("roArray", size * size, false)
+    for i = 0 to size * size - 1
+      value = cint((h[i] - minH) / range * 255)
+      if value < seaLevel
+        value = seaLevel
+      end if
+      m.heights[i] = value
+    end for
+
+    ' biome bands by height (top of band, colour), each in 4 shades
+    bandTops = [seaLevel + 1, 78, 120, 165, 205, 256]
+    bandColors = [&h2A5DA8, &hD8C98A, &h4E9A3A, &h2F6E2A, &h7A6F66, &hEEEEF2]
+    shadeFactors = [0.6, 0.8, 1.0, 1.15]
+    palette = [] as integer[]
+    for each rgb in bandColors
+      for each factor in shadeFactors
+        palette.push(m.scaleColor(rgb, factor))
+      end for
+    end for
+    m.paletteSize = palette.count()
+
+    m.bandTops = bandTops
+    m.heightLevels = [m.heights]
+    m.paletteLevels = [m.colorMap(m.heights, 0)]
+    m.paletteIndex = m.paletteLevels[0]
+    ' mip levels: each the 2x2 average of the one before, shaded by its own slopes
+    levelCount = m.mipLevelCount
+    if levelCount > m.mapShift
+      levelCount = m.mapShift
+    end if
+    for level = 1 to levelCount - 1
+      prev = m.heightLevels[level - 1]
+      prevShift = m.mapShift - level + 1
+      levelShift = m.mapShift - level
+      levelSize = 1 << levelShift
+      averaged = CreateObject("roArray", levelSize * levelSize, false)
+      for y = 0 to levelSize - 1
+        row0 = (y * 2) << prevShift
+        row1 = row0 + (1 << prevShift)
+        for x = 0 to levelSize - 1
+          x2 = x * 2
+          averaged[(y << levelShift) + x] = (prev[row0 + x2] + prev[row0 + x2 + 1] + prev[row1 + x2] + prev[row1 + x2 + 1]) \ 4
+        end for
+      end for
+      m.heightLevels.push(averaged)
+      m.paletteLevels.push(m.colorMap(averaged, level))
+    end for
+
+    m.fogTable = [] as integer[]
+    for level = 0 to m.fogLevels - 1
+      ' no fog for the nearest half, then towards the sky colour
+      amount = (level - m.fogLevels / 2) / (m.fogLevels / 2)
+      if amount < 0
+        amount = 0
+      end if
+      for each color in palette
+        m.fogTable.push(m.mixColor(color, m.skyColor, amount * 0.85))
+      end for
+    end for
+  end sub
+
+  ' Palette indexes for a heightmap at mip `level` (2^level cells per entry): biome by height,
+  ' shade by the slope per cell down to the south-east
+  private function colorMap(levelHeights as integer[], level as integer) as integer[]
+    shift = m.mapShift - level
+    size = 1 << shift
+    mask = size - 1
+    cellsPerEntry = 1 << level
+    bandTops = m.bandTops
+    out = CreateObject("roArray", size * size, false)
+    for y = 0 to size - 1
+      row = y << shift
+      nextRow = ((y + 1) and mask) << shift
+      for x = 0 to size - 1
+        value = levelHeights[row + x]
+        band = 0
+        while value >= bandTops[band]
+          band++
+        end while
+        ' lit from the north-west: brighter where the terrain falls away to the south-east
+        slope = (value - levelHeights[nextRow + ((x + 1) and mask)]) / cellsPerEntry
+        shade = 2
+        if band = 0 or not m.slopeShading
+          shade = 2
+        else if slope > 4
+          shade = 3
+        else if slope < -4
+          shade = 0
+        else if slope < 0
+          shade = 1
+        end if
+        out[row + x] = band * 4 + shade
+      end for
+    end for
+    return out
+  end function
+
+  ' rgb (no alpha) scaled by factor, as opaque RGBA
+  private function scaleColor(rgb as integer, factor as float) as integer
+    r = BGE.Math.Min(255, cint(((rgb >> 16) and 255) * factor))
+    g = BGE.Math.Min(255, cint(((rgb >> 8) and 255) * factor))
+    b = BGE.Math.Min(255, cint((rgb and 255) * factor))
+    return (r << 24) + (g << 16) + (b << 8) + 255
+  end function
+
+  private function mixColor(a as integer, b as integer, t as float) as integer
+    result = 255
+    for each shift in [24, 16, 8]
+      ca = (a >> shift) and 255
+      cb = (b >> shift) and 255
+      result += cint(ca + (cb - ca) * t) << shift
+    end for
+    return result
+  end function
+
+  ' The terrain height (0-255 height units) under map position (x, y), wrapped
+  function heightAt(x as float, y as float) as integer
+    return m.heights[((int(y) and m.mapMask) << m.mapShift) + (int(x) and m.mapMask)]
+  end function
+
+  ' Trees on grass, and a few balloons floating over anything. Sizes are in map cells (world).
+  private sub scatterObjects(count as integer)
+    m.sprites = {tree: m.createTreeSprite(), balloon: m.createBalloonSprite()}
+    m.objects = []
+    attempts = 0
+    while m.objects.count() < count and attempts < count * 20
+      attempts++
+      x = m.rand() * m.mapSize
+      y = m.rand() * m.mapSize
+      ground = m.heightAt(x, y)
+      if m.objects.count() mod 10 = 9
+        m.objects.push({kind: "balloon", x: x, y: y, h: ground + 60 + m.rand() * 60, size: 6.0})
+      else if ground >= 80 and ground < 160
+        m.objects.push({kind: "tree", x: x, y: y, h: ground, size: 3.0 + m.rand() * 2})
+      end if
+    end while
+  end sub
+
+  private function createTreeSprite() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 32, height: 48, alphaEnable: true})
+    bmp.Clear(&h00000000)
+    bmp.DrawRect(13, 36, 6, 12, &h5A3A1EFF)
+    for row = 0 to 35
+      half = 2 + row * 14 / 35
+      shade = &h1F5A1EFF
+      if row mod 12 > 8
+        shade = &h17461AFF
+      end if
+      bmp.DrawRect(16 - half, row, half * 2, 1, shade)
+    end for
+    return bmp
+  end function
+
+  private function createBalloonSprite() as roBitmap
+    bmp = CreateObject("roBitmap", {width: 32, height: 44, alphaEnable: true})
+    bmp.Clear(&h00000000)
+    for row = 0 to 31
+      dy = (row - 15.5) / 16
+      half = cint(16 * sqr(BGE.Math.Max(0, 1 - dy * dy)))
+      color = &hE04030FF
+      if (row \ 6) mod 2 = 1
+        color = &hF0C040FF
+      end if
+      bmp.DrawRect(16 - half, row, half * 2, 1, color)
+    end for
+    bmp.DrawRect(10, 32, 1, 6, &h333333FF)
+    bmp.DrawRect(21, 32, 1, 6, &h333333FF)
+    bmp.DrawRect(11, 37, 10, 7, &h7A5230FF)
+    return bmp
+  end function
+
+  override sub onInput(buttonName as string)
+    if buttonName = "left"
+      m.turnRate = BGE.Math.Min(m.turnRate + 0.3, 0.9)
+    else if buttonName = "right"
+      m.turnRate = BGE.Math.Max(m.turnRate - 0.3, -0.9)
+    else if buttonName = "up"
+      m.camHeight += 15
+    else if buttonName = "down"
+      m.camHeight -= 15
+    else if buttonName = "options"
+      ' cycling shows each level as it comes, so drop the launch overrides
+      m.overrides = {}
+      m.qualityIndex = (m.qualityIndex + 1) mod m.qualityLevels.count()
+      m.applyQuality()
+    else if buttonName = "OK"
+      m.rotateRoll = not m.rotateRoll
+      m.sizeView()
+    else if buttonName = "fastforward"
+      m.distance = BGE.Math.Min(m.distance + 100, 1200)
+    else if buttonName = "rewind"
+      m.distance = BGE.Math.Max(m.distance - 100, 200)
+    else if buttonName = "replay"
+      m.useMips = not m.useMips
+    else if buttonName = "play"
+      m.flying = not m.flying
+    end if
+    m.dirty = true
+  end sub
+
+  override sub update(dt as float)
+    if dt > 0.1
+      dt = 0.1
+    end if
+    if m.flying or m.sweeping
+      m.camX -= sin(m.camAngle) * m.flySpeed * dt
+      m.camY -= cos(m.camAngle) * m.flySpeed * dt
+      if m.sweeping
+        m.turnRate = 0.15
+      end if
+      m.dirty = true
+    end if
+    if m.turnRate <> 0
+      m.camAngle += m.turnRate * dt
+      if not m.sweeping
+        ' ease the turn out over a couple of seconds
+        decay = 0.45 * dt
+        if abs(m.turnRate) <= decay
+          m.turnRate = 0
+        else if m.turnRate > 0
+          m.turnRate -= decay
+        else
+          m.turnRate += decay
+        end if
+      end if
+      m.dirty = true
+    end if
+    ' bank into the turn: turning left (positive rate) drops the left side
+    m.rollDegrees = -m.turnRate * 30
+    if invalid <> m.fixedBank
+      m.rollDegrees = m.fixedBank
+    end if
+    ground = m.heightAt(m.camX, m.camY) + 20
+    if m.camHeight < ground
+      m.camHeight = ground
+      m.dirty = true
+    end if
+    if m.still
+      m.dirty = true
+    end if
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    if m.dirty
+      m.clock.Mark()
+      m.renderTerrain()
+      m.terrain.Finish()
+      m.lastMarchUs = m.clock.TotalMicroseconds()
+      m.dirty = false
+    end if
+    m.clock.Mark()
+    m.compose(renderer)
+    m.lastComposeUs = m.clock.TotalMicroseconds()
+
+    if m.sweeping or m.still
+      m.recordFrame()
+    end if
+
+    levelText = ""
+    for each level in m.bandLevels
+      levelText += Str(level).trim()
+    end for
+    lines = [
+      `${m.modeName()}  bank ${cint(m.rollDegrees)}`
+      `terrain ${m.lastMarchUs \ 1000} ms  objects ${m.lastComposeUs \ 1000} ms (${m.visible.count()})  tables ${m.lastTablesUs} us  steps ${m.zs.count()}  iterations ${m.lastIters}  spans ${m.lastSpans}  mips ${levelText}`
+      "L/R turn  U/D height  * quality  OK roll mode  RW/FF distance  Replay mips  Play pause"
+    ]
+    if m.sweeping
+      lines[2] = `sweep ${m.sweepIndex + 1}/${m.sweepCases.count()}`
+      if m.sweepDone
+        lines[2] = "sweep done"
+      end if
+    end if
+    y = 80
+    for each line in lines
+      renderer.drawText(line, 130, y, BGE.Colors.White, m.font)
+      y += 26
+    end for
+  end sub
+
+  ' With still=1 or sweep=1: averages over sampleFrames frames after warmupFrames, then logs a
+  ' `VOXEL` line (still: once; sweep: per case, moving to the next)
+  private sub recordFrame()
+    frameUs = m.frameClock.TotalMicroseconds()
+    m.frameClock.Mark()
+    if m.sweepDone
+      return
+    end if
+    m.frameCount++
+    if m.frameCount <= m.warmupFrames or m.frameCount > m.warmupFrames + m.sampleFrames
+      return
+    end if
+    m.sampleMarchUs += m.lastMarchUs
+    m.sampleComposeUs += m.lastComposeUs
+    m.sampleFrameUs += frameUs
+    m.sampleSpans += m.lastSpans
+    m.sampleIters += m.lastIters
+    m.sampleVisible += m.visible.count()
+    if m.frameCount < m.warmupFrames + m.sampleFrames
+      return
+    end if
+    n = m.sampleFrames
+    kind = "still"
+    if m.sweeping
+      kind = "case"
+    end if
+    marchMs = cint(m.sampleMarchUs / n / 100) / 10
+    composeMs = cint(m.sampleComposeUs / n / 100) / 10
+    frameMs = cint(m.sampleFrameUs / n / 100) / 10
+    fps = cint(10000000 / (m.sampleFrameUs / n)) / 10
+    print `VOXEL ${kind} ${m.modeName()} iters ${cint(m.sampleIters / n)} spans ${cint(m.sampleSpans / n)} objs ${cint(m.sampleVisible / n)} terrain ${marchMs} ms objects ${composeMs} ms frame ${frameMs} ms fps ${fps}`
+    if not m.sweeping
+      print "VOXEL end"
+      return
+    end if
+    m.sweepIndex++
+    if m.sweepIndex >= m.sweepCases.count()
+      m.sweepDone = true
+      print "VOXEL end"
+      return
+    end if
+    m.qualityIndex = m.sweepCases[m.sweepIndex]
+    m.applyQuality()
+    m.resetSample()
+  end sub
+
+  ' The camera's focal length and forward/right vectors on the map
+  private sub computeView()
+    m.focal = (m.screenWidth / 2) / tan(BGE.Math.DegreesToRadians(m.fovDegrees) / 2)
+    m.forwardX = -sin(m.camAngle)
+    m.forwardY = -cos(m.camAngle)
+    m.rightX = cos(m.camAngle)
+    m.rightY = -sin(m.camAngle)
+  end sub
+
+  ' The screen y of the horizon in the terrain bitmap, which is centred on the screen
+  private function viewHorizon() as float
+    return m.horizon + (m.viewHeight - m.screenHeight) / 2
+  end function
+
+  ' The per-column shear for the roll (0 when rolling by rotation)
+  private function shearTan() as float
+    if m.rotateRoll
+      return 0
+    end if
+    return tan(BGE.Math.DegreesToRadians(m.rollDegrees))
+  end function
+
+  ' The depth step tables. Only the projection base (which follows the camera height) changes
+  ' every frame; the rest is rebuilt when the distance, columns, step preset or mips change.
+  ' dz grows by bandGrowth every bandSteps steps, so within a band a column steps its map
+  ' position by a fixed integer.
+  private sub buildTables()
+    key = `${m.distance}|${m.marchColumns}|${m.viewWidth}|${m.bandSteps}|${m.bandGrowth}|${m.useMips}|${m.mipBias}|${m.mipMode}|${m.fovDegrees}`
+    if key <> m.tablesKey
+      m.tablesKey = key
+      zs = [] as float[]
+      invZs = [] as float[]
+      fogBases = [] as integer[]
+      m.bandStart = [] as integer[]
+      m.bandEnd = [] as integer[]
+      m.bandDz = [] as float[]
+      m.bandLevels = [] as integer[]
+      focal = m.focal
+      columnGap = m.viewWidth / m.marchColumns / focal
+      z = 1.0
+      dz = 1.0
+      s = 0
+      while z < m.distance
+        m.bandStart.push(s)
+        m.bandDz.push(dz)
+        for k = 1 to m.bandSteps
+          zs.push(z)
+          ' y of height h is base - h * invZ
+          invZs.push(focal / z * m.heightUnit)
+          fogBases.push(int(z * m.fogLevels / m.distance) * m.paletteSize)
+          s++
+          z += dz
+          if z >= m.distance
+            exit for
+          end if
+        end for
+        m.bandEnd.push(s - 1)
+        ' sample the mip level whose cells are about as wide as the samples are apart: the gap
+        ' between neighbouring columns' rays where the band starts (rounded down, keeping detail
+        ' across), the step along them (rounded to nearest, so a 3.4-cell step doesn't skip
+        ' 2-cell texels), or the coarser of the two
+        gapLevel = m.log2Floor(zs[m.bandStart.peek()] * columnGap)
+        stepLevel = m.log2Floor(dz * 1.4142)
+        level = gapLevel
+        if m.mipMode = "step"
+          level = stepLevel
+        else if m.mipMode = "max" and stepLevel > gapLevel
+          level = stepLevel
+        end if
+        level += m.mipBias
+        if not m.useMips or level < 0
+          level = 0
+        else if level > m.heightLevels.count() - 1
+          level = m.heightLevels.count() - 1
+        end if
+        m.bandLevels.push(level)
+        dz *= m.bandGrowth
+      end while
+      m.zs = zs
+      m.invZs = invZs
+      m.fogBases = fogBases
+      m.bases = CreateObject("roArray", zs.count(), false)
+    end if
+    ' base = camera height * focal / z + horizon = camera height / heightUnit * invZ + horizon
+    invZs = m.invZs
+    bases = m.bases
+    camHeightUnits = m.camHeight
+    horizon = m.viewHorizon()
+    for s = 0 to invZs.count() - 1
+      bases[s] = camHeightUnits * invZs[s] + horizon
+    end for
+  end sub
+
+  ' floor(log2(value)), 0 for anything under 2
+  private function log2Floor(value as float) as integer
+    level = 0
+    while value >= 2
+      value /= 2
+      level++
+    end while
+    return level
+  end function
+
+  ' Marches the terrain front to back into m.terrain: every column, or with interlace every
+  ' other column, alternating
+  private sub renderTerrain()
+    m.computeView()
+    m.clock.Mark()
+    m.buildTables()
+    m.lastTablesUs = m.clock.TotalMicroseconds()
+    firstColumn = 0
+    columnStep = 1
+    if m.interlace and m.frameParity >= 0
+      m.frameParity = 1 - m.frameParity
+      firstColumn = m.frameParity
+      columnStep = 2
+    else
+      m.frameParity = 0
+      m.terrain.Clear(m.skyColor)
+    end if
+    m.march(firstColumn, columnStep)
+  end sub
+
+  ' Column by column, all depths in each, per-column state in locals. Each column's spans go into
+  ' m.terrain and, with objects about, its m.columnSpans list (y, height, colour, nearest depth).
+  private sub march(firstColumn as integer, columnStep as integer)
+    target = m.terrain
+    columns = m.marchColumns
+    colWidth = m.viewWidth / columns
+    halfW = m.viewWidth / 2
+    fog = m.fogTable
+    zs = m.zs
+    invZs = m.invZs
+    bases = m.bases
+    fogBases = m.fogBases
+    bandStart = m.bandStart
+    bandEnd = m.bandEnd
+    bandDz = m.bandDz
+    bandLevels = m.bandLevels
+    heightLevels = m.heightLevels
+    paletteLevels = m.paletteLevels
+    bandCount = bandStart.count()
+    lastStep = zs.count() - 1
+    fixedOne = 65536
+    mapShift = m.mapShift
+    recording = m.objects.count() > 0
+    columnSpans = m.columnSpans
+    skyColor = m.skyColor
+    tanRoll = m.shearTan()
+    ' past this y nothing farther can show: the highest terrain at the far end projects lower
+    stopY = -1.0
+    if m.camHeight > m.maxHeight
+      stopY = bases[lastStep] - m.maxHeight * invZs[lastStep]
+    end if
+    ' below the bitmap's bottom, and above its top, at every column's shear
+    maxShift = abs(halfW * tanRoll)
+    topStart = m.viewHeight + maxShift
+    clampY = -maxShift
+    ' ray per unit depth: forward + right * (x - middle) / focal
+    rayStepX = m.rightX * colWidth / m.focal
+    rayStepY = m.rightY * colWidth / m.focal
+    leftOffset = (colWidth / 2 - halfW) / m.focal
+    leftX = m.forwardX + m.rightX * leftOffset
+    leftY = m.forwardY + m.rightY * leftOffset
+    spans = 0
+    iters = 0
+
+    for i = firstColumn to columns - 1 step columnStep
+      rx = leftX + rayStepX * i
+      ry = leftY + rayStepY * i
+      fx = cint((m.camX + rx * zs[0]) * fixedOne)
+      fy = cint((m.camY + ry * zs[0]) * fixedOne)
+      colX = i * colWidth
+      ' the march works unsheared; spans move by this column's shear as they're drawn
+      shift = cint((colX + colWidth / 2 - halfW) * tanRoll)
+      record = columnSpans[i]
+      record.Clear()
+      top = topStart
+      color = 0
+      bottom = topStart
+      spanZ = 0.0
+      for b = 0 to bandCount - 1
+        level = bandLevels[b]
+        heights = heightLevels[level]
+        pal = paletteLevels[level]
+        mask = m.mapMask >> level
+        rowMask = mask << (mapShift - level)
+        xShift = 16 + level
+        yShift = xShift - (mapShift - level)
+        dzb = bandDz[b]
+        ddx = cint(rx * dzb * fixedOne)
+        ddy = cint(ry * dzb * fixedOne)
+        first = bandStart[b]
+        last = bandEnd[b]
+        iters += last - first + 1
+        for k = first to last
+          idx = ((fy >> yShift) and rowMask) + ((fx >> xShift) and mask)
+          y = bases[k] - heights[idx] * invZs[k]
+          if y < top
+            c = fog[fogBases[k] + pal[idx]]
+            if c <> color
+              if color <> 0
+                target.DrawRect(colX, top + shift, colWidth + 1, bottom - top, color)
+                if recording
+                  record.push(top + shift)
+                  record.push(bottom - top)
+                  record.push(color)
+                  record.push(spanZ)
+                end if
+                spans++
+              end if
+              color = c
+              bottom = top
+              spanZ = zs[k]
+            end if
+            if y < clampY
+              y = clampY
+            end if
+            ' whole pixels, so neighbouring spans meet without a seam
+            top = cint(y)
+          end if
+          fx += ddx
+          fy += ddy
+        end for
+        if top <= stopY
+          exit for
+        end if
+      end for
+      if color <> 0
+        target.DrawRect(colX, top + shift, colWidth + 1, bottom - top, color)
+        if recording
+          record.push(top + shift)
+          record.push(bottom - top)
+          record.push(color)
+          record.push(spanZ)
+        end if
+        spans++
+      end if
+      if columnStep > 1 and top + shift > 0
+        target.DrawRect(colX, 0, colWidth + 1, top + shift, skyColor)
+      end if
+    end for
+    m.lastSpans = spans
+    m.lastIters = iters
+  end sub
+
+  ' The objects in view, nearest first, each with its depth and its position and scale in the
+  ' terrain bitmap
+  private sub collectVisible()
+    m.visible = []
+    size = m.mapSize
+    halfSize = size / 2
+    halfW = m.viewWidth / 2
+    horizon = m.viewHorizon()
+    tanRoll = m.shearTan()
+    for each obj in m.objects
+      ' the nearest copy of the tiled map
+      dx = obj.x - m.camX
+      dy = obj.y - m.camY
+      dx -= size * int((dx + halfSize) / size)
+      dy -= size * int((dy + halfSize) / size)
+      depth = dx * m.forwardX + dy * m.forwardY
+      if depth > 2 and depth < m.distance
+        scale = m.focal / depth
+        x = halfW + (dx * m.rightX + dy * m.rightY) * scale
+        if abs(x - halfW) < halfW + obj.size * scale
+          obj.depth = depth
+          obj.screenX = x
+          obj.footY = horizon + (m.camHeight - obj.h) * m.heightUnit * scale + (x - halfW) * tanRoll
+          obj.scale = scale
+          m.visible.push(obj)
+        end if
+      end if
+    end for
+    m.visible.SortBy("depth")
+  end sub
+
+  ' Copies the terrain out, draws the objects far to near, each followed by the spans in front of
+  ' it in its columns, and with rotate roll turns the result onto the screen
+  private sub compose(renderer as BGE.Renderer)
+    m.computeView()
+    m.collectVisible()
+    dest = m.screenRef
+    if m.rotateRoll
+      dest = m.composite
+    end if
+    dest.DrawObject(0, 0, m.terrain)
+    colWidth = m.viewWidth / m.marchColumns
+    lastColumn = m.marchColumns - 1
+    for n = m.visible.count() - 1 to 0 step -1
+      obj = m.visible[n]
+      bmp = m.sprites[obj.kind]
+      ' sprite width is obj.size map cells
+      s = obj.size * obj.scale / bmp.GetWidth()
+      width = bmp.GetWidth() * s
+      height = bmp.GetHeight() * s
+      left = obj.screenX - width / 2
+      spriteTop = obj.footY - height
+      dest.DrawScaledObject(left, spriteTop, s, s, bmp)
+      first = BGE.Math.Max(0, int(left / colWidth))
+      last = BGE.Math.Min(lastColumn, int((left + width) / colWidth))
+      depth = obj.depth
+      spriteBottom = obj.footY
+      for c = first to last
+        record = m.columnSpans[c]
+        colX = c * colWidth
+        for r = 0 to record.count() - 1 step 4
+          spanTop = record[r]
+          if record[r + 3] < depth and spanTop < spriteBottom and spanTop + record[r + 1] > spriteTop
+            dest.DrawRect(colX, spanTop, colWidth + 1, record[r + 1], record[r + 2])
+          end if
+        end for
+      end for
+    end for
+    if m.rotateRoll
+      ' the level view rotated about its centre, its middle screen-sized part on the screen
+      centre = BGE.Math.VectorOps.create(m.viewWidth / 2, m.viewHeight / 2)
+      cropOffset = BGE.Math.VectorOps.create((m.viewWidth - m.screenWidth) / 2, (m.viewHeight - m.screenHeight) / 2)
+      renderer.drawRotatedImageWithCenterTo(m.screenRef, m.composite, centre, BGE.Math.DegreesToRadians(m.rollDegrees), BGE.Math.VectorOps.negative(cropOffset))
+    end if
+  end sub
+
+end class
