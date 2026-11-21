@@ -1,0 +1,184 @@
+import "VoxelMap.bs"
+
+' Building and loading `BGE.VoxelMap`s (kept out of VoxelMap.bs: a namespace function returning a
+' class from its own file can corrupt that file's types).
+namespace BGE.VoxelMaps
+
+  ' Smallest and largest map sizes, as log2
+  const MIN_SIZE_SHIFT = 6
+  const MAX_SIZE_SHIFT = 10
+  ' Most mip levels a map has, level 0 included
+  const MAX_LEVELS = 6
+
+  ' log2 of a map size, or -1 if it isn't a power of 2 from 64 to 1024.
+  '
+  ' @param {integer} size
+  ' @return {integer}
+  function sizeShiftOf(size as integer) as integer
+    for shift = MIN_SIZE_SHIFT to MAX_SIZE_SHIFT
+      if (1 << shift) = size
+        return shift
+      end if
+    end for
+    return -1
+  end function
+
+  ' How many mip levels a map of this size has: up to 6, none smaller than 8x8.
+  '
+  ' @param {integer} sizeShift
+  ' @return {integer}
+  function maxLevelCount(sizeShift as integer) as integer
+    count = sizeShift - 2
+    if count > MAX_LEVELS
+      count = MAX_LEVELS
+    end if
+    return count
+  end function
+
+  ' The next mip level of a heightmap: each 2x2 averaged, rounded down.
+  '
+  ' @param {integer[]} heights a level (1 << levelShift) cells square
+  ' @param {integer} levelShift log2 of that level's size
+  ' @return {integer[]}
+  function averageHeights(heights as integer[], levelShift as integer) as integer[]
+    outShift = levelShift - 1
+    outSize = 1 << outShift
+    out = CreateObject("roArray", outSize * outSize, false)
+    for z = 0 to outSize - 1
+      row0 = (z * 2) << levelShift
+      row1 = row0 + (1 << levelShift)
+      outRow = z << outShift
+      for x = 0 to outSize - 1
+        x2 = x * 2
+        out[outRow + x] = (heights[row0 + x2] + heights[row0 + x2 + 1] + heights[row1 + x2] + heights[row1 + x2 + 1]) \ 4
+      end for
+    end for
+    return out
+  end function
+
+  ' The next mip level of a colour map: the most common palette index of each 2x2, a tie going
+  ' to the first of the tied ones in the order (x, z), (x + 1, z), (x, z + 1), (x + 1, z + 1).
+  ' `tools/voxel-map.py` uses the same rule.
+  '
+  ' @param {integer[]} colors a level (1 << levelShift) cells square
+  ' @param {integer} levelShift log2 of that level's size
+  ' @return {integer[]}
+  function mostCommonColors(colors as integer[], levelShift as integer) as integer[]
+    outShift = levelShift - 1
+    outSize = 1 << outShift
+    out = CreateObject("roArray", outSize * outSize, false)
+    for z = 0 to outSize - 1
+      row0 = (z * 2) << levelShift
+      row1 = row0 + (1 << levelShift)
+      outRow = z << outShift
+      for x = 0 to outSize - 1
+        x2 = x * 2
+        a = colors[row0 + x2]
+        b = colors[row0 + x2 + 1]
+        c = colors[row1 + x2]
+        d = colors[row1 + x2 + 1]
+        ' count of each, and the first with the highest count wins
+        best = a
+        bestCount = 1
+        if b = a
+          bestCount++
+        end if
+        if c = a
+          bestCount++
+        end if
+        if d = a
+          bestCount++
+        end if
+        if bestCount < 2
+          countB = 1
+          if c = b
+            countB++
+          end if
+          if d = b
+            countB++
+          end if
+          if countB > bestCount
+            best = b
+            bestCount = countB
+          end if
+          if c = d and bestCount < 2
+            best = c
+          end if
+        end if
+        out[outRow + x] = best
+      end for
+    end for
+    return out
+  end function
+
+  ' A map from flat arrays, with its mip levels built (or taken from `options`).
+  '
+  ' @param {integer} size cells along each side: a power of 2 from 64 to 1024
+  ' @param {integer[]} heights size * size heights, 0-255, row by row (index z * size + x)
+  ' @param {integer[]} colors size * size palette indexes
+  ' @param {integer[]} palette RGB colours (0xRRGGBB), 1-256 of them
+  ' @param {BGE.VoxelMapOptions} [options]
+  ' @return {dynamic} a `BGE.VoxelMap`, or invalid (and a printed reason) if the input is bad
+  function fromArrays(size as integer, heights as integer[], colors as integer[], palette as integer[], options = {} as BGE.VoxelMapOptions) as dynamic
+    shift = sizeShiftOf(size)
+    if shift < 0
+      return fail(`size ${size} isn't a power of 2 from 64 to 1024`)
+    end if
+    paletteCount = palette.count()
+    if paletteCount < 1 or paletteCount > 256
+      return fail(`a palette needs 1-256 colours, not ${paletteCount}`)
+    end if
+    cellCount = size * size
+    if heights.count() <> cellCount or colors.count() <> cellCount
+      return fail(`a ${size} map needs ${cellCount} heights and colours`)
+    end if
+    for i = 0 to cellCount - 1
+      h = heights[i]
+      if h < 0 or h > 255
+        return fail(`height ${h} at ${i} isn't 0-255`)
+      end if
+      c = colors[i]
+      if c < 0 or c >= paletteCount
+        return fail(`colour ${c} at ${i} isn't in the palette`)
+      end if
+    end for
+
+    levelCount = maxLevelCount(shift)
+    if invalid <> options.heightLevels and invalid <> options.colorLevels
+      heightLevels = options.heightLevels
+      colorLevels = options.colorLevels
+    else
+      heightLevels = [heights]
+      colorLevels = [colors]
+      for level = 1 to levelCount - 1
+        heightLevels.push(averageHeights(heightLevels[level - 1], shift - level + 1))
+        colorLevels.push(mostCommonColors(colorLevels[level - 1], shift - level + 1))
+      end for
+    end if
+
+    map = new BGE.VoxelMap(shift, palette, heightLevels, colorLevels)
+    if invalid <> options.edgeMode
+      map.edgeMode = options.edgeMode
+    end if
+    if invalid <> options.flatHeight
+      map.flatHeight = options.flatHeight
+    end if
+    if invalid <> options.flatColor
+      map.flatColor = options.flatColor
+    end if
+    if map.edgeMode <> BGE.VoxelEdgeMode.wrap and map.edgeMode <> BGE.VoxelEdgeMode.flat
+      return fail(`unknown edgeMode "${map.edgeMode}"`)
+    end if
+    if map.flatHeight < 0 or map.flatHeight > 255 or map.flatColor < 0 or map.flatColor >= paletteCount
+      return fail("flatHeight must be 0-255 and flatColor in the palette")
+    end if
+    return map
+  end function
+
+  ' Prints why a map couldn't be made, and returns invalid.
+  function fail(message as string) as dynamic
+    print "[BGE.VoxelMap] " + message
+    return invalid
+  end function
+
+end namespace

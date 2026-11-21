@@ -1,0 +1,168 @@
+import "pkg:/source/engine/voxel/VoxelMap.bs"
+import "pkg:/source/engine/voxel/VoxelMaps.bs"
+
+namespace tests
+
+  @suite("BGE.VoxelMap")
+  class VoxelMapTests extends rooibos.BaseTestSuite
+
+    @describe("sizes and levels")
+
+    @it("accepts powers of 2 from 64 to 1024")
+    function _()
+      m.assertEqual(6, BGE.VoxelMaps.sizeShiftOf(64))
+      m.assertEqual(10, BGE.VoxelMaps.sizeShiftOf(1024))
+      m.assertEqual(-1, BGE.VoxelMaps.sizeShiftOf(32))
+      m.assertEqual(-1, BGE.VoxelMaps.sizeShiftOf(100))
+      m.assertEqual(-1, BGE.VoxelMaps.sizeShiftOf(2048))
+    end function
+
+    @it("has up to 6 levels, none under 8x8")
+    function _()
+      m.assertEqual(4, BGE.VoxelMaps.maxLevelCount(6))
+      m.assertEqual(6, BGE.VoxelMaps.maxLevelCount(8))
+      m.assertEqual(6, BGE.VoxelMaps.maxLevelCount(10))
+    end function
+
+    @describe("mips")
+
+    @it("averages heights over each 2x2, rounding down")
+    function _()
+      heights = m.blocks([0, 1, 2, 3], [10, 10, 10, 13])
+      out = BGE.VoxelMaps.averageHeights(heights, 6)
+      m.assertEqual(32 * 32, out.count())
+      m.assertEqual(1, out[0])
+      m.assertEqual(10, out[1])
+    end function
+
+    @it("takes the most common colour of each 2x2, ties to the first")
+    function _()
+      colors = m.blocks([5, 7, 7, 5], [1, 2, 3, 3])
+      out = BGE.VoxelMaps.mostCommonColors(colors, 6)
+      m.assertEqual(5, out[0])
+      m.assertEqual(3, out[1])
+      colors = m.blocks([4, 4, 4, 9], [1, 2, 3, 4])
+      out = BGE.VoxelMaps.mostCommonColors(colors, 6)
+      m.assertEqual(4, out[0])
+      m.assertEqual(1, out[1])
+      colors = m.blocks([6, 8, 9, 8], [1, 2, 1, 2])
+      out = BGE.VoxelMaps.mostCommonColors(colors, 6)
+      m.assertEqual(8, out[0])
+      m.assertEqual(1, out[1])
+    end function
+
+    @describe("fromArrays")
+
+    @it("builds every level")
+    function _()
+      map = m.rampMap({})
+      m.assertNotInvalid(map)
+      m.assertEqual(4, map.getLevelCount())
+      m.assertEqual(64, map.size)
+      m.assertEqual(63, map.mask)
+      m.assertEqual(64 * 64, map.heightLevels[0].count())
+      m.assertEqual(32 * 32, map.heightLevels[1].count())
+      m.assertEqual(8 * 8, map.colorLevels[3].count())
+      ' ramp: height = x, so level 1 cell 0 averages 0, 1, 0, 1
+      m.assertEqual(0, map.heightLevels[1][0])
+      m.assertEqual(2, map.heightLevels[1][1])
+    end function
+
+    @it("rejects bad input")
+    function _()
+      heights = m.filled(64 * 64, 0)
+      colors = m.filled(64 * 64, 0)
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(100, heights, colors, [&hFFFFFF]))
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, m.filled(10, 0), colors, [&hFFFFFF]))
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, heights, colors, []))
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, heights, colors, m.filled(257, 0)))
+      colors[5] = 1
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, heights, colors, [&hFFFFFF]))
+      colors[5] = 0
+      heights[7] = 256
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, heights, colors, [&hFFFFFF]))
+      heights[7] = 0
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, heights, colors, [&hFFFFFF], {edgeMode: "mirror"}))
+      m.assertInvalid(BGE.VoxelMaps.fromArrays(64, heights, colors, [&hFFFFFF], {edgeMode: "flat", flatColor: 1}))
+    end function
+
+    @it("uses the mip levels it's given")
+    function _()
+      heights = m.filled(64 * 64, 3)
+      colors = m.filled(64 * 64, 0)
+      level1 = m.filled(32 * 32, 9)
+      map = BGE.VoxelMaps.fromArrays(64, heights, colors, [&hFFFFFF], {heightLevels: [heights, level1], colorLevels: [colors, m.filled(32 * 32, 0)]})
+      m.assertEqual(2, map.getLevelCount())
+      m.assertEqual(9, map.heightLevels[1][0])
+    end function
+
+    @describe("lookups")
+
+    @it("wraps past the edges")
+    function _()
+      map = m.rampMap({})
+      m.assertEqual(63, map.cellHeight(-1, 0))
+      m.assertEqual(0, map.cellHeight(64, 65))
+      m.assertEqual(1, map.cellHeight(65, -3))
+      m.assertEqual(1, map.colorAt(-1, 0))
+      m.assertEqual(0, map.colorAt(64, 0))
+    end function
+
+    @it("reads the flat floor past the edges with edgeMode flat")
+    function _()
+      map = m.rampMap({edgeMode: "flat", flatHeight: 40, flatColor: 2})
+      m.assertEqual(40, map.cellHeight(-1, 0))
+      m.assertEqual(40, map.cellHeight(64, 3))
+      m.assertEqual(40, map.cellHeight(3, 64))
+      m.assertEqual(2, map.colorAt(3, -1))
+      m.assertEqual(5, map.cellHeight(5, 0))
+      m.assertEqual(1, map.colorAt(5, 0))
+    end function
+
+    @it("blends heights between cell centres")
+    function _()
+      map = m.rampMap({edgeMode: "flat", flatHeight: 40, flatColor: 2})
+      m.assertEqual(10.0, map.heightAt(10.5, 3.5))
+      m.assertEqual(10.5, map.heightAt(11.0, 3.5))
+      m.assertEqual(51.5, map.heightAt(64.0, 3.5))
+    end function
+
+    ' A 64 map whose height is x and colour x mod 2, palette of 3
+    private function rampMap(options as BGE.VoxelMapOptions) as dynamic
+      heights = CreateObject("roArray", 64 * 64, false)
+      colors = CreateObject("roArray", 64 * 64, false)
+      for z = 0 to 63
+        for x = 0 to 63
+          heights[z * 64 + x] = x
+          colors[z * 64 + x] = x mod 2
+        end for
+      end for
+      return BGE.VoxelMaps.fromArrays(64, heights, colors, [&h000000, &h808080, &h0000FF], options)
+    end function
+
+    ' A 64 map whose first two 2x2 blocks hold `first` and `second` in the order (x, z),
+    ' (x + 1, z), (x, z + 1), (x + 1, z + 1), zeros elsewhere
+    private function blocks(first as integer[], second as integer[]) as integer[]
+      out = m.filled(64 * 64, 0)
+      out[0] = first[0]
+      out[1] = first[1]
+      out[64] = first[2]
+      out[65] = first[3]
+      out[2] = second[0]
+      out[3] = second[1]
+      out[66] = second[2]
+      out[67] = second[3]
+      return out
+    end function
+
+    private function filled(count as integer, value as integer) as integer[]
+      out = CreateObject("roArray", count, false)
+      for i = 0 to count - 1
+        out[i] = value
+      end for
+      return out
+    end function
+
+  end class
+
+end namespace
