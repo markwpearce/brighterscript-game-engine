@@ -78,7 +78,7 @@ namespace BGE.BSP
     end if
     pivot = items[0]
     if pivot.hullFaces <> invalid and pivot.hullFaces.count() > 0
-      return buildHullChain(pivot, items, 1, 0, counter)
+      return buildHullChain(pivot, items, 1, counter)
     end if
     node = createNode(pivot.planePoint, pivot.planeNormal, pivot.corners, counter)
     node.item = pivot
@@ -153,48 +153,83 @@ namespace BGE.BSP
 
   ' One node per face of pivot's hull, each the next one's back child; the innermost holds pivot,
   ' so the walk draws it after the faces the camera is behind and before those it's in front of.
-  function buildHullChain(pivot as BGE.BSP.StaticItem, items as BGE.BSP.StaticItem[], firstItem as integer, faceIndex as integer, counter as object) as object
+  ' Each other item goes in front of the one face hullFaceFor() picks, or inside (the innermost
+  ' node's back). The first node keeps the face planes, so findBoundsLeaf() picks the same way.
+  function buildHullChain(pivot as BGE.BSP.StaticItem, items as BGE.BSP.StaticItem[], firstItem as integer, counter as object) as object
     faces = pivot.hullFaces
-    face = faces[faceIndex]
-    node = createNode(face.planePoint, face.planeNormal, face.corners, counter)
-    isLast = faceIndex = faces.count() - 1
-    if isLast
-      node.item = pivot
-    end if
-    front = []
-    back = []
+    faceCount = faces.count()
+    planes = [] as float[]
+    for each face in faces
+      n = face.planeNormal
+      p = face.planePoint
+      planes.append([n.x, n.y, n.z, n.x * p.x + n.y * p.y + n.z * p.z])
+    end for
+    ' one group per face, then inside
+    groups = []
+    for k = 0 to faceCount
+      groups.push([])
+    end for
     for i = firstItem to items.count() - 1
       item = items[i]
-      ' only what's wholly in front of a face is ordered by it; the rest tries the next face
-      inFront = false
-      points = itemPoints(item)
-      if points.count() = 0
-        inFront = pointSide(node, item.planePoint) >= 0
-      else
-        inFront = true
-        for each p in points
-          if pointSide(node, p) < 0
-            inFront = false
-            exit for
-          end if
-        end for
-        if not inFront and isLast
-          inFront = pointSide(node, item.planePoint) >= 0
-        end if
+      c = item.planePoint
+      k = hullFaceFor(planes, itemPoints(item), c.x, c.y, c.z)
+      if k < 0
+        k = faceCount
       end if
-      if inFront
-        front.push(item)
+      groups[k].push(item)
+    end for
+    head = invalid
+    previous = invalid
+    for k = 0 to faceCount - 1
+      face = faces[k]
+      ' no corners: past a face's edge isn't past the solid, so findBoundsLeaf()'s edge test doesn't apply
+      node = createNode(face.planePoint, face.planeNormal, invalid, counter)
+      node.front = buildTree(groups[k], counter)
+      if k = 0
+        node.hullPlanes = planes
+        head = node
       else
-        back.push(item)
+        previous.back = node
+      end if
+      previous = node
+    end for
+    previous.item = pivot
+    previous.back = buildTree(groups[faceCount], counter)
+    return head
+  end function
+
+  ' Which of a solid's faces orders something against it: the first it's wholly in front of
+  ' (that plane separates them), else the one its centre is farthest in front of (a fence past a
+  ' house's corner crosses every face's plane), else -1 when its centre is inside.
+  '
+  ' @param {float[]} planes nx, ny, nz, d per face
+  ' @param {BGE.Math.Vector[]} points bounding it; empty to go by the centre alone
+  ' @return {integer} face index, or -1
+  function hullFaceFor(planes as float[], points as BGE.Math.Vector[], cx as float, cy as float, cz as float) as integer
+    bestFace = -1
+    bestSide = 0.0
+    for k = 0 to planes.count() - 1 step 4
+      nx = planes[k]
+      ny = planes[k + 1]
+      nz = planes[k + 2]
+      d = planes[k + 3]
+      side = nx * cx + ny * cy + nz * cz - d
+      wholly = side >= 0
+      for each p in points
+        if nx * p.x + ny * p.y + nz * p.z < d
+          wholly = false
+          exit for
+        end if
+      end for
+      if wholly
+        return k \ 4
+      end if
+      if side > bestSide
+        bestSide = side
+        bestFace = k \ 4
       end if
     end for
-    node.front = buildTree(front, counter)
-    if isLast
-      node.back = buildTree(back, counter)
-    else
-      node.back = buildHullChain(pivot, back, 0, faceIndex + 1, counter)
-    end if
-    return node
+    return bestFace
   end function
 
   ' The points bounding a static item: a quad's corners, or a solid's faces' corners
@@ -308,46 +343,62 @@ namespace BGE.BSP
     node = root
     leaf = 0
     while node <> invalid
-      nx = node.nx
-      ny = node.ny
-      nz = node.nz
-      d = node.d
-      low = 1e30
-      high = -1e30
-      for each p in points
-        side = nx * p.x + ny * p.y + nz * p.z - d
-        if side < low
-          low = side
-        end if
-        if side > high
-          high = side
-        end if
-      end for
-      if low >= 0
-        inFront = true
-      else if high < 0
-        inFront = false
-      else
-        inFront = nx * x + ny * y + nz * z >= d
-        if node.hasExtent
-          ' 1: the object draws after the quad, -1: before it, 0: they overlap on both edges
-          order = separatedOrder(node.ux, node.uy, node.uz, node.uMin, node.uMax, points, cameraPosition)
-          if order = 0
-            order = separatedOrder(node.vx, node.vy, node.vz, node.vMin, node.vMax, points, cameraPosition)
+      planes = node.hullPlanes
+      if planes <> invalid
+        ' a solid's chain: in front of the face hullFaceFor() picks, else on to the inside
+        face = hullFaceFor(planes, points, x, y, z)
+        last = planes.count() \ 4 - 1
+        for k = 0 to last
+          if k = face
+            leaf = node.id * 2
+            node = node.front
+            exit for
           end if
-          if order <> 0
-            state.usesCamera = true
-            ' the child on the camera's side draws after the quad
-            inFront = (nx * cameraPosition.x + ny * cameraPosition.y + nz * cameraPosition.z >= d) = (order > 0)
+          leaf = node.id * 2 + 1
+          node = node.back
+        end for
+      else
+        nx = node.nx
+        ny = node.ny
+        nz = node.nz
+        d = node.d
+        low = 1e30
+        high = -1e30
+        for each p in points
+          side = nx * p.x + ny * p.y + nz * p.z - d
+          if side < low
+            low = side
+          end if
+          if side > high
+            high = side
+          end if
+        end for
+        if low >= 0
+          inFront = true
+        else if high < 0
+          inFront = false
+        else
+          inFront = nx * x + ny * y + nz * z >= d
+          if node.hasExtent
+            ' 1: the object draws after the quad, -1: before it, 0: they overlap on both edges
+            order = separatedOrder(node.ux, node.uy, node.uz, node.uMin, node.uMax, points, cameraPosition)
+            if order = 0
+              order = separatedOrder(node.vx, node.vy, node.vz, node.vMin, node.vMax, points, cameraPosition)
+            end if
+            if order <> 0
+              state.usesCamera = true
+              ' the child on the camera's side draws after the quad
+              inFront = (nx * cameraPosition.x + ny * cameraPosition.y + nz * cameraPosition.z >= d) = (order > 0)
+            end if
           end if
         end if
-      end if
-      if inFront
-        leaf = node.id * 2
-        node = node.front
-      else
-        leaf = node.id * 2 + 1
-        node = node.back
+        if inFront
+          leaf = node.id * 2
+          node = node.front
+        else
+          leaf = node.id * 2 + 1
+          node = node.back
+        end if
       end if
     end while
     return leaf
