@@ -81,7 +81,8 @@ Nothing is drawn above the terrain, so put a skybox or a backdrop behind it.
 
 ## Fog and fading
 
-With `Camera3d.fog` on, far terrain fades into the fog colour. With it off, set `fade` to fade it
+With `Camera3d.fog` on, far terrain fades into the fog colour across the camera's
+`drawDistanceFadeFraction` band, like objects and walls. With it off, set `fade` to fade it
 into another colour (usually the sky's) from `start` (a fraction of the draw distance) to the far
 end. Without either, the terrain just stops at the draw distance.
 
