@@ -1267,8 +1267,9 @@ of view, and a `Segment Walls` demo (`demo=segment-walls`, `map=hall`) with wall
 
 `DrawableWall` is an upright textured quad between two floor points, from `bottom` to `top`,
 at any length and angle. It's for a few walls in an open scene; for a level's walls use
-`DrawableWalls`. It stays a sorted object rather than a segment so it works under a `Camera2d`
-and on any entity, moving ones included (a renderer has one walls view, `Camera3d` only). Set `tileWidth`/`tileHeight` (world units per copy of the texture) to
+`DrawableWalls`. It stays a sorted object rather than a segment, so it works under a
+`Camera2d` and on any entity, moving ones included (a renderer has one walls view, `Camera3d`
+only). Set `tileWidth`/`tileHeight` (world units per copy of the texture) to
 repeat the texture instead of stretching it once. Tiles start at the wall's start point and
 foot, so a partial tile is at the far end or the top.
 
