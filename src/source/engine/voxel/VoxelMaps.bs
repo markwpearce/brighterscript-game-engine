@@ -181,4 +181,98 @@ namespace BGE.VoxelMaps
     return invalid
   end function
 
+  ' Loads a `.bvox` file (from `tools/voxel-map.py` or `VoxelMap.saveToFile()`).
+  '
+  ' @param {string} path e.g. "pkg:/maps/island.bvox"
+  ' @return {dynamic} a `BGE.VoxelMap`, or invalid (and a printed reason)
+  function fromFile(path as string) as dynamic
+    bytes = CreateObject("roByteArray")
+    if not bytes.ReadFile(path)
+      return fail(`couldn't read ${path}`)
+    end if
+    return fromByteArray(bytes)
+  end function
+
+  ' A map from a `.bvox` file's bytes. Version 1 layout, one byte per value:
+  ' "BGEV", version (1), log2 size, level count, edge mode (0 wrap, 1 flat), flat height,
+  ' flat colour, palette count (0 = 256), RGB per palette entry, then per level (level 0 first)
+  ' its heights then its colours, row by row.
+  '
+  ' @param {roByteArray} bytes
+  ' @return {dynamic} a `BGE.VoxelMap`, or invalid (and a printed reason)
+  function fromByteArray(bytes as roByteArray) as dynamic
+    headerSize = 11
+    total = bytes.count()
+    if total < headerSize or bytes[0] <> 66 or bytes[1] <> 71 or bytes[2] <> 69 or bytes[3] <> 86
+      return fail("not a .bvox file")
+    end if
+    if bytes[4] <> 1
+      return fail(`unsupported .bvox version ${bytes[4]}`)
+    end if
+    shift = bytes[5]
+    if shift < MIN_SIZE_SHIFT or shift > MAX_SIZE_SHIFT
+      return fail(`bad size shift ${shift}`)
+    end if
+    levelCount = bytes[6]
+    if levelCount < 1 or levelCount > maxLevelCount(shift)
+      return fail(`bad level count ${levelCount}`)
+    end if
+    edgeByte = bytes[7]
+    if edgeByte > 1
+      return fail(`bad edge mode ${edgeByte}`)
+    end if
+    paletteCount = bytes[10]
+    if paletteCount = 0
+      paletteCount = 256
+    end if
+    expected = headerSize + paletteCount * 3
+    for level = 0 to levelCount - 1
+      levelSize = 1 << (shift - level)
+      expected += 2 * levelSize * levelSize
+    end for
+    if total <> expected
+      return fail(`expected ${expected} bytes, found ${total}`)
+    end if
+
+    offset = headerSize
+    palette = CreateObject("roArray", paletteCount, false)
+    for i = 0 to paletteCount - 1
+      palette[i] = (bytes[offset] << 16) + (bytes[offset + 1] << 8) + bytes[offset + 2]
+      offset += 3
+    end for
+    heightLevels = []
+    colorLevels = []
+    for level = 0 to levelCount - 1
+      levelSize = 1 << (shift - level)
+      cellCount = levelSize * levelSize
+      heights = CreateObject("roArray", cellCount, false)
+      for i = 0 to cellCount - 1
+        heights[i] = bytes[offset + i]
+      end for
+      offset += cellCount
+      colors = CreateObject("roArray", cellCount, false)
+      for i = 0 to cellCount - 1
+        c = bytes[offset + i]
+        if c >= paletteCount
+          return fail(`colour ${c} isn't in the palette`)
+        end if
+        colors[i] = c
+      end for
+      offset += cellCount
+      heightLevels.push(heights)
+      colorLevels.push(colors)
+    end for
+
+    map = new BGE.VoxelMap(shift, palette, heightLevels, colorLevels)
+    if edgeByte = 1
+      map.edgeMode = BGE.VoxelEdgeMode.flat
+    end if
+    map.flatHeight = bytes[8]
+    map.flatColor = bytes[9]
+    if map.flatColor >= paletteCount
+      return fail(`flat colour ${map.flatColor} isn't in the palette`)
+    end if
+    return map
+  end function
+
 end namespace
