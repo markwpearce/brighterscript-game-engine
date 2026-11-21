@@ -214,6 +214,30 @@ numbers go in the doc. Express (.118) numbers if time allows.
   units; hidden/partial/visible decisions against known spans; still frames skip the march; roll
   takes the scratch-bitmap path; quality fields are read; a second terrain is refused.
 
+### Results (PR 2, Roku Ultra, 1280x720)
+
+Flying and turning over the generated 256 map, terrain only (`demo=voxel-terrain sweep=1 objects=0`):
+
+| Level | `horizonShift` | `exact` | `horizonShift`, 20° roll |
+|---|---|---|---|
+| basic | 17.5 ms, 48 fps | 23.4 ms, 38 fps | 21.8 ms, 39 fps |
+| low | 22.4 ms, 39 fps | 29.4 ms, 31 fps | |
+| medium | 29.5 ms, 30 fps | 40.4 ms, 23 fps | 36.8 ms, 24 fps |
+| high | 38.0 ms, 24 fps | 51.2 ms, 18 fps | |
+| ultra | 44.6 ms, 21 fps | 58.3 ms, 16 fps | 54.3 ms, 17 fps |
+
+- The march costs ~3.8-4.0 µs per column per step, the same as the spike. `exact` is +31-37% (it was
+  +40-57% until its per-step constants moved into per-march tables), so `horizonShift` stays the
+  default.
+- Under roll the columns are scaled by the level view's width over the frame's, so the screen keeps
+  as many as unrolled (the spike did the same).
+- Loading a 256 `.bvox` takes 2 ms.
+- Merged spans start at their nearest depth but reach much farther (flat ground of one colour is one
+  span), so hiding uses each column's exact top-by-depth profile (`columnTops`, bisected), not span
+  depths. The hill test costs ~5 ms for ~40 objects in view.
+- With 160 billboards, the engine's per-object update (~23 ms a frame) and their draws cost more than
+  the terrain. That's the general billboard cost, not the terrain's.
+
 ## PR 3: shear pitch camera
 
 ### `Camera3d.pitchMode`

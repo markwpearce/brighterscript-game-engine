@@ -27,7 +27,9 @@ import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
 import "ScanlinePolygonFill.bs"
 import "sceneObjects/SceneObject.bs"
+import "sceneObjects/SceneObjectVoxelTerrain.bs"
 import "sceneObjects/SceneObjectWalls.bs"
+import "voxel/VoxelTerrainView.bs"
 import "walls/WallsView.bs"
 import "quadColumns/QuadColumnDrawer.bs"
 import "quadColumns/QuadColumnTexture.bs"
@@ -242,6 +244,15 @@ namespace BGE
     private pendingWallRedraws = [] as BGE.WallsSpan[]
     ' Scratch for the span each sorted object is tested by.
     private wallSpan = {valid: false, firstRay: 0, lastRay: 0, nearestDistance: 0.0} as BGE.WallsSpan
+    ' The voxel terrain this renderer draws (one at most), and the one drawn this frame.
+    private terrainObject as dynamic = invalid
+    private activeTerrain as dynamic = invalid
+    ' Terrain boxes to redraw over partly hidden cluster members once the cluster pass has drawn.
+    private pendingTerrainRedraws = [] as BGE.VoxelHideBox[]
+    ' Scratch for a sorted object's points projected for the terrain test, and its box.
+    private terrainProjected = [] as float[]
+    private terrainHideBox = {} as BGE.VoxelHideBox
+    private terrainDepthPoints = [] as BGE.Math.Vector[]
     private stageMs as roAssociativeArray = {}
     private stageCounts as roAssociativeArray = {}
     ' Scratch for projected occlusion test points: x, y, depth per point.
@@ -681,7 +692,22 @@ namespace BGE
           sceneObj.drawable.log("Drawable '" + sceneObj.drawable.name + "' is a second walls object on this renderer - only one is supported, so it will not draw", BGE.Debug.LogLevel.warning)
         end if
       end if
+      if sceneObj.type = SceneObjectType.VoxelTerrain
+        if invalid = m.terrainObject
+          m.terrainObject = sceneObj
+        else
+          sceneObj.drawable.log("Drawable '" + sceneObj.drawable.name + "' is a second voxel terrain on this renderer - only one is supported, so it will not draw", BGE.Debug.LogLevel.warning)
+        end if
+      end if
     end sub
+
+    ' The voxel terrain scene object drawn this frame (a BGE.SceneObjectVoxelTerrain), or
+    ' invalid if none drew.
+    '
+    ' @return {dynamic}
+    function getVoxelTerrain() as dynamic
+      return m.activeTerrain
+    end function
 
     ' The walls scene object drawn this frame (a BGE.SceneObjectWalls), or invalid
     ' if none drew - e.g. none is registered, it's disabled, or the camera is a Camera2d.
@@ -885,6 +911,9 @@ namespace BGE
         m.fogCastersDirty = true
         if invalid <> m.wallsObject and m.wallsObject.id = sceneObjToRemove.id
           m.wallsObject = invalid
+        end if
+        if invalid <> m.terrainObject and m.terrainObject.id = sceneObjToRemove.id
+          m.terrainObject = invalid
         end if
       end if
       sceneObjToRemove.id = ""
@@ -1665,10 +1694,38 @@ namespace BGE
           end if
         end if
       end if
+      terrainBox = invalid
+      if invalid <> m.activeTerrain and sceneObj.distanceFadeAlpha > 0
+        terrainBox = m.terrainHideBox
+        if m.profileStages
+          testStart = m.occlusionTimer.TotalMilliseconds()
+          hidden = m.testHiddenByTerrain(sceneObj, terrainBox)
+          m.addStageMs("terrainTest", m.occlusionTimer.TotalMilliseconds() - testStart)
+        else
+          hidden = m.testHiddenByTerrain(sceneObj, terrainBox)
+        end if
+        if hidden = BGE.VoxelHidden.all
+          sceneObj.markSkippedOccluded(m.camera)
+          m.occludedCountLastFrame++
+          return
+        end if
+        if hidden <> BGE.VoxelHidden.partly
+          terrainBox = invalid
+        end if
+      end if
       if m.profileStages
         m.drawAndTime(sceneObj)
       else
         sceneObj.draw(m)
+      end if
+      if invalid <> terrainBox and sceneObj.didDrawLastFrame()
+        if sceneObj.clusterMemberCount > 1
+          ' copied, since the scratch box is reused by the next object
+          m.pendingTerrainRedraws.push({top: terrainBox.top, bottom: terrainBox.bottom, firstColumn: terrainBox.firstColumn, lastColumn: terrainBox.lastColumn, limit: terrainBox.limit})
+        else
+          terrainObj = m.activeTerrain as SceneObjectVoxelTerrain
+          terrainObj.redrawOver(m, terrainBox)
+        end if
       end if
       if invalid <> partialSpan and sceneObj.didDrawLastFrame()
         if sceneObj.clusterMemberCount > 1
@@ -1679,6 +1736,46 @@ namespace BGE
         end if
       end if
     end sub
+
+    ' Whether the terrain's hills hide a sorted object: a BGE.VoxelHidden, with `hideBox` filled
+    ' for SceneObjectVoxelTerrain.redrawOver() when partly. Only "all" for an object whose
+    ' points bound what it draws (canBeOccluded()).
+    private function testHiddenByTerrain(sceneObj as SceneObject, hideBox as BGE.VoxelHideBox) as integer
+      terrainObj = m.activeTerrain as SceneObjectVoxelTerrain
+      canSkip = sceneObj.canBeOccluded()
+      cam = m.camera as Camera3d
+      projected = m.terrainProjected
+      if canSkip and sceneObj.projectOcclusionCorners(cam, projected, m.terrainDepthPoints)
+        ' its canvas box without building and projecting its corners
+        points = m.terrainDepthPoints
+      else
+        if canSkip
+          points = sceneObj.getOcclusionTestPoints(m.camera)
+        else
+          points = sceneObj.getBoundingPointsThisFrame(m.camera)
+        end if
+        if invalid = points or points.count() = 0
+          return BGE.VoxelHidden.visible
+        end if
+        cam.projectPointsWithDepth(points, projected, true)
+      end if
+      tolerance = terrainObj.drawable.getHideTolerance()
+      ' redrawn over: hills nearer than its middle; wholly hidden: only by hills nearer than
+      ' its nearest point, so a hill between its near face and its middle can't hide all of it
+      limit = terrainObj.levelDepthOf(sceneObj.getDepthPosition()) - tolerance
+      nearest = limit + tolerance
+      for each point in points
+        depth = terrainObj.levelDepthOf(point)
+        if depth < nearest
+          nearest = depth
+        end if
+      end for
+      hidden = terrainObj.testHidden(projected, nearest - tolerance, limit, hideBox)
+      if hidden = BGE.VoxelHidden.all and not canSkip
+        return BGE.VoxelHidden.partly
+      end if
+      return hidden
+    end function
 
     ' Redraws the wall strips that hide part of the span (nearer than its nearest point by
     ' more than hideTolerance), one ray wider each side.
@@ -1821,6 +1918,7 @@ namespace BGE
       ' a free-running timer, so both readings round down alike and averages stay unbiased
       lap = m.occlusionTimer.TotalMilliseconds()
       m.activeWalls = invalid
+      m.activeTerrain = invalid
       m.quadColumns.beginFrame(m.qualitySettings)
       m.updateLighting()
       m.applyOccluderDrawPolicy()
@@ -1924,6 +2022,15 @@ namespace BGE
       end if
       lap = m.lapStage("fogSilhouettes", lap)
 
+      terrain = m.terrainObject
+      if invalid <> terrain and terrain.isEnabled()
+        terrain.draw(m)
+        if terrain.didDrawLastFrame()
+          m.activeTerrain = terrain
+        end if
+      end if
+      lap = m.lapStage("terrain", lap)
+
       walls = m.wallsObject
       if invalid <> walls and walls.isEnabled()
         walls.draw(m)
@@ -1956,6 +2063,14 @@ namespace BGE
       lap = m.lapStage("objects", lap)
 
       m.drawPendingClusterPrimitives()
+      ' hills first: the walls then go back over any hill drawn over them
+      if m.pendingTerrainRedraws.count() > 0
+        terrainObj = m.activeTerrain as SceneObjectVoxelTerrain
+        for each hideBox in m.pendingTerrainRedraws
+          terrainObj.redrawOver(m, hideBox)
+        end for
+        m.pendingTerrainRedraws.clear()
+      end if
       if m.pendingWallRedraws.count() > 0
         for each span in m.pendingWallRedraws
           m.redrawWallsOver(span)

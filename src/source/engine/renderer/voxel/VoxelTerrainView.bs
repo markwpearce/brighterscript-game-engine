@@ -1,0 +1,633 @@
+import "../../voxel/VoxelMap.bs"
+
+namespace BGE
+
+  ' Where a voxel terrain is seen from, in the map's units: built each frame by
+  ' `SceneObjectVoxelTerrain` from the camera.
+  ' An object's box in a terrain's level view, from SceneObjectVoxelTerrain.testHidden(), for
+  ' redrawing the hills over it.
+  interface VoxelHideBox extends roAssociativeArray
+    top as float
+    bottom as float
+    firstColumn as integer
+    lastColumn as integer
+    ' level depth: hills nearer than this are redrawn
+    limit as float
+  end interface
+
+  interface VoxelTerrainPose extends roAssociativeArray
+    ' Camera position on the map, in cells
+    camX as float
+    camZ as float
+    ' Camera height in height units (the map's 0-255 scale)
+    camHeight as float
+    ' The level view direction and its right, on the map plane (unit length)
+    forwardX as float
+    forwardZ as float
+    rightX as float
+    rightZ as float
+    ' Focal length in pixels
+    focal as float
+    ' Size of the level view being marched, in pixels
+    viewWidth as float
+    viewHeight as float
+    ' Screen y of the horizon in the level view (horizon shift pitch)
+    horizon as float
+    ' Pitch in radians, looking up positive, for exactPitch
+    pitch as float
+    ' Project each step with the pitched camera instead of shifting the horizon
+    exactPitch as boolean
+    ' How far to march, in cells
+    distance as float
+    ' World units per cell and per height unit
+    cellSize as float
+    heightScale as float
+  end interface
+
+  ' The march of a voxel (heightmap) terrain, with no drawing: for each screen column, a ray
+  ' steps front to back over the map, and wherever the terrain rises above what the column
+  ' already shows it adds a span. Spans in a column never overlap, run upward from the view's
+  ' bottom with increasing depth, and same-coloured neighbours merge.
+  '
+  ' Steps double every `bandSteps` steps; each band samples the mip level whose cells are about
+  ' as far apart as its samples (the coarser of the gap between columns and the step), which
+  ' keeps far terrain from flickering. Map positions are 16.16 fixed point. See
+  ' specs/2026-11-21-voxel-terrain-spike.md.
+  class VoxelTerrainView
+
+    ' Columns across the view
+    columns as integer = 80
+    ' Steps in each depth band
+    bandSteps as integer = 20
+    ' RGB colour far terrain blends towards (-1 for none), from fogStart (a fraction of the
+    ' distance) to all of it at the far end
+    fogColor as integer = -1
+    fogStart as float = 0.5
+
+    ' Per column, its spans from the last march: top, height, RGBA colour and the depth (world
+    ' units along the view direction) where it starts, repeated
+    columnSpans = [] as roArray
+    ' Per column, each place its top rose: depth (world units) then the new top, repeated, in
+    ' order. A merged span covers many depths, so this, not the spans, says what hides what.
+    columnTops = [] as roArray
+    ' Width of each column in pixels
+    columnWidth as float = 0
+    ' Height of the level view last marched
+    viewHeight as float = 0
+    ' Spans and depth steps in the last march
+    spanCount as integer = 0
+    stepCount as integer = 0
+
+    private map as BGE.VoxelMap
+    private fogLevels as integer = 16
+    private fogTable = [] as integer[]
+    private fogKey as string = ""
+    private tablesKey as string = ""
+    private zs = [] as float[]
+    ' zs in world units
+    private depths = [] as float[]
+    private invZs = [] as float[]
+    private bases = [] as float[]
+    private fogBases = [] as integer[]
+    private bandStart = [] as integer[]
+    private bandEnd = [] as integer[]
+    private bandDz = [] as float[]
+    private bandLevels = [] as integer[]
+    ' exactPitch: per step, depth (world) times cos and sin of the pitch
+    private depthCos = [] as float[]
+    private depthSin = [] as float[]
+    ' exactPitch, rebuilt each march: per step, the parts of focal x up and of depth that
+    ' don't depend on the height (see buildTables())
+    private numBases = [] as float[]
+    private denBases = [] as float[]
+    private numScale as float = 0
+    private denScale as float = 0
+    ' one-cell "maps" holding the flat edge's height and colour
+    private flatHeights as roByteArray
+    private flatColors as roByteArray
+
+    ' @param {BGE.VoxelMap} map
+    sub new(map as BGE.VoxelMap)
+      m.map = map
+      m.flatHeights = CreateObject("roByteArray")
+      m.flatHeights.push(0)
+      m.flatColors = CreateObject("roByteArray")
+      m.flatColors.push(0)
+    end sub
+
+    ' The map being marched.
+    '
+    ' @return {BGE.VoxelMap}
+    function getMap() as BGE.VoxelMap
+      return m.map
+    end function
+
+    ' Swaps the map; the next march rebuilds everything that depends on it.
+    '
+    ' @param {BGE.VoxelMap} map
+    sub setMap(map as BGE.VoxelMap)
+      m.map = map
+      m.tablesKey = ""
+      m.fogKey = ""
+    end sub
+
+    ' The top of the last span in a column that starts nearer than `depth`: everything in the
+    ' column from there down hides what's at that depth. The view's height if none does.
+    '
+    ' @param {integer} column
+    ' @param {float} depth world units along the view direction
+    ' @return {float}
+    function occluderTopAt(column as integer, depth as float) as float
+      tops = m.columnTops[column]
+      ' the last rise nearer than depth, by bisection (objects x columns x rises adds up)
+      low = 0
+      high = tops.count() \ 2 - 1
+      found = -1
+      while low <= high
+        middle = (low + high) \ 2
+        if tops[middle * 2] < depth
+          found = middle
+          low = middle + 1
+        else
+          high = middle - 1
+        end if
+      end while
+      if found < 0
+        return m.viewHeight
+      end if
+      return tops[found * 2 + 1]
+    end function
+
+    ' Marches every column for a pose, replacing columnSpans.
+    '
+    ' @param {BGE.VoxelTerrainPose} pose
+    sub march(pose as BGE.VoxelTerrainPose)
+      m.buildFogTable()
+      m.buildTables(pose)
+      map = m.map
+      columns = m.columns
+      ' whole pixels, like the span tops
+      viewHeight = cint(pose.viewHeight)
+      m.viewHeight = viewHeight
+      colWidth = pose.viewWidth / columns
+      m.columnWidth = colWidth
+      halfW = pose.viewWidth / 2
+      fog = m.fogTable
+      zs = m.zs
+      invZs = m.invZs
+      bases = m.bases
+      fogBases = m.fogBases
+      bandStart = m.bandStart
+      bandEnd = m.bandEnd
+      bandDz = m.bandDz
+      bandLevels = m.bandLevels
+      depthCos = m.depthCos
+      depthSin = m.depthSin
+      numBases = m.numBases
+      denBases = m.denBases
+      numScale = m.numScale
+      denScale = m.denScale
+      heightLevels = map.heightLevels
+      colorLevels = map.colorLevels
+      bandCount = bandStart.count()
+      lastStep = zs.count() - 1
+      fixedOne = 65536
+      mapShift = map.sizeShift
+      mapMask = map.mask
+      mapSize = map.size
+      flatEdges = map.edgeMode = BGE.VoxelEdgeMode.flat
+      m.flatHeights[0] = map.flatHeight
+      m.flatColors[0] = map.flatColor
+      exact = pose.exactPitch
+      camHeight = pose.camHeight
+      heightScale = pose.heightScale
+      focal = pose.focal
+      centreY = viewHeight / 2
+      sinPitch = sin(pose.pitch)
+      cosPitch = cos(pose.pitch)
+      ' past this y nothing farther can show: the highest terrain at the far end projects lower
+      stopY = -1.0
+      if camHeight > 255 and lastStep >= 0
+        if exact
+          dh = (255 - camHeight) * heightScale
+          den = depthCos[lastStep] + dh * sinPitch
+          if den > 0
+            stopY = centreY - focal * (dh * cosPitch - depthSin[lastStep]) / den
+          end if
+        else
+          stopY = bases[lastStep] - 255 * invZs[lastStep]
+        end if
+      end if
+      ' ray per unit depth: forward + right * (x - middle) / focal
+      rayStepX = pose.rightX * colWidth / focal
+      rayStepZ = pose.rightZ * colWidth / focal
+      leftOffset = (colWidth / 2 - halfW) / focal
+      leftX = pose.forwardX + pose.rightX * leftOffset
+      leftZ = pose.forwardZ + pose.rightZ * leftOffset
+      spans = 0
+      steps = 0
+      if m.columnSpans.count() <> columns
+        m.columnSpans = CreateObject("roArray", columns, false)
+        m.columnTops = CreateObject("roArray", columns, false)
+        for i = 0 to columns - 1
+          m.columnSpans[i] = [] as float[]
+          m.columnTops[i] = [] as float[]
+        end for
+      end if
+      columnSpans = m.columnSpans
+      columnTops = m.columnTops
+      depths = m.depths
+      flatHeights = m.flatHeights
+      flatColors = m.flatColors
+      ' a draw distance of a cell or less has no steps
+      if lastStep < 0
+        for i = 0 to columns - 1
+          columnSpans[i].Clear()
+          columnTops[i].Clear()
+        end for
+        m.spanCount = 0
+        m.stepCount = 0
+        return
+      end if
+
+      for i = 0 to columns - 1
+        rx = leftX + rayStepX * i
+        rz = leftZ + rayStepZ * i
+        ' map position at the first step, 16.16
+        fx = cint((pose.camX + rx * zs[0]) * fixedOne)
+        fz = cint((pose.camZ + rz * zs[0]) * fixedOne)
+        record = columnSpans[i]
+        record.Clear()
+        tops = columnTops[i]
+        tops.Clear()
+        top = viewHeight
+        color = 0
+        bottom = viewHeight
+        spanZ = 0.0
+        for b = 0 to bandCount - 1
+          level = bandLevels[b]
+          dzb = bandDz[b]
+          ddx = cint(rx * dzb * fixedOne)
+          ddz = cint(rz * dzb * fixedOne)
+          first = bandStart[b]
+          last = bandEnd[b]
+          steps += last - first + 1
+          ' the band in up to three runs: before the map, on it, past it (flat edges only;
+          ' a wrapped map is one run). A run off the map samples a one-cell "map" holding the
+          ' flat height and colour, with zero masks, so the loop is the same.
+          inFirst = first
+          inLast = last
+          if flatEdges
+            ' steps t = k - first for which 0 <= position < size on both axes
+            tMin = 0.0
+            tMax = (last - first) + 1.0
+            x0 = fx / fixedOne
+            z0 = fz / fixedOne
+            stepX = ddx / fixedOne
+            stepZ = ddz / fixedOne
+            if stepX > 0
+              tMin = BGE.Math.Max(tMin, (0 - x0) / stepX)
+              tMax = BGE.Math.Min(tMax, (mapSize - x0) / stepX)
+            else if stepX < 0
+              tMin = BGE.Math.Max(tMin, (mapSize - x0) / stepX)
+              tMax = BGE.Math.Min(tMax, (0 - x0) / stepX)
+            else if x0 < 0 or x0 >= mapSize
+              tMax = -1.0
+            end if
+            if stepZ > 0
+              tMin = BGE.Math.Max(tMin, (0 - z0) / stepZ)
+              tMax = BGE.Math.Min(tMax, (mapSize - z0) / stepZ)
+            else if stepZ < 0
+              tMin = BGE.Math.Max(tMin, (mapSize - z0) / stepZ)
+              tMax = BGE.Math.Min(tMax, (0 - z0) / stepZ)
+            else if z0 < 0 or z0 >= mapSize
+              tMax = -1.0
+            end if
+            ' a little inside where the ray crosses an edge, so a sample rounding to just off
+            ' the map is flat rather than wrapping round to the far edge
+            if tMin > 0
+              tMin += 0.001
+            end if
+            inFirst = first - int(-tMin)
+            inLast = first - int(-(tMax - 0.001)) - 1
+            if inLast > last
+              inLast = last
+            end if
+            if inFirst > inLast
+              ' never on the map in this band: all one flat run
+              inFirst = last + 1
+              inLast = last
+            end if
+          end if
+          for runIndex = 0 to 2
+            if runIndex = 0
+              runFirst = first
+              runLast = inFirst - 1
+              onMap = false
+            else if runIndex = 1
+              runFirst = inFirst
+              runLast = inLast
+              onMap = true
+            else
+              runFirst = inLast + 1
+              if runFirst < inFirst
+                runFirst = inFirst
+              end if
+              runLast = last
+              onMap = false
+            end if
+            if not flatEdges
+              onMap = true
+              if runIndex <> 1
+                runLast = runFirst - 1
+              end if
+            end if
+            if runLast >= runFirst
+              if onMap
+                heights = heightLevels[level]
+                pal = colorLevels[level]
+                mask = mapMask >> level
+                rowMask = mask << (mapShift - level)
+                xShift = 16 + level
+                zShift = xShift - (mapShift - level)
+              else
+                heights = flatHeights
+                pal = flatColors
+                mask = 0
+                rowMask = 0
+                xShift = 16
+                zShift = 16
+              end if
+              ' position at this run's first step
+              px = fx + ddx * (runFirst - first)
+              pz = fz + ddz * (runFirst - first)
+              ' The two projections are separate copies of the loop: it's the hot path, and a
+              ' branch per step would cost the default one ~8%.
+              if exact
+                for k = runFirst to runLast
+                  idx = ((pz >> zShift) and rowMask) + ((px >> xShift) and mask)
+                  h = heights[idx]
+                  ' focal x the pitched camera's up and its depth, from per-march tables
+                  num = h * numScale - numBases[k]
+                  den = h * denScale + denBases[k]
+                  if den > 0
+                    y = centreY - num / den
+                  else if num > 0
+                    ' behind the image plane but above the view (a near hill looking down):
+                    ' up to the top (0, so a full column stops adding spans)
+                    y = 0
+                  else
+                    y = viewHeight
+                  end if
+                  if y < top
+                    c = fog[fogBases[k] + pal[idx]]
+                    if c <> color
+                      if color <> 0
+                        record.push(top)
+                        record.push(bottom - top)
+                        record.push(color)
+                        record.push(spanZ)
+                        spans++
+                      end if
+                      color = c
+                      bottom = top
+                      spanZ = depths[k]
+                    end if
+                    if y < 0
+                      y = 0
+                    end if
+                    ' whole pixels, so neighbouring spans meet without a seam
+                    top = cint(y)
+                    tops.push(depths[k])
+                    tops.push(top)
+                  end if
+                  px += ddx
+                  pz += ddz
+                end for
+              else
+                for k = runFirst to runLast
+                  idx = ((pz >> zShift) and rowMask) + ((px >> xShift) and mask)
+                  y = bases[k] - heights[idx] * invZs[k]
+                  if y < top
+                    c = fog[fogBases[k] + pal[idx]]
+                    if c <> color
+                      if color <> 0
+                        record.push(top)
+                        record.push(bottom - top)
+                        record.push(color)
+                        record.push(spanZ)
+                        spans++
+                      end if
+                      color = c
+                      bottom = top
+                      spanZ = depths[k]
+                    end if
+                    if y < 0
+                      y = 0
+                    end if
+                    top = cint(y)
+                    tops.push(depths[k])
+                    tops.push(top)
+                  end if
+                  px += ddx
+                  pz += ddz
+                end for
+              end if
+            end if
+          end for
+          fx += ddx * (last - first + 1)
+          fz += ddz * (last - first + 1)
+          if top <= stopY or top <= 0
+            exit for
+          end if
+        end for
+        if color <> 0 and bottom > top
+          record.push(top)
+          record.push(bottom - top)
+          record.push(color)
+          record.push(spanZ)
+          spans++
+        end if
+      end for
+      m.spanCount = spans
+      m.stepCount = steps
+    end sub
+
+    ' Fog band * 256 + palette index -> RGBA, rebuilt when the fog or palette changes. All 256
+    ' indexes are filled (past the palette with colour 0), so a bad index can't crash a draw.
+    private sub buildFogTable()
+      palette = m.map.palette
+      key = `${m.fogColor}|${m.fogStart}|${palette.count()}|${palette[0]}|${palette.peek()}`
+      if key = m.fogKey
+        return
+      end if
+      m.fogKey = key
+      levels = 1
+      if m.fogColor >= 0
+        levels = m.fogLevels
+      end if
+      table = CreateObject("roArray", levels * 256, false)
+      fr = (m.fogColor >> 16) and 255
+      fg = (m.fogColor >> 8) and 255
+      fb = m.fogColor and 255
+      for level = 0 to levels - 1
+        amount = 0.0
+        if levels > 1
+          ' 0 up to fogStart, then up to all fog in the last band
+          t = (level + 1) / levels
+          amount = (t - m.fogStart) / (1 - m.fogStart)
+          if amount < 0
+            amount = 0
+          else if amount > 1
+            amount = 1
+          end if
+        end if
+        for i = 0 to 255
+          rgb = palette[0]
+          if i < palette.count()
+            rgb = palette[i]
+          end if
+          r = (rgb >> 16) and 255
+          g = (rgb >> 8) and 255
+          b = rgb and 255
+          r = cint(r + (fr - r) * amount)
+          g = cint(g + (fg - g) * amount)
+          b = cint(b + (fb - b) * amount)
+          table.push((r << 24) + (g << 16) + (b << 8) + 255)
+        end for
+      end for
+      m.fogTable = table
+      ' the fog band per step depends on how many bands there are
+      m.tablesKey = ""
+    end sub
+
+    ' The depth step tables, rebuilt when what shapes them changes; the projection base (which
+    ' follows the camera height) every march.
+    private sub buildTables(pose as BGE.VoxelTerrainPose)
+      map = m.map
+      levelCount = map.heightLevels.count()
+      fogLevels = 1
+      if m.fogColor >= 0
+        fogLevels = m.fogLevels
+      end if
+      key = `${pose.distance}|${m.columns}|${m.bandSteps}|${pose.viewWidth}|${pose.focal}|${pose.cellSize}|${pose.heightScale}|${levelCount}|${fogLevels}`
+      if pose.exactPitch
+        key += `|${pose.pitch}`
+      end if
+      if key <> m.tablesKey
+        m.tablesKey = key
+        zs = [] as float[]
+        depths = [] as float[]
+        invZs = [] as float[]
+        fogBases = [] as integer[]
+        depthCos = [] as float[]
+        depthSin = [] as float[]
+        m.bandStart = [] as integer[]
+        m.bandEnd = [] as integer[]
+        m.bandDz = [] as float[]
+        m.bandLevels = [] as integer[]
+        focal = pose.focal
+        cellSize = pose.cellSize
+        cosPitch = cos(pose.pitch)
+        sinPitch = sin(pose.pitch)
+        ' cells between neighbouring columns' rays per cell of depth
+        columnGap = pose.viewWidth / m.columns / focal
+        distance = pose.distance
+        z = 1.0
+        dz = 1.0
+        s = 0
+        while z < distance
+          m.bandStart.push(s)
+          m.bandDz.push(dz)
+          for k = 1 to m.bandSteps
+            zs.push(z)
+            depths.push(z * cellSize)
+            ' y of height h is base - h * invZ
+            invZs.push(focal / (z * cellSize) * pose.heightScale)
+            fogBases.push(int(z * fogLevels / distance) * 256)
+            depthCos.push(z * cellSize * cosPitch)
+            depthSin.push(z * cellSize * sinPitch)
+            s++
+            z += dz
+            if z >= distance
+              exit for
+            end if
+          end for
+          m.bandEnd.push(s - 1)
+          ' the mip whose cells are about as far apart as the samples: the gap between columns
+          ' where the band starts (rounded down) or the step (rounded to nearest), the coarser
+          gapLevel = m.log2Floor(zs[m.bandStart.peek()] * columnGap)
+          stepLevel = m.log2Floor(dz * 1.4142)
+          level = gapLevel
+          if stepLevel > level
+            level = stepLevel
+          end if
+          if level > levelCount - 1
+            level = levelCount - 1
+          end if
+          m.bandLevels.push(level)
+          dz *= 2
+        end while
+        m.zs = zs
+        m.depths = depths
+        m.invZs = invZs
+        m.fogBases = fogBases
+        m.depthCos = depthCos
+        m.depthSin = depthSin
+        m.bases = CreateObject("roArray", zs.count(), false)
+      end if
+      ' base = camera height * invZ + horizon
+      invZs = m.invZs
+      bases = m.bases
+      camHeight = pose.camHeight
+      horizon = pose.horizon
+      for s = 0 to invZs.count() - 1
+        bases[s] = camHeight * invZs[s] + horizon
+      end for
+      if pose.exactPitch
+        ' with dh = (h - camHeight) * heightScale: focal * (dh * cos - depthSin) and
+        ' depthCos + dh * sin, split into h * scale and a per-step rest
+        heightScale = pose.heightScale
+        cosPitch = cos(pose.pitch)
+        sinPitch = sin(pose.pitch)
+        focal = pose.focal
+        m.numScale = focal * heightScale * cosPitch
+        m.denScale = heightScale * sinPitch
+        numConstant = focal * camHeight * heightScale * cosPitch
+        denConstant = camHeight * heightScale * sinPitch
+        depthCos = m.depthCos
+        depthSin = m.depthSin
+        count = depthCos.count()
+        if m.numBases.count() <> count
+          m.numBases = CreateObject("roArray", count, false)
+          m.denBases = CreateObject("roArray", count, false)
+        end if
+        numBases = m.numBases
+        denBases = m.denBases
+        for s = 0 to count - 1
+          numBases[s] = numConstant + focal * depthSin[s]
+          denBases[s] = depthCos[s] - denConstant
+        end for
+      end if
+    end sub
+
+    ' floor(log2(value)), 0 for anything under 2
+    private function log2Floor(value as float) as integer
+      level = 0
+      while value >= 2
+        value /= 2
+        level++
+      end while
+      return level
+    end function
+
+    ' The band levels of the last march, for tests and the demo's readout.
+    '
+    ' @return {integer[]}
+    function getBandLevels() as integer[]
+      return m.bandLevels
+    end function
+
+  end class
+
+end namespace

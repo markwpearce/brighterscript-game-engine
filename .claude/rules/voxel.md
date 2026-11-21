@@ -1,6 +1,9 @@
 ---
 paths:
   - "src/source/engine/voxel/**"
+  - "src/source/engine/renderer/voxel/**"
+  - "src/source/engine/renderer/sceneObjects/SceneObjectVoxelTerrain.bs"
+  - "src/source/engine/drawables/DrawableVoxelTerrain.bs"
   - "tools/voxel-map.py"
 ---
 
@@ -13,3 +16,6 @@ Design: `specs/2026-11-21-voxel-terrain-drawable-design.md` (spike: `specs/2026-
 - `.bvox` v1 layout is documented on `VoxelMaps.fromByteArray()`; bump the version byte for any change.
 - `fromFile()` reads each level with a ranged `ReadFile` (no per-cell loop): keep it that way, it's the games' load path.
 - `VoxelMapGenerator` is slow (~1.3 s for 256 on the Ultra): games load baked maps.
+- Doc: `docs/voxel-terrain.md`. Benchmark on device with rendererTest `demo=voxel-terrain sweep=1` (`objects=0` for terrain only, `bank=`, `pitchModes=`, `qualityList=`); its `VOXEL stages` lines break the frame down.
+- The march is the hot path (~4 µs per column per step on the Ultra): the two pitch projections are separate loop copies, per-step constants live in tables (`exact` ones rebuilt per march), and flat edges sample a one-cell map instead of branching per step. Keep it branch-free.
+- Colour tables cover all 256 indexes (stride 256) so a bad index from a file can't crash a draw.
