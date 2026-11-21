@@ -323,6 +323,19 @@ To replay a one-shot from its first frame, such as a second attack in a combo, p
 sprite.playOrientedAnimation("attack", true) ' Sprite.playAnimation() takes it too
 ```
 
+An animating sprite is redrawn and re-sorted every frame. For a crowd, give an animation a far
+stand-in, such as one frame of it, that plays past `lodDistance` from the camera (across x/z). The distance is
+rechecked every `lodCheckSeconds` (0.5), at a different moment for each sprite.
+Animations without a stand-in (a walk) carry on as they are:
+
+```brighterscript
+sprite.addOrientedAnimationColumns("still", [0], 4, 1)
+sprite.lodDistance = 320
+sprite.setLodAnimation("idle", "still")
+sprite.playOrientedAnimation("idle") ' plays "still" while the camera is over 320 away
+' sprite.isLodFar() says which side it was last time, e.g. to only wander about where seen
+```
+
 ## Polygons
 
 `DrawablePolygon` fills (or, in the wireframe draw modes, strokes) a flat polygon from its `points`.
@@ -882,6 +895,9 @@ every instance of the model, so drawing a face only projects its strips. A movin
 faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
 With `useImpostor` (the default), only the model's own movement or turning counts: while just the
 camera moves, the impostor reuses its last capture.
+Its `impostor*` fields tune that; `applyImpostorOptions()` sets them from a bag of short names
+that can come straight from deep-link params (`model.applyImpostorOptions(params.pick(["strips",
+"stripStep"]))`; see `BGE.ImpostorOptions`).
 A `Camera2d` projects the strips orthographically (rendererTest's `camera2d-model` demo). A face
 that crosses the camera's near plane has its strips cut back to it. A face columns can't draw (the
 per-frame column budget is spent, or its UV triangle has no area) is filled with its shaded color

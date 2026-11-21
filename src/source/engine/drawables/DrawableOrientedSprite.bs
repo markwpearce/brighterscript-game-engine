@@ -36,6 +36,16 @@ namespace BGE
     ' Weapons and shields swap hands in the mirrored directions. Mirrors by flipping scale.x.
     mirrorBuckets as boolean = false
 
+    ' Animation level of detail: past this level distance (world units, across x/z) from the camera, an animation
+    ' given a far stand-in with setLodAnimation() plays that instead, e.g. an idle loop held on
+    ' one frame, as an animating sprite is redrawn and re-sorted every frame. 0 turns it off.
+    lodDistance as float = 0.0
+
+    ' How often (seconds) the distance is rechecked. After the first check (on the first
+    ' update()) the next comes at a point in the interval picked from the owner's position, so
+    ' a crowd spreads its checks.
+    lodCheckSeconds as float = 0.5
+
     ' baseName -> (numElevationBands x numAngles) array of OrientedSpriteBucket
     private orientedAnimations as roAssociativeArray = {}
     private activeBaseAnimationName as string = ""
@@ -46,6 +56,11 @@ namespace BGE
     private appliedAnimationName as string = ""
     ' Whether scale.x is currently flipped for a mirrored bucket
     private drawingMirrored as boolean = false
+    ' near baseName -> far baseName (setLodAnimation())
+    private lodAnimations as roAssociativeArray = {}
+    private lodFar as boolean = false
+    ' Seconds to the next distance check; below 0 before the first
+    private lodCheckIn as float = -1.0
 
     sub new(owner as GameEntity, spriteSheet as ifDraw2d or ifDraw2d[] or BGE.SpriteFrames, cellWidth as integer, cellHeight as integer, numAngles = 8 as integer, numElevationBands = 1 as integer, args = {} as roAssociativeArray)
       super(owner, spriteSheet, cellWidth, cellHeight, args)
@@ -388,6 +403,52 @@ namespace BGE
       m.currentAngleBucket = -1
     end sub
 
+    ' Past lodDistance, play `farBaseName` whenever `baseName` is playing. Both must be
+    ' registered oriented animations. An empty farBaseName removes the stand-in.
+    '
+    ' @param {string} baseName - e.g. "idle"
+    ' @param {string} farBaseName - e.g. "still", a one-frame version of it
+    sub setLodAnimation(baseName as string, farBaseName as string)
+      if farBaseName = ""
+        m.lodAnimations.Delete(baseName)
+      else
+        m.lodAnimations[baseName] = farBaseName
+      end if
+      ' re-resolve on the next update(), in case baseName is playing
+      m.currentElevationBand = -1
+    end sub
+
+    ' Whether the last distance check found the camera past lodDistance (false with it off).
+    ' Checks run in update() while an oriented animation plays.
+    '
+    ' @return {boolean}
+    function isLodFar() as boolean
+      return m.lodFar
+    end function
+
+    ' Rechecks the distance to `camera` when it's due, and forces a re-resolve if it crossed
+    ' lodDistance.
+    private sub updateLod(game as BGE.Game, toCamera as BGE.Math.Vector)
+      if m.lodCheckIn >= 0
+        m.lodCheckIn -= game.getDeltaTime()
+        if m.lodCheckIn > 0
+          return
+        end if
+        m.lodCheckIn = m.lodCheckSeconds
+      else
+        position = m.getOwnerPosition()
+        m.lodCheckIn = BGE.Math.hash2(Int(position.x), Int(position.z), 7) * m.lodCheckSeconds
+      end if
+      far = false
+      if invalid <> toCamera
+        far = toCamera.x * toCamera.x + toCamera.z * toCamera.z > m.lodDistance * m.lodDistance
+      end if
+      if far <> m.lodFar
+        m.lodFar = far
+        m.currentElevationBand = -1
+      end if
+    end sub
+
     ' The vector from the camera to this entity, or invalid if `camera` isn't a Camera3d
     ' (a 2D camera has no facing/orbit concept). Shared by computeAngleBucket() and
     ' computeElevationBand() so update() only computes it once per frame.
@@ -411,6 +472,24 @@ namespace BGE
         if invalid <> grid and invalid <> game
           camera = game.canvas.renderer.camera
           toCamera = m.computeToCamera(camera)
+          if m.lodDistance > 0
+            m.updateLod(game, toCamera)
+          else
+            ' turned back on, it checks straight away
+            m.lodCheckIn = -1.0
+            if m.lodFar
+              m.lodFar = false
+              m.currentElevationBand = -1
+            end if
+          end if
+          baseName = m.activeBaseAnimationName
+          if m.lodFar
+            farName = m.lodAnimations[baseName]
+            if invalid <> farName and invalid <> m.orientedAnimations[farName]
+              baseName = farName
+              grid = m.orientedAnimations[farName]
+            end if
+          end if
           elevationBand = m.computeElevationBand(camera, toCamera)
           angleBucket = m.computeAngleBucket(camera, toCamera)
           if elevationBand <> m.currentElevationBand or angleBucket <> m.currentAngleBucket
@@ -438,9 +517,9 @@ namespace BGE
             ' base (or anything played directly since) starts from the first frame.
             ' A restart was already applied by playOrientedAnimation().
             stillPlayingApplied = invalid <> m.activeAnimation and m.activeAnimation.name = m.appliedAnimationName
-            sameBase = stillPlayingApplied and m.appliedBaseAnimationName = m.activeBaseAnimationName
+            sameBase = stillPlayingApplied and m.appliedBaseAnimationName = baseName
             m.setActiveAnimation(bucket.animationName, not sameBase)
-            m.appliedBaseAnimationName = m.activeBaseAnimationName
+            m.appliedBaseAnimationName = baseName
             m.appliedAnimationName = bucket.animationName
           end if
         end if
