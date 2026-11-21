@@ -829,7 +829,15 @@ frame in the interval and print a summary line:
 ```brighterscript
 game.debugPrintPerfStats(true, 3) ' counts and phases every 3 seconds
 game.debugPrintPerfStats(true, 3, {stages: true, runId: "baseline"})
-' PERF fps 29.4 frameMs 34.0 | update 2.1ms x1 | walls 9.8ms x1 | ... | med 33 p90 41 max 67 spikes 3/88 | run baseline
+```
+
+With options, each interval prints the counts and phases, then a summary line (and
+`PERF start baseline` once when it's turned on):
+
+```text
+Entities: 73 | Colliders: 23
+Phase ms - uiInput: 0 | update+collision: 5 | entityDraw: 19 | swap: 1
+PERF fps 29.4 frameMs 34.0 | update 2.1ms x1 | walls 9.8ms x1 | ... | med 33 p90 41 max 67 spikes 3/88 | run baseline
 ```
 
 `stages: true` turns on the game renderer's `profileStages` and adds each stage's average
@@ -840,7 +848,8 @@ tell apart in a log. The stage timers cost a timer read per scene object drawn, 
 with `stages` off too.
 
 To show or send the numbers your own way, pass `onStats` (and `printToConsole: false` to print
-nothing). It gets a `BGE.Debug.PerfStatsSummary` each interval:
+nothing). It gets a `BGE.Debug.PerfStatsSummary` each interval, with the entity/collider counts
+and phase times added:
 
 ```brighterscript
 game.debugPrintPerfStats(true, 5, {

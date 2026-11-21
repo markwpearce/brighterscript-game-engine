@@ -41,4 +41,4 @@ Callbacks can delete entities or change scene mid-frame: re-check `isValidEntity
 - Typed keyboard chars arrive as their own events (`GetChar() <> 0`) whose codes collide with buttons; `BGE.getControlEventKind()` routes them to `onECPKeyboard()` only. Backspace/Enter arrive as buttons.
 
 ## Debug (`engine/debug/`)
-Opt-in only: `enableDebugToggle()` binds a button; `debugPrintPerfStats(enabled, interval, options)` prints counts/phases, and with options a `PERF` summary line from `BGE.Debug.PerfStats` (stages, percentiles, spikes, runId, `onStats` hook). Sort frame times with `Sort()` on a plain numeric array — `SortBy()` misorders numbers on brs-cli (#230).
+Everything is opt-in (`enableDebugToggle()`, `debugPrintPerfStats()` options; usage in `docs/game-engine-overview.md`). Sort numbers with `Sort()` on a plain numeric array — `SortBy()` misorders numbers on brs-cli (#230).
