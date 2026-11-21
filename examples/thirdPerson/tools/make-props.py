@@ -372,8 +372,8 @@ def models():
     face((s, 0, s), (0, 0, -1), lambda c, r: "tower")                                       # +X
     mh = 1.6
     box_walls(m, -s, s, -s, s, h, h + mh, ("merlons", (0, 0, 1, 1)), ("merlons",), ("merlons",), ("merlons",))
-    # banner hung on the front above the door, just proud of the wall
-    m.quad((-0.9, 5.0, s + 0.05), (0.9, 5.0, s + 0.05), (0.9, 9.0, s + 0.05), (-0.9, 9.0, s + 0.05), "banner")
+    # banner hung on the front above the door (the middle of the +x half), just proud of the wall
+    m.quad((1.6, 5.0, s + 0.05), (3.4, 5.0, s + 0.05), (3.4, 9.0, s + 0.05), (1.6, 9.0, s + 0.05), "banner")
     out.append(m)
 
     # --- wall torch: an iron bracket out of a wall (the wall is z 0, front +Z) holding a short

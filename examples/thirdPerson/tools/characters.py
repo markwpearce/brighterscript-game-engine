@@ -5,8 +5,9 @@
 # Grey-green skin (renders at about #9AAE93; the lighting brightens it) in place of the source's orange, with dark hair
 ORC_COLOURS = {"Material.skin": (0.18, 0.22, 0.146), "Material.hair": (0.06, 0.04, 0.025)}
 
-# The melee's four keys (13-16) with four in-betweens
-MONSTER_ATTACK = inbetweens(13, 16, 8)  # noqa: F821 (provided by render-character.py)
+# The melee: 8 frames drawing back to the top of the swing (13 to 14.5), so even a long wind-up plays
+# at 12 fps or more before holding there, then 4 for the strike (to 16)
+MONSTER_ATTACK = inbetweens(13, 14.5, 8) + inbetweens(14.5, 16, 5)[1:]  # noqa: F821 (provided by render-character.py)
 
 CHARACTERS = {
     # steel_armor.blend
@@ -15,7 +16,10 @@ CHARACTERS = {
             ("idle", [1, 2, 3, 4]),
             ("run", [5, 6, 7, 8, 9, 10, 11, 12]),
             ("attack", inbetweens(13, 16, 9)),  # noqa: F821
-            ("block", [17, 18]),
+            # raising the shield, a hit and the fall, with in-betweens so each plays at 12 fps or more
+            ("block", inbetweens(17, 18, 3)),  # noqa: F821
+            ("hit", inbetweens(19, 20, 3)),  # noqa: F821
+            ("die", inbetweens(21, 24, 7)),  # noqa: F821
         ],
         "parts": {"MaleHead1": "male_head1.blend", "Longsword": "longsword.blend", "HeavyShield": "shield.blend"},
         "size": 2.6,

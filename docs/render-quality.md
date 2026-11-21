@@ -178,6 +178,24 @@ A [voxel terrain](/voxel-terrain) marches `voxelColumns` screen columns, each ta
 | High   | 100            | 20               |
 | Ultra  | 100            | 28               |
 
+An oriented sprite (`BGE.DrawableOrientedSprite`) with a `lodDistance` plays the far
+stand-in you gave `setLodAnimation()` (an idle loop held on one frame, say) past that distance
+from the camera. Set `lodDistance` for Medium: `animationLodDistanceScale` scales it, so
+higher levels keep characters animating further out.
+
+```brighterscript
+m.sprite.lodDistance = World.metres(10)   ' 10 m at Medium, 20 m at Ultra
+m.sprite.setLodAnimation("idle", "still")
+```
+
+| Level  | `animationLodDistanceScale` |
+| ------ | --------------------------- |
+| Basic  | 0.6                         |
+| Low    | 0.8                         |
+| Medium | 1                           |
+| High   | 1.5                         |
+| Ultra  | 2                           |
+
 ## Scale your own content
 
 Every entity and scene gets `onQualityChanged(level)` when the level changes:
