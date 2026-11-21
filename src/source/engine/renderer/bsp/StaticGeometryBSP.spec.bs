@@ -207,6 +207,105 @@ namespace tests
       m.assertEqual(["nearBall", "farBall"], result)
     end function
 
+    @describe("solids (hullFaces)")
+
+    ' A cube from -10 to 10 on every axis, as a hull item
+    function cubeItem(name as string) as object
+      corners = BGE.Math.getBoundingCubePoints([BGE.Math.VectorOps.create(-10, -10, -10), BGE.Math.VectorOps.create(10, 10, 10)])
+      return {sceneObj: name, planePoint: BGE.Math.VectorOps.create(0, 0, 0), planeNormal: BGE.Math.VectorOps.create(0, 1, 0), hullFaces: BGE.BSP.boxHullFaces(corners)}
+    end function
+
+    @it("boxHullFaces gives a box's six faces with outward normals, sides first")
+    function _()
+      faces = m.cubeItem("cube").hullFaces
+      m.assertEqual(6, faces.count())
+      expected = [[-1, 0, 0], [1, 0, 0], [0, 0, -1], [0, 0, 1], [0, 1, 0], [0, -1, 0]]
+      for i = 0 to 5
+        n = faces[i].planeNormal
+        m.assertEqual(expected[i][0] * 1.0, n.x + 0.0)
+        m.assertEqual(expected[i][1] * 1.0, n.y + 0.0)
+        m.assertEqual(expected[i][2] * 1.0, n.z + 0.0)
+        p = faces[i].planePoint
+        m.assertEqual(expected[i][0] * 10.0, p.x + 0.0)
+        m.assertEqual(4, faces[i].corners.count())
+      end for
+    end function
+
+    @it("boxHullFaces leaves out faces with no area")
+    function _()
+      corners = BGE.Math.getBoundingCubePoints([BGE.Math.VectorOps.create(-10, 0, -10), BGE.Math.VectorOps.create(10, 0, 10)])
+      m.assertEqual(2, BGE.BSP.boxHullFaces(corners).count())
+    end function
+
+    @it("builds a solid as a chain of one node per face, with the solid on the innermost")
+    function _()
+      node = BGE.BSP.buildTree([m.cubeItem("cube")])
+      count = 0
+      while node <> invalid
+        count++
+        if count < 6
+          m.assertInvalid(node.item)
+        else
+          m.assertEqual("cube", node.item.sceneObj)
+        end if
+        m.assertInvalid(node.front)
+        node = node.back
+      end while
+      m.assertEqual(6, count)
+    end function
+
+    @it("draws objects behind a solid before it and objects in front after it, from either side")
+    function _()
+      node = BGE.BSP.buildTree([m.cubeItem("cube")])
+      behind = {sceneObj: "minusZ", position: BGE.Math.VectorOps.create(0, 0, -50), depthKey: 0.0}
+      ahead = {sceneObj: "plusZ", position: BGE.Math.VectorOps.create(0, 0, 50), depthKey: 0.0}
+      result = []
+      BGE.BSP.collectDrawOrder(node, BGE.Math.VectorOps.create(0, 0, 100), [behind, ahead], result)
+      m.assertEqual(["minusZ", "cube", "plusZ"], result)
+      result = []
+      BGE.BSP.collectDrawOrder(node, BGE.Math.VectorOps.create(0, 0, -100), [behind, ahead], result)
+      m.assertEqual(["plusZ", "cube", "minusZ"], result)
+    end function
+
+    @it("draws an object beside a big solid by the face between them, not by distance")
+    function _()
+      ' A wide building: the camera close in front of its middle, the player near its right end. By
+      ' centre distance the player is farther, but it stands in front of the building.
+      corners = BGE.Math.getBoundingCubePoints([BGE.Math.VectorOps.create(-200, 0, -10), BGE.Math.VectorOps.create(200, 50, 10)])
+      building = {sceneObj: "building", planePoint: BGE.Math.VectorOps.create(0, 25, 0), planeNormal: BGE.Math.VectorOps.create(0, 1, 0), hullFaces: BGE.BSP.boxHullFaces(corners)}
+      node = BGE.BSP.buildTree([building])
+      player = {sceneObj: "player", position: BGE.Math.VectorOps.create(190, 10, 12), depthKey: 0.0}
+      result = []
+      BGE.BSP.collectDrawOrder(node, BGE.Math.VectorOps.create(0, 20, 30), [player], result)
+      m.assertEqual(["building", "player"], result)
+    end function
+
+    @it("orders a quad against a solid by a face it's wholly in front of, not by its centre")
+    function _()
+      ' a fence in front of the cube running off to +x: its centre is past the +x face, but it
+      ' crosses that face's plane; it's wholly in front of the +z face
+      fenceCorners = [BGE.Math.VectorOps.create(0, 10, 20), BGE.Math.VectorOps.create(200, 10, 20), BGE.Math.VectorOps.create(0, 0, 20), BGE.Math.VectorOps.create(200, 0, 20)]
+      fence = {sceneObj: "fence", planePoint: BGE.Math.VectorOps.create(100, 5, 20), planeNormal: BGE.Math.VectorOps.create(0, 0, 1), corners: fenceCorners}
+      node = BGE.BSP.buildTree([fence, m.cubeItem("cube")])
+      result = []
+      BGE.BSP.collectDrawOrder(node, BGE.Math.VectorOps.create(0, 5, 100), [], result)
+      m.assertEqual(["cube", "fence"], result)
+    end function
+
+    @it("orders static quads against a solid")
+    function _()
+      farWall = {sceneObj: "farWall", planePoint: BGE.Math.VectorOps.create(0, 0, -50), planeNormal: BGE.Math.VectorOps.create(0, 0, 1)}
+      nearWall = {sceneObj: "nearWall", planePoint: BGE.Math.VectorOps.create(0, 0, 50), planeNormal: BGE.Math.VectorOps.create(0, 0, 1)}
+      node = BGE.BSP.buildTree([m.cubeItem("cube"), farWall, nearWall])
+      result = []
+      BGE.BSP.collectDrawOrder(node, BGE.Math.VectorOps.create(0, 0, 100), [], result)
+      m.assertEqual(["farWall", "cube", "nearWall"], result)
+      node = BGE.BSP.buildTree([farWall, m.cubeItem("cube"), nearWall])
+      result = []
+      BGE.BSP.collectDrawOrder(node, BGE.Math.VectorOps.create(0, 0, 100), [], result)
+      m.assertEqual(["farWall", "cube", "nearWall"], result)
+    end function
+
   end class
 
 end namespace

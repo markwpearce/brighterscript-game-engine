@@ -13,6 +13,18 @@ namespace BGE.BSP
     ' The quad's corners (topLeft, topRight, bottomLeft, bottomRight), so findBoundsLeaf() can
     ' order an object that crosses the quad's plane beyond the quad's edges
     optional corners as BGE.Math.Vector[]
+    ' A solid's faces (see hullFaces()), outward normals: instead of one plane, the item becomes a
+    ' chain of nodes, one per face, and draws at the innermost - so anything outside the solid is
+    ' ordered by a face that separates it. planePoint is the solid's centre.
+    optional hullFaces as BGE.BSP.HullFace[]
+  end interface
+
+  ' One face of a solid's hull: a quad with an outward normal
+  interface HullFace
+    planePoint as BGE.Math.Vector
+    planeNormal as BGE.Math.Vector
+    ' topLeft, topRight, bottomLeft, bottomRight, as StaticItem.corners
+    corners as BGE.Math.Vector[]
   end interface
 
   ' One dynamic (non-static) object being threaded into the BSP walk. depthKey mirrors
@@ -33,10 +45,11 @@ namespace BGE.BSP
     usesCamera as boolean
   end interface
 
-  ' Builds a classification-only BSP tree over static quads - no polygon splitting (see
-  ' the design spec for why). Picks the first item as each node's splitting plane and
-  ' partitions every other remaining item to front/back by which side of that plane its
-  ' center falls on. Each node gets an `id` (0 up, in build order) for findLeaf().
+  ' Builds a classification-only BSP tree over static quads and solids - no polygon splitting
+  ' (see the design spec for why). Picks the first item as each node's splitting plane (a
+  ' solid: a chain of its faces' planes) and partitions every other remaining item to
+  ' front/back by which side of that plane its center falls on. Each node gets an `id` (0 up,
+  ' in build order) for findLeaf(); a solid's outer faces' nodes have no item.
   '
   ' @param {BGE.BSP.StaticItem[]} items
   ' @param {object} counter internal: shares the next node id across the recursion
@@ -47,13 +60,170 @@ namespace BGE.BSP
     end if
     if counter = invalid
       counter = {next: 0}
+      ' Solids first: a quad's plane runs on past its edges, so a solid across it but beyond
+      ' them (a house past the end of a fence, on its line) can't be put on one side for every
+      ' camera, while a quad beyond a solid is wholly in front of one of its faces
+      ordered = []
+      for each item in items
+        if item.hullFaces <> invalid and item.hullFaces.count() > 0
+          ordered.push(item)
+        end if
+      end for
+      for each item in items
+        if item.hullFaces = invalid or item.hullFaces.count() = 0
+          ordered.push(item)
+        end if
+      end for
+      items = ordered
     end if
     pivot = items[0]
-    normal = pivot.planeNormal
-    point = pivot.planePoint
+    if pivot.hullFaces <> invalid and pivot.hullFaces.count() > 0
+      return buildHullChain(pivot, items, 1, 0, counter)
+    end if
+    node = createNode(pivot.planePoint, pivot.planeNormal, pivot.corners, counter)
+    node.item = pivot
+    front = []
+    back = []
+    for i = 1 to items.count() - 1
+      item = items[i]
+      if pointSide(node, item.planePoint) >= 0
+        front.push(item)
+      else
+        back.push(item)
+      end if
+    end for
+    node.front = buildTree(front, counter)
+    node.back = buildTree(back, counter)
+    return node
+  end function
+
+  ' The six faces of a box (any parallelepiped) for StaticItem.hullFaces, sides first, then top
+  ' and bottom. A face with no area (a flat box's sides) is left out.
+  '
+  ' @param {BGE.Math.Vector[]} corners the 8 corners in BGE.Math.getBoundingCubePoints() order
+  '   (index bit 4: max x, 2: max y, 1: max z), transformed as you like
+  ' @return {BGE.BSP.HullFace[]}
+  function boxHullFaces(corners as BGE.Math.Vector[]) as BGE.BSP.HullFace[]
+    cx = 0.0
+    cy = 0.0
+    cz = 0.0
+    for each c in corners
+      cx += c.x
+      cy += c.y
+      cz += c.z
+    end for
+    cx /= 8
+    cy /= 8
+    cz /= 8
+    ' each quad's first corner to its second and to its third run along its two edges
+    quads = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 2, 4, 6], [1, 3, 5, 7], [2, 3, 6, 7], [0, 1, 4, 5]]
+    faces = [] as BGE.BSP.HullFace[]
+    for each q in quads
+      a = corners[q[0]]
+      b = corners[q[1]]
+      c = corners[q[2]]
+      d = corners[q[3]]
+      ux = b.x - a.x
+      uy = b.y - a.y
+      uz = b.z - a.z
+      vx = c.x - a.x
+      vy = c.y - a.y
+      vz = c.z - a.z
+      nx = uy * vz - uz * vy
+      ny = uz * vx - ux * vz
+      nz = ux * vy - uy * vx
+      length = Sqr(nx * nx + ny * ny + nz * nz)
+      if length > 0.000001
+        px = (a.x + b.x + c.x + d.x) / 4
+        py = (a.y + b.y + c.y + d.y) / 4
+        pz = (a.z + b.z + c.z + d.z) / 4
+        ' outward: away from the box's centre
+        if nx * (px - cx) + ny * (py - cy) + nz * (pz - cz) < 0
+          length = -length
+        end if
+        faces.push({
+          planePoint: BGE.Math.VectorOps.create(px, py, pz),
+          planeNormal: BGE.Math.VectorOps.create(nx / length, ny / length, nz / length),
+          corners: [a, b, c, d]
+        })
+      end if
+    end for
+    return faces
+  end function
+
+  ' One node per face of pivot's hull, each the next one's back child; the innermost holds pivot,
+  ' so the walk draws it after the faces the camera is behind and before those it's in front of.
+  function buildHullChain(pivot as BGE.BSP.StaticItem, items as BGE.BSP.StaticItem[], firstItem as integer, faceIndex as integer, counter as object) as object
+    faces = pivot.hullFaces
+    face = faces[faceIndex]
+    node = createNode(face.planePoint, face.planeNormal, face.corners, counter)
+    isLast = faceIndex = faces.count() - 1
+    if isLast
+      node.item = pivot
+    end if
+    front = []
+    back = []
+    for i = firstItem to items.count() - 1
+      item = items[i]
+      ' only what's wholly in front of a face is ordered by it; the rest tries the next face
+      inFront = false
+      points = itemPoints(item)
+      if points.count() = 0
+        inFront = pointSide(node, item.planePoint) >= 0
+      else
+        inFront = true
+        for each p in points
+          if pointSide(node, p) < 0
+            inFront = false
+            exit for
+          end if
+        end for
+        if not inFront and isLast
+          inFront = pointSide(node, item.planePoint) >= 0
+        end if
+      end if
+      if inFront
+        front.push(item)
+      else
+        back.push(item)
+      end if
+    end for
+    node.front = buildTree(front, counter)
+    if isLast
+      node.back = buildTree(back, counter)
+    else
+      node.back = buildHullChain(pivot, back, 0, faceIndex + 1, counter)
+    end if
+    return node
+  end function
+
+  ' The points bounding a static item: a quad's corners, or a solid's faces' corners
+  function itemPoints(item as BGE.BSP.StaticItem) as BGE.Math.Vector[]
+    if item.hullFaces <> invalid
+      points = [] as BGE.Math.Vector[]
+      for each face in item.hullFaces
+        points.append(face.corners)
+      end for
+      return points
+    end if
+    if item.corners <> invalid
+      return item.corners
+    end if
+    return []
+  end function
+
+  ' How far point is in front of node's plane
+  function pointSide(node as object, point as BGE.Math.Vector) as float
+    return node.nx * point.x + node.ny * point.y + node.nz * (point.z ?? 0.0) - node.d
+  end function
+
+  ' A node on the plane through point with normal, its id the counter's next. With corners
+  ' (a quad's, as StaticItem.corners) it also gets the quad's extent along its two edges, for
+  ' findBoundsLeaf(). item, front and back are left for the caller.
+  function createNode(point as BGE.Math.Vector, normal as BGE.Math.Vector, corners as dynamic, counter as object) as object
     ' the plane as n.x*x + n.y*y + n.z*z = d, so classifying a point is one inline expression
     node = {
-      item: pivot,
+      item: invalid,
       id: counter.next,
       nx: normal.x,
       ny: normal.y,
@@ -62,7 +232,6 @@ namespace BGE.BSP
       hasExtent: false
     }
     counter.next++
-    corners = pivot.corners
     if corners <> invalid
       ' The quad's extent along its two edges, for findBoundsLeaf()
       u = BGE.Math.VectorOps.subtract(corners[1], corners[0])
@@ -99,19 +268,6 @@ namespace BGE.BSP
         end for
       end if
     end if
-    front = []
-    back = []
-    for i = 1 to items.count() - 1
-      item = items[i]
-      side = BGE.Math.distanceFromPlane(pivot.planePoint, pivot.planeNormal, item.planePoint)
-      if side >= 0
-        front.push(item)
-      else
-        back.push(item)
-      end if
-    end for
-    node.front = buildTree(front, counter)
-    node.back = buildTree(back, counter)
     return node
   end function
 
@@ -267,7 +423,9 @@ namespace BGE.BSP
     else
       collectNodeOrder(firstChild, cx, cy, cz, buckets, result)
     end if
-    result.push(node.item.sceneObj)
+    if node.item <> invalid
+      result.push(node.item.sceneObj)
+    end if
     if secondChild = invalid
       if buckets[secondLeaf] <> invalid
         result.append(buckets[secondLeaf])
