@@ -1,0 +1,173 @@
+import "../../math/vector.bs"
+import "../Game.bs"
+import "cameras/Camera3d.bs"
+import "ImpostorFit.bs"
+import "Renderer.bs"
+import "RendererHelpers.bs"
+import "../drawables/DrawablePlane.bs"
+import "../drawables/DrawableSkybox.bs"
+import "sceneObjects/SceneObjectSkybox.bs"
+import "../drawables/DrawableWalls.bs"
+import "../drawables/Model3d.bs"
+import "walls/WallSegment.bs"
+
+namespace tests
+
+  ' Drawing through a Camera3d with pitchMode "shear": everything lands where the camera
+  ' projects it. 1280 x 720, 90 degree FOV (focal 640), eye at (0, 50, 0), looking 20 degrees
+  ' down -z, so the image is moved up by 640 tan(20) = 233 px.
+  @suite("BGE.Renderer - shear pitch")
+  class RendererShearPitchTests extends rooibos.BaseTestSuite
+
+    private game as BGE.Game
+    private renderer as BGE.Renderer
+    private camera as BGE.Camera3d
+    private target as roBitmap
+
+    protected override sub beforeEach()
+      m.game = new BGE.Game(1280, 720)
+      m.camera = new BGE.Camera3d()
+      m.camera.fieldOfViewDegrees = 90
+      m.camera.maxDrawDistance = 2000
+      m.camera.pitchMode = BGE.CameraPitchMode.shear
+      m.camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      pitch = BGE.Math.DegreesToRadians(-20)
+      m.camera.orientation = BGE.Math.VectorOps.create(0, sin(pitch), -cos(pitch))
+      m.camera.drawDistanceFadeFraction = 0
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.target = CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true})
+      m.renderer = new BGE.Renderer(m.target, m.game, m.camera)
+      m.renderer.setupCameraForFrame()
+    end sub
+
+    private function pixelAt(x as integer, y as integer) as integer
+      bytes = m.target.GetByteArray(x, y, 1, 1)
+      return (bytes[0] << 24) + (bytes[1] << 16) + (bytes[2] << 8) + bytes[3]
+    end function
+
+    @describe("column-drawn quads")
+
+    @it("draws a textured quad where the camera projects its corners")
+    function _()
+      v = BGE.Math.VectorOps.create
+      ' a 100 x 100 upright quad 300 ahead
+      corners = [v(-50, 100, -300), v(50, 100, -300), v(-50, 0, -300), v(50, 0, -300)]
+      bitmap = CreateObject("roBitmap", {width: 16, height: 16, alphaEnable: true})
+      bitmap.Clear(&hFF0000FF)
+      texture = {id: "red", region: CreateObject("roRegion", bitmap, 0, 0, 16, 16)}
+      m.target.Clear(&h00000000)
+      m.renderer.drawTexturedQuadTo(m.target, corners, texture)
+      top = m.camera.worldPointToCanvasPoint(corners[0])
+      bottom = m.camera.worldPointToCanvasPoint(corners[3])
+      middleY = (top.y + bottom.y) \ 2
+      m.assertEqual(&hFF0000FF, m.pixelAt(640, middleY))
+      m.assertEqual(0, m.pixelAt(640, top.y - 8))
+      m.assertEqual(0, m.pixelAt(640, bottom.y + 8))
+    end function
+
+    @describe("ground planes")
+
+    @it("fills the ground from its far edge's row to the bottom")
+    function _()
+      for each roll in [0.0, 20.0]
+        m.camera.rollDegrees = roll
+        ground = new BGE.DrawablePlane(invalid, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: &h00FF00})
+        ground.addToRenderer(m.renderer)
+        m.target.Clear(&h00000000)
+        m.renderer.setupCameraForFrame()
+        m.renderer.render()
+        m.renderer.setupCameraForFrame()
+        m.target.Clear(&h00000000)
+        m.renderer.render()
+        if roll = 0
+          farRow = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(0, 0, -m.camera.getCurrentDrawDistance())).y
+          m.assertEqual(&h00FF00FF, m.pixelAt(640, farRow + 6), "just inside the far edge")
+          m.assertEqual(0, m.pixelAt(640, farRow - 6), "just past the far edge")
+        end if
+        ' the near ground reaches the frame's bottom, and the middle is ground
+        m.assertEqual(&h00FF00FF, m.pixelAt(640, 715), `bottom, roll ${roll}`)
+        m.assertEqual(&h00FF00FF, m.pixelAt(640, 500), `middle, roll ${roll}`)
+        m.renderer.removeSceneObject(ground.getSceneObjects()[0])
+      end for
+    end function
+
+    @describe("walls")
+
+    @it("draws a wall from its top's row to its foot's")
+    function _()
+      v = BGE.Math.VectorOps.create
+      texture = CreateObject("roBitmap", {width: 16, height: 32, alphaEnable: true})
+      texture.Clear(&hFFFFFFFF)
+      region = CreateObject("roRegion", texture, 0, 0, 16, 32)
+      segment = BGE.createWallSegment(v(1000, 0, -300), v(-1000, 0, -300), 0, 100, "stone", {twoSided: true})
+      walls = new BGE.DrawableWalls(invalid, [segment], {stone: region})
+      walls.addToRenderer(m.renderer)
+      m.target.Clear(&h00000000)
+      m.renderer.setupCameraForFrame()
+      m.renderer.render()
+      top = m.camera.worldPointToCanvasPoint(v(0, 100, -300)).y
+      foot = m.camera.worldPointToCanvasPoint(v(0, 0, -300)).y
+      m.assertEqual(&hFFFFFFFF, m.pixelAt(640, top + 4), "just under the top")
+      m.assertEqual(0, m.pixelAt(640, top - 6), "above the top")
+      m.assertEqual(&hFFFFFFFF, m.pixelAt(640, foot - 4), "just above the foot")
+      m.assertEqual(0, m.pixelAt(640, foot + 6), "under the foot")
+    end function
+
+    @describe("skyboxes")
+
+    @it("shows the level band moved by the pitch shift")
+    function _()
+      bitmap = CreateObject("roBitmap", {width: 512, height: 256, alphaEnable: false})
+      region = CreateObject("roRegion", bitmap, 0, 0, 512, 256)
+      sky = new BGE.SceneObjectSkybox("sky", new BGE.DrawableSkybox(invalid, region))
+      level = new BGE.Camera3d()
+      level.setFrameSize(1280, 720)
+      level.position = m.camera.position
+      level.orientation = BGE.Math.VectorOps.create(0, 0, -1)
+      flat = sky.computeVisibleBand(level, 1280, 720)
+      sheared = sky.computeVisibleBand(m.camera, 1280, 720)
+      ' a band 720 rows tall on screen covers cropHeight texture rows when nothing clamps
+      visibleHeight = level.getFovDegreesForCanvasSize(720) * 256 / sky.drawable.verticalDegreesCovered
+      expected = flat.topY - m.camera.getPitchShiftY() * visibleHeight / 720
+      m.assertTrue(abs(sheared.topY - expected) < 0.01, `topY ${sheared.topY} vs ${expected}`)
+    end function
+
+    @it("draws a textured ground to the bottom, not past its far edge")
+    function _()
+      bitmap = CreateObject("roBitmap", {width: 16, height: 16, alphaEnable: true})
+      bitmap.Clear(&h0000FFFF)
+      region = CreateObject("roRegion", bitmap, 0, 0, 16, 16)
+      ground = new BGE.DrawablePlane(invalid, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      ground.addToRenderer(m.renderer)
+      m.target.Clear(&h00000000)
+      m.renderer.setupCameraForFrame()
+      m.renderer.render()
+      farRow = m.camera.worldPointToCanvasPoint(BGE.Math.VectorOps.create(0, 0, -m.camera.getCurrentDrawDistance())).y
+      m.assertEqual(&h0000FFFF, m.pixelAt(640, 715), "bottom")
+      m.assertEqual(&h0000FFFF, m.pixelAt(640, 500), "middle")
+      m.assertEqual(&h0000FFFF, m.pixelAt(100, 600), "left")
+      m.assertEqual(&h0000FFFF, m.pixelAt(1180, 600), "right")
+      m.assertEqual(0, m.pixelAt(640, farRow - 8), "past the far edge")
+    end function
+
+    @describe("models")
+
+    @it("draws a model's face where the camera projects it")
+    function _()
+      v = BGE.Math.VectorOps.create
+      ' a 100 x 100 x 100 box 300 ahead, its front face at z -250
+      faces = BGE.Model3dOps.boxFaces(v(0, 50, -300), v(100, 100, 100), &hFF00FFFF)
+      model = new BGE.DrawableModel(invalid, new BGE.Model3d(faces), {isShaded: false})
+      model.addToRenderer(m.renderer)
+      m.target.Clear(&h00000000)
+      m.renderer.setupCameraForFrame()
+      m.renderer.render()
+      top = m.camera.worldPointToCanvasPoint(v(0, 100, -250)).y
+      foot = m.camera.worldPointToCanvasPoint(v(0, 0, -250)).y
+      m.assertEqual(&hFF00FFFF, m.pixelAt(640, (top + foot) \ 2), "front face")
+      m.assertEqual(0, m.pixelAt(640, foot + 8), "under the foot")
+    end function
+
+  end class
+
+end namespace

@@ -124,6 +124,16 @@ namespace BGE
       return Int(Sqr(frameSize.x * frameSize.x + frameSize.y * frameSize.y)) + 2
     end function
 
+    ' getRollCanvasSize() for a camera: a shear-pitched one turns its image about the moved
+    ' image centre (Camera3d.getPrincipalY()), so the square must reach the frame's corners from
+    ' there.
+    '
+    ' @param {Camera3d} camera
+    ' @return {float}
+    function getRollCanvasSizeFor(camera as Camera3d) as float
+      return camera.getRollViewSize()
+    end function
+
     sub new(name as string, drawableObj as DrawablePlane)
       super(name, drawableObj, BGE.SceneObjectType.Plane)
       ' Redeclaring `drawable` above auto-inits it to invalid after super() - this wins since it runs last (issue #69).
@@ -757,9 +767,21 @@ namespace BGE
         ' camera.frustumRays itself (used by every other scene object's
         ' frustum culling) is untouched by this.
         horizFov = camera.getEffectiveFieldOfViewDegrees()
-        trueVertFov = camera.getFovDegreesForCanvasSize(camera.frameSize.y)
-        rays = new CameraFrustumRays()
-        rays.setRays(camera.position, camera.orientation, horizFov, trueVertFov, camera.getUpVector(), camera.getRightVector())
+        if camera.pitchMode = BGE.CameraPitchMode.shear
+          ' a shear camera's own rays are its exact frame corners, top and bottom moved. They're
+          ' named by screen position, but setRays()' bottom pair is swapped (its bottomLeft is
+          ' the screen's bottom right) and the fallback corners below follow that
+          shearRays = camera.frustumRays
+          rays = new CameraFrustumRays()
+          rays.topLeft = shearRays.topLeft
+          rays.topRight = shearRays.topRight
+          rays.bottomLeft = shearRays.bottomRight
+          rays.bottomRight = shearRays.bottomLeft
+        else
+          trueVertFov = camera.getFovDegreesForCanvasSize(camera.frameSize.y)
+          rays = new CameraFrustumRays()
+          rays.setRays(camera.position, camera.getViewForward(), horizFov, trueVertFov, camera.getUpVector(), camera.getRightVector())
+        end if
       else
         ' Roll can't be represented by this trapezoid-slice rasterizer directly (see
         ' the design doc) - instead, compute every bit of geometry against an
@@ -769,11 +791,11 @@ namespace BGE
         ' the level projection rotated about the image center, so this is exact, not
         ' an approximation - modulo the finite canvas needing to be big enough to
         ' cover every angle, which getRollCanvasSize() guarantees.
-        canvasWidth = m.getRollCanvasSize(camera.frameSize)
+        canvasWidth = m.getRollCanvasSizeFor(camera)
         horizFov = camera.getFovDegreesForCanvasSize(canvasWidth)
 
         rays = new CameraFrustumRays()
-        rays.setRays(camera.position, camera.orientation, horizFov, horizFov, camera.getLevelUpVector(), camera.getLevelRightVector())
+        rays.setRays(camera.position, camera.getViewForward(), horizFov, horizFov, camera.getLevelUpVector(), camera.getLevelRightVector())
       end if
 
       output = new BGE.Math.CornerPoints()
@@ -791,7 +813,7 @@ namespace BGE
       end if
 
 
-      projectedRay = BGE.Math.projectRayOntoPlane(plane, {origin: camera.position, direction: camera.orientation})
+      projectedRay = BGE.Math.projectRayOntoPlane(plane, {origin: camera.position, direction: camera.getViewForward()})
       if projectedRay = invalid
         print "failed to project camera ray onto plane"
         return invalid
@@ -850,7 +872,7 @@ namespace BGE
     end function
 
     private function isPastForwardDepth(camera as Camera3d, point as BGE.Math.Vector, farDistance as float) as boolean
-      return BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, camera.position), camera.orientation) > farDistance
+      return BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, camera.position), camera.getViewForward()) > farDistance
     end function
 
     ' A far corner on the plane at forward depth `farDistance` - the same flat depth
@@ -858,8 +880,8 @@ namespace BGE
     ' edge of the view. Not a fixed radius around the camera, which would stop the
     ' ground short of the object far-clip straight ahead (issue #307).
     private function getFarEdgeCorner(camera as Camera3d, plane as BGE.Math.Plane, cameraPointOnPlane as BGE.Math.Vector, projectedForward as BGE.Math.Vector, farDistance as float, horizFov as float, side as float) as BGE.Math.Vector
-      cameraOffsetDepth = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(cameraPointOnPlane, camera.position), camera.orientation)
-      forwardRate = BGE.Math.VectorOps.dotProduct(projectedForward, camera.orientation)
+      cameraOffsetDepth = BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(cameraPointOnPlane, camera.position), camera.getViewForward())
+      forwardRate = BGE.Math.VectorOps.dotProduct(projectedForward, camera.getViewForward())
       if forwardRate <= 0.0001
         forwardRate = 0.0001
       end if
@@ -1244,7 +1266,7 @@ namespace BGE
       destWidth = camera.frameSize.x
       canvasHeight = camera.frameSize.y
       if camera.rollDegrees <> 0
-        destWidth = m.getRollCanvasSize(camera.frameSize)
+        destWidth = m.getRollCanvasSizeFor(camera)
         canvasHeight = destWidth
       end if
 
@@ -1262,12 +1284,12 @@ namespace BGE
 
       ' The ground straight ahead (screen centre column) as a line in forward depth d:
       ' centre(d) = centreAtZero + centrePerDepth * d.
-      projectedRay = BGE.Math.projectRayOntoPlane(plane, {origin: camera.position, direction: camera.orientation})
+      projectedRay = BGE.Math.projectRayOntoPlane(plane, {origin: camera.position, direction: camera.getViewForward()})
       if invalid = projectedRay
         return slices
       end if
       forward = BGE.Math.VectorOps.getNormalizedCopy(projectedRay.direction)
-      forwardRate = BGE.Math.VectorOps.dotProduct(forward, camera.orientation)
+      forwardRate = BGE.Math.VectorOps.dotProduct(forward, camera.getViewForward())
       nearDepth = (m.getForwardDepth(camera, cp.bottomLeft) + m.getForwardDepth(camera, cp.bottomRight)) / 2
       farDepth = (m.getForwardDepth(camera, cp.topLeft) + m.getForwardDepth(camera, cp.topRight)) / 2
       if forwardRate <= 0.0001 or nearDepth <= 0.001 or farDepth <= nearDepth
@@ -1294,13 +1316,18 @@ namespace BGE
       ' Screen rows use the same perspective formula as Camera3d.worldPointToCanvasPoint(),
       ' against the level (unrolled) camera cp was built with, so this works for the
       ' rolled case too. Camera-space position is affine in d too.
-      levelLookTarget = BGE.Math.VectorOps.add(camera.position, camera.orientation)
+      levelLookTarget = BGE.Math.VectorOps.add(camera.position, camera.getViewForward())
       levelWorldToCamera = BGE.Math.Matrix44.inverse(BGE.Math.lookAt(camera.position, levelLookTarget, camera.getLevelUpVector()))
       viewAtZero = BGE.Math.Matrix44.multVecMatrix(centreAtZero, levelWorldToCamera)
       viewAtOne = BGE.Math.Matrix44.multVecMatrix(BGE.Math.VectorOps.add(centreAtZero, centrePerDepth), levelWorldToCamera)
       viewYPerDepth = viewAtOne.y - viewAtZero.y
       viewZPerDepth = viewAtOne.z - viewAtZero.z
       halfCanvasHeight = canvasHeight * 0.5
+      if camera.rollDegrees = 0
+        ' a shear camera's image is moved by its pitch; a rolled one's composite is centred
+        ' on the image centre and placed there when it's turned on
+        halfCanvasHeight += camera.getPitchShiftY()
+      end if
 
       depths = []
       canvasYs = []
@@ -1391,13 +1418,13 @@ namespace BGE
     end function
 
     private function getForwardDepth(camera as Camera3d, point as BGE.Math.Vector) as float
-      return BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, camera.position), camera.orientation)
+      return BGE.Math.VectorOps.dotProduct(BGE.Math.VectorOps.subtract(point, camera.position), camera.getViewForward())
     end function
 
     private function drawPerspectiveBmpSlicesToByCamera(rendererObj as BGE.Renderer, srcBmp as ifDraw2D, points as PerspectiveCalculationResult, sliceCount as integer) as boolean
       camera = rendererObj.camera as Camera3d
       isRolled = camera.rollDegrees <> 0
-      compositeSize = m.getRollCanvasSize(camera.frameSize)
+      compositeSize = m.getRollCanvasSizeFor(camera)
       destWidth = camera.frameSize.x
       canvasHeight = camera.frameSize.y
       if isRolled
@@ -1450,7 +1477,8 @@ namespace BGE
       ' where nothing moved - see performDraw.
       center = BGE.Math.VectorOps.create(compositeSize / 2, compositeSize / 2)
       rollRad = BGE.Math.DegreesToRadians(camera.rollDegrees)
-      cropOffset = BGE.Math.VectorOps.create((compositeSize - camera.frameSize.x) / 2, (compositeSize - camera.frameSize.y) / 2)
+      ' its centre lands on the image centre, moved down by a shear camera's pitch
+      cropOffset = BGE.Math.VectorOps.create((compositeSize - camera.frameSize.x) / 2, (compositeSize - camera.frameSize.y) / 2 - camera.getPitchShiftY())
 
       if invalid = m.rotatedTempBitmap or m.rotatedTempBitmap.GetWidth() <> camera.frameSize.x or m.rotatedTempBitmap.GetHeight() <> camera.frameSize.y
         m.rotatedTempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})

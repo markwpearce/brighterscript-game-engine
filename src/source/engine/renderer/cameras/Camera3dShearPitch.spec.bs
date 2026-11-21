@@ -1,0 +1,180 @@
+import "pkg:/source/engine/renderer/cameras/Camera3d.bs"
+import "pkg:/source/math/vector.bs"
+
+namespace tests
+
+  ' Camera3d.pitchMode "shear": a level view whose image moves by focal x tan(pitch).
+  ' 1280 x 720, 90 degree FOV (focal 640), eye at (0, 50, 0) looking down -z.
+  @suite("BGE.Camera3d - shear pitch")
+  class Camera3dShearPitchTests extends rooibos.BaseTestSuite
+
+    private function newCamera(pitchMode as string, pitchDegrees as float) as BGE.Camera3d
+      camera = new BGE.Camera3d()
+      camera.setFrameSize(1280, 720)
+      camera.fieldOfViewDegrees = 90
+      camera.pitchMode = pitchMode
+      camera.position = BGE.Math.VectorOps.create(0, 50, 0)
+      pitch = BGE.Math.DegreesToRadians(pitchDegrees)
+      camera.orientation = BGE.Math.VectorOps.create(0, sin(pitch), -cos(pitch))
+      camera.checkMovement()
+      return camera
+    end function
+
+    private function points() as BGE.Math.Vector[]
+      v = BGE.Math.VectorOps.create
+      return [v(0, 0, -300), v(120, 80, -500), v(-200, -30, -250), v(50, 400, -900)]
+    end function
+
+    private sub assertNear(expected as float, actual as float, message as string, tolerance = 0.001 as float)
+      m.assertTrue(abs(expected - actual) <= tolerance, `${message}: ${expected} vs ${actual}`)
+    end sub
+
+    @describe("level")
+
+    @it("projects and culls as rotate does when level")
+    function _()
+      rotate = m.newCamera("rotate", 0)
+      shear = m.newCamera("shear", 0)
+      m.assertEqual(0.0, shear.getPitchShiftY())
+      for each point in m.points()
+        a = rotate.worldPointToCanvasPoint(point)
+        b = shear.worldPointToCanvasPoint(point)
+        m.assertEqual(a.x, b.x)
+        m.assertEqual(a.y, b.y)
+      end for
+      for each side in ["near", "top", "bottom", "left", "right"]
+        for each point in m.points()
+          m.assertNear(rotate.distanceFromFrustumSide(side, point), shear.distanceFromFrustumSide(side, point), side, 0.01)
+        end for
+      end for
+    end function
+
+    @it("casts its corner rays through the frame's corners")
+    function _()
+      corners = {topLeft: [0, 0], topRight: [1280, 0], bottomLeft: [0, 720], bottomRight: [1280, 720]}
+      for each pitch in [0.0, -25.0]
+        shear = m.newCamera("shear", pitch)
+        for each name in corners
+          ray = shear.frustumRays[name]
+          point = BGE.Math.VectorOps.add(ray.origin, BGE.Math.VectorOps.scale(ray.direction, 100))
+          projected = shear.worldPointToCanvasPoint(point)
+          m.assertTrue(abs(projected.x - corners[name][0]) <= 1 and abs(projected.y - corners[name][1]) <= 1, `pitch ${pitch} ${name} at ${projected.x}, ${projected.y}`)
+        end for
+      end for
+    end function
+
+    @describe("pitched")
+
+    @it("projects to the level camera's point moved by focal x tan(pitch)")
+    function _()
+      level = m.newCamera("rotate", 0)
+      shear = m.newCamera("shear", -20)
+      shift = shear.getPitchShiftY()
+      m.assertNear(640 * tan(BGE.Math.DegreesToRadians(-20)), shift, "shift", 0.01)
+      m.assertNear(360 + shift, shear.getPrincipalY(), "principal row", 0.01)
+      for each point in m.points()
+        a = level.worldPointToCanvasPoint(point)
+        b = shear.worldPointToCanvasPoint(point)
+        m.assertEqual(a.x, b.x)
+        m.assertTrue(abs(a.y + shift - b.y) <= 1, `y ${a.y + shift} vs ${b.y}`)
+      end for
+      out = [] as float[]
+      shear.projectPointsWithDepth(m.points(), out)
+      first = shear.worldPointToCanvasPoint(m.points()[0])
+      m.assertEqual(first.x * 1.0, out[0] * 1.0)
+      m.assertEqual(first.y * 1.0, out[1] * 1.0)
+    end function
+
+    @it("keeps vertical lines vertical")
+    function _()
+      v = BGE.Math.VectorOps.create
+      shear = m.newCamera("shear", -25)
+      foot = shear.worldPointToCanvasPoint(v(100, 0, -300))
+      head = shear.worldPointToCanvasPoint(v(100, 200, -300))
+      m.assertEqual(foot.x, head.x)
+      rotate = m.newCamera("rotate", -25)
+      foot = rotate.worldPointToCanvasPoint(v(100, 0, -300))
+      head = rotate.worldPointToCanvasPoint(v(100, 200, -300))
+      m.assertNotEqual(foot.x, head.x)
+    end function
+
+    @it("culls at the image's moved top and bottom edges")
+    function _()
+      v = BGE.Math.VectorOps.create
+      for each pitch in [-30.0, 25.0]
+        shear = m.newCamera("shear", pitch)
+        for height = -2000 to 2000 step 25
+          point = v(0, height, -400)
+          projected = shear.worldPointToCanvasPoint(point)
+          if projected.y > 3 and projected.y < 717
+            m.assertTrue(shear.isInView(point), `pitch ${pitch} height ${height} at row ${projected.y} should be in view`)
+          else if projected.y < -3 or projected.y > 723
+            m.assertFalse(shear.isAnyInView([point, v(0, height, -401)]), `pitch ${pitch} height ${height} at row ${projected.y} should be out of view`)
+          end if
+        end for
+      end for
+    end function
+
+    @it("measures depth along the level view")
+    function _()
+      shear = m.newCamera("shear", -40)
+      m.assertNear(300, shear.viewDepth(BGE.Math.VectorOps.create(0, -500, -300)), "depth")
+    end function
+
+    @it("counts switching pitchMode, not a pitch change, as a projection change")
+    function _()
+      shear = m.newCamera("shear", -10)
+      version = shear.projectionVersion
+      pitch = BGE.Math.DegreesToRadians(-15)
+      shear.orientation = BGE.Math.VectorOps.create(0, sin(pitch), -cos(pitch))
+      shear.checkMovement()
+      ' a move, which refreshes everything already
+      m.assertEqual(version, shear.projectionVersion)
+      m.assertTrue(shear.movedLastFrame())
+      point = BGE.Math.VectorOps.create(0, 0, -300)
+      shearRow = shear.worldPointToCanvasPoint(point).y
+      shear.pitchMode = BGE.CameraPitchMode.rotate
+      shear.checkMovement()
+      m.assertTrue(shear.projectionVersion > version)
+      m.assertNotEqual(shearRow, shear.worldPointToCanvasPoint(point).y)
+    end function
+
+    @it("looks along orientation itself with rotate")
+    function _()
+      rotate = m.newCamera("rotate", -20)
+      forward = rotate.getViewForward()
+      m.assertEqual(rotate.orientation.y, forward.y)
+      m.assertEqual(0.0, rotate.getPitchShiftY())
+    end function
+
+    @it("turns the image about the moved centre when rolled")
+    function _()
+      shear = m.newCamera("shear", -20)
+      shear.rollDegrees = 30
+      shear.checkMovement()
+      ahead = BGE.Math.VectorOps.create(0, 50, -400)
+      projected = shear.worldPointToCanvasPoint(ahead)
+      m.assertEqual(640, projected.x)
+      m.assertTrue(abs(projected.y - shear.getPrincipalY()) <= 1, `row ${projected.y} vs ${shear.getPrincipalY()}`)
+      m.assertTrue(shear.isInView(ahead))
+      ' the corner rays still land on the frame's corners
+      ray = shear.frustumRays.topLeft
+      corner = shear.worldPointToCanvasPoint(BGE.Math.VectorOps.add(ray.origin, BGE.Math.VectorOps.scale(ray.direction, 100)))
+      m.assertTrue(abs(corner.x) <= 1 and abs(corner.y) <= 1, `top left at ${corner.x}, ${corner.y}`)
+    end function
+
+    @it("holds the shift at 60 degrees")
+    function _()
+      shear = m.newCamera("shear", -80)
+      m.assertNear(-640 * tan(BGE.Math.DegreesToRadians(60)), shear.getPitchShiftY(), "shift", 0.01)
+    end function
+
+    @it("keeps the level view straight up or down")
+    function _()
+      shear = m.newCamera("shear", -90)
+      m.assertEqual(0.0, shear.getPitchShiftY())
+    end function
+
+  end class
+
+end namespace
