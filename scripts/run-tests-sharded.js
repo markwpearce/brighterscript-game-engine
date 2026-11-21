@@ -22,18 +22,20 @@ const SHARD_DIR = path.join(ROOT_DIR, 'test-build-shards');
 
 // Spec globs (relative to rootDir) for each shard, added after every spec is excluded.
 // UiContainer.spec.bs stays with the engine shard: Game.spec.bs uses its test widgets.
-// SceneObjectTestDoubles.spec.bs has no tests, only helpers both renderer shards use.
+// SceneObjectTestDoubles.spec.bs has no tests, only helpers the renderer and drawables shards use.
+// Drawables test with their scene objects, so the two share a shard.
 // Slowest first, so they start first.
 const SHARDS = [
     { name: 'renderer', specs: ['source/engine/renderer/*.spec.bs', 'source/engine/renderer/sceneObjects/SceneObjectTestDoubles.spec.bs'] },
-    { name: 'renderer-parts', specs: ['source/engine/renderer/*/**/*.spec.bs'] },
+    { name: 'drawables', specs: ['source/engine/renderer/sceneObjects/**/*.spec.bs', 'source/engine/drawables/**/*.spec.bs'] },
+    { name: 'renderer-parts', specs: ['source/engine/renderer/*/**/*.spec.bs', '!source/engine/renderer/sceneObjects/**/*.spec.bs'] },
     { name: 'other', specs: ['source/**/*.spec.bs', '!source/engine/**/*.spec.bs'] },
-    { name: 'engine', specs: ['source/engine/**/*.spec.bs', '!source/engine/renderer/**/*.spec.bs', '!source/engine/ui/**/*.spec.bs', '!source/engine/loading/**/*.spec.bs', '!source/engine/quality/**/*.spec.bs', 'source/engine/ui/UiContainer.spec.bs'] },
+    { name: 'engine', specs: ['source/engine/**/*.spec.bs', '!source/engine/renderer/**/*.spec.bs', '!source/engine/drawables/**/*.spec.bs', '!source/engine/ui/**/*.spec.bs', '!source/engine/loading/**/*.spec.bs', '!source/engine/quality/**/*.spec.bs', 'source/engine/ui/UiContainer.spec.bs'] },
     { name: 'engine-ui', specs: ['source/engine/ui/**/*.spec.bs', 'source/engine/loading/**/*.spec.bs', 'source/engine/quality/**/*.spec.bs', '!source/engine/ui/UiContainer.spec.bs'] }
 ];
 
 const GIB = 1024 * 1024 * 1024;
-// All five at once peaked at ~5.7GB of brs-cli memory locally; leave headroom
+// The five shards before drawables split off peaked at ~5.7GB of brs-cli memory together locally; leave headroom
 const MEMORY_PER_SHARD = 2.5 * GIB;
 
 function getShards() {

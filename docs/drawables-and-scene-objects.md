@@ -852,6 +852,25 @@ cluster-candidate count for zero possible benefit.
 See `specs/2026-08-16-depth-sort-plan-2-design.md` for the full design, and `examples/depthsort`'s
 `ClusterVisualizerScene` for a runnable demo of interleaved draw order taking visible effect.
 
+## Building models in code (`Model3dOps.boxFaces`)
+
+For greyboxing, or props with no art of their own, build a `Model3d` from flat-colored boxes.
+`BGE.Model3dOps.boxFaces(center, size, rgba, options)` returns an axis-aligned box's triangles, wound
+counter-clockwise from outside with outward normals, so back faces cull and lighting works:
+
+```brighterscript
+' a 2 m bench standing on the floor: center is the box's middle, not its base
+center = BGE.Math.VectorOps.create(0, 0.25, 0)
+size = BGE.Math.VectorOps.create(2, 0.5, 0.6)
+faces = BGE.Model3dOps.boxFaces(center, size, &h7A5A3AFF, {omit: ["bottom"]})
+m.addDrawable("bench", new BGE.DrawableModel(m, new BGE.Model3d(faces)))
+```
+
+`omit` leaves out sides you never see (`"top"`, `"bottom"`, `"right"`/`"left"` for ±x,
+`"front"`/`"back"` for ±z). Append several boxes' faces for one model, but note the renderer sorts a
+model by the centre of its bounds: give separate pieces (a bench in a hall, a doorway's posts) a
+model each, as thirdPerson's `BoxProp` and `CryptDoorway` do.
+
 ## Textured 3D models (`Model3d` / `OBJParser`)
 
 An `.obj` model can carry diffuse textures, sampled via UV coordinates. On a `Camera3d`, each
