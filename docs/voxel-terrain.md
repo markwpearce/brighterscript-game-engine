@@ -100,6 +100,12 @@ picks how it copes:
   pitch. It costs about a third more. Objects near the screen edges drift sideways a little at
   steep pitches, since the columns can't lean.
 
+Or make the camera match the terrain instead: with `camera.pitchMode = "shear"` the whole view
+pitches the way `horizonShift` does (it stays level and the image moves up or down), so objects,
+walls and planes sit exactly on the hills at any pitch, at `horizonShift`'s cost. Vertical lines
+stay vertical, which suits the retro look; it reads as looking up or down up to about 30 degrees.
+The terrain ignores its own `pitchMode` under a shear camera.
+
 ## Quality and cost
 
 The cost is almost exactly columns x depth steps, about 4 µs each on a Roku Ultra. Quality sets

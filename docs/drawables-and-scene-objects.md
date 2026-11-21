@@ -733,6 +733,22 @@ A few things the renderer enforces, which are easy to trip over:
   that needed the full test) show what it costs you; compare frame times with
   `occlusionCullingEnabled` on and off.
 
+## Camera pitch (`Camera3d.pitchMode`)
+
+A `Camera3d` shows the pitch in its `orientation` (looking up or down) one of two ways:
+
+- `"rotate"` (default): the view turns, a true perspective. Looking down, vertical lines
+  converge towards the bottom of the screen.
+- `"shear"`: the view stays level and the image moves down (looking up) or up (looking down) by
+  `focal length x tan(pitch)`, held to ±60°. Vertical lines stay vertical, as in old voxel and
+  raycast games. It's the pitch a [voxel terrain](/voxel-terrain) can draw exactly, so objects
+  sit on its hills at any pitch.
+
+Everything the renderer draws follows the mode: models, sprites, walls, ground planes, the
+skybox, fog and culling. `orientation` keeps the pitch either way; `getViewForward()` is the
+direction projections look along (level under shear) and `getPitchShiftY()` how far the image
+moved (0 under rotate). Shear only reads as looking up or down at modest angles.
+
 ## How `Renderer.render()` actually draws a frame
 
 `Renderer.render()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a

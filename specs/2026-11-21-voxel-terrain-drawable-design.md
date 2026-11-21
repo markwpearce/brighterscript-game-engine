@@ -270,6 +270,19 @@ The terrain under a `shear` camera uses its horizon-shift march with the camera'
   objects/planes/walls scenes under `shear` to catch regressions. Results go in a section at the
   end of this spec.
 
+### Results (PR 3, Roku Ultra)
+
+- Terrain cost under a shear camera equals `horizonShift` (no objects: 49 / 30 / 21.5 fps at basic /
+  medium / ultra vs 48 / 31 / 20.6), since it's the same march.
+- Device screenshots at 0, -15 and -30 degrees: A and C draw identical terrain; under A's rotating
+  camera, billboards drift off the hills as pitch grows (riding high by -30), under C they stay on
+  them.
+- The audit found the central projections, frustum, depth and level vectors covered most of the
+  engine; inline copies changed: column projection centre, impostor basis, model clip path,
+  particle size, fog depth, plane rows/rays/roll centre, skybox band, walls' principal row and frame
+  height, voxel terrain. Shear frustum rays are exact frame-corner rays (rotate's are approximate;
+  nothing reads them besides tests).
+
 ## Open questions
 
 - Express performance (expected 2-3x slower than the Ultra).
