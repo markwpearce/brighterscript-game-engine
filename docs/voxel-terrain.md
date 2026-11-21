@@ -123,6 +123,7 @@ Flying and turning over a 256 map, terrain only, on a Roku Ultra at 1280x720:
 | High   | 100     | 24 fps         | 18 fps  |                        |
 | Ultra  | 100     | 21 fps         | 16 fps  | 17 fps                 |
 
-Objects cost the same as anywhere else, plus a little for the hill test (~5 ms for ~40 in view).
+Objects cost the same as anywhere else, plus the hill test for each one in view: ~0.2 ms for a
+`directScaled` sprite on a Roku Ultra, ~0.3 ms for other kinds.
 The rendererTest app's **Voxel Terrain** demo (`demo=voxel-terrain`) shows all of this, and with
 `sweep=1` it prints these numbers for your own device.
