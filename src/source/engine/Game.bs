@@ -24,6 +24,7 @@ import "debug/InputDisplayMode.bs"
 import "debug/LogDisplay.bs"
 import "debug/LogLevel.bs"
 import "debug/MemoryDisplay.bs"
+import "debug/PerfStats.bs"
 import "drawables/Model3d.bs"
 import "drawables/SpriteFrames.bs"
 import "GameEntity.bs"
@@ -173,6 +174,11 @@ namespace BGE
     private lastGarbageCollection as GarbageCollectionInfo = invalid
     ' Timer backing debugPrintPerfStats()'s independent print cadence - see Play().
     private perfStatsTimer as roTimespan = CreateObject("roTimespan")
+    ' debugPrintPerfStats() options; perfStats aggregates frames only when options were given
+    private perfStatsOptions as BGE.Debug.GamePerfStatsOptions = {}
+    private perfStats as BGE.Debug.PerfStats = invalid
+    ' Did debugPrintPerfStats() turn on the renderer's profileStages (so it turns it off again)?
+    private perfStatsProfilingStages as boolean = false
     private sceneChangedThisFrame as boolean = false
     ' changeSceneWithFade() state: "" (none), "out" (fading to the new scene) or "in" (fading back)
     private fadeTransitionPhase as string = ""
@@ -653,15 +659,12 @@ namespace BGE
         ' is on, so there's no per-frame cost otherwise). Independent of the GC print below:
         ' it runs on its own (typically much shorter) interval for faster iteration while
         ' investigating a perf issue.
-        if m.debugging.print_perf_stats and m.perfStatsTimer.totalMilliseconds() > (m.debugging.perf_stats_interval_seconds * 1000)
-          entityCount = m.sortedEntities.count()
-          colliderCount = 0
-          for each entity in m.sortedEntities
-            colliderCount += entity.colliders.count()
-          end for
-          print `Entities: ${entityCount} | Colliders: ${colliderCount}`
-          print `Phase ms - uiInput: ${uiInputTime} | update+collision: ${updateAndCollisionTime} | entityDraw: ${entityDrawTime} | swap: ${drawTime}`
-          m.perfStatsTimer.mark()
+        if m.debugging.print_perf_stats
+          m.recordPerfStatsFrame(frameSeconds * 1000)
+          if m.perfStatsTimer.totalMilliseconds() > (m.debugging.perf_stats_interval_seconds * 1000)
+            m.reportPerfStats({uiInput: uiInputTime, updateAndCollision: updateAndCollisionTime, entityDraw: entityDrawTime, swap: drawTime})
+            m.perfStatsTimer.mark()
+          end if
         end if
 
         if m.garbageCollectionTimer.totalMilliseconds() > (m.secondsBetweenGarbageCollection * 1000)
@@ -2149,18 +2152,97 @@ namespace BGE
       return m.debugging.show_debug_ui
     end function
 
-    ' Set whether Play() prints per-frame perf stats to the console (entity/collider counts
-    ' and per-phase timing: UI input, update+collision, entity draw, buffer swap). Off by
-    ' default - each phase timestamp above is only measured while this is on, so leaving it
-    ' off costs nothing per frame. Independent of, and typically a much shorter interval than,
-    ' the periodic garbage-collection print.
+    ' Set whether Play() prints perf stats to the console every interval: entity/collider counts
+    ' and one frame's phase timing (UI input, update+collision, entity draw, buffer swap). Off by
+    ' default - each phase timestamp is only measured while this is on, so leaving it off costs
+    ' nothing per frame. Independent of, and typically a much shorter interval than, the
+    ' periodic garbage-collection print.
+    '
+    ' Passing options also collects every frame over the interval (BGE.Debug.PerfStats) and
+    ' prints a `PERF fps ... | med ... p90 ... max ... spikes n/frames` line after those (and
+    ' `PERF start <runId>` once, with a runId): `stages` adds the
+    ' renderer's stage times, and `onStats` gets each interval's stats to show or send them your
+    ' own way (`printToConsole: false` to print nothing).
+    '
+    ' @example
+    ' game.debugPrintPerfStats(true, 3, {stages: true, percentiles: [0.5, 0.9, 0.99], runId: "a"})
     '
     ' @param {boolean} enabled
     ' @param {float} intervalSeconds How often to print, in seconds (default 2)
-    sub debugPrintPerfStats(enabled as boolean, intervalSeconds = 2.0 as float)
+    ' @param {BGE.Debug.GamePerfStatsOptions} [options={}] - stages, stageNames, percentiles, spikeFactor, runId, printToConsole, onStats
+    sub debugPrintPerfStats(enabled as boolean, intervalSeconds = 2.0 as float, options = {} as BGE.Debug.GamePerfStatsOptions)
       m.debugging.print_perf_stats = enabled
       m.debugging.perf_stats_interval_seconds = intervalSeconds
       m.perfStatsTimer.mark()
+      m.perfStatsOptions = options
+      m.perfStats = invalid
+      if m.perfStatsProfilingStages
+        m.canvas.renderer.profileStages = false
+        m.perfStatsProfilingStages = false
+      end if
+      if not enabled or options.count() = 0
+        return
+      end if
+      stats = new BGE.Debug.PerfStats(options)
+      m.perfStats = stats
+      if options.stages = true and not m.canvas.renderer.profileStages
+        m.canvas.renderer.profileStages = true
+        m.perfStatsProfilingStages = true
+      end if
+      if options.runId <> invalid and options.runId <> "" and options.printToConsole <> false
+        print `PERF start ${options.runId}`
+      end if
+    end sub
+
+    ' Adds a frame to perfStats, with the renderer's stage times when they're on.
+    private sub recordPerfStatsFrame(frameMs as float)
+      if m.perfStats = invalid
+        return
+      end if
+      if m.perfStatsOptions.stages = true
+        renderer = m.canvas.renderer
+        m.perfStats.addFrame(frameMs, renderer.getStageMsLastFrame(), renderer.getStageCountsLastFrame())
+      else
+        m.perfStats.addFrame(frameMs)
+      end if
+    end sub
+
+    ' Prints (and passes to onStats) this interval's perf stats, then starts the next interval.
+    private sub reportPerfStats(phaseMs as roAssociativeArray)
+      entityCount = m.sortedEntities.count()
+      colliderCount = 0
+      for each entity in m.sortedEntities
+        colliderCount += entity.colliders.count()
+      end for
+      printStats = m.perfStatsOptions.printToConsole <> false
+      if printStats
+        print `Entities: ${entityCount} | Colliders: ${colliderCount}`
+        print `Phase ms - uiInput: ${phaseMs.uiInput} | update+collision: ${phaseMs.updateAndCollision} | entityDraw: ${phaseMs.entityDraw} | swap: ${phaseMs.swap}`
+      end if
+      if m.perfStats = invalid
+        return
+      end if
+      summary = m.perfStats.getSummary()
+      summary.entityCount = entityCount
+      summary.colliderCount = colliderCount
+      summary.phaseMs = phaseMs
+      if printStats
+        print "PERF " + m.perfStats.format(summary)
+      end if
+      m.perfStats.reset()
+      if m.perfStatsOptions.onStats <> invalid
+        m.perfStatsOptions.onStats(summary, m)
+      end if
+    end sub
+
+    ' For tests: adds a frame of `frameMs` as Play() does
+    sub recordPerfStatsFrameForTest(frameMs as float)
+      m.recordPerfStatsFrame(frameMs)
+    end sub
+
+    ' For tests: reports the interval as Play() does when the interval is up
+    sub reportPerfStatsForTest(phaseMs = {} as roAssociativeArray)
+      m.reportPerfStats(phaseMs)
     end sub
 
     function getDebugValue(debugKey as string) as dynamic

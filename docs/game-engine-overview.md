@@ -820,6 +820,54 @@ doesn't use, or set `game.debugToggle.enabled = false` while it does. Each chang
 `BGE.Debug.DebugToggle` subclass (override `applyLevel()` or `onLevelChanged()`) can be assigned
 to `game.debugToggle`.
 
+### Perf stats on the console
+
+`debugPrintPerfStats()` prints entity/collider counts and one frame's phase times (UI input,
+update+collision, entity draw, buffer swap) every interval. Pass options to also collect every
+frame in the interval and print a summary line:
+
+```brighterscript
+game.debugPrintPerfStats(true, 3) ' counts and phases every 3 seconds
+game.debugPrintPerfStats(true, 3, {stages: true, runId: "baseline"})
+```
+
+With options, each interval prints the counts and phases, then a summary line (and
+`PERF start baseline` once when it's turned on):
+
+```text
+Entities: 73 | Colliders: 23
+Phase ms - uiInput: 0 | update+collision: 5 | entityDraw: 19 | swap: 1
+PERF fps 29.4 frameMs 34.0 | update 2.1ms x1 | walls 9.8ms x1 | ... | med 33 p90 41 max 67 spikes 3/88 | run baseline
+```
+
+`stages: true` turns on the game renderer's `profileStages` and adds each stage's average
+milliseconds and runs per frame (`stageNames` picks which, in order). The frame times are the
+median, any other `percentiles` (default `[0.5, 0.9]`), the longest frame and how many frames ran
+over `spikeFactor` (default 1.5) times the median. `runId` tags each line, so runs are easy to
+tell apart in a log. The stage timers cost a timer read per scene object drawn, so compare fps
+with `stages` off too.
+
+To show or send the numbers your own way, pass `onStats` (and `printToConsole: false` to print
+nothing). It gets a `BGE.Debug.PerfStatsSummary` each interval, with the entity/collider counts
+and phase times added:
+
+```brighterscript
+game.debugPrintPerfStats(true, 5, {
+  printToConsole: false,
+  onStats: sub(stats as BGE.Debug.PerfStatsSummary, game as BGE.Game)
+    game.log(`fps ${stats.fps} p90 ${stats.percentileMs[1]}ms`)
+  end sub
+})
+```
+
+Nothing is collected until you call it. For a report of your own (extra per-frame numbers, its
+own line), keep a `BGE.Debug.PerfStats` yourself: `addFrame(ms, stageMs, stageCounts)` each frame,
+then `getSummary()`, `format()` (or `formatStages()`/`formatFrameTimes()` for parts of the line)
+and `reset()`. `examples/thirdPerson`'s `PerfLog` does this with `perf=1`, adding object,
+occlusion and impostor counts to the line.
+
+### Other debug helpers
+
 - `Game.debugDrawColliders(true)` / `Game.debugDrawEntityDetails(true)` / `Game.debugShowUi(true)`
   set the same flags directly - the collider-outline view above, plus per-entity name/position
   labels.

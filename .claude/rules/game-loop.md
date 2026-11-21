@@ -39,3 +39,6 @@ Callbacks can delete entities or change scene mid-frame: re-check `isValidEntity
 - Fires on press **and** release — guard one-shots with `input.press and input.isButton(...)`.
 - `GetRemoteID()` returns `"BT:1"`/`"IR:1"`; only trust `GetValue(axis)` analog data for `"BT:"`.
 - Typed keyboard chars arrive as their own events (`GetChar() <> 0`) whose codes collide with buttons; `BGE.getControlEventKind()` routes them to `onECPKeyboard()` only. Backspace/Enter arrive as buttons.
+
+## Debug (`engine/debug/`)
+Everything is opt-in (`enableDebugToggle()`, `debugPrintPerfStats()` options; usage in `docs/game-engine-overview.md`). Sort numbers with `Sort()` on a plain numeric array — `SortBy()` misorders numbers on brs-cli (#230).
