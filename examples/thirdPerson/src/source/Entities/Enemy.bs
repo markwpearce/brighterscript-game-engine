@@ -42,6 +42,9 @@ interface EnemyFrameTables
   guard as integer[][]
   hit as integer[][]
   die as integer[][]
+  ' The fall backwards, and its last frame: a heap of bones getting up
+  rise as integer[][]
+  bones as integer[][]
 end interface
 
 interface EnemyAttack
@@ -112,6 +115,8 @@ end interface
 enum EnemyState
   ' Stands still until the player comes within wakeDistance, or hits it
   dormant = "dormant"
+  ' Getting up off the ground when it wakes (a dormant one given `rise`)
+  rise = "rise"
   approach = "approach"
   circle = "circle"
   flank = "flank"
@@ -131,6 +136,8 @@ class Enemy extends Fighter
   type as EnemyType
   ' state is an EnemyState
   clock as BGE.StateClock = new BGE.StateClock(EnemyState.approach)
+  ' The slowest the windup and strike play (frames per second)
+  attackFrameRate as float = 12
 
   private flankSeconds as float = 0
   ' 1 or -1: which way it circles the player
@@ -141,6 +148,10 @@ class Enemy extends Fighter
   private retreatDuration as float = 0
   ' 0 is always awake
   private wakeDistance as float = 0
+  ' Lies dormant as a heap (its last death frame), and gets up when it wakes
+  private risesOnWake as boolean = false
+  ' How fast its death plays, and its rise (backwards)
+  private fallFrameRate as float = 8
   ' How long the current wind-up lasts: the attack's, or half that for a combo's second swing
   private windupDuration as float = 0
   private comboUsed as boolean = false
@@ -155,8 +166,9 @@ class Enemy extends Fighter
   end sub
 
   ' args: type (EnemyType), director (CombatDirector), x, z, heading (optional, radians), wakeDistance
-  ' (optional: stands still until the player is this close or hits it), nav (optional
-  ' BGE.NavGrid: finds its way round walls, and wakes only in sight of the player)
+  ' (optional: stands still until the player is this close or hits it), rise (optional: with a
+  ' wakeDistance, lies dormant as a heap and gets up when it wakes), nav (optional BGE.NavGrid:
+  ' finds its way round walls, and wakes only in sight of the player)
   override sub onCreate(args as roAssociativeArray)
     m.type = args.type
     m.director = args.director
@@ -173,6 +185,7 @@ class Enemy extends Fighter
     if args.wakeDistance <> invalid and args.wakeDistance > 0
       m.wakeDistance = args.wakeDistance
       m.clock.set(EnemyState.dormant)
+      m.risesOnWake = args.rise = true
     end if
     if invalid <> args.nav
       m.follower = new BGE.NavFollower(args.nav, {
@@ -206,17 +219,24 @@ class Enemy extends Fighter
     m.sprite.addOrientedAnimation("idle", tables.idle, 5, BGE.SpritePlayMode.PingPong)
     m.sprite.addOrientedAnimation("run", tables.run, World.runFrameRate(m.type.speed))
     m.sprite.addOrientedAnimation("backpedal", tables.backpedal, World.runFrameRate(m.type.speed * 0.6))
-    ' Lasts exactly as long as the windup and strike, so the swing lines up with its timing
-    m.sprite.addOrientedAnimation("windup", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds), BGE.SpritePlayMode.Forward)
+    ' Spread over the windup and strike, so the swing lines up with its timing, but never under
+    ' attackFrameRate: a long windup reaches the top of the swing early and holds it
+    m.sprite.addOrientedAnimation("windup", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds, m.attackFrameRate), BGE.SpritePlayMode.Forward)
     if m.comboChance() > 0
-      m.sprite.addOrientedAnimation("windupQuick", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds / 2), BGE.SpritePlayMode.Forward)
+      m.sprite.addOrientedAnimation("windupQuick", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds / 2, m.attackFrameRate), BGE.SpritePlayMode.Forward)
     end if
-    m.sprite.addOrientedAnimation("strike", tables.strike, BGE.frameRateFor(frames.strike.Count(), attack.strikeSeconds), BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("strike", tables.strike, BGE.frameRateFor(frames.strike.Count(), attack.strikeSeconds, m.attackFrameRate), BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimation("guard", tables.guard, 8, BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimation("hit", tables.hit, 8, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimation("die", tables.die, 8, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("die", tables.die, m.fallFrameRate, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("rise", tables.rise, m.fallFrameRate, BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimation("bones", tables.bones, 1)
     m.clock.orientedSprite = m.sprite
-    m.clock.play("idle")
+    if m.risesOnWake
+      m.clock.play("bones")
+    else
+      m.clock.play("idle")
+    end if
   end sub
 
   ' Every animation's per-direction frames, built once per EnemyType and shared by its enemies.
@@ -231,7 +251,9 @@ class Enemy extends Fighter
         strike: m.sprite.framesForColumns(frames.strike, m.framesPerDirection),
         guard: m.sprite.framesForColumns(frames.guard, m.framesPerDirection),
         hit: m.sprite.framesForColumns(frames.hit, m.framesPerDirection),
-        die: m.sprite.framesForColumns(frames.die, m.framesPerDirection)
+        die: m.sprite.framesForColumns(frames.die, m.framesPerDirection),
+        rise: m.sprite.framesForColumns(m.reversed(frames.die), m.framesPerDirection),
+        bones: m.sprite.framesForColumns([frames.die[frames.die.Count() - 1]], m.framesPerDirection)
       }
     end if
     return m.type.frameTables
@@ -253,6 +275,10 @@ class Enemy extends Fighter
     else if m.clock.state = EnemyState.dormant
       player = m.director.player
       if invalid <> player and player.isAlive() and m.distanceTo(player) <= m.wakeDistance and m.canSee(player, dt)
+        m.wake()
+      end if
+    else if m.clock.state = EnemyState.rise
+      if m.clock.seconds >= m.type.frames.die.Count() / m.fallFrameRate
         m.setState(EnemyState.approach, "idle")
       end if
     else if m.clock.state = EnemyState.windup
@@ -410,7 +436,7 @@ class Enemy extends Fighter
       return HitResult.dodged
     end if
     if m.clock.state = EnemyState.dormant
-      m.setState(EnemyState.approach, "idle")
+      m.wake()
     end if
     notBusy = m.clock.state = EnemyState.approach or m.clock.state = EnemyState.circle or m.clock.state = EnemyState.flank or m.clock.state = EnemyState.guard
     if notBusy and m.isFacing(attacker, BGE.Math.PI / 3) and Rnd(0) < m.type.blockChance
@@ -423,8 +449,8 @@ class Enemy extends Fighter
     m.spray(BGE.ParticlePresets.blood(m.bloodColor, World.particleUnits()), attacker)
     if not m.isAlive()
       m.die()
-    else if m.clock.state <> EnemyState.strike and m.clock.state <> EnemyState.stagger and m.type.flinchSeconds > 0
-      ' The strike itself can't be interrupted
+    else if m.clock.state <> EnemyState.strike and m.clock.state <> EnemyState.stagger and m.clock.state <> EnemyState.rise and m.type.flinchSeconds > 0
+      ' The strike, and getting up, can't be interrupted
       m.stagger(m.type.flinchSeconds)
     end if
     return HitResult.hit
@@ -489,6 +515,14 @@ class Enemy extends Fighter
     end if
     return m.type.comboChance
   end function
+
+  private sub wake()
+    if m.risesOnWake
+      m.setState(EnemyState.rise, "rise")
+    else
+      m.setState(EnemyState.approach, "idle")
+    end if
+  end sub
 
   ' Not dormant and not dead
   function isAwake() as boolean
