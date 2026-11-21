@@ -158,8 +158,9 @@ namespace BGE
     ' 0) to allow true black. With lights, it applies to each color channel separately.
     ambientBrightness as float = 0.25
 
-    ' Active flash() state; see getDisplayColor().
+    ' Active flash() state; see getDisplayColor() and getDisplayAlpha(). -1 keeps the drawable's own.
     private flashColor as integer = &hFFFFFF
+    private flashAlphaTo as float = -1.0
     private flashSeconds as float = 0.0
     private flashElapsed as float = 0.0
     private flashBlinkSeconds as float = 0.0
@@ -375,29 +376,47 @@ namespace BGE
     function getFillColorRGBA(ignoreColor = false as boolean) as integer
       rgba = BGE.Colors.White
       if not ignoreColor and invalid <> m.color
-        rgba = (m.getDisplayColor() << 8) + int(m.alpha)
+        ' inline: every drawable reads this every frame, and few are flashing
+        if m.flashElapsed < m.flashSeconds
+          rgba = (m.getDisplayColor() << 8) + int(m.getDisplayAlpha())
+        else
+          rgba = (m.color << 8) + int(m.alpha)
+        end if
       end if
       return rgba
     end function
 
-    ' Tints this drawable with `color` (RGB, like `color`) for `seconds`, then goes back to
-    ' its own `color`. `color` itself is never touched, so it can keep changing during the
-    ' flash and is what shows afterwards. Flashing again restarts the flash.
+    ' Tints this drawable with `color` (RGB, like `color`), and/or fades it by `alpha`, for
+    ' `seconds`, then goes back to its own look. `color` and `alpha` themselves are never
+    ' touched, so they can keep changing during the flash and are what show afterwards.
+    ' Flashing again restarts the flash.
     '
     ' The owning entity's flashes tick with the game, just before its onUpdate(), and pause
     ' with it. A drawable with no owner must call tickFlash() itself.
     '
-    ' @param {integer} color - RGB flash color, e.g. &hFF5050
+    ' @param {integer} color - RGB flash color, e.g. &hFF5050, or -1 to keep its own (see flashAlpha())
     ' @param {float} seconds - how long the flash lasts
-    ' @param {float} [blinkSeconds=0] - if above 0, alternates between the flash color and the drawable's own color this often
-    sub flash(color as integer, seconds as float, blinkSeconds = 0.0 as float)
+    ' @param {float} [blinkSeconds=0] - if above 0, alternates between the flash and the drawable's own look this often
+    ' @param {float} [alpha=-1] - 0-255, scales its own `alpha` during the flash (255 / -1 keep it as is)
+    sub flash(color as integer, seconds as float, blinkSeconds = 0.0 as float, alpha = -1.0 as float)
       m.flashColor = color
+      m.flashAlphaTo = alpha
       m.flashSeconds = seconds
       m.flashElapsed = 0.0
       m.flashBlinkSeconds = blinkSeconds
       if seconds > 0 and invalid <> m.owner
         m.owner.hasActiveFlash = true
       end if
+    end sub
+
+    ' Fades this drawable by `alpha` (scaling its own) for `seconds`, keeping its color - with blinkSeconds, a
+    ' flicker such as a hit's invulnerability. Shares flash()'s state, so one replaces the other.
+    '
+    ' @param {float} alpha - 0-255: 60 draws an opaque drawable at 60, a half-faded one at 30
+    ' @param {float} seconds - how long it lasts
+    ' @param {float} [blinkSeconds=0] - if above 0, alternates between `alpha` and its own alpha this often
+    sub flashAlpha(alpha as float, seconds as float, blinkSeconds = 0.0 as float)
+      m.flash(-1, seconds, blinkSeconds, alpha)
     end sub
 
     ' Ends any flash now.
@@ -434,20 +453,39 @@ namespace BGE
     '
     ' @return {integer}
     function getDisplayColor() as integer
+      if m.flashColor <> -1 and m.isFlashShowing()
+        return m.flashColor
+      end if
+      return m.color
+    end function
+
+    ' The alpha drawn this frame: `alpha`, scaled by a flash's alpha while it shows.
+    '
+    ' @return {float}
+    function getDisplayAlpha() as float
+      if m.flashAlphaTo >= 0 and m.isFlashShowing()
+        return m.alpha * m.flashAlphaTo / 255.0
+      end if
+      return m.alpha
+    end function
+
+    ' Whether a flash is running and not in a blink's "off" phase.
+    private function isFlashShowing() as boolean
       if not m.isFlashing()
-        return m.color
+        return false
       end if
-      if m.flashBlinkSeconds > 0 and (int(m.flashElapsed / m.flashBlinkSeconds) mod 2) = 1
-        return m.color
-      end if
-      return m.flashColor
+      return m.flashBlinkSeconds <= 0 or (int(m.flashElapsed / m.flashBlinkSeconds) mod 2) = 0
     end function
 
 
     function getOutlineColorRGBA(ignoreColor = false as boolean) as integer
       rgba = m.getFillColorRGBA(ignoreColor)
       if not ignoreColor and invalid <> m.outlineRGBA
-        rgba = (m.outlineRGBA << 8) + int(m.alpha)
+        alpha = m.alpha
+        if m.flashElapsed < m.flashSeconds
+          alpha = m.getDisplayAlpha()
+        end if
+        rgba = (m.outlineRGBA << 8) + int(alpha)
       end if
       return rgba
     end function

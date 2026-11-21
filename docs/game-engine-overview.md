@@ -516,8 +516,10 @@ The flash color is RGB, like `Drawable.color`. The flash never changes `color` i
 code can keep setting `color` (a tint that follows the enemy's state, say) and the drawable goes
 back to whatever it is when the flash ends. Flashing again restarts it, `stopFlash()` ends it,
 and a third argument makes it blink: `flash(&hFF4040, 0.6, 0.08)` alternates every 0.08 seconds.
-The game ticks flashes for you, just before the entity's `onUpdate()`, and holds them while
-paused.
+A fourth fades it too (`flash(&hFF4040, 0.6, 0.08, 128)`), and `flashAlpha(60, 1.0, 0.1)` only
+fades it, keeping its color - an invulnerability flicker. `alpha`, like `color`, is never
+changed. The game ticks flashes for you, just before the entity's `onUpdate()`, and holds them
+while paused.
 
 `step(dt)` returns how far to move this frame rather than moving anything, so you can send it
 through your own collision instead, e.g. `m.solidWorld.moveAndSlide(feetBox, push.x, push.y,
