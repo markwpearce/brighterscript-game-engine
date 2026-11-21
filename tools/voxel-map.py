@@ -22,6 +22,8 @@
 # (src/source/engine/voxel/VoxelMapTool.spec.bvox).
 
 import argparse
+import heapq
+import itertools
 import struct
 import sys
 import zlib
@@ -148,18 +150,25 @@ def write_png(path, rows):
 
 def median_cut(colors, count):
     """Up to `count` boxes of (r, g, b), as lists."""
-    boxes = [list(colors)]
-    while len(boxes) < count:
-        boxes.sort(key=lambda box: max(max(c[k] for c in box) - min(c[k] for c in box) for k in range(3)) if len(box) > 1 else -1)
-        box = boxes.pop()
-        if len(box) < 2:
-            boxes.append(box)
+
+    def entry(box):
+        # (-widest channel range, tiebreak, axis, box): heapq pops the widest box first
+        ranges = [max(c[k] for c in box) - min(c[k] for c in box) for k in range(3)]
+        axis = max(range(3), key=lambda k: ranges[k])
+        return (-ranges[axis] if len(box) > 1 else 1, next(counter), axis, box)
+
+    counter = itertools.count()
+    heap = [entry(list(colors))]
+    while len(heap) < count:
+        widest, _, axis, box = heapq.heappop(heap)
+        if widest > 0:
+            heapq.heappush(heap, (widest, next(counter), axis, box))
             break
-        axis = max(range(3), key=lambda k: max(c[k] for c in box) - min(c[k] for c in box))
         box.sort(key=lambda c: c[axis])
         half = len(box) // 2
-        boxes += [box[:half], box[half:]]
-    return [box for box in boxes if box]
+        heapq.heappush(heap, entry(box[:half]))
+        heapq.heappush(heap, entry(box[half:]))
+    return [box for _, _, _, box in heap if box]
 
 
 def palette_indexes(rows, max_colors=256):
@@ -289,10 +298,10 @@ def main():
             fail(f"--flat-color {args.flat_color} isn't RRGGBB hex")
         if not 0 <= rgb <= 0xFFFFFF:
             fail(f"--flat-color {args.flat_color} isn't RRGGBB hex")
-        flat_px = ((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255)
-        # leave a palette slot for the flat colour unless the map already uses it
-        in_map = any(px == flat_px for row in color_rows for px in row)
-        palette, colors = palette_indexes(color_rows, 256 if in_map else 255)
+        palette, colors = palette_indexes(color_rows)
+        if rgb not in palette and len(palette) == 256:
+            # no slot left for the flat colour: quantise to 255 instead
+            palette, colors = palette_indexes(color_rows, 255)
         if rgb not in palette:
             palette.append(rgb)
         flat_color = palette.index(rgb)
