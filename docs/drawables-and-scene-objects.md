@@ -324,7 +324,7 @@ sprite.playOrientedAnimation("attack", true) ' Sprite.playAnimation() takes it t
 ```
 
 An animating sprite is redrawn and re-sorted every frame. For a crowd, give an animation a far
-stand-in, such as one frame of it, that plays past `lodDistance` from the camera. The distance is
+stand-in, such as one frame of it, that plays past `lodDistance` from the camera (across x/z). The distance is
 rechecked every `lodCheckSeconds` (0.5), at a different moment for each sprite.
 Animations without a stand-in (a walk) carry on as they are:
 
