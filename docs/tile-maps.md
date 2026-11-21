@@ -427,6 +427,19 @@ Finding things in the grid:
 
 `BGE.GridSides` turns a side into a `[col, row]` `offset()`, a unit
 `normal()`, its `opposite()` or the `heading()` that faces out through it.
+To hang something on a cell's wall (a picture, a torch bracket model), turn it
+by `wallRotation(side)`: the `rotation.y` that faces a drawable or model built
+facing +z back into the cell.
+
+```brighterscript
+side = grid.wallSides(cell.col, cell.row)[0]
+painting.rotation = BGE.Math.VectorOps.create(0, BGE.GridSides.wallRotation(side), 0)
+```
+
+A `rotation.y` isn't a heading: something built facing +z, turned by `r`,
+faces `BGE.Math.rotationForward(r)`, (-sin r, 0, cos r), so a quarter turn
+faces -x where a heading of a quarter turn faces +x.
+`BGE.Math.rotationFacing(direction)` goes the other way.
 
 A level that keeps more than the grid (its start cell, its exits) can extend
 `BGE.CharGrid`:
