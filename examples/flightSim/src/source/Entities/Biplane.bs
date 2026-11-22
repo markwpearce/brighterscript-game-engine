@@ -1,0 +1,154 @@
+' The player's plane: an arcade flight model (the stick sets a bank and pitch to ease towards,
+' so letting go levels the plane out) with a spinning propeller.
+'
+' Angles are radians. Heading 0 faces -z and grows turning left; bank is positive with the right
+' wing down; pitch is positive nose up.
+class Biplane extends BGE.GameEntity
+
+  ' Model units are about a metre: this makes the plane ~24 world units long
+  modelScale as float = 5.0
+
+  heading as float = 0
+  pitch as float = 0
+  bank as float = 0
+  speed as float = 130
+  ' 0-1
+  throttle as float = 0.5
+  ' True: stick up pulls the nose up. False (the default): stick up pushes it down, like a pilot's
+  invertPitch as boolean = false
+  ' Set false to hold the plane still (crashed, course complete)
+  flying as boolean = true
+
+  maxBankDegrees as float = 60
+  maxPitchDegrees as float = 40
+  bankDegreesPerSecond as float = 110
+  pitchDegreesPerSecond as float = 55
+  ' radians a second of heading change at a full (90 degree) bank
+  turnRate as float = 1.15
+  minSpeed as float = 60
+  maxSpeed as float = 300
+  ceiling as float = 1000
+
+  private body as BGE.DrawableModel
+  private prop as BGE.DrawableModel
+  private propAngle as float = 0
+  ' the propeller hub in model units
+  private hubX as float = 2.25
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "Biplane"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.scale = BGE.Math.VectorOps.create(m.modelScale, m.modelScale, m.modelScale)
+    ' A moving model redraws every frame (no impostor), and each solid triangle costs two
+    ' transformed draws, so the body culls back faces: about half the cost on a Roku Ultra.
+    ' Its single-sided wings and tail face up and back, so they still show from the chase camera.
+    m.body = new BGE.DrawableModel(m, m.game.get3dModel("biplane"), {drawMode: BGE.SceneObjectDrawMode.solid, useImpostor: false})
+    m.addDrawable("body", m.body)
+    ' the propeller's 4 triangles face forward: draw both sides so it shows from behind
+    m.prop = new BGE.DrawableModel(m, m.game.get3dModel("propeller"), {drawMode: BGE.SceneObjectDrawMode.solidDrawBackFace, useImpostor: false})
+    m.addDrawable("propeller", m.prop)
+    m.applyAttitude()
+  end sub
+
+  ' Puts the plane at a position, level, flying towards a heading
+  sub resetTo(position as BGE.Math.Vector, heading as float)
+    m.position = BGE.Math.VectorOps.create(position.x, position.y, position.z)
+    m.heading = heading
+    m.pitch = 0
+    m.bank = 0
+    m.speed = 130
+    m.throttle = 0.5
+    m.flying = true
+    m.applyAttitude()
+  end sub
+
+  ' The direction the nose points, a unit vector
+  function forward() as BGE.Math.Vector
+    cosPitch = cos(m.pitch)
+    return BGE.Math.VectorOps.create(-sin(m.heading) * cosPitch, sin(m.pitch), -cos(m.heading) * cosPitch)
+  end function
+
+  override sub onUpdate(dt as float)
+    if dt > 0.1
+      dt = 0.1
+    end if
+    if not m.flying
+      return
+    end if
+    controls = m.game.controls
+    stick = controls.getAxis("fly")
+    throttleChange = 0.0
+    if controls.isActionHeld("throttleUp")
+      throttleChange += 1
+    end if
+    if controls.isActionHeld("throttleDown")
+      throttleChange -= 1
+    end if
+    ' a second stick (right stick, the phone page's second stick) also works the throttle
+    throttleStick = controls.getRawAxis("throttle")
+    throttleChange += throttleStick.y
+    m.fly(dt, stick, throttleChange)
+  end sub
+
+  ' Moves the plane on one step.
+  '
+  ' @param {float} dt - seconds
+  ' @param {BGE.Math.Vector} stick - x right, y up, each -1 to 1
+  ' @param {float} throttleChange - -1 to 1: how fast to close or open the throttle
+  sub fly(dt as float, stick as BGE.Math.Vector, throttleChange as float)
+    targetBank = BGE.Math.DegreesToRadians(stick.x * m.maxBankDegrees)
+    pitchInput = -stick.y
+    if m.invertPitch
+      pitchInput = stick.y
+    end if
+    targetPitch = BGE.Math.DegreesToRadians(pitchInput * m.maxPitchDegrees)
+    m.bank = approach(m.bank, targetBank, BGE.Math.DegreesToRadians(m.bankDegreesPerSecond) * dt)
+    m.pitch = approach(m.pitch, targetPitch, BGE.Math.DegreesToRadians(m.pitchDegreesPerSecond) * dt)
+    m.heading -= m.turnRate * sin(m.bank) * dt
+
+    m.throttle = BGE.Math.Clamp(m.throttle + throttleChange * 0.6 * dt, 0, 1)
+    targetSpeed = 80 + m.throttle * 170
+    ' climbing bleeds speed, diving gains it
+    m.speed += (targetSpeed - m.speed) * 0.7 * dt - sin(m.pitch) * 110 * dt
+    m.speed = BGE.Math.Clamp(m.speed, m.minSpeed, m.maxSpeed)
+
+    direction = m.forward()
+    m.position.x += direction.x * m.speed * dt
+    m.position.y += direction.y * m.speed * dt
+    m.position.z += direction.z * m.speed * dt
+    if m.position.y > m.ceiling
+      m.position.y = m.ceiling
+      if m.pitch > 0
+        m.pitch = m.pitch * 0.9
+      end if
+    end if
+    m.propAngle += (10 + m.throttle * 30) * dt
+    if m.propAngle > BGE.Math.PI * 2
+      m.propAngle -= BGE.Math.PI * 2
+    end if
+    m.applyAttitude()
+  end sub
+
+  ' Turns the models to the heading, pitch and bank. The engine turns about x, then y, then z, so
+  ' bank (about the nose, +x) and pitch (z) go on the drawables and heading (y) on the entity.
+  private sub applyAttitude()
+    ' the model's nose is +x: turn it to face the heading
+    m.rotation = BGE.Math.VectorOps.create(0, -m.heading - BGE.Math.PI / 2, 0)
+    m.body.rotation = BGE.Math.VectorOps.create(-m.bank, 0, m.pitch)
+    m.prop.rotation = BGE.Math.VectorOps.create(m.propAngle - m.bank, 0, m.pitch)
+    ' the drawable's offset isn't turned by its own rotation, so pitch the hub here
+    m.prop.offset = BGE.Math.VectorOps.create(m.hubX * cos(m.pitch), m.hubX * sin(m.pitch), 0)
+  end sub
+
+end class
+
+' Moves value towards target by at most maxStep
+function approach(value as float, target as float, maxStep as float) as float
+  if value < target
+    return BGE.Math.Min(value + maxStep, target)
+  end if
+  return BGE.Math.Max(value - maxStep, target)
+end function

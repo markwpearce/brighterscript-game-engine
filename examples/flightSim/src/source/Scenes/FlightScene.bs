@@ -1,0 +1,456 @@
+import "../Entities/Biplane.bs"
+import "../Entities/CourseRing.bs"
+
+' Fly the biplane round the island through a course of rings, in order, against the clock.
+' Hitting the ground or the sea puts the plane back at the last ring passed, 5 seconds down.
+class FlightScene extends BGE.GameScene
+
+  ' world units per map cell, and per height unit: the 512 map is 2560 units across
+  cellSize as float = 5.0
+  heightScale as float = 1.5
+  ' the sky panorama's horizon colour, which far terrain fades into
+  skyRgb as integer = &hB4D8F0
+
+  ' The course, in map cells (x, z) - see art/island-colors.png
+  coursePoints = [
+    [250, 440], [345, 392], [425, 312], [425, 190], [330, 135],
+    [312, 262], [205, 190], [105, 235], [130, 375], [195, 342]
+  ]
+  ' where a run starts, in map cells, out at sea south of the island, level with the first ring
+  startPoint = [255, 540]
+  crashPenaltySeconds as float = 5
+  ' the terrain's cost is about columns x depth steps, so this is the main speed knob
+  drawDistance as float = 1700
+
+  private terrain as BGE.DrawableVoxelTerrain
+  private plane as Biplane
+  private rings = [] as CourseRing[]
+  private nextRing as integer = 0
+  ' "flying", "crashed" or "done" (course finished, still flying)
+  private state as string = "flying"
+  private stateTime as float = 0
+  private runTime as float = 0
+  private bestTime as float = -1
+  private lastPosition = BGE.Math.VectorOps.create()
+  private message as string = ""
+  private messageTime as float = 0
+
+  ' chase camera, eased after the plane
+  private camHeading as float = 0
+  private camPitch as float = 0
+  private camRoll as float = 0
+  private camDistance as float = 85
+  private camHeight as float = 18
+  ' how far below the camera's level the plane sits: a little, so there's more to see ahead
+  private camLookDown as float = 0.12
+
+  ' Deep link `profile=1`: logs a `FLIGHT` line every 60 frames with the render stages' ms
+  profile as boolean = false
+  private profileFrames as integer = 0
+  private profileStages as roAssociativeArray = {}
+  private profileHudUs as integer = 0
+  private profileClock = CreateObject("roTimespan")
+  private hudClock = CreateObject("roTimespan")
+
+  private bigFont as roFont
+  private font as roFont
+  private smallFont as roFont
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "FlightScene"
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    fonts = CreateObject("roFontRegistry")
+    m.bigFont = fonts.GetDefaultFont(48, true, false)
+    m.font = fonts.GetDefaultFont(28, true, false)
+    m.smallFont = fonts.GetDefaultFont(20, false, false)
+
+    map = BGE.VoxelMaps.fromFile("pkg:/maps/island.bvox")
+    m.terrain = new BGE.DrawableVoxelTerrain(m, map, {
+      cellSize: m.cellSize,
+      heightScale: m.heightScale,
+      fade: {color: m.skyRgb, start: 0.55}
+    })
+    m.addDrawable("terrain", m.terrain)
+
+    skyBmp = m.game.getBitmap("sky")
+    skyRegion = CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())
+    m.addDrawable("sky", new BGE.DrawableSkybox(m, skyRegion, {verticalDegreesCovered: 120}))
+    ' the sky texture's colour below the horizon, for anything past its edges
+    m.game.setBackgroundColor(&hA8C8E0FF)
+    ' a high sun from the north-west (the map's slope shading is lit from there too), and plenty
+    ' of sky light, so the plane seen from behind isn't in shadow
+    sun = BGE.Math.VectorOps.create(0.5, -1, 0.5)
+    BGE.Math.VectorOps.normalize(sun)
+    m.addLight(new BGE.DirectionalLight(sun, &hFFF4E0, 0.75))
+    m.addLight(new BGE.AmbientLight(&hC8DCF0, 0.5))
+
+    camera = m.camera()
+    camera.fieldOfViewDegrees = 75
+    camera.maxDrawDistance = m.drawDistance
+    camera.drawDistanceFadeFraction = 0.1
+    ' shear pitch is what the terrain does anyway, so the rings sit exactly on it at any pitch
+    camera.pitchMode = BGE.CameraPitchMode.shear
+
+    if m.profile
+      m.game.canvas.renderer.profileStages = true
+    end if
+
+    m.plane = new Biplane(m.game)
+    m.game.addEntity(m.plane)
+    m.createRings()
+    m.startRun()
+  end sub
+
+  private function camera() as BGE.Camera3d
+    return m.game.canvas.renderer.camera as BGE.Camera3d
+  end function
+
+  private function mapToWorld(cellX as float, cellZ as float) as BGE.Math.Vector
+    return BGE.Math.VectorOps.create(cellX * m.cellSize, 0, cellZ * m.cellSize)
+  end function
+
+  private sub createRings()
+    count = m.coursePoints.count()
+    points = [] as BGE.Math.Vector[]
+    for each cell in m.coursePoints
+      points.push(m.mapToWorld(cell[0], cell[1]))
+    end for
+    start = m.mapToWorld(m.startPoint[0], m.startPoint[1])
+    radius = 45.0
+    for i = 0 to count - 1
+      ' face along the course: from the ring before to the ring after
+      before = start
+      if i > 0
+        before = points[i - 1]
+      end if
+      after = points[(i + 1) mod count]
+      p = points[i]
+      ' clear the highest ground round it
+      ground = m.terrain.heightAt(p.x, p.z)
+      for each offset in [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]]
+        for each reach in [radius, radius * 2]
+          ground = BGE.Math.Max(ground, m.terrain.heightAt(p.x + offset[0] * reach, p.z + offset[1] * reach))
+        end for
+      end for
+      ring = new CourseRing(m.game)
+      m.game.addEntity(ring, {
+        x: p.x,
+        y: ground + radius + 20,
+        z: p.z,
+        normalX: after.x - before.x,
+        normalZ: after.z - before.z,
+        index: i,
+        radius: radius
+      })
+      m.rings.push(ring)
+    end for
+  end sub
+
+  ' Back to the start with the timer at zero
+  private sub startRun()
+    start = m.startPosition()
+    m.placePlane(start, m.rings[0].position)
+    m.nextRing = 0
+    m.runTime = 0
+    m.state = "flying"
+    m.stateTime = 0
+    m.updateRingStates()
+    m.showMessage("Fly through the gold rings in order", 4)
+  end sub
+
+  ' Puts the plane at a position, flying towards a target, and the camera straight behind it
+  private sub placePlane(position as BGE.Math.Vector, target as BGE.Math.Vector)
+    heading = BGE.Math.Atan2(-(target.x - position.x), -(target.z - position.z))
+    m.plane.resetTo(position, heading)
+    m.lastPosition = BGE.Math.VectorOps.create(position.x, position.y, position.z)
+    m.camHeading = heading
+    m.camPitch = 0
+    m.camRoll = 0
+  end sub
+
+  private function startPosition() as BGE.Math.Vector
+    start = m.mapToWorld(m.startPoint[0], m.startPoint[1])
+    start.y = m.rings[0].position.y
+    return start
+  end function
+
+  private sub updateRingStates()
+    count = m.rings.count()
+    for i = 0 to count - 1
+      state = "hidden"
+      if m.state <> "done"
+        if i = m.nextRing
+          state = "next"
+        else if i = m.nextRing + 1
+          state = "later"
+        end if
+      end if
+      m.rings[i].setState(state)
+    end for
+  end sub
+
+  private sub showMessage(text as string, seconds as float)
+    m.message = text
+    m.messageTime = seconds
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if input.isRemoteBack()
+      m.game.End()
+    end if
+  end sub
+
+  override sub onControls(controls as BGE.Controller.ControlMap)
+    if controls.isActionPressed("restart")
+      m.startRun()
+    end if
+    if controls.isActionPressed("invert")
+      m.plane.invertPitch = not m.plane.invertPitch
+      if m.plane.invertPitch
+        m.showMessage("Stick up: nose up", 2)
+      else
+        m.showMessage("Stick up: nose down", 2)
+      end if
+    end if
+  end sub
+
+  ' After the plane has moved: rings, crashes and the camera
+  override sub onPostUpdate(dt as float)
+    if dt > 0.1
+      dt = 0.1
+    end if
+    m.stateTime += dt
+    if m.messageTime > 0
+      m.messageTime -= dt
+    end if
+    position = m.plane.position
+    if m.state = "flying"
+      m.runTime += dt
+      m.checkRing(position)
+    else if m.state = "done" and m.stateTime > 8
+      m.nextRing = 0
+      m.runTime = 0
+      m.state = "flying"
+      m.updateRingStates()
+      m.showMessage("Again!", 2)
+    end if
+    if m.state <> "crashed"
+      ' the wheels are ~6 units below the middle
+      if position.y < m.terrain.heightAt(position.x, position.z) + 5
+        m.crash()
+      end if
+    else if m.stateTime > 2.5
+      m.respawn()
+    end if
+    m.lastPosition = BGE.Math.VectorOps.create(position.x, position.y, position.z)
+    m.updateCamera(dt)
+  end sub
+
+  private sub checkRing(position as BGE.Math.Vector)
+    ring = m.rings[m.nextRing]
+    if not ring.isCrossedBy(m.lastPosition, position)
+      return
+    end if
+    m.game.playSound("score", 60)
+    m.nextRing++
+    if m.nextRing >= m.rings.count()
+      m.state = "done"
+      m.stateTime = 0
+      text = "Course complete!  " + formatTime(m.runTime)
+      if m.bestTime < 0 or m.runTime < m.bestTime
+        m.bestTime = m.runTime
+        text += "  Best!"
+      end if
+      m.showMessage(text, 8)
+    end if
+    m.updateRingStates()
+  end sub
+
+  private sub crash()
+    m.game.playSound("die", 70)
+    m.plane.flying = false
+    m.state = "crashed"
+    m.stateTime = 0
+    m.showMessage("Crashed!", 2.5)
+  end sub
+
+  ' Back in the air at the last ring passed (or the start), facing the next one
+  private sub respawn()
+    target = m.rings[m.nextRing].position
+    if m.nextRing = 0
+      position = m.startPosition()
+    else
+      last = m.rings[m.nextRing - 1].position
+      position = BGE.Math.VectorOps.create(last.x, last.y, last.z)
+    end if
+    m.placePlane(position, target)
+    m.runTime += m.crashPenaltySeconds
+    m.state = "flying"
+    m.stateTime = 0
+    m.showMessage("+" + Str(m.crashPenaltySeconds).trim() + " seconds", 2)
+  end sub
+
+  private sub updateCamera(dt as float)
+    plane = m.plane
+    ease = 1 - exp(-dt * 4)
+    m.camHeading += wrapAngle(plane.heading - m.camHeading) * ease
+    maxPitch = BGE.Math.DegreesToRadians(25)
+    targetPitch = BGE.Math.Clamp(plane.pitch * 0.8, -maxPitch, maxPitch)
+    m.camPitch += (targetPitch - m.camPitch) * ease
+    ' rolls with the bank, but not all the way, so the plane still looks banked
+    m.camRoll += (BGE.Math.RadiansToDegrees(plane.bank) * 0.8 - m.camRoll) * (1 - exp(-dt * 5))
+
+    cosPitch = cos(m.camPitch)
+    dirX = -sin(m.camHeading) * cosPitch
+    dirY = sin(m.camPitch)
+    dirZ = -cos(m.camHeading) * cosPitch
+    p = plane.position
+    camX = p.x - dirX * m.camDistance
+    camY = p.y - dirY * m.camDistance + m.camHeight
+    camZ = p.z - dirZ * m.camDistance
+    camY = BGE.Math.Max(camY, m.terrain.heightAt(camX, camZ) + 8)
+
+    lookPitch = m.camPitch - m.camLookDown
+    cosLook = cos(lookPitch)
+    camera = m.camera()
+    camera.position = BGE.Math.VectorOps.create(camX, camY, camZ)
+    camera.orientation = BGE.Math.VectorOps.create(-sin(m.camHeading) * cosLook, sin(lookPitch), -cos(m.camHeading) * cosLook)
+    camera.rollDegrees = m.camRoll
+  end sub
+
+  ' ---- HUD: kept inside the title-safe area (10% in from each edge of 1280x720) ----
+
+  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
+    m.hudClock.Mark()
+    m.drawHud(uiRenderObj)
+    if m.profile
+      m.recordProfile(renderObj, m.hudClock.TotalMicroseconds())
+    end if
+  end sub
+
+  private sub recordProfile(renderObj as BGE.Renderer, hudUs as integer)
+    if m.profileFrames = 0
+      m.profileClock.Mark()
+      m.profileStages = {}
+      m.profileHudUs = 0
+    end if
+    stages = renderObj.getStageMsLastFrame()
+    for each name in stages
+      m.profileStages[name] = (m.profileStages[name] ?? 0) + stages[name]
+    end for
+    m.profileHudUs += hudUs
+    m.profileFrames++
+    if m.profileFrames < 60
+      return
+    end if
+    frameMs = m.profileClock.TotalMilliseconds() / 60
+    text = `FLIGHT quality ${m.game.renderQuality.getLevel()} frame ${cint(frameMs * 10) / 10} ms hud ${cint(m.profileHudUs / 600) / 100} ms`
+    for each name in m.profileStages
+      text += ` ${name}=${cint(m.profileStages[name] / 6) / 10}`
+    end for
+    print text
+    m.profileFrames = 0
+  end sub
+
+  private sub drawHud(ui as BGE.Renderer)
+    left = 140
+    right = 1140
+    top = 80
+    plane = m.plane
+    ringText = "RINGS " + Str(m.nextRing).trim() + "/" + Str(m.rings.count()).trim()
+    m.shadowText(ui, ringText, left, top, m.font, "left")
+    m.shadowText(ui, "TIME " + formatTime(m.runTime), left, top + 34, m.font, "left")
+    if m.bestTime >= 0
+      m.shadowText(ui, "BEST " + formatTime(m.bestTime), left, top + 68, m.smallFont, "left")
+    end if
+
+    altitude = plane.position.y - m.terrain.heightAt(plane.position.x, plane.position.z)
+    m.shadowText(ui, "SPEED " + Str(cint(plane.speed)).trim(), right, top, m.font, "right")
+    m.shadowText(ui, "ALT " + Str(cint(BGE.Math.Max(altitude, 0))).trim(), right, top + 34, m.font, "right")
+
+    m.drawThrottle(ui, left, 600)
+    if m.state <> "done"
+      m.drawRingPointer(ui)
+    end if
+
+    if m.messageTime > 0
+      m.shadowText(ui, m.message, 640, 250, m.bigFont, "center")
+    else if m.distanceFromIsland() > 2200
+      m.shadowText(ui, "Turn back to the island", 640, 250, m.font, "center")
+    end if
+
+    pitchHint = "stick up: nose down"
+    if plane.invertPitch
+      pitchHint = "stick up: nose up"
+    end if
+    m.shadowText(ui, "Stick/D-pad fly (" + pitchHint + ")   RT/R1/OK/FF faster   LT/L1/RW slower   X/* invert   Y/Replay restart", 640, 620, m.smallFont, "center")
+  end sub
+
+  private sub shadowText(ui as BGE.Renderer, text as string, x as integer, y as integer, font as roFont, align as string)
+    ui.drawText(text, x + 2, y + 2, &h00000099, font, align)
+    ui.drawText(text, x, y, BGE.Colors.White, font, align)
+  end sub
+
+  private sub drawThrottle(ui as BGE.Renderer, x as integer, y as integer)
+    width = 200
+    m.shadowText(ui, "THROTTLE", x, y - 30, m.smallFont, "left")
+    ui.drawRectangle(x, y, width, 14, &h00000080)
+    ui.drawRectangle(x, y, cint(width * m.plane.throttle), 14, &hF2B630FF)
+  end sub
+
+  ' Which way to turn for the next ring: a marker on a bar at the top, and its distance
+  private sub drawRingPointer(ui as BGE.Renderer)
+    target = m.rings[m.nextRing].position
+    p = m.plane.position
+    dx = target.x - p.x
+    dz = target.z - p.z
+    bearing = BGE.Math.Atan2(-dx, -dz)
+    ' positive: the ring is to the left
+    relative = wrapAngle(bearing - m.plane.heading)
+    halfWidth = 150
+    centerX = 640
+    y = 86
+    ui.drawRectangle(centerX - halfWidth, y + 7, halfWidth * 2, 6, &h00000070)
+    ui.drawRectangle(centerX - 1, y + 2, 3, 16, &hFFFFFFFF)
+    markerX = centerX - cint(BGE.Math.Clamp(relative / (BGE.Math.PI / 2), -1, 1) * halfWidth)
+    ui.drawRectangle(markerX - 6, y, 12, 20, &hF2B630FF)
+    distance = cint(sqr(dx * dx + dz * dz))
+    m.shadowText(ui, "NEXT RING " + Str(distance).trim(), centerX, y + 26, m.smallFont, "center")
+  end sub
+
+  private function distanceFromIsland() as float
+    half = 256 * m.cellSize
+    dx = m.plane.position.x - half
+    dz = m.plane.position.z - half
+    return sqr(dx * dx + dz * dz)
+  end function
+
+end class
+
+' An angle in -pi to pi
+function wrapAngle(angle as float) as float
+  twoPi = BGE.Math.PI * 2
+  while angle > BGE.Math.PI
+    angle -= twoPi
+  end while
+  while angle < -BGE.Math.PI
+    angle += twoPi
+  end while
+  return angle
+end function
+
+' Seconds as m:ss.t
+function formatTime(seconds as float) as string
+  tenths = cint(seconds * 10)
+  minutes = tenths \ 600
+  rest = tenths - minutes * 600
+  secs = rest \ 10
+  text = Str(minutes).trim() + ":"
+  if secs < 10
+    text += "0"
+  end if
+  return text + Str(secs).trim() + "." + Str(rest mod 10).trim()
+end function
