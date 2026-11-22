@@ -5,11 +5,18 @@
     const status = document.getElementById('status');
     const statusText = document.getElementById('status-text');
     const restart = document.getElementById('restart');
+    let initialized = false;
 
     function showStatus(text, canRestart) {
         statusText.textContent = text;
         restart.hidden = !canRestart;
+        restart.disabled = false;
         status.hidden = false;
+    }
+
+    function fail(message) {
+        window.__bgeError = message;
+        showStatus('Error: ' + message, true);
     }
 
     brs.subscribe('bge-standalone', function (event, data) {
@@ -23,8 +30,7 @@
                 showStatus('Game ended', true);
             }
         } else if (event === 'error') {
-            window.__bgeError = String(data);
-            showStatus('Error: ' + data, true);
+            fail(data && data.message ? data.message : String(data));
         }
     });
 
@@ -36,12 +42,7 @@
         return res.arrayBuffer();
     }
 
-    async function start() {
-        showStatus('Loading…', false);
-        brs.execute('game.zip', await fetchBuffer('game.zip'), { clearDisplayOnExit: false });
-    }
-
-    async function main() {
+    async function initialize() {
         // brs.initialize() fetches common.zip without awaiting it, so execute() can run
         // before the common: volume exists (no fonts/audio, app crashes). Passing it in avoids the race.
         const deviceInfo = { assets: await fetchBuffer('assets/common.zip') };
@@ -50,16 +51,30 @@
             deviceInfo.extensions = new Map([['brs-scenegraph', './brs-sg.js']]);
         }
         await brs.initialize(deviceInfo, { disableDebug: !debug, debugToConsole: debug, showStats: debug });
-        await start();
+        initialized = true;
+    }
+
+    async function start() {
+        window.__bgeStarted = false;
+        delete window.__bgeError;
+        showStatus('Loading…', false);
+        if (!initialized) {
+            await initialize();
+        }
+        brs.execute('game.zip', await fetchBuffer('game.zip'), { clearDisplayOnExit: false });
+    }
+
+    function run() {
+        start().catch(function (e) {
+            fail(e && e.message ? e.message : String(e));
+        });
     }
 
     restart.addEventListener('click', function () {
-        start().catch(function (e) {
-            showStatus('Error: ' + e.message, true);
-        });
+        // Guard against double clicks while the restart is in flight.
+        restart.disabled = true;
+        restart.hidden = true;
+        run();
     });
-    main().catch(function (e) {
-        window.__bgeError = e.message;
-        showStatus('Error: ' + e.message, true);
-    });
+    run();
 })();

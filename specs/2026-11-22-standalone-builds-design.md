@@ -138,7 +138,7 @@ Engine bugs found here get their own issues or PRs and are fixed in the engine, 
 
 brs-engine 2.6.2, headless Chromium (Playwright's headless shell) on macOS, hand-assembled bundle served by `lib/serve.js`, `?debug=1`. Gamepad and real window resizing need a person and were not checked.
 
-**Runtime fix found first.** `brs.initialize()` starts its own `fetch("./assets/common.zip")` and returns without waiting for it. Calling `execute()` straight after ran the app with an empty `common:` volume: `[sound] Error unzipping audio files: invalid zip data`, `Error setting up file system: Start offset -22...`, `ENOENT ... common:/fonts/default-fonts.json`, then `EXIT_BRIGHTSCRIPT_CRASH`. `runtime.js` now fetches `assets/common.zip` itself and passes it as `deviceInfo.assets` (a documented `DeviceInfo` field), which skips the internal fetch. Side effect: brs-engine only loads closed-caption fonts on its own fetch path, so captions fonts aren't loaded. BGE games don't use captions. This is a brs-engine race, worth reporting upstream.
+**Runtime fix found first.** `brs.initialize()` starts its own `fetch("./assets/common.zip")` and returns without waiting for it. Calling `execute()` straight after ran the app with an empty `common:` volume: `[sound] Error unzipping audio files: invalid zip data`, `Error setting up file system: Start offset -22...`, `ENOENT ... common:/fonts/default-fonts.json`, then `EXIT_BRIGHTSCRIPT_CRASH`. `runtime.js` now fetches `assets/common.zip` itself and passes it as `deviceInfo.assets` (a documented `DeviceInfo` field), which skips the internal fetch. Side effect: brs-engine only loads closed-caption fonts on its own fetch path, so captions fonts aren't loaded. BGE games don't use captions. This is a brs-engine race, reported upstream as [lvcabral/brs-engine#1338](https://github.com/lvcabral/brs-engine/issues/1338).
 
 | # | Question | pong | 3d | controller |
 | - | -------- | ---- | -- | ---------- |
@@ -148,12 +148,14 @@ brs-engine 2.6.2, headless Chromium (Playwright's headless shell) on macOS, hand
 | 4 | `pkg:` images and fonts | Yes (sprites, remote overlay image, fonts) | Yes (textured Roku logo plane) | Yes |
 | 5 | Keyboard | Yes: arrows move the paddle, Enter works | Yes: arrows move the camera, OK toggles rotation | Yes: Enter fired (`fire! (fire1)`) |
 | 5 | Gamepad / analog stick | Not checked, needs a person | | |
-| 6 | `enableControllerInput()` | | | Starts, no crash: `failed to listen on port 8888 - controller input is disabled this run`; the QR code isn't shown |
+| 6 | `enableControllerInput()` | | | Starts, no crash. Logs `[roStreamSocket] failed to start TCP helper: rE.tmpdir is not a function` and `[BGE.Game] enableControllerInput: failed to listen on port  8888 - controller input is disabled this run`. No QR code, and the info label ends "...or scan for up to 2 controllers:" with no address |
 | 7 | Letterboxing | Yes at 900x900 (bars top/bottom) and 1600x600 (bars left/right) | same page | same page |
+
+**Restart.** Pong's Back (Escape) calls `game.End()`. The page then shows "Game ended" with Restart, and frames stop. Clicking Restart resets `__bgeStarted`, calls `brs.execute()` a second time, and `__bgeStarted` comes back true with frames rendering (~48 per second, paddle moves). So a second `execute()` in the same page works. With `assets/common.zip` missing, the page shows `Error: could not load assets/common.zip (HTTP 404)` and sets `__bgeError`. Putting the file back and clicking Restart reruns the full init (`common.zip` fetch + `brs.initialize`), and the game starts.
 
 Stripping `components/` isn't needed. Quality starts at `Medium` (pong) / `Medium (auto)` (3d) under `simulation_engine`.
 
-**brs-engine bug that shows in games:** `roRegion.Clear(0)` on an alpha-enabled bitmap leaves the old pixels (`roBitmap.Clear(0)` works). `DrawableText` reuses its bitmap and clears it through a region, so changing text draws over the old text: the FPS debug label is unreadable and pong's score shows the old digit under the new one. 20-line repro: draw a white rect into an `AlphaEnable` bitmap, `CreateObject("roRegion", bmp, 0, 0, w, h).Clear(0)`, draw the region; the white rect still shows. This needs an upstream brs-engine fix. Changing the engine to clear the bitmap instead would be a BGE workaround, so it's left out of the packager.
+**brs-engine bug that shows in games:** `roRegion.Clear(0)` on an alpha-enabled bitmap leaves the old pixels (`roBitmap.Clear(0)` works). `DrawableText` reuses its bitmap and clears it through a region, so changing text draws over the old text: the FPS debug label is unreadable and pong's score shows the old digit under the new one. 20-line repro: draw a white rect into an `AlphaEnable` bitmap, `CreateObject("roRegion", bmp, 0, 0, w, h).Clear(0)`, draw the region; the white rect still shows. Reported upstream as [lvcabral/brs-engine#1337](https://github.com/lvcabral/brs-engine/issues/1337). Decision: leave it to upstream; no BGE workaround for now.
 
 Timings are from headless Chromium with software rendering and may be lower than desktop Chrome or Electron. Check fps again in the manual desktop check.
 
