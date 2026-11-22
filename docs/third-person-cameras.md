@@ -185,6 +185,49 @@ m.orbit = new BGE.OrbitCamera(camera, m.player, {
 It takes the same fields as `BGE.CameraBoom`. Override `isBlockedAt(x, z)` to
 block on something besides the map's solid cells.
 
+## Chase cameras for vehicles
+
+`BGE.OrbitCamera` stays level and waits for the player to swing it. A plane, spaceship or boat
+wants the opposite: a camera that trails behind along its heading and pitch and rolls with its
+bank. `BGE.ChaseCamera` does that, eased so turns swing the view round instead of snapping it.
+It has no look input; you pass the target's attitude to `update()` each frame.
+
+```brighterscript
+override sub onCreate(args as roAssociativeArray)
+  m.plane = new Plane(m.game)
+  m.game.addEntity(m.plane)
+  camera = m.game.canvas.renderer.camera as BGE.Camera3d
+  m.chase = new BGE.ChaseCamera(camera, m.plane, {
+    distance: 85,
+    height: 18,
+    terrain: m.terrain ' optional: keeps the camera above a DrawableVoxelTerrain
+  })
+  m.chase.snapBehind(m.plane.heading)
+end sub
+
+override sub onPostUpdate(dt as float)
+  m.chase.update(dt, m.plane.heading, m.plane.pitch, m.plane.bank)
+end sub
+```
+
+The heading uses the engine's convention (0 faces -z, increasing turns clockwise seen from
+above); negate it if your vehicle turns the other way. Bank becomes the camera's `rollDegrees`.
+Call `snapBehind(heading)` after a respawn or a cut to place the camera without easing.
+`examples/flightSim` uses one.
+
+| Field | Default | |
+| --- | --- | --- |
+| `distance` | 85 | Distance behind the target, along its eased heading and pitch |
+| `height` | 18 | Raised this far above that point |
+| `lookDown` | 0.12 | Radians the camera looks below its own pitch, so the target sits low on screen |
+| `followRate` | 4 | How quickly heading and pitch catch up, 1/seconds |
+| `rollRate` | 5 | How quickly roll catches up, 1/seconds |
+| `pitchFollow` | 0.8 | Fraction of the target's pitch the camera takes up |
+| `maxPitch` | 0.436 (25°) | Camera pitch limit, radians |
+| `rollFollow` | 0.8 | Fraction of the bank the camera rolls by; under 1 keeps the target looking banked |
+| `terrain` | `invalid` | A `BGE.DrawableVoxelTerrain` to stay above |
+| `groundClearance` | 8 | Height kept above `terrain` |
+
 ## Camera-relative movement
 
 With an orbit camera, pushing the stick up should run away from the camera, whichever way it
