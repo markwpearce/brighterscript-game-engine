@@ -185,6 +185,88 @@ m.orbit = new BGE.OrbitCamera(camera, m.player, {
 It takes the same fields as `BGE.CameraBoom`. Override `isBlockedAt(x, z)` to
 block on something besides the map's solid cells.
 
+## Chase cameras for vehicles
+
+`BGE.OrbitCamera` stays level and waits for the player to swing it. A plane, spaceship or boat
+wants the opposite: a camera that trails behind along its heading and pitch and rolls with its
+bank. `BGE.ChaseCamera` does that, eased so turns swing the view round instead of snapping it.
+It has no look input; you pass the target's attitude to `update()` each frame.
+
+```brighterscript
+override sub onCreate(args as roAssociativeArray)
+  m.plane = new Plane(m.game)
+  m.game.addEntity(m.plane)
+  camera = m.game.canvas.renderer.camera as BGE.Camera3d
+  m.chase = new BGE.ChaseCamera(camera, m.plane, {
+    heading: m.plane.heading, ' where it starts; defaults to the plane's rotation.y
+    distance: 85,
+    height: 18,
+    terrain: m.terrain ' optional: keeps the camera above a DrawableVoxelTerrain
+  })
+end sub
+
+override sub onPostUpdate(dt as float)
+  m.chase.update(dt, m.plane.heading, m.plane.pitch, m.plane.bank)
+end sub
+```
+
+The heading uses the engine's convention (0 faces -z, increasing turns clockwise seen from
+above); negate it if your vehicle turns the other way. Bank becomes the camera's `rollDegrees`.
+Like `OrbitCamera`, it places the camera as soon as it's created. Call `snapBehind(heading)`
+after a respawn or a cut to place it again without easing.
+
+`distance` and `height` don't mean quite what they do on an `OrbitCamera`: `distance` is
+measured along the camera's pitch, so the camera climbs and dives with the target, and
+`height` is added straight up on top of that.
+`examples/flightSim` uses one.
+
+| Field | Default | |
+| --- | --- | --- |
+| `distance` | 85 | Distance behind the target, along its eased heading and pitch |
+| `height` | 18 | Raised this far above that point |
+| `lookDown` | 0.12 | Radians the camera looks below its own pitch, so the target sits low on screen |
+| `followRate` | 4 | How quickly heading and pitch catch up, 1/seconds |
+| `rollRate` | 5 | How quickly roll catches up, 1/seconds |
+| `pitchFollow` | 0.8 | Fraction of the target's pitch the camera takes up |
+| `maxPitch` | 0.436 (25°) | Camera pitch limit, radians |
+| `rollFollow` | 0.8 | Fraction of the bank the camera rolls by; under 1 keeps the target looking banked |
+| `terrain` | `invalid` | A `BGE.DrawableVoxelTerrain` to stay above |
+| `groundClearance` | 8 | Height kept above `terrain` |
+| `heading` | target's `rotation.y` | The heading the camera starts behind |
+
+## Switching cameras
+
+`OrbitCamera` and `ChaseCamera` are both a `BGE.FollowCamera`, so a scene can keep its camera
+in a field of that type and swap one rig for the other, e.g. when the player climbs into a
+plane, without touching the rest of its code:
+
+- `follow(dt, input)` moves the camera for the frame. `input` is a `BGE.FollowCameraInput`, and
+  each rig reads only the fields it uses: `look` for an orbit camera, `heading`, `pitch` and
+  `bank` for a chase camera. Fill in all of them and either rig works.
+- `snapBehind(heading)` puts the camera straight behind the target, no easing.
+- `getLookAt()` is the point on the target the camera is framed round.
+- `camera`, `target` and `heading` are public fields on both.
+
+```brighterscript
+m.rig = new BGE.OrbitCamera(camera, m.player) as BGE.FollowCamera
+
+' later, e.g. on boarding the plane: start the new rig where the old one was looking
+m.rig = new BGE.ChaseCamera(camera, m.plane, {heading: m.rig.heading}) as BGE.FollowCamera
+
+override sub onPostUpdate(dt as float)
+  m.rig.follow(dt, {
+    look: m.game.controls.getRawAxis("look"),
+    heading: m.plane.heading,
+    pitch: m.plane.pitch,
+    bank: m.plane.bank
+  })
+end sub
+```
+
+The rig-specific methods (`OrbitCamera.recenter()`/`lockOn()`, the typed `update()` calls)
+still need the concrete class: cast back, or keep a second field typed as it. Any other class
+with the same fields and methods counts as a `FollowCamera` too.
+
 ## Camera-relative movement
 
 With an orbit camera, pushing the stick up should run away from the camera, whichever way it
