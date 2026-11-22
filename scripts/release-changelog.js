@@ -12,6 +12,9 @@
 //   node scripts/release-changelog.js append-unreleased <file>
 //     Adds the file's contents to the end of [Unreleased] under "### Pull requests"
 //     (the fallback when Claude couldn't draft the changelog).
+//   node scripts/release-changelog.js pr-body <version> <drafted|fallback|none> [prListFile]
+//     Prints the release PR's description: the version's notes, then the PR list if
+//     it fits under GitHub's body limit (the notes are cut short if even they don't).
 //   node scripts/release-changelog.js check-draft <originalFile>
 //     Fails unless CHANGELOG.md differs from <originalFile> only inside [Unreleased],
 //     and [Unreleased] isn't empty.
@@ -169,7 +172,45 @@ function notes(text, version) {
     return `${body.join('\n')}\n\n**Full changelog**: [CHANGELOG.md](${REPO_URL}/blob/v${version}/CHANGELOG.md)\n`;
 }
 
-const [command, version, date] = process.argv.slice(2);
+// GitHub rejects PR bodies over 65536 characters; leave headroom.
+const PR_BODY_LIMIT = 60000;
+
+const NOTES_INTRO = {
+    drafted: '> Claude drafted these notes from the PRs merged since the last release - check them, and edit CHANGELOG.md on this branch to fix anything.',
+    fallback: '> Claude didn\'t draft usable notes, so CHANGELOG.md has a plain PR list - rewrite it on this branch before merging.',
+    none: '> No PRs were merged since the last release, so these are the [Unreleased] notes as written.'
+};
+
+function prBody(text, version, kind, prList, limit = PR_BODY_LIMIT) {
+    const head = [
+        `Release ${version}. Merging this tags \`v${version}\`, publishes to npm and creates the GitHub release with these notes:`,
+        '',
+        NOTES_INTRO[kind] || NOTES_INTRO.none,
+        '',
+        '---',
+        '',
+        ''
+    ].join('\n');
+    const releaseNotes = notes(text, version);
+    const list = (prList || '').trim();
+    if (list) {
+        const full = `${head}${releaseNotes}\n---\n\nPRs in this release:\n\n${list}\n`;
+        if (full.length <= limit) {
+            return full;
+        }
+    }
+    const omitted = list ? '\n---\n\n_The list of PRs in this release is left out to keep this description under GitHub\'s size limit._\n' : '';
+    if (head.length + releaseNotes.length + omitted.length <= limit) {
+        return `${head}${releaseNotes}${omitted}`;
+    }
+    const cut = `\n\n_The notes are cut short here to fit GitHub's size limit - see CHANGELOG.md on this branch for the rest._\n${omitted}`;
+    const room = limit - head.length - cut.length;
+    const kept = releaseNotes.slice(0, room);
+    const lastLine = kept.lastIndexOf('\n');
+    return `${head}${lastLine > 0 ? kept.slice(0, lastLine) : kept}${cut}`;
+}
+
+const [command, version, date, extra] = process.argv.slice(2);
 const text = fs.readFileSync(CHANGELOG, 'utf8');
 if (command === 'append-unreleased') {
     if (!version) {
@@ -186,10 +227,12 @@ if (command === 'check-draft') {
     process.exit(0);
 }
 if (!version || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
-    fail('usage: release-changelog.js <prepare|notes> <x.y.z> [date]');
+    fail('usage: release-changelog.js <prepare|notes|pr-body> <x.y.z> [date|notesKind] [prListFile]');
 }
 if (command === 'prepare') {
     fs.writeFileSync(CHANGELOG, prepare(text, version, date || new Date().toISOString().slice(0, 10)));
+} else if (command === 'pr-body') {
+    process.stdout.write(prBody(text, version, date, extra && fs.existsSync(extra) ? fs.readFileSync(extra, 'utf8') : ''));
 } else if (command === 'notes') {
     process.stdout.write(notes(text, version));
 } else {
