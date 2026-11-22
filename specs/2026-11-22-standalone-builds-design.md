@@ -94,7 +94,7 @@ Modules (each a separate file in `packages/standalone/lib/`, unit tested):
 ### Runtime page (`template/index.html` + `runtime.js`)
 
 - One `<canvas id="display">` scaled to fit the window with letterboxing, plus a hidden `<video id="player">` (brs-engine expects one).
-- `brs.initialize(deviceInfo, { disableDebug: true, debugToConsole: false })`. `deviceInfo` is `{}`, or `{ extensions: new Map([["brs-scenegraph", "./brs-sg.js"]]) }` when `sceneGraph` is on (the path is relative to the worker). Keyboard and gamepads stay on with brs-engine's default mapping.
+- `brs.initialize(deviceInfo, { disableDebug: true, debugToConsole: false })`. `deviceInfo` is `{ assets }` (the page fetches `assets/common.zip` itself, see Spike results), plus `{ extensions: new Map([["brs-scenegraph", "./brs-sg.js"]]) }` when `sceneGraph` is on (the path is relative to the worker). Keyboard and gamepads stay on with brs-engine's default mapping.
 - It fetches `game.zip` and calls `brs.execute("game.zip", buffer, { clearDisplayOnExit: false })`.
 - It shows "Loading…" until the `started` event.
 - `closed` event: on desktop, the window asks the main process to quit. On the web, it shows "Game ended" with a Restart button.
@@ -133,6 +133,29 @@ Before building the CLI, spend about a day hand-assembling a `dist/web` for `exa
 5. The game doesn't break if it calls `enableControllerInput()` (sockets are fake in the browser).
 
 Engine bugs found here get their own issues or PRs and are fixed in the engine, not worked around in the packager.
+
+## Spike results (2026-11-22)
+
+brs-engine 2.6.2, headless Chromium (Playwright's headless shell) on macOS, hand-assembled bundle served by `lib/serve.js`, `?debug=1`. Gamepad and real window resizing need a person and were not checked.
+
+**Runtime fix found first.** `brs.initialize()` starts its own `fetch("./assets/common.zip")` and returns without waiting for it. Calling `execute()` straight after ran the app with an empty `common:` volume: `[sound] Error unzipping audio files: invalid zip data`, `Error setting up file system: Start offset -22...`, `ENOENT ... common:/fonts/default-fonts.json`, then `EXIT_BRIGHTSCRIPT_CRASH`. `runtime.js` now fetches `assets/common.zip` itself and passes it as `deviceInfo.assets` (a documented `DeviceInfo` field), which skips the internal fetch. Side effect: brs-engine only loads closed-caption fonts on its own fetch path, so captions fonts aren't loaded. BGE games don't use captions. This is a brs-engine race, worth reporting upstream.
+
+| # | Question | pong | 3d | controller |
+| - | -------- | ---- | -- | ---------- |
+| 1 | Starts with no SceneGraph extension (zip has `components/Shapes`) | Yes | Yes | Yes |
+| 2 | Frame rate (frames copied to the display canvas over 5 s, idle) | ~52 fps (BGE's own log: 18-24 ms/frame) | ~40 fps idle, ~12-22 fps while the camera moves (example's own `avgMs=45`/`82`) | ~60 fps |
+| 3 | Audio | No audio errors; 16 `AudioBufferSourceNode.start()` calls in 20 s of play, `AudioContext` running. Not listened to. | n/a | n/a |
+| 4 | `pkg:` images and fonts | Yes (sprites, remote overlay image, fonts) | Yes (textured Roku logo plane) | Yes |
+| 5 | Keyboard | Yes: arrows move the paddle, Enter works | Yes: arrows move the camera, OK toggles rotation | Yes: Enter fired (`fire! (fire1)`) |
+| 5 | Gamepad / analog stick | Not checked, needs a person | | |
+| 6 | `enableControllerInput()` | | | Starts, no crash: `failed to listen on port 8888 - controller input is disabled this run`; the QR code isn't shown |
+| 7 | Letterboxing | Yes at 900x900 (bars top/bottom) and 1600x600 (bars left/right) | same page | same page |
+
+Stripping `components/` isn't needed. Quality starts at `Medium` (pong) / `Medium (auto)` (3d) under `simulation_engine`.
+
+**brs-engine bug that shows in games:** `roRegion.Clear(0)` on an alpha-enabled bitmap leaves the old pixels (`roBitmap.Clear(0)` works). `DrawableText` reuses its bitmap and clears it through a region, so changing text draws over the old text: the FPS debug label is unreadable and pong's score shows the old digit under the new one. 20-line repro: draw a white rect into an `AlphaEnable` bitmap, `CreateObject("roRegion", bmp, 0, 0, w, h).Clear(0)`, draw the region; the white rect still shows. This needs an upstream brs-engine fix. Changing the engine to clear the bitmap instead would be a BGE workaround, so it's left out of the packager.
+
+Timings are from headless Chromium with software rendering and may be lower than desktop Chrome or Electron. Check fps again in the manual desktop check.
 
 ## Docs
 
