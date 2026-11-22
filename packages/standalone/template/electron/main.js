@@ -16,7 +16,8 @@ function resolveRequest(webRoot, url) {
         // Malformed URL or percent-encoding (e.g. "/%zz").
         return null;
     }
-    if (rel.includes('\0')) {
+    // Backslashes and drive letters are path syntax on Windows: reject on every OS.
+    if (rel.includes('\0') || rel.includes('\\') || /^[a-zA-Z]:/.test(rel)) {
         return null;
     }
     const file = path.resolve(webRoot, rel);
@@ -24,6 +25,28 @@ function resolveRequest(webRoot, url) {
         return null;
     }
     return file;
+}
+
+function respond(body, init) {
+    const headers = new Headers(init.headers);
+    for (const [key, value] of Object.entries(ISOLATION_HEADERS)) {
+        headers.set(key, value);
+    }
+    return new Response(body, { status: init.status, headers });
+}
+
+async function handleRequest(webRoot, url, fetchFile) {
+    const file = resolveRequest(webRoot, url);
+    if (!file) {
+        return respond('Not found', { status: 404 });
+    }
+    let res;
+    try {
+        res = await fetchFile(pathToFileURL(file).toString());
+    } catch {
+        return respond('Not found', { status: 404 });
+    }
+    return respond(res.body, { status: res.status, headers: res.headers });
 }
 
 function start() {
@@ -38,18 +61,7 @@ function start() {
     ]);
 
     app.whenReady().then(() => {
-        protocol.handle('app', async (request) => {
-            const file = resolveRequest(webRoot, request.url);
-            if (!file) {
-                return new Response('Not found', { status: 404 });
-            }
-            const res = await net.fetch(pathToFileURL(file).toString());
-            const headers = new Headers(res.headers);
-            for (const [key, value] of Object.entries(ISOLATION_HEADERS)) {
-                headers.set(key, value);
-            }
-            return new Response(res.body, { status: res.status, headers });
-        });
+        protocol.handle('app', (request) => handleRequest(webRoot, request.url, (fileUrl) => net.fetch(fileUrl)));
 
         ipcMain.on('bge:quit', () => app.quit());
         if (process.platform !== 'darwin') {
@@ -72,7 +84,7 @@ function start() {
             }
         });
         win.webContents.on('before-input-event', (event, input) => {
-            if (input.type === 'keyDown' && input.key === 'F11') {
+            if (input.type === 'keyDown' && !input.isAutoRepeat && input.key === 'F11') {
                 win.setFullScreen(!win.isFullScreen());
                 event.preventDefault();
             }
@@ -90,4 +102,4 @@ if (process.versions.electron) {
     start();
 }
 
-module.exports = { resolveRequest };
+module.exports = { resolveRequest, handleRequest };
