@@ -124,7 +124,22 @@ Flying and turning over a 256 map, terrain only, on a Roku Ultra at 1280x720:
 | High   | 100     | 24 fps         | 18 fps  |                        |
 | Ultra  | 100     | 21 fps         | 16 fps  | 17 fps                 |
 
+On a Roku Express (HD, so the engine caps the draw distance at 1000 units: ~74 depth steps a column
+where the Ultra takes ~99) the same flight runs at about half the Ultra's frame rate. Each column
+step costs ~8.5 µs, about twice the Ultra's:
+
+| Level  | `horizonShift` | `exact` | `horizonShift`, rolled |
+| ------ | -------------- | ------- | ---------------------- |
+| Basic  | 23 fps         | 17 fps  | 23 fps                 |
+| Low    | 18 fps         | 15 fps  |                        |
+| Medium | 15 fps         | 11 fps  | 15 fps                 |
+| High   | 13 fps         | 9 fps   |                        |
+| Ultra  | 11 fps         | 8 fps   | 11 fps                 |
+
+On an Express, start at Basic or Low and keep the objects in view few.
+
 Objects cost the same as anywhere else, plus the hill test for each one in view: ~0.2 ms for a
-`directScaled` sprite on a Roku Ultra, ~0.3 ms for other kinds.
+`directScaled` sprite on a Roku Ultra, ~0.3 ms for other kinds. The test is relatively dearer on an
+Express: ~0.9 ms per sprite (35 ms for 40 at Medium).
 The rendererTest app's **Voxel Terrain** demo (`demo=voxel-terrain`) shows all of this, and with
 `sweep=1` it prints these numbers for your own device.

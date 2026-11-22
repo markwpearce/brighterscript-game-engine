@@ -283,6 +283,24 @@ The terrain under a `shear` camera uses its horizon-shift march with the camera'
   height, voxel terrain. Shear frustum rays are exact frame-corner rays (rotate's are approximate;
   nothing reads them besides tests).
 
-## Open questions
+### Results (Roku Express, 1280x720)
 
-- Express performance (expected 2-3x slower than the Ultra).
+The same sweep (`demo=voxel-terrain sweep=1 objects=0`; the roll column with `bank=20`). The
+Express is HD, so the draw distance is capped at 1000 (the demo asks for 2400): ~74 steps a column
+where the Ultra takes ~99.
+
+| Level | `horizonShift` | `exact` | `horizonShift`, 20° roll |
+|---|---|---|---|
+| basic | 35.9 ms, 23 fps | 50.1 ms, 17 fps | 35.9 ms, 23 fps |
+| low | 48.6 ms, 18 fps | 57.6 ms, 15 fps | |
+| medium | 59.9 ms, 15 fps | 79.3 ms, 11 fps | 59.2 ms, 15 fps |
+| high | 72.2 ms, 13 fps | 99.4 ms, 9 fps | |
+| ultra | 81.6 ms, 11 fps | 116.6 ms, 8 fps | 85.0 ms, 11 fps |
+
+(ms is the terrain stage.)
+
+- ~8.5 µs per column per step, ~2.1x the Ultra; the shorter draw distance hides some of it, so frame
+  rates are about half the Ultra's.
+- `exact` is +19-43%.
+- The hill test is relatively dearer: 35.5 ms for 40 billboards at medium (~0.9 ms each, ~4x the
+  Ultra), more than the terrain's 2x. A candidate for a later optimisation.
