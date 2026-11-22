@@ -86,10 +86,10 @@ Open the first time. On Windows, choose More info, then Run anyway, on the Smart
 
 ## When the game exits
 
-The page shows "Loading…" while the game starts. If the game ends normally (for
-example it calls `game.End()` or the player presses Back), the web page shows "Game ended"
+The page shows `Loading…` while the game starts. If the game ends normally (for
+example it calls `game.End()` or the player presses Back), the web page shows `Game ended`
 with a Restart button and the desktop app quits. Any other exit reason shows
-"Game crashed (<reason>)" on screen with a Restart button, and the desktop window stays open.
+`Game crashed (<reason>)` on screen with a Restart button, and the desktop window stays open.
 
 ## Troubleshooting
 
@@ -100,8 +100,8 @@ overlay, and (on desktop) DevTools.
 If you run the generated `electron-app/` directly with `npx electron` and Electron has no
 binary, npm 11 may have skipped its install script. Run
 `node node_modules/electron/install.js`. Behind a corporate proxy, Node's `fetch` ignores
-proxy environment variables unless `NODE_USE_ENV_PROXY=1` is set; this applies to
-Electron's install script and to the downloads `electron-builder` does when packaging.
+proxy environment variables unless `NODE_USE_ENV_PROXY=1` is set.
+This applies to Electron's install script and to the downloads `electron-builder` does when packaging.
 
 ## Known issues
 
