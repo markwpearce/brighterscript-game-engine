@@ -22,12 +22,26 @@ const ISOLATION_HEADERS = {
 function createServer(root) {
     const base = path.resolve(root);
     return http.createServer((req, res) => {
-        const url = new URL(req.url, 'http://localhost');
-        const rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
+        let rel;
+        try {
+            const url = new URL(req.url, 'http://localhost');
+            rel = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
+        } catch {
+            // Malformed percent-encoding (e.g. "/%zz"); throwing here would crash the server.
+            res.writeHead(400, ISOLATION_HEADERS);
+            res.end('Bad request');
+            return;
+        }
         const file = path.resolve(base, rel);
         if (file !== base && !file.startsWith(base + path.sep)) {
             res.writeHead(403, ISOLATION_HEADERS);
             res.end('Forbidden');
+            return;
+        }
+        if (file.includes('\0')) {
+            // fs.readFile throws synchronously on NUL bytes; treat as not found.
+            res.writeHead(404, ISOLATION_HEADERS);
+            res.end('Not found');
             return;
         }
         fs.readFile(file, (err, data) => {
