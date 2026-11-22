@@ -4,7 +4,7 @@ const JSZip = require('jszip');
 
 function parseManifest(text) {
     const out = {};
-    for (const raw of text.split(/\r?\n/)) {
+    for (const raw of text.replace(/^\uFEFF/, '').split(/\r?\n/)) {
         const line = raw.trim();
         if (!line || line.startsWith('#')) {
             continue;

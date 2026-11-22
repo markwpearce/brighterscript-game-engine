@@ -108,6 +108,9 @@ function validateFile(file) {
         checkType(key, file[key], 'string');
     }
     checkType('sceneGraph', file.sceneGraph, 'boolean');
+    if (file.appId !== undefined && !/^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$/.test(file.appId)) {
+        throw new Error('"appId" must be reverse-DNS, like com.example.mygame');
+    }
     if (file.version !== undefined && !/^\d+\.\d+\.\d+$/.test(file.version)) {
         throw new Error('"version" must be x.y.z');
     }
@@ -130,10 +133,24 @@ function validateFile(file) {
     }
 }
 
+function isInside(child, parent) {
+    const rel = path.relative(parent, child);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 function resolveConfig({ cli, file, game, platform, cwd }) {
     validateFile(file);
+    const zip = resolveZipPath({ cli, file, cwd });
+    const outDir = path.resolve(cwd, cli.out || file.outDir || 'dist');
+    // The build deletes <outDir>/web and <outDir>/electron-app, so keep it away from the project.
+    if (isInside(cwd, outDir)) {
+        throw new Error('"outDir" must be a dedicated folder, not the project folder or a parent of it');
+    }
+    if (isInside(zip, outDir)) {
+        throw new Error(`game zip must not be inside "outDir" (${outDir}); the build deletes that folder`);
+    }
     return {
-        zip: resolveZipPath({ cli, file, cwd }),
+        zip,
         appId: file.appId || `com.bge.${slug(game.title)}`,
         productName: file.productName || game.title,
         version: file.version || game.version,
@@ -141,7 +158,7 @@ function resolveConfig({ cli, file, game, platform, cwd }) {
         sceneGraph: file.sceneGraph === true,
         window: { ...WINDOW_DEFAULTS, ...(file.window || {}) },
         targets: resolveTargets(cli.target !== undefined ? cli.target : file.targets, platform),
-        outDir: path.resolve(cwd, cli.out || file.outDir || 'dist')
+        outDir
     };
 }
 

@@ -140,3 +140,28 @@ test('resolveConfig: "targets" must be an array of strings', () => {
     assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', targets: [null] } }), /"targets" must be an array of strings/);
     assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', targets: [] } }), /no targets selected/);
 });
+
+test('resolveConfig rejects an outDir that is the project folder or a parent of it', () => {
+    const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    const msg = /"outDir" must be a dedicated folder, not the project folder or a parent of it/;
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', outDir: '.' } }), msg);
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', outDir: '..' } }), msg);
+    assert.throws(() => resolveConfig({ ...base, cli: { out: path.resolve(CWD, '..', '..') }, file: { zip: 'g.zip' } }), msg);
+    assert.doesNotThrow(() => resolveConfig({ ...base, file: { zip: 'g.zip', outDir: 'build/out' } }));
+});
+
+test('resolveConfig rejects a zip located inside outDir', () => {
+    const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    assert.throws(
+        () => resolveConfig({ ...base, cli: { zip: path.join('dist', 'web', 'game.zip') }, file: {} }),
+        /game zip must not be inside "outDir"/
+    );
+    assert.doesNotThrow(() => resolveConfig({ ...base, file: { zip: 'out/g.zip' } }));
+});
+
+test('resolveConfig validates appId as reverse-DNS', () => {
+    const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', appId: 'mygame' } }), /"appId" must be reverse-DNS, like com\.example\.mygame/);
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', appId: 'com.bad id' } }), /"appId" must be reverse-DNS/);
+    assert.equal(resolveConfig({ ...base, file: { zip: 'g.zip', appId: 'com.Example.MyGame' } }).appId, 'com.Example.MyGame');
+});

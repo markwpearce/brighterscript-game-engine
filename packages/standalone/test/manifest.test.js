@@ -25,6 +25,10 @@ test('parseManifest reads key=value lines, skips comments/blank/invalid, trims',
     assert.equal(Object.keys(m).length, 7);
 });
 
+test('parseManifest strips a leading UTF-8 BOM', () => {
+    assert.equal(parseManifest('\uFEFFtitle=Pong\nmajor_version=1').title, 'Pong');
+});
+
 test('parseManifest keeps "=" inside values', () => {
     assert.equal(parseManifest('title=a=b').title, 'a=b');
 });
