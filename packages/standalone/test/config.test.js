@@ -89,3 +89,54 @@ test('appId falls back to com.bge.game for titles with no letters/digits', () =>
     const c = resolveConfig({ cli: {}, file: { zip: 'g.zip' }, game: { ...GAME, title: '!!!' }, platform: 'linux', cwd: CWD });
     assert.equal(c.appId, 'com.bge.game');
 });
+
+test('loadConfigFile: a non-object JSON value names the file', () => {
+    const dir = tmpDir();
+    for (const [name, text] of [['null.json', 'null'], ['arr.json', '[1,2]'], ['num.json', '42']]) {
+        const file = path.join(dir, name);
+        fs.writeFileSync(file, text);
+        assert.throws(() => loadConfigFile(file, false), new RegExp(`${name.replace('.', '\\.')}: must be a JSON object`));
+    }
+});
+
+test('loadConfigFile: strips a leading UTF-8 BOM before parsing', () => {
+    const dir = tmpDir();
+    const file = path.join(dir, 'bom.json');
+    fs.writeFileSync(file, '﻿{"zip":"g.zip"}');
+    assert.deepEqual(loadConfigFile(file, false), { zip: 'g.zip' });
+});
+
+test('loadConfigFile: a read error is reported as a read error, not invalid JSON', () => {
+    const dir = tmpDir();
+    assert.throws(() => loadConfigFile(dir, false), (e) => {
+        assert.match(e.message, new RegExp(`^${dir.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')}: `));
+        assert.doesNotMatch(e.message, /invalid JSON/);
+        return true;
+    });
+});
+
+test('resolveConfig: a non-object file is a named error, not a TypeError', () => {
+    const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    for (const file of [null, [], 'str']) {
+        assert.throws(() => resolveConfig({ ...base, file }), /config must be a JSON object/);
+    }
+});
+
+test('resolveConfig rejects inherited object keys as unknown window fields', () => {
+    const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', window: { constructor: 1 } } }), /unknown config field "window.constructor"/);
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', window: JSON.parse('{"__proto__":1}') } }), /unknown config field "window.__proto__"/);
+});
+
+test('resolveTargets: an empty selection throws instead of resolving to []', () => {
+    assert.throws(() => resolveTargets('', 'linux'), /no targets selected/);
+    assert.throws(() => resolveTargets(',', 'linux'), /no targets selected/);
+    assert.throws(() => resolveTargets([], 'linux'), /no targets selected/);
+});
+
+test('resolveConfig: "targets" must be an array of strings', () => {
+    const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', targets: [1] } }), /"targets" must be an array of strings/);
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', targets: [null] } }), /"targets" must be an array of strings/);
+    assert.throws(() => resolveConfig({ ...base, file: { zip: 'g.zip', targets: [] } }), /no targets selected/);
+});

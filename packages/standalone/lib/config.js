@@ -15,11 +15,26 @@ function loadConfigFile(file, required) {
         }
         return {};
     }
+    let text;
     try {
-        return JSON.parse(fs.readFileSync(file, 'utf8'));
+        text = fs.readFileSync(file, 'utf8');
+    } catch (e) {
+        throw new Error(`${file}: ${e.message}`);
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(text.replace(/^\uFEFF/, '')); // Windows editors write a BOM
     } catch (e) {
         throw new Error(`${file}: invalid JSON (${e.message})`);
     }
+    if (!isObject(parsed)) {
+        throw new Error(`${file}: must be a JSON object`);
+    }
+    return parsed;
+}
+
+function isObject(value) {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function resolveZipPath({ cli, file, cwd }) {
@@ -52,6 +67,9 @@ function resolveTargets(requested, platform) {
             list = ['web', host];
         }
     }
+    if (list.length === 0) {
+        throw new Error('no targets selected (use web, mac, win, linux or all)');
+    }
     for (const t of list) {
         if (!ALL_TARGETS.includes(t)) {
             throw new Error(`unknown target "${t}" (use web, mac, win, linux or all)`);
@@ -78,6 +96,9 @@ function checkType(name, value, kind) {
 }
 
 function validateFile(file) {
+    if (!isObject(file)) {
+        throw new Error('config must be a JSON object');
+    }
     for (const key of Object.keys(file)) {
         if (!FILE_KEYS.includes(key)) {
             throw new Error(`unknown config field "${key}"`);
@@ -90,15 +111,15 @@ function validateFile(file) {
     if (file.version !== undefined && !/^\d+\.\d+\.\d+$/.test(file.version)) {
         throw new Error('"version" must be x.y.z');
     }
-    if (file.targets !== undefined && !Array.isArray(file.targets)) {
-        throw new Error('"targets" must be an array');
+    if (file.targets !== undefined && (!Array.isArray(file.targets) || !file.targets.every((t) => typeof t === 'string'))) {
+        throw new Error('"targets" must be an array of strings');
     }
     if (file.window !== undefined) {
         if (typeof file.window !== 'object' || file.window === null) {
             throw new Error('"window" must be an object');
         }
         for (const key of Object.keys(file.window)) {
-            if (!(key in WINDOW_DEFAULTS)) {
+            if (!Object.hasOwn(WINDOW_DEFAULTS, key)) {
                 throw new Error(`unknown config field "window.${key}"`);
             }
         }
