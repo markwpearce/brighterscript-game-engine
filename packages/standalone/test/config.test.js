@@ -150,13 +150,27 @@ test('resolveConfig rejects an outDir that is the project folder or a parent of 
     assert.doesNotThrow(() => resolveConfig({ ...base, file: { zip: 'g.zip', outDir: 'build/out' } }));
 });
 
-test('resolveConfig rejects a zip located inside outDir', () => {
+test('resolveConfig rejects a zip inside the folders the build deletes, but not elsewhere in outDir', () => {
     const base = { cli: {}, game: GAME, platform: 'linux', cwd: CWD };
+    const out = path.join(CWD, 'out');
     assert.throws(
-        () => resolveConfig({ ...base, cli: { zip: path.join('dist', 'web', 'game.zip') }, file: {} }),
-        /game zip must not be inside "outDir"/
+        () => resolveConfig({ ...base, file: { zip: 'out/web/game.zip', outDir: 'out' } }),
+        (e) => e.message.includes(`the game zip is inside ${path.join(out, 'web')}, which the build deletes; move it or choose another outDir`)
     );
-    assert.doesNotThrow(() => resolveConfig({ ...base, file: { zip: 'out/g.zip' } }));
+    assert.throws(
+        () => resolveConfig({ ...base, file: { zip: 'out/electron-app/x.zip', outDir: 'out' } }),
+        /inside .*electron-app, which the build deletes/
+    );
+    assert.doesNotThrow(() => resolveConfig({ ...base, file: { zip: 'out/game.zip', outDir: 'out' } }));
+});
+
+test('resolveConfig treats a folder named like "..proj" as a real child, not outside', () => {
+    const parent = path.resolve('/tmp/a');
+    const cwd = path.join(parent, '..proj');
+    assert.throws(
+        () => resolveConfig({ cli: {}, file: { zip: 'g.zip', outDir: parent }, game: GAME, platform: 'linux', cwd }),
+        /"outDir" must be a dedicated folder/
+    );
 });
 
 test('resolveConfig validates appId as reverse-DNS', () => {

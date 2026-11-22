@@ -135,7 +135,7 @@ function validateFile(file) {
 
 function isInside(child, parent) {
     const rel = path.relative(parent, child);
-    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
 }
 
 function resolveConfig({ cli, file, game, platform, cwd }) {
@@ -146,8 +146,11 @@ function resolveConfig({ cli, file, game, platform, cwd }) {
     if (isInside(cwd, outDir)) {
         throw new Error('"outDir" must be a dedicated folder, not the project folder or a parent of it');
     }
-    if (isInside(zip, outDir)) {
-        throw new Error(`game zip must not be inside "outDir" (${outDir}); the build deletes that folder`);
+    for (const sub of ['web', 'electron-app']) {
+        const dir = path.join(outDir, sub);
+        if (isInside(zip, dir)) {
+            throw new Error(`the game zip is inside ${dir}, which the build deletes; move it or choose another outDir`);
+        }
     }
     return {
         zip,
