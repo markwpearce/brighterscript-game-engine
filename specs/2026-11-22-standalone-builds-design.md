@@ -19,7 +19,8 @@ Both are powered by [brs-engine](https://github.com/lvcabral/brs-engine). The to
 
 ## Key findings
 
-- The engine draws with `roScreen`/`roBitmap`/`roCompositor`, the Draw 2D profile brs-engine fully supports. A Draw 2D app only needs `brs.api.js`, `brs.worker.js` and `assets/common.zip`. The `brs-sg.js` SceneGraph extension is only needed if the game has `pkg:/components/` files. The engine source ships some components, so the bundle includes the extension and registers it through `DeviceInfo.extensions`.
+- The engine draws with `roScreen`/`roBitmap`/`roCompositor`, the Draw 2D profile brs-engine fully supports. A Draw 2D app only needs `lib/brs.api.js`, `lib/brs.worker.js` and `assets/common.zip`. `brs.api.js` finds the worker next to its own script URL and fetches `./assets/common.zip` relative to the page, so the bundle must keep that `lib/` + `assets/` layout.
+- **SceneGraph is opt-in.** It is not part of `brs-engine`. It is the separate `brs-scenegraph` package (`lib/brs-sg.js` plus its own SceneGraph-ready `assets/common.zip`, registered through `DeviceInfo.extensions`). Most BGE games are pure `roScreen`, so the bundle leaves SceneGraph out unless the config sets `"sceneGraph": true` (for games that mix in SceneGraph, like `examples/scenegraph`/`hybrid`). Engine zips always contain `components/Shapes`, so the spike must confirm that brs-engine runs such a zip as a plain Draw 2D app when no SceneGraph extension is registered.
 - brs-engine needs `SharedArrayBuffer`, so the page has to be served with COOP/COEP headers. That rules out loading it as `file://`.
 - **Gamepads are native.** brs-engine's browser library maps Gamepad API buttons and sticks to remote keys. When the manifest has `multi_controllers=1`, it adds X/Y/L1/R1/L2/R2 and analog values through `roUniversalControlEvent.GetValue(axis)`. `BGE.Controller.ControllerRegistry` already reads that path (`HasFeature("multi_controllers")`), and the examples already set `multi_controllers=1`. No new engine input code is needed.
 
@@ -36,8 +37,8 @@ game repo
 dist/web/                      static, host with COOP/COEP
 ├── index.html                 runtime page (canvas + brs.initialize/execute)
 ├── runtime.js
-├── lib/brs.api.js, lib/brs.worker.js, lib/brs-sg.js
-├── assets/common.zip
+├── lib/brs.api.js, lib/brs.worker.js   (+ lib/brs-sg.js if sceneGraph)
+├── assets/common.zip                   (brs-scenegraph's copy if sceneGraph)
 └── game.zip
           │  (desktop targets only)
           ▼
@@ -50,7 +51,7 @@ dist/desktop/                  .dmg (mac), NSIS .exe (win), .AppImage (linux)
 ### Package
 
 - It lives at `packages/standalone/` in this repo and is published separately as `bge-standalone` (working name; check it's free on npm before the first release). This keeps Electron out of the main `brighterscript-game-engine` package, which every Roku-only ROPM consumer installs.
-- Its dependencies are `brs-engine` (pinned to a tested minor version), `electron`, `electron-builder` and `jszip` (for reading the manifest).
+- Its dependencies are `brs-engine` (pinned to a tested minor version), `electron`, `electron-builder` and `jszip` (for reading the manifest). `brs-scenegraph` is an optional peer dependency, needed only when `sceneGraph` is on; the CLI fails with an install hint if it's missing.
 - It's plain Node (CommonJS, no build step) and has to run on Windows, like `scripts/*.js`.
 - Its version is independent of the engine's. The README lists the BGE and brs-engine versions it was tested with.
 
@@ -58,6 +59,7 @@ dist/desktop/                  .dmg (mac), NSIS .exe (win), .AppImage (linux)
 
 ```
 npx bge-standalone build [--target web|mac|win|linux|all] [--config bge-standalone.json] [--zip path] [--out dist]
+npx bge-standalone serve [dir] [--port 6502]    # serve a web build locally with COOP/COEP
 ```
 
 - The default target is `web` plus the current OS's desktop target.
@@ -71,6 +73,7 @@ Modules (each a separate file in `packages/standalone/lib/`, unit tested):
 | `manifest.js` | Reads `manifest` from the zip and parses it with the same `key=value` rules as Roku. Pulls out `title`, `major/minor/build_version`, `mm_icon_focus_hd` and `multi_controllers`, and extracts the icon bytes. |
 | `webBundle.js` | Writes `dist/web/`: copies the runtime template, the brs-engine files from `node_modules/brs-engine` and the game zip, and fills `index.html` with the title and runtime settings. |
 | `electronApp.js` | Writes `dist/electron-app/` (main process, `package.json` and a copy of `dist/web/`). |
+| `serve.js` | A tiny static `http` server that adds the COOP/COEP headers. Used by `bge-standalone serve` and the end-to-end test. |
 | `desktopBuild.js` | Runs electron-builder on the generated app through its JS API with targets dmg/nsis/AppImage. |
 | `cli.js` | Parses arguments and sends each target to the right module. |
 
@@ -82,7 +85,8 @@ Modules (each a separate file in `packages/standalone/lib/`, unit tested):
 | `appId` | `com.bge.<slug of title>` |
 | `productName` | manifest `title` |
 | `version` | manifest `major.minor.build` |
-| `icon` | manifest `mm_icon_focus_hd`, read from the zip (electron-builder upscales it; a 512px+ PNG is recommended) |
+| `icon` | manifest `mm_icon_focus_hd`, read from the zip, used only if it's a PNG at least 512×512. Roku channel icons are smaller (336×210), so usually the build warns and falls back to Electron's default icon. Set this to a 512×512+ PNG path. |
+| `sceneGraph` | `false` (bundle `brs-scenegraph` when `true`) |
 | `window` | `{ "width": 1280, "height": 720, "fullscreen": false, "resizable": true }` |
 | `targets` | `["web", "<current os>"]` |
 | `outDir` | `dist` |
@@ -90,7 +94,7 @@ Modules (each a separate file in `packages/standalone/lib/`, unit tested):
 ### Runtime page (`template/index.html` + `runtime.js`)
 
 - One `<canvas id="display">` scaled to fit the window with letterboxing, plus a hidden `<video id="player">` (brs-engine expects one).
-- `brs.initialize({ extensions: SceneGraph → "./lib/brs-sg.js" }, { disableDebug: true, debugToConsole: false })`. Keyboard and gamepads stay on with brs-engine's default mapping.
+- `brs.initialize(deviceInfo, { disableDebug: true, debugToConsole: false })`. `deviceInfo` is `{}`, or `{ extensions: new Map([["brs-scenegraph", "./brs-sg.js"]]) }` when `sceneGraph` is on (the path is relative to the worker). Keyboard and gamepads stay on with brs-engine's default mapping.
 - It fetches `game.zip` and calls `brs.execute("game.zip", buffer, { clearDisplayOnExit: false })`.
 - It shows "Loading…" until the `started` event.
 - `closed` event: on desktop, the window asks the main process to quit. On the web, it shows "Game ended" with a Restart button.
@@ -122,7 +126,7 @@ Modules (each a separate file in `packages/standalone/lib/`, unit tested):
 
 Before building the CLI, spend about a day hand-assembling a `dist/web` for `examples/pong` and one heavier example (`3d` or `terrain`), and check:
 
-1. The engine starts under brs-engine in Chromium. `deviceRenderTier` and `DeviceQualitySeed` already branch on `HasFeature("simulation_engine")`; confirm those defaults look right.
+1. The engine starts under brs-engine in Chromium with **no** SceneGraph extension registered, even though the zip contains `components/Shapes`. If it doesn't, decide between stripping `components/` from the bundled zip when `sceneGraph` is off and an engine/brs-engine fix. `deviceRenderTier` and `DeviceQualitySeed` already branch on `HasFeature("simulation_engine")`; confirm those defaults look right.
 2. Frame rate is acceptable.
 3. Audio (`roAudioResource`/`roAudioPlayer`) plays. brs-engine supports only one `roAudioPlayer`.
 4. Asset loading through `roUrlTransfer`/`roTextureManager` works from `pkg:`.
@@ -136,6 +140,8 @@ Engine bugs found here get their own issues or PRs and are fixed in the engine, 
 - `packages/standalone/README.md`: the npm-facing summary.
 
 ## Follow-ups (separate issues)
+
+- Publishing `bge-standalone`: wire it into the Initialize/Publish Release workflows (see `.claude/rules/releasing.md`). v1 is not published by hand.
 
 - Mobile builds (Capacitor or similar) with a nipple.js touch overlay.
 - Code signing and notarization in CI.
