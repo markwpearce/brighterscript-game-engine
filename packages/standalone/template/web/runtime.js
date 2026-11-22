@@ -24,7 +24,11 @@
             status.hidden = true;
             window.__bgeStarted = true;
         } else if (event === 'closed') {
-            if (window.bgeHost) {
+            // `data` is the exit reason. A game quitting (Back, End()) reports EXIT_USER_NAV;
+            // anything else (EXIT_BRIGHTSCRIPT_CRASH, ...) is shown rather than silently closing.
+            if (data !== 'EXIT_USER_NAV') {
+                fail('Game crashed (' + data + ')');
+            } else if (window.bgeHost) {
                 window.bgeHost.quit();
             } else {
                 showStatus('Game ended', true);
