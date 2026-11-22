@@ -6,7 +6,7 @@
 
 **Architecture:** Plain-Node CLI in `packages/standalone/`. `build` reads the zip's manifest and resolves config, writes `dist/web/` (a runtime page plus the brs-engine libs and the game zip), and for desktop targets wraps that folder in a generated Electron app that serves it over a privileged `app://` protocol with COOP/COEP headers, then runs electron-builder. Gamepads use brs-engine's native mapping. SceneGraph (`brs-scenegraph`) is opt-in.
 
-**Tech Stack:** Node 24 (CommonJS, `node:test`), brs-engine 2.6.x, brs-scenegraph 0.6.x (optional peer), jszip, Electron, electron-builder, Playwright (dev only, e2e).
+**Tech Stack:** Node 24 (CommonJS, `node:test`), brs-engine 2.6.x, brs-scenegraph 0.6.x (optional peer), jszip, sharp (icon letterboxing), Electron, electron-builder, Playwright (dev only, e2e).
 
 **Spec:** `specs/2026-11-22-standalone-builds-design.md`
 
@@ -35,7 +35,7 @@ packages/standalone/
 ├── lib/
 │   ├── serve.js             COOP/COEP static server (Task 1)
 │   ├── manifest.js          parse manifest, read zip, gameInfo (Task 3)
-│   ├── icon.js              PNG size check (Task 3)
+│   ├── icon.js              PNG size check, letterbox to 512x512 (Task 3)
 │   ├── config.js            load + resolve + validate config, targets (Task 4)
 │   ├── webBundle.js         write dist/web (Task 5, SceneGraph in Task 9)
 │   ├── electronApp.js       write dist/electron-app (Task 7)
@@ -94,7 +94,8 @@ docs/standalone-builds.md    guide (Task 10)
         "brs-engine": "~2.6.2",
         "electron": "^45.3.2",
         "electron-builder": "^26.0.0",
-        "jszip": "^3.10.2"
+        "jszip": "^3.10.2",
+        "sharp": "^0.35.5"
     },
     "peerDependencies": {
         "brs-scenegraph": "~0.6.2"
@@ -459,7 +460,9 @@ git commit -m "bge-standalone: runtime page and brs-engine spike results (#235)"
   - `readGameZip(zip: Buffer): Promise<{ manifest: Record<string,string>, icon: { name: string, data: Buffer } | null }>`, which throws `Error('zip has no manifest at its root')`
   - `gameInfo(manifest): { title: string, version: string, multiControllers: boolean }`
   - `pngSize(buf: Buffer): { width: number, height: number } | null`
-  - `isUsableIcon(buf: Buffer): boolean` (PNG, both sides ≥ 512)
+  - `isUsableIcon(buf: Buffer): boolean` (square PNG, side ≥ 512)
+  - `letterboxIcon(buf: Buffer): Promise<Buffer>`: fits any PNG/JPEG into a 512×512 PNG, aspect kept, centered on transparent bars
+  - `ICON_SIZE = 512`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -527,8 +530,19 @@ test('gameInfo derives title, semver version and multiControllers', () => {
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { pngSize, isUsableIcon } = require('../lib/icon');
+const sharp = require('sharp');
+const { pngSize, isUsableIcon, letterboxIcon } = require('../lib/icon');
 const { fakePng } = require('./helpers');
+
+function solid(width, height, format = 'png') {
+    return sharp({ create: { width, height, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } })[format]().toBuffer();
+}
+
+async function pixels(buf) {
+    const { data, info } = await sharp(buf).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const at = (x, y) => Array.from(data.subarray((y * info.width + x) * 4, (y * info.width + x) * 4 + 4));
+    return { info, at };
+}
 
 test('pngSize reads IHDR width/height', () => {
     assert.deepEqual(pngSize(fakePng(336, 210)), { width: 336, height: 210 });
@@ -539,11 +553,39 @@ test('pngSize returns null for non-PNG or short data', () => {
     assert.equal(pngSize(Buffer.alloc(4)), null);
 });
 
-test('isUsableIcon needs a PNG of at least 512x512', () => {
+test('isUsableIcon needs a square PNG of at least 512x512', () => {
     assert.equal(isUsableIcon(fakePng(512, 512)), true);
-    assert.equal(isUsableIcon(fakePng(1024, 512)), true);
+    assert.equal(isUsableIcon(fakePng(1024, 1024)), true);
+    assert.equal(isUsableIcon(fakePng(1024, 512)), false);
     assert.equal(isUsableIcon(fakePng(336, 210)), false);
     assert.equal(isUsableIcon(Buffer.from('nope')), false);
+});
+
+test('letterboxIcon fits a wide icon into 512x512 with transparent top/bottom bars', async () => {
+    // 336x210 scales to 512x320, leaving 96px bars top and bottom.
+    const { info, at } = await pixels(await letterboxIcon(await solid(336, 210)));
+    assert.equal(info.width, 512);
+    assert.equal(info.height, 512);
+    assert.equal(at(256, 10)[3], 0);
+    assert.equal(at(256, 500)[3], 0);
+    assert.deepEqual(at(256, 256), [255, 0, 0, 255]);
+    assert.deepEqual(at(5, 256), [255, 0, 0, 255], 'full width is used');
+});
+
+test('letterboxIcon fits a tall icon with transparent side bars', async () => {
+    const { at } = await pixels(await letterboxIcon(await solid(100, 200)));
+    assert.equal(at(10, 256)[3], 0);
+    assert.deepEqual(at(256, 5), [255, 0, 0, 255], 'full height is used');
+});
+
+test('letterboxIcon accepts JPEG input', async () => {
+    const { info } = await pixels(await letterboxIcon(await solid(290, 218, 'jpeg')));
+    assert.equal(info.width, 512);
+    assert.equal(info.height, 512);
+});
+
+test('letterboxIcon rejects data it cannot decode', async () => {
+    await assert.rejects(letterboxIcon(fakePng(336, 210)));
 });
 ```
 
@@ -611,8 +653,10 @@ module.exports = { parseManifest, readGameZip, gameInfo };
 
 ```js
 'use strict';
+const sharp = require('sharp');
+
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const MIN_ICON_SIZE = 512;
+const ICON_SIZE = 512;
 
 function pngSize(buf) {
     if (!Buffer.isBuffer(buf) || buf.length < 24 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
@@ -621,13 +665,22 @@ function pngSize(buf) {
     return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
 
-// electron-builder rejects mac/linux icons smaller than 512x512.
+// electron-builder needs a square icon of at least 512x512 for mac/linux.
 function isUsableIcon(buf) {
     const size = pngSize(buf);
-    return size !== null && size.width >= MIN_ICON_SIZE && size.height >= MIN_ICON_SIZE;
+    return size !== null && size.width >= ICON_SIZE && size.width === size.height;
 }
 
-module.exports = { pngSize, isUsableIcon, MIN_ICON_SIZE };
+// Roku channel icons are small and wide (e.g. 336x210): scale to fit, keep the aspect,
+// and pad with transparency so the dock/taskbar shows a wide icon, not black bars.
+function letterboxIcon(buf) {
+    return sharp(buf)
+        .resize(ICON_SIZE, ICON_SIZE, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+        .png()
+        .toBuffer();
+}
+
+module.exports = { pngSize, isUsableIcon, letterboxIcon, ICON_SIZE };
 ```
 
 - [ ] **Step 4: Run the tests and make sure they pass**
@@ -639,7 +692,7 @@ Expected: all pass.
 
 ```bash
 git add packages/standalone/lib/manifest.js packages/standalone/lib/icon.js packages/standalone/test/manifest.test.js packages/standalone/test/icon.test.js
-git commit -m "bge-standalone: read manifest, version and icon from the game zip (#235)"
+git commit -m "bge-standalone: read manifest, version and icon; letterbox small icons (#235)"
 ```
 
 ---
@@ -1688,10 +1741,10 @@ git commit -m "bge-standalone: generated Electron app serving the web build over
 - Modify: `packages/standalone/lib/cli.js`: replace `notImplementedDesktop` with the real `buildDesktop`
 
 **Interfaces:**
-- Consumes: `writeElectronApp` (Task 7); `isUsableIcon`, `MIN_ICON_SIZE` (Task 3); the `cli.js` `buildDesktop` call shape `{ config, game, target, webDir, appDir, outDir, log, warn }` (Task 6).
+- Consumes: `writeElectronApp` (Task 7); `isUsableIcon`, `letterboxIcon`, `ICON_SIZE` (Task 3); the `cli.js` `buildDesktop` call shape `{ config, game, target, webDir, appDir, outDir, log, warn }` (Task 6).
 - Produces:
   - `builderConfig({ config, outDir, iconPath: string|null, electronVersion: string }): object` (pure)
-  - `pickIcon({ config, game, appDir, warn }): string|null`. It writes `icon.png` into `appDir` and returns its path, or returns null.
+  - `pickIcon({ config, game, appDir, warn }): Promise<string|null>`. It writes `icon.png` into `appDir` (copied, or letterboxed from the manifest icon) and returns its path, or returns null.
   - `buildDesktop(args, builder = require('electron-builder')): Promise<void>`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1704,6 +1757,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const sharp = require('sharp');
 const { builderConfig, pickIcon, buildDesktop } = require('../lib/desktopBuild');
 const { tmpDir, fakePng } = require('./helpers');
 
@@ -1732,28 +1786,49 @@ test('builderConfig leaves icon out when there is none', () => {
     assert.equal('icon' in c.mac, false);
 });
 
-test('pickIcon uses a big enough manifest icon, else warns and returns null', () => {
+test('pickIcon copies a square 512+ manifest icon as-is, without a warning', async () => {
     const appDir = tmpDir();
     const warns = [];
     const big = fakePng(512, 512);
-    assert.equal(pickIcon({ config: CONFIG, game: { icon: { name: 'i.png', data: big } }, appDir, warn: (m) => warns.push(m) }), path.join(appDir, 'icon.png'));
-    assert.deepEqual(fs.readFileSync(path.join(appDir, 'icon.png')), big);
-    assert.equal(pickIcon({ config: CONFIG, game: { icon: { name: 'i.png', data: fakePng(336, 210) } }, appDir, warn: (m) => warns.push(m) }), null);
-    assert.equal(pickIcon({ config: CONFIG, game: { icon: null }, appDir, warn: (m) => warns.push(m) }), null);
-    assert.equal(warns.length, 2);
-    assert.match(warns[0], /512x512/);
+    const result = await pickIcon({ config: CONFIG, game: { icon: { name: 'i.png', data: big } }, appDir, warn: (m) => warns.push(m) });
+    assert.equal(result, path.join(appDir, 'icon.png'));
+    assert.deepEqual(fs.readFileSync(result), big);
+    assert.deepEqual(warns, []);
 });
 
-test('pickIcon prefers config.icon and throws if that file is unusable', () => {
+test('pickIcon letterboxes a small manifest icon to 512x512 and warns', async () => {
+    const appDir = tmpDir();
+    const warns = [];
+    const small = await sharp({ create: { width: 336, height: 210, channels: 4, background: '#0000ff' } }).png().toBuffer();
+    const result = await pickIcon({ config: CONFIG, game: { icon: { name: 'i.png', data: small } }, appDir, warn: (m) => warns.push(m) });
+    assert.equal(result, path.join(appDir, 'icon.png'));
+    const meta = await sharp(result).metadata();
+    assert.equal(meta.width, 512);
+    assert.equal(meta.height, 512);
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /letterboxed to 512x512/);
+});
+
+test('pickIcon returns null with no manifest icon, and warns when it cannot be decoded', async () => {
+    const appDir = tmpDir();
+    const warns = [];
+    assert.equal(await pickIcon({ config: CONFIG, game: { icon: null }, appDir, warn: (m) => warns.push(m) }), null);
+    assert.deepEqual(warns, []);
+    // fakePng is only a header, so sharp can't decode it.
+    assert.equal(await pickIcon({ config: CONFIG, game: { icon: { name: 'i.png', data: fakePng(336, 210) } }, appDir, warn: (m) => warns.push(m) }), null);
+    assert.match(warns[0], /could not convert the manifest icon/);
+});
+
+test('pickIcon prefers config.icon and rejects one that is unusable', async () => {
     const dir = tmpDir();
     const good = path.join(dir, 'good.png');
     fs.writeFileSync(good, fakePng(1024, 1024));
-    const bad = path.join(dir, 'bad.png');
-    fs.writeFileSync(bad, fakePng(64, 64));
+    const wide = path.join(dir, 'wide.png');
+    fs.writeFileSync(wide, fakePng(1024, 512));
     const appDir = tmpDir();
-    assert.equal(pickIcon({ config: { ...CONFIG, icon: good }, game: { icon: null }, appDir, warn: () => {} }), path.join(appDir, 'icon.png'));
-    assert.throws(() => pickIcon({ config: { ...CONFIG, icon: bad }, game: { icon: null }, appDir, warn: () => {} }), /bad\.png must be a PNG of at least 512x512/);
-    assert.throws(() => pickIcon({ config: { ...CONFIG, icon: path.join(dir, 'nope.png') }, game: { icon: null }, appDir, warn: () => {} }), /icon not found/);
+    assert.equal(await pickIcon({ config: { ...CONFIG, icon: good }, game: { icon: null }, appDir, warn: () => {} }), path.join(appDir, 'icon.png'));
+    await assert.rejects(pickIcon({ config: { ...CONFIG, icon: wide }, game: { icon: null }, appDir, warn: () => {} }), /wide\.png must be a square PNG of at least 512x512/);
+    await assert.rejects(pickIcon({ config: { ...CONFIG, icon: path.join(dir, 'nope.png') }, game: { icon: null }, appDir, warn: () => {} }), /icon not found/);
 });
 
 test('buildDesktop writes the electron app then calls builder.build for one platform', async () => {
@@ -1786,10 +1861,10 @@ Expected: FAIL, `Cannot find module '../lib/desktopBuild'`.
 const fs = require('node:fs');
 const path = require('node:path');
 const { writeElectronApp } = require('./electronApp');
-const { isUsableIcon, MIN_ICON_SIZE } = require('./icon');
+const { isUsableIcon, letterboxIcon, ICON_SIZE } = require('./icon');
 
 const FORMATS = { mac: ['dmg'], win: ['nsis'], linux: ['AppImage'] };
-const SIZE = `${MIN_ICON_SIZE}x${MIN_ICON_SIZE}`;
+const SIZE = `${ICON_SIZE}x${ICON_SIZE}`;
 
 function builderConfig({ config, outDir, iconPath, electronVersion }) {
     const icon = iconPath ? { icon: iconPath } : {};
@@ -1806,7 +1881,7 @@ function builderConfig({ config, outDir, iconPath, electronVersion }) {
     };
 }
 
-function pickIcon({ config, game, appDir, warn }) {
+async function pickIcon({ config, game, appDir, warn }) {
     const dest = path.join(appDir, 'icon.png');
     if (config.icon) {
         if (!fs.existsSync(config.icon)) {
@@ -1814,25 +1889,32 @@ function pickIcon({ config, game, appDir, warn }) {
         }
         const data = fs.readFileSync(config.icon);
         if (!isUsableIcon(data)) {
-            throw new Error(`${config.icon} must be a PNG of at least ${SIZE}`);
+            throw new Error(`${config.icon} must be a square PNG of at least ${SIZE}`);
         }
         fs.writeFileSync(dest, data);
         return dest;
     }
-    if (game.icon && isUsableIcon(game.icon.data)) {
+    if (!game.icon) {
+        return null;
+    }
+    if (isUsableIcon(game.icon.data)) {
         fs.writeFileSync(dest, game.icon.data);
         return dest;
     }
-    if (game.icon) {
-        warn(`warning: the manifest icon is smaller than ${SIZE}; using Electron's default icon (set "icon" in bge-standalone.json)`);
+    try {
+        fs.writeFileSync(dest, await letterboxIcon(game.icon.data));
+    } catch (e) {
+        warn(`warning: could not convert the manifest icon (${e.message}); using Electron's default icon`);
+        return null;
     }
-    return null;
+    warn(`warning: no "icon" set, so the manifest icon ${game.icon.name} was letterboxed to ${SIZE} with transparent bars; set "icon" in bge-standalone.json to a square ${SIZE}+ PNG for a sharper icon`);
+    return dest;
 }
 
 async function buildDesktop({ config, game, target, webDir, appDir, outDir, log, warn }, builder = require('electron-builder')) {
     writeElectronApp({ config, webDir, appDir });
     // After writeElectronApp, which empties appDir.
-    const iconPath = pickIcon({ config, game, appDir, warn });
+    const iconPath = await pickIcon({ config, game, appDir, warn });
     const platform = { mac: builder.Platform.MAC, win: builder.Platform.WINDOWS, linux: builder.Platform.LINUX }[target];
     log(`packaging ${target} (${FORMATS[target].join(', ')})...`);
     await builder.build({
@@ -1873,7 +1955,7 @@ cd packages/standalone
 node bin/bge-standalone.js build --zip ../../examples/pong/out/bge-pong.zip --out test-output
 ```
 
-Expected on macOS: `test-output/desktop/Example Game - Pong-1.1.0*.dmg` exists, plus a warning about the small manifest icon. Install it from the dmg and launch it (right-click → Open past Gatekeeper, since it's unsigned). Then check:
+Expected on macOS: `test-output/desktop/Example Game - Pong-1.1.0*.dmg` exists, plus the warning that the manifest icon was letterboxed. Check the dock icon shows the pong icon with transparent (not black) padding. Install it from the dmg and launch it (right-click → Open past Gatekeeper, since it's unsigned). Then check:
 - [ ] pong plays with the keyboard;
 - [ ] pong plays with a gamepad, analog stick included;
 - [ ] F11 toggles fullscreen;
@@ -2041,7 +2123,7 @@ All fields in `bge-standalone.json` (next to your `package.json`) are optional:
 | `productName` | manifest `title` | App and window name. |
 | `appId` | `com.bge.<title>` | Reverse-DNS app id. |
 | `version` | manifest `major.minor.build` | |
-| `icon` | manifest `mm_icon_focus_hd` if ≥ 512×512 | PNG, at least 512×512. Roku icons are smaller, so set this. |
+| `icon` | Manifest `mm_icon_focus_hd`, letterboxed | Square PNG, at least 512×512. Without it, the Roku icon is scaled to fit 512×512 with transparent bars, and the build warns. |
 | `sceneGraph` | `false` | Bundle SceneGraph support (`npm install --save-dev brs-scenegraph`). Only needed if your game mixes in SceneGraph nodes. |
 | `window` | `{ "width": 1280, "height": 720, "fullscreen": false, "resizable": true }` | Desktop window. F11 toggles fullscreen. |
 | `targets` | `["web", "<your OS>"]` | |

@@ -51,7 +51,7 @@ dist/desktop/                  .dmg (mac), NSIS .exe (win), .AppImage (linux)
 ### Package
 
 - It lives at `packages/standalone/` in this repo and is published separately as `bge-standalone` (working name; check it's free on npm before the first release). This keeps Electron out of the main `brighterscript-game-engine` package, which every Roku-only ROPM consumer installs.
-- Its dependencies are `brs-engine` (pinned to a tested minor version), `electron`, `electron-builder` and `jszip` (for reading the manifest). `brs-scenegraph` is an optional peer dependency, needed only when `sceneGraph` is on; the CLI fails with an install hint if it's missing.
+- Its dependencies are `brs-engine` (pinned to a tested minor version), `electron`, `electron-builder`, `jszip` (for reading the manifest) and `sharp` (for letterboxing the icon). `brs-scenegraph` is an optional peer dependency, needed only when `sceneGraph` is on; the CLI fails with an install hint if it's missing.
 - It's plain Node (CommonJS, no build step) and has to run on Windows, like `scripts/*.js`.
 - Its version is independent of the engine's. The README lists the BGE and brs-engine versions it was tested with.
 
@@ -85,7 +85,7 @@ Modules (each a separate file in `packages/standalone/lib/`, unit tested):
 | `appId` | `com.bge.<slug of title>` |
 | `productName` | manifest `title` |
 | `version` | manifest `major.minor.build` |
-| `icon` | manifest `mm_icon_focus_hd`, read from the zip, used only if it's a PNG at least 512×512. Roku channel icons are smaller (336×210), so usually the build warns and falls back to Electron's default icon. Set this to a 512×512+ PNG path. |
+| `icon` | Manifest `mm_icon_focus_hd`, read from the zip. A square PNG of at least 512×512 is used as-is. Anything else, such as a typical 336×210 Roku icon, is **letterboxed**: scaled to fit 512×512 with its aspect ratio kept and centered with **transparent** bars, with a warning suggesting a proper icon. If it can't be decoded, the build warns and uses Electron's default icon. An explicit `icon` must be a square PNG of at least 512×512, otherwise the build fails. |
 | `sceneGraph` | `false` (bundle `brs-scenegraph` when `true`) |
 | `window` | `{ "width": 1280, "height": 720, "fullscreen": false, "resizable": true }` |
 | `targets` | `["web", "<current os>"]` |
