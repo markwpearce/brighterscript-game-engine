@@ -12,17 +12,14 @@ const USAGE = [
     '       bge-standalone serve [dir] [--port 6502]'
 ].join('\n');
 
-async function notImplementedDesktop() {
-    throw new Error('desktop targets are not available yet');
-}
-
 function defaults() {
     return {
         cwd: process.cwd(),
         platform: process.platform,
         log: (m) => console.log(m),
         warn: (m) => console.error(m),
-        buildDesktop: notImplementedDesktop,
+        // Lazy: `--target web` must never load electron-builder.
+        buildDesktop: (args) => require('./desktopBuild').buildDesktop(args),
         onServer: () => {}
     };
 }
