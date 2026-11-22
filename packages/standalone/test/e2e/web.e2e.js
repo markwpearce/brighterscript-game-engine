@@ -17,14 +17,26 @@ test('web build of a real game starts and draws under brs-engine', { timeout: 12
     assert.equal(code, 0);
 
     const server = await serve(path.join(out, 'web'), 0);
-    const browser = await chromium.launch();
+    let browser;
+    const errors = [];
+    const consoleErrors = [];
+    const report = () => `page errors: ${JSON.stringify(errors)}; console errors: ${JSON.stringify(consoleErrors)}`;
     try {
+        browser = await chromium.launch();
         const page = await browser.newPage();
-        const errors = [];
         page.on('pageerror', (e) => errors.push(e.message));
+        page.on('console', (m) => {
+            if (m.type() === 'error') {
+                consoleErrors.push(m.text());
+            }
+        });
         await page.goto(`http://127.0.0.1:${server.address().port}/`);
-        await page.waitForFunction(() => window.__bgeStarted === true || typeof window.__bgeError === 'string', null, { timeout: 60000 });
-        assert.equal(await page.evaluate(() => window.__bgeError), undefined);
+        try {
+            await page.waitForFunction(() => window.__bgeStarted === true || typeof window.__bgeError === 'string', null, { timeout: 60000 });
+        } catch (e) {
+            assert.fail(`game did not start: ${e.message}; ${report()}`);
+        }
+        assert.equal(await page.evaluate(() => window.__bgeError), undefined, `runtime error; ${report()}`);
         assert.equal(await page.evaluate(() => self.crossOriginIsolated), true);
         await page.waitForTimeout(2000);
         const colors = await page.evaluate(() => {
@@ -41,10 +53,14 @@ test('web build of a real game starts and draws under brs-engine', { timeout: 12
             }
             return seen.size;
         });
-        assert.ok(colors > 1, 'canvas should not be a single flat color after 2s');
+        assert.ok(colors > 1, `canvas should not be a single flat color after 2s; ${report()}`);
         assert.deepEqual(errors, []);
     } finally {
-        await browser.close();
-        server.close();
+        if (browser) {
+            await browser.close();
+        }
+        server.closeAllConnections();
+        await new Promise((r) => server.close(r));
+        fs.rmSync(out, { recursive: true, force: true });
     }
 });

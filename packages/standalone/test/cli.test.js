@@ -78,3 +78,42 @@ test('desktop targets call buildDesktop with the electron-app and desktop dirs',
     assert.equal(calls[0].outDir, path.join(cwd, 'dist', 'desktop'));
     assert.ok(fs.existsSync(path.join(cwd, 'dist', 'web', 'index.html')), 'desktop builds still write the web bundle they wrap');
 });
+
+test('--help prints usage and exits 0', async () => {
+    const io = capture();
+    assert.equal(await main(['--help'], { cwd: tmpDir(), platform: 'linux', ...io }), 0);
+    assert.match(io.logs.join('\n'), /Usage: bge-standalone build/);
+});
+
+test('serve without index.html exits 1', async () => {
+    const io = capture();
+    assert.equal(await main(['serve'], { cwd: tmpDir(), platform: 'linux', ...io }), 1);
+    assert.match(io.warns.join('\n'), /no index\.html/);
+});
+
+test('serve --port 0 starts a server and logs the URL', async () => {
+    const cwd = await gameDir();
+    await main(['build', '--target', 'web', '--zip', 'out/game.zip'], { cwd, platform: 'linux', ...capture() });
+    const io = capture();
+    let server;
+    try {
+        const code = await main(['serve', '--port', '0'], { cwd, platform: 'linux', ...io, onServer: (s) => { server = s; } });
+        assert.equal(code, 0);
+        assert.match(io.logs.join('\n'), /http:\/\/127\.0\.0\.1:\d+\//);
+    } finally {
+        if (server) {
+            server.closeAllConnections();
+            await new Promise((r) => server.close(r));
+        }
+    }
+});
+
+test('serve rejects an invalid --port', async () => {
+    const cwd = await gameDir();
+    await main(['build', '--target', 'web', '--zip', 'out/game.zip'], { cwd, platform: 'linux', ...capture() });
+    for (const bad of ['abc', '70000', '-1', '1.5']) {
+        const io = capture();
+        assert.equal(await main(['serve', `--port=${bad}`], { cwd, platform: 'linux', ...io }), 1, bad);
+        assert.match(io.warns.join('\n'), /--port must be an integer from 0 to 65535/);
+    }
+});

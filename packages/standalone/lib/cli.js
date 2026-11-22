@@ -22,7 +22,8 @@ function defaults() {
         platform: process.platform,
         log: (m) => console.log(m),
         warn: (m) => console.error(m),
-        buildDesktop: notImplementedDesktop
+        buildDesktop: notImplementedDesktop,
+        onServer: () => {}
     };
 }
 
@@ -69,7 +70,12 @@ async function serveCommand(argv, deps) {
     if (!fs.existsSync(path.join(dir, 'index.html'))) {
         throw new Error(`no index.html in ${dir} (run bge-standalone build --target web first)`);
     }
-    const server = await serve(dir, Number(values.port || 6502));
+    const port = values.port === undefined ? 6502 : Number(values.port);
+    if (!/^\d+$/.test(String(values.port ?? port)) || port > 65535) {
+        throw new Error('--port must be an integer from 0 to 65535');
+    }
+    const server = await serve(dir, port);
+    deps.onServer(server);
     deps.log(`serving ${dir} at http://127.0.0.1:${server.address().port}/ (Ctrl+C to stop)`);
     return server;
 }
