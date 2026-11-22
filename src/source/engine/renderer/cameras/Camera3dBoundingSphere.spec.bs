@@ -1,0 +1,151 @@
+namespace tests
+
+  ' Camera3d's sphere shortcuts (#654) must never disagree with the point tests they stand in for:
+  ' each answers only when every point inside the sphere would get the same answer.
+  @suite("BGE.Camera3d bounding sphere tests")
+  class Camera3dBoundingSphereTests extends rooibos.BaseTestSuite
+
+    camera as BGE.Camera3d
+    seed as integer = 12345
+
+    protected override function beforeEach()
+      m.seed = 12345
+      m.camera = new BGE.Camera3d()
+      m.camera.setFrameSize(320, 240)
+      m.camera.position = BGE.Math.VectorOps.create(0, 0, 0)
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, 0, -1))
+      m.camera.maxDrawDistance = 500
+      m.camera.drawDistanceFadeFraction = 0.5
+      m.camera.drawDistanceTransitionSeconds = 0
+      m.prepare()
+    end function
+
+    private sub prepare()
+      m.camera.checkMovement()
+      m.camera.computeWorldToCameraMatrix()
+    end sub
+
+    ' A repeatable random float in [low, high)
+    private function nextRandom(low as float, high as float) as float
+      m.seed = (m.seed * 1103515245& + 12345&) mod 2147483648&
+      return low + (m.seed / 2147483648.0) * (high - low)
+    end function
+
+    ' A random upright quad somewhere around the camera, near and far, behind and beside it
+    private function randomQuad() as BGE.Math.Vector[]
+      x = m.nextRandom(-700, 700)
+      y = m.nextRandom(-150, 150)
+      z = m.nextRandom(-700, 300)
+      width = m.nextRandom(1, 120)
+      height = m.nextRandom(1, 120)
+      return [
+        BGE.Math.VectorOps.create(x, y, z),
+        BGE.Math.VectorOps.create(x + width, y, z),
+        BGE.Math.VectorOps.create(x, y - height, z + width / 3),
+        BGE.Math.VectorOps.create(x + width, y - height, z + width / 3)
+      ]
+    end function
+
+    ' Checks both shortcuts against their point tests over many quads; returns how many the
+    ' sphere settled, as [frustum, fade]
+    private function checkAgreement(count as integer) as integer[]
+      settledView = 0
+      settledFade = 0
+      for i = 1 to count
+        points = m.randomQuad()
+        sphere = BGE.Math.boundingSphereOfPoints(points)
+        verdict = m.camera.getSphereInViewVerdict(sphere)
+        if verdict >= 0
+          settledView++
+          m.assertEqual(verdict = 1, m.camera.isAnyInView(points), `frustum verdict ${verdict} disagrees for quad ${i}`)
+        end if
+        alpha = m.camera.getDistanceFadeAlphaForSphere(sphere)
+        if alpha >= 0
+          settledFade++
+          m.assertEqual(alpha, m.camera.getDistanceFadeAlphaForPoints(points), `fade disagrees for quad ${i}`)
+        end if
+      end for
+      return [settledView, settledFade]
+    end function
+
+    @describe("agreement with the point tests")
+
+    @it("never disagrees, and settles most quads, looking straight ahead")
+    function _()
+      settled = m.checkAgreement(300)
+      m.assertTrue(settled[0] > 150, `only ${settled[0]} frustum verdicts settled`)
+      m.assertTrue(settled[1] > 150, `only ${settled[1]} fades settled`)
+    end function
+
+    @it("never disagrees when turned, pitched and rolled")
+    function _()
+      m.camera.position = BGE.Math.VectorOps.create(40, 30, -20)
+      m.camera.setTarget(BGE.Math.VectorOps.create(-300, -60, -250))
+      m.camera.rollDegrees = 15
+      m.prepare()
+      m.checkAgreement(300)
+    end function
+
+    @it("never disagrees with a shear pitch")
+    function _()
+      m.camera.pitchMode = BGE.CameraPitchMode.shear
+      m.camera.setTarget(BGE.Math.VectorOps.create(0, -0.4, -1))
+      m.prepare()
+      m.checkAgreement(300)
+    end function
+
+    @it("never disagrees with a non-unit orientation")
+    function _()
+      m.camera.orientation = BGE.Math.VectorOps.create(0, 0, -3)
+      m.prepare()
+      m.checkAgreement(200)
+    end function
+
+    @describe("getSphereInViewVerdict")
+
+    @it("is 1 for a sphere well inside the view")
+    function _()
+      m.assertEqual(m.camera.getSphereInViewVerdict({x: 0, y: 0, z: -100, radius: 5}), 1)
+    end function
+
+    @it("is 0 for a sphere behind the camera, beside the view or past the draw distance")
+    function _()
+      m.assertEqual(m.camera.getSphereInViewVerdict({x: 0, y: 0, z: 400, radius: 5}), 0)
+      m.assertEqual(m.camera.getSphereInViewVerdict({x: 500, y: 0, z: -100, radius: 5}), 0)
+      m.assertEqual(m.camera.getSphereInViewVerdict({x: 0, y: 0, z: -600, radius: 5}), 0)
+    end function
+
+    @it("is -1 for a sphere across the edge of the view")
+    function _()
+      ' the 90-degree-wide default view's right edge passes x = 100 at z = -100
+      m.assertEqual(m.camera.getSphereInViewVerdict({x: 100, y: 0, z: -100, radius: 20}), -1)
+    end function
+
+    @describe("getDistanceFadeAlphaForSphere")
+
+    @it("is 1 for a sphere wholly before the fade band and 0 for one wholly past the draw distance")
+    function _()
+      m.assertEqual(m.camera.getDistanceFadeAlphaForSphere({x: 0, y: 0, z: -100, radius: 20}), 1.0)
+      m.assertEqual(m.camera.getDistanceFadeAlphaForSphere({x: 0, y: 0, z: -600, radius: 20}), 0.0)
+    end function
+
+    @it("is -1 for a sphere reaching into the fade band")
+    function _()
+      m.assertEqual(m.camera.getDistanceFadeAlphaForSphere({x: 0, y: 0, z: -240, radius: 20}), -1.0)
+    end function
+
+    @it("stretches by the distance scale")
+    function _()
+      ' twice as far: the band runs 500-1000
+      m.assertEqual(m.camera.getDistanceFadeAlphaForSphere({x: 0, y: 0, z: -400, radius: 20}, 2), 1.0)
+    end function
+
+    @it("is 1 with no fade band")
+    function _()
+      m.camera.drawDistanceFadeFraction = 0
+      m.assertEqual(m.camera.getDistanceFadeAlphaForSphere({x: 0, y: 0, z: -600, radius: 20}), 1.0)
+    end function
+
+  end class
+
+end namespace

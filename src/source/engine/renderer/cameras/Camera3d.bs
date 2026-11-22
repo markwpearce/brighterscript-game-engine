@@ -1,3 +1,4 @@
+import "../../../math/boundingSphere.bs"
 import "../../../math/math.bs"
 import "../../../math/Matrix44.bs"
 import "../../../math/plane.bs"
@@ -457,6 +458,61 @@ namespace BGE
 
     override function isInView(point as BGE.Math.Vector) as boolean
       return m.isAnyInView([point])
+    end function
+
+    ' Judged against the planes isAnyInView() uses for several points: hidden if the sphere is
+    ' wholly outside one, in view if it's wholly inside them all.
+    override function getSphereInViewVerdict(sphere as BGE.Math.BoundingSphere) as integer
+      normals = m.frustumNormals
+      nearN = normals.near
+      r = sphere.radius
+      rr = r * r
+      cx = sphere.x
+      cy = sphere.y
+      cz = sphere.z
+      inside = true
+      ' near: through the convergence point. Each plane is compared squared, as the normals
+      ' needn't be unit length: wholly out when d < 0 and d^2 > r^2 |n|^2.
+      conv = m.frustrumConvergence
+      nx = nearN.x
+      ny = nearN.y
+      nz = nearN.z ?? 0
+      nn = nx * nx + ny * ny + nz * nz
+      d = (cx - conv.x) * nx + (cy - conv.y) * ny + (cz - (conv.z ?? 0)) * nz
+      if d * d <= rr * nn
+        inside = false
+      else if d < 0
+        return 0
+      end if
+      ' far: the view direction from the camera, out to the draw distance
+      camPos = m.position
+      dx = cx - camPos.x
+      dy = cy - camPos.y
+      dz = cz - (camPos.z ?? 0)
+      reach = r * Sqr(nn)
+      forward = dx * nx + dy * ny + dz * nz
+      drawDistance = m.getCurrentDrawDistance()
+      if forward - reach > drawDistance
+        return 0
+      else if forward + reach > drawDistance
+        inside = false
+      end if
+      ' the sides, through the camera
+      for each n in [normals.top, normals.left, normals.right, normals.bottom]
+        nx = n.x
+        ny = n.y
+        nz = n.z ?? 0
+        d = dx * nx + dy * ny + dz * nz
+        if d * d <= rr * (nx * nx + ny * ny + nz * nz)
+          inside = false
+        else if d < 0
+          return 0
+        end if
+      end for
+      if inside
+        return 1
+      end if
+      return -1
     end function
 
     ' Same arithmetic as distanceFromFrustumSide() for each side, inlined - this runs for
@@ -1296,6 +1352,30 @@ namespace BGE
         end if
       end for
       return m.fadeAlphaForForwardDistance(forwardDistance, distanceScale)
+    end function
+
+    ' The alpha falls with distance, so if the sphere's nearest and farthest reach get the same
+    ' alpha, so does every point in it.
+    override function getDistanceFadeAlphaForSphere(sphere as BGE.Math.BoundingSphere, distanceScale = 1.0 as float) as float
+      if m.drawDistanceFadeFraction <= 0
+        return 1.0
+      end if
+      o = m.orientation
+      if m.pitchMode = CameraPitchMode.shear
+        o = m.getViewForward()
+      end if
+      ox = o.x
+      oy = o.y
+      oz = o.z ?? 0
+      p = m.position
+      centerDistance = (sphere.x - p.x) * ox + (sphere.y - p.y) * oy + (sphere.z - (p.z ?? 0)) * oz
+      ' the orientation needn't be unit length
+      reach = sphere.radius * Sqr(ox * ox + oy * oy + oz * oz)
+      nearAlpha = m.fadeAlphaForForwardDistance(centerDistance - reach, distanceScale)
+      if nearAlpha <> m.fadeAlphaForForwardDistance(centerDistance + reach, distanceScale)
+        return -1.0
+      end if
+      return nearAlpha
     end function
 
     ' `distanceScale` (Drawable.fadeDistanceScale) stretches the band; 0 or less counts as 1, and

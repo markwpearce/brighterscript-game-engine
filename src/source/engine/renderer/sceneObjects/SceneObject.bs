@@ -1,3 +1,4 @@
+import "../../../math/boundingSphere.bs"
 import "../../../math/CornerPoints.bs"
 import "../../../math/Matrix44.bs"
 import "../../../math/vector.bs"
@@ -191,6 +192,9 @@ namespace BGE
 
     ' Bounding points computed for this frame's fade, reused by the frustum check.
     private boundingPointsThisFrame as BGE.Math.Vector[] = invalid
+    ' Likewise getBoundingSphere(), once boundingSphereFound
+    private boundingSphereThisFrame as BGE.Math.BoundingSphere = invalid
+    private boundingSphereFound as boolean = false
 
     private previousTransform = {}
 
@@ -416,6 +420,7 @@ namespace BGE
     ' @param {Camera} cameraObj
     sub update(cameraObj as Camera)
       m.boundingPointsThisFrame = invalid
+      m.boundingSphereFound = false
       ' Drawable/owner/camera helpers are read inline throughout: this runs for every object
       ' every frame, and each call costs several microseconds on device.
       drawable = m.drawable
@@ -457,7 +462,10 @@ namespace BGE
       ' a geometry change can move the depth point (a model's or polygon's centre) in place
       m.depthChangedThisFrame = cameraObj.motionChecker.movedLastFrame or objMovedLastFrame or drawModeChanged or geometryChanged
       if m.depthChangedThisFrame
-        m.depthPosition = m.getPositionForCameraDistance(sceneObjDrawMode)
+        ' the depth point only moves with a recompute: a camera move just changes its distances
+        if forceRecompute or invalid = m.depthPosition
+          m.depthPosition = m.getPositionForCameraDistance(sceneObjDrawMode)
+        end if
         m.negDistanceFromCamera = -cameraObj.distanceFromCameraFront(m.depthPosition)
         if cameraObj.sortsByGroundDistance
           m.negSortDepth = -cameraObj.groundDistanceAhead(m.depthPosition)
@@ -468,8 +476,21 @@ namespace BGE
       ' a re-enabled object missed every update while disabled, and a resize moves its corners
       if m.depthChangedThisFrame or m.isFirstFrameSinceEnabled or cameraObj.farDistanceChangedThisFrame()
         if cameraObj.fadesWithDistance() and m.participatesInDistanceFade()
-          ' nearest bounding point, so a large object near the camera doesn't fade by its far end
-          m.distanceFadeAlpha = cameraObj.getDistanceFadeAlphaForPoints(m.getBoundingPointsThisFrame(cameraObj), m.drawable.fadeDistanceScale)
+          ' A still object is mostly settled by its bounding sphere, wholly inside the fade or
+          ' wholly past the draw distance, without finding its points (#654). A moving one
+          ' would only build a sphere to use once.
+          alpha = -1.0
+          if not forceRecompute
+            sphere = m.getBoundingSphereThisFrame()
+            if invalid <> sphere
+              alpha = cameraObj.getDistanceFadeAlphaForSphere(sphere, m.drawable.fadeDistanceScale)
+            end if
+          end if
+          if alpha < 0
+            ' nearest bounding point, so a large object near the camera doesn't fade by its far end
+            alpha = cameraObj.getDistanceFadeAlphaForPoints(m.getBoundingPointsThisFrame(cameraObj), m.drawable.fadeDistanceScale)
+          end if
+          m.distanceFadeAlpha = alpha
         else
           m.distanceFadeAlpha = 1.0
         end if
@@ -641,6 +662,17 @@ namespace BGE
         m.boundingPointsThisFrame = m.getBoundingPoints(cameraObj)
       end if
       return m.boundingPointsThisFrame
+    end function
+
+    ' getBoundingSphere(), found at most once per frame (update() clears it)
+    '
+    ' @return {BGE.Math.BoundingSphere}
+    function getBoundingSphereThisFrame() as BGE.Math.BoundingSphere
+      if not m.boundingSphereFound
+        m.boundingSphereThisFrame = m.getBoundingSphere()
+        m.boundingSphereFound = true
+      end if
+      return m.boundingSphereThisFrame
     end function
 
     ' The world points of each box its fog silhouette is drawn as (see `BGE.Fog`): one box, its
@@ -1094,6 +1126,16 @@ namespace BGE
           return true
         end if
       end if
+      ' a still object's sphere mostly settles it without its points (#654)
+      if not m.drawable.movedLastFrame(true)
+        sphere = m.getBoundingSphereThisFrame()
+        if invalid <> sphere
+          verdict = cameraObj.getSphereInViewVerdict(sphere)
+          if verdict >= 0
+            return verdict = 1
+          end if
+        end if
+      end if
       ' getBoundingPoints() gives every corner for billboard types (Image, Rectangle, Circle,
       ' Text) rather than just the anchor. Camera2d then tests those corners' bounding box
       ' against the view, so an object bigger than the view isn't culled once all of its
@@ -1127,6 +1169,15 @@ namespace BGE
     ' @return {BGE.Math.Vector[]}
     function getBoundingPoints(cameraObj as Camera) as BGE.Math.Vector[]
       return m.getPositionsForFrustumCheck(m.getActualDrawMode(cameraObj))
+    end function
+
+    ' A sphere holding every getBoundingPoints() point, or invalid (the default) for a type
+    ' that can't keep one more cheaply than finding the points. Lets update() and the frustum
+    ' check settle a still object from its centre and radius while the camera moves.
+    '
+    ' @return {BGE.Math.BoundingSphere}
+    function getBoundingSphere() as BGE.Math.BoundingSphere
+      return invalid
     end function
 
     ' Whether this object is worth including in overlap-cluster detection
