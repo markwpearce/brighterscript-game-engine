@@ -41,6 +41,21 @@ function writeWebBundle({ config, webDir, packageDir = defaultPackageDir }) {
     copy(path.join(engine, 'lib', 'brs.worker.js'), webDir, 'lib/brs.worker.js');
     copy(path.join(engine, 'assets', 'common.zip'), webDir, 'assets/common.zip');
 
+    if (config.sceneGraph) {
+        let sceneGraph;
+        try {
+            sceneGraph = packageDir('brs-scenegraph');
+        } catch (e) {
+            if (e.code !== 'MODULE_NOT_FOUND') {
+                throw e;
+            }
+            throw new Error('sceneGraph is on but brs-scenegraph is not installed: npm install --save-dev brs-scenegraph');
+        }
+        copy(path.join(sceneGraph, 'lib', 'brs-sg.js'), webDir, 'lib/brs-sg.js');
+        // brs-scenegraph's common.zip is a superset of the core one (adds SceneGraph fonts/resources).
+        copy(path.join(sceneGraph, 'assets', 'common.zip'), webDir, 'assets/common.zip');
+    }
+
     copy(config.zip, webDir, 'game.zip');
     copy(path.join(TEMPLATE_DIR, 'runtime.js'), webDir, 'runtime.js');
 

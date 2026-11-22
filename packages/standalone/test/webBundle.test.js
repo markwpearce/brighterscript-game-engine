@@ -59,3 +59,36 @@ test('default packageDir finds the real brs-engine', async () => {
     writeWebBundle({ config, webDir });
     assert.ok(fs.statSync(path.join(webDir, 'lib', 'brs.worker.js')).size > 1000);
 });
+
+function fakeSceneGraphDir() {
+    const dir = tmpDir();
+    fs.mkdirSync(path.join(dir, 'lib'));
+    fs.mkdirSync(path.join(dir, 'assets'));
+    fs.writeFileSync(path.join(dir, 'lib', 'brs-sg.js'), 'sg');
+    fs.writeFileSync(path.join(dir, 'assets', 'common.zip'), 'sg-common');
+    return dir;
+}
+
+test('sceneGraph adds brs-sg.js and swaps in its common.zip', async () => {
+    const { config, webDir } = await setup({ sceneGraph: true });
+    const engine = fakeEngineDir();
+    const sg = fakeSceneGraphDir();
+    const files = writeWebBundle({ config, webDir, packageDir: (name) => (name === 'brs-engine' ? engine : sg) });
+    assert.ok(files.includes('lib/brs-sg.js'));
+    assert.equal(fs.readFileSync(path.join(webDir, 'assets', 'common.zip'), 'utf8'), 'sg-common');
+    assert.match(fs.readFileSync(path.join(webDir, 'index.html'), 'utf8'), /\{"sceneGraph":true\}/);
+});
+
+test('sceneGraph without brs-scenegraph installed gives an install hint', async () => {
+    const { config, webDir } = await setup({ sceneGraph: true });
+    const engine = fakeEngineDir();
+    const packageDir = (name) => {
+        if (name === 'brs-engine') {
+            return engine;
+        }
+        const e = new Error(`Cannot find module '${name}/package.json'`);
+        e.code = 'MODULE_NOT_FOUND';
+        throw e;
+    };
+    assert.throws(() => writeWebBundle({ config, webDir, packageDir }), /npm install --save-dev brs-scenegraph/);
+});
