@@ -227,6 +227,8 @@ This is a static type-checker false positive only - type annotations aren't enfo
 
 Documentation can be found [here](https://markwpearce.github.io/brighterscript-game-engine)
 
+To ship a game as a web page or desktop app without a Roku, see the [Standalone Builds guide](https://markwpearce.github.io/brighterscript-game-engine/standalone-builds).
+
 ## Acknowledgements
 
 This project was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into BrighterScript. This work owes a lot to this original project!
