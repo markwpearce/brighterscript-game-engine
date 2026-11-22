@@ -25,7 +25,7 @@ test('writes package.json, bge-app.json, main/preload and copies web/', () => {
     const appDir = path.join(tmpDir(), 'electron-app');
     writeElectronApp({ config: CONFIG, webDir: webDir(), appDir });
     const pkg = JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8'));
-    assert.deepEqual(pkg, { name: 'com.bge.pong', productName: 'Pong', version: '1.2.3', description: 'Pong', main: 'main.js' });
+    assert.deepEqual(pkg, { name: 'com.bge.pong', productName: 'Pong', version: '1.2.3', description: 'Pong', author: 'Pong', main: 'main.js' });
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(appDir, 'bge-app.json'), 'utf8')), { title: 'Pong', window: CONFIG.window });
     for (const f of ['main.js', 'preload.js', 'web/index.html', 'web/lib/brs.api.js']) {
         assert.ok(fs.existsSync(path.join(appDir, ...f.split('/'))), f);
@@ -49,6 +49,19 @@ test('resolveRequest returns null for malformed URLs and NUL bytes', () => {
     const root = path.join(appDir, 'web');
     assert.equal(resolveRequest(root, 'app://game/%zz'), null);
     assert.equal(resolveRequest(root, 'app://game/a%00b'), null);
+});
+
+test('package.json name is the lowercased appId', () => {
+    const appDir = path.join(tmpDir(), 'electron-app');
+    writeElectronApp({ config: { ...CONFIG, appId: 'com.Example.MyGame' }, webDir: webDir(), appDir });
+    assert.equal(JSON.parse(fs.readFileSync(path.join(appDir, 'package.json'), 'utf8')).name, 'com.example.mygame');
+});
+
+test('main.js blocks new windows, foreign navigation and quit from other origins', () => {
+    const main = fs.readFileSync(path.join(__dirname, '..', 'template', 'electron', 'main.js'), 'utf8');
+    assert.match(main, /setWindowOpenHandler\(\(\) => \(\{ action: 'deny' \}\)\)/);
+    assert.match(main, /'will-navigate'[\s\S]*startsWith\('app:\/\/game\/'\)[\s\S]*preventDefault\(\)/);
+    assert.match(main, /ipcMain\.on\('bge:quit', \(event\) =>[\s\S]*senderFrame[\s\S]*startsWith\('app:\/\/game\/'\)/);
 });
 
 test('main.js and preload.js keep the security settings', () => {

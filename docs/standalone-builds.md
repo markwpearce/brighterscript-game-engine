@@ -89,7 +89,7 @@ Open the first time. On Windows, choose More info, then Run anyway, on the Smart
 The page shows `Loading…` while the game starts. If the game ends normally (for
 example it calls `game.End()` or the player presses Back), the web page shows `Game ended`
 with a Restart button and the desktop app quits. Any other exit reason shows
-`Game crashed (<reason>)` on screen with a Restart button, and the desktop window stays open.
+`Error: Game crashed (<reason>)` on screen with a Restart button, and the desktop window stays open.
 
 ## Troubleshooting
 

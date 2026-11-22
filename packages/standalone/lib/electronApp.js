@@ -12,10 +12,11 @@ function writeElectronApp({ config, webDir, appDir }) {
     fs.rmSync(appDir, { recursive: true, force: true });
     fs.mkdirSync(appDir, { recursive: true });
     writeJson(path.join(appDir, 'package.json'), {
-        name: config.appId,
+        name: config.appId.toLowerCase(),
         productName: config.productName,
         version: config.version,
         description: config.productName,
+        author: config.productName,
         main: 'main.js'
     });
     writeJson(path.join(appDir, 'bge-app.json'), { title: config.productName, window: config.window });

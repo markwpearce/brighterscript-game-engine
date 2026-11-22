@@ -63,7 +63,12 @@ function start() {
     app.whenReady().then(() => {
         protocol.handle('app', (request) => handleRequest(webRoot, request.url, (fileUrl) => net.fetch(fileUrl)));
 
-        ipcMain.on('bge:quit', () => app.quit());
+        ipcMain.on('bge:quit', (event) => {
+            const url = event.senderFrame ? event.senderFrame.url : '';
+            if (url.startsWith('app://game/')) {
+                app.quit();
+            }
+        });
         if (process.platform !== 'darwin') {
             Menu.setApplicationMenu(null);
         }
@@ -81,6 +86,12 @@ function start() {
                 contextIsolation: true,
                 nodeIntegration: false,
                 sandbox: true
+            }
+        });
+        win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+        win.webContents.on('will-navigate', (event, url) => {
+            if (!url.startsWith('app://game/')) {
+                event.preventDefault();
             }
         });
         win.webContents.on('before-input-event', (event, input) => {
