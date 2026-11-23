@@ -1,0 +1,147 @@
+import "../../../math/math.bs"
+import "../../../math/vector.bs"
+import "../../GameEntity.bs"
+import "../../drawables/DrawableVoxelTerrain.bs"
+import "Camera3d.bs"
+import "FollowCamera.bs"
+
+namespace BGE
+
+  ' Settings for BGE.ChaseCamera; any left out keep the class defaults.
+  interface ChaseCameraOptions extends roAssociativeArray
+    optional distance as float
+    optional height as float
+    optional lookDown as float
+    optional followRate as float
+    optional rollRate as float
+    optional pitchFollow as float
+    optional maxPitch as float
+    optional rollFollow as float
+    optional terrain as BGE.DrawableVoxelTerrain
+    optional groundClearance as float
+    optional heading as float
+  end interface
+
+  ' A chase camera for vehicles that pitch and roll (planes, spaceships, boats): it sits behind
+  ' a target entity along its heading and pitch, eased so turns swing the view round rather than
+  ' snapping it, and rolls with the target's bank. Unlike BGE.OrbitCamera there's no look input:
+  ' the target's own attitude, passed to update() each frame, steers it.
+  '
+  ' It's a BGE.FollowCamera, so a scene can swap it for another rig (e.g. a BGE.OrbitCamera).
+  ' Give it a terrain to keep the camera above the ground. Call update() after everything has
+  ' moved, e.g. in the scene's onPostUpdate():
+  '
+  '   m.chase = new BGE.ChaseCamera(camera, plane, {heading: plane.heading, terrain: m.terrain})
+  '   m.chase.update(dt, plane.heading, plane.pitch, plane.bank)
+  class ChaseCamera
+
+    camera as BGE.Camera3d
+    target as BGE.GameEntity
+
+    ' Distance behind the target, in world units, measured along the camera's eased heading and
+    ' pitch (so it climbs and dives with the target; OrbitCamera's distance is on the ground)
+    distance as float = 85.0
+    ' Raised this far above that point, straight up in world space
+    height as float = 18.0
+    ' Radians the camera looks below its own pitch, so the target sits low with more to see ahead
+    lookDown as float = 0.12
+    ' How quickly heading and pitch catch up with the target, 1/seconds (higher is tighter)
+    followRate as float = 4.0
+    ' How quickly the roll catches up with the target's bank, 1/seconds
+    rollRate as float = 5.0
+    ' Fraction of the target's pitch the camera takes up
+    pitchFollow as float = 0.8
+    ' The camera's pitch is kept within +/- this, radians
+    maxPitch as float = 0.4363
+    ' Fraction of the target's bank the camera rolls by; under 1 keeps the target looking banked
+    rollFollow as float = 0.8
+    ' Optional: the camera stays groundClearance above it
+    terrain as BGE.DrawableVoxelTerrain = invalid
+    groundClearance as float = 8.0
+
+    ' The eased attitude the camera is following: heading (0 faces -z, clockwise seen from above),
+    ' pitch (radians, positive up) and roll (radians, as the target's bank)
+    heading as float = 0
+    pitch as float = 0
+    roll as float = 0
+
+    ' Places the camera straight away, behind the target along options.heading (default the
+    ' target's rotation.y), level and unrolled.
+    '
+    ' @param {BGE.Camera3d} camera - the camera to move
+    ' @param {BGE.GameEntity} target - the entity to follow
+    ' @param {BGE.ChaseCameraOptions} [options={}] - overrides for the public fields
+    sub new(camera as BGE.Camera3d, target as BGE.GameEntity, options = {} as BGE.ChaseCameraOptions)
+      m.camera = camera
+      m.target = target
+      m.heading = target.rotation.y
+      ' bs:disable-next-line: 1140
+      m.append(options)
+      m.apply()
+    end sub
+
+    ' Puts the camera straight behind the target at `heading`, level and unrolled, with no ease,
+    ' e.g. when the target respawns.
+    '
+    ' @param {float} heading - radians; 0 faces -z, increasing turns clockwise seen from above
+    sub snapBehind(heading as float)
+      m.heading = BGE.Math.wrapAngle(heading)
+      m.pitch = 0
+      m.roll = 0
+      m.apply()
+    end sub
+
+    ' Eases toward the target's attitude, then moves the camera.
+    '
+    ' @param {float} dt - seconds since last frame
+    ' @param {float} heading - the target's heading, radians; 0 faces -z, increasing turns clockwise seen from above
+    ' @param {float} [pitch=0] - the target's pitch, radians, positive nose up
+    ' @param {float} [bank=0] - the target's bank, radians; becomes the camera's rollDegrees (times rollFollow)
+    sub update(dt as float, heading as float, pitch = 0 as float, bank = 0 as float)
+      ease = 1 - Exp(-dt * m.followRate)
+      m.heading = BGE.Math.wrapAngle(m.heading + BGE.Math.wrapAngle(heading - m.heading) * ease)
+      targetPitch = BGE.Math.Clamp(pitch * m.pitchFollow, -m.maxPitch, m.maxPitch)
+      m.pitch += (targetPitch - m.pitch) * ease
+      m.roll += (bank * m.rollFollow - m.roll) * (1 - Exp(-dt * m.rollRate))
+      m.apply()
+    end sub
+
+    ' update() with a BGE.FollowCameraInput: reads `heading` (default the target's rotation.y),
+    ' `pitch` and `bank` (default 0).
+    '
+    ' @param {float} dt - seconds since last frame
+    ' @param {BGE.FollowCameraInput} input
+    sub follow(dt as float, input as BGE.FollowCameraInput)
+      m.update(dt, input.heading ?? m.target.rotation.y, input.pitch ?? 0, input.bank ?? 0)
+    end sub
+
+    ' The point the camera follows: the target's position. The camera sits `height` above the
+    ' line behind it and looks `lookDown` below that line, so the target sits a little low on screen.
+    '
+    ' @return {BGE.Math.Vector}
+    function getLookAt() as BGE.Math.Vector
+      p = m.target.position
+      return BGE.Math.VectorOps.create(p.x, p.y, p.z)
+    end function
+
+    protected sub apply()
+      sinHeading = Sin(m.heading)
+      cosHeading = Cos(m.heading)
+      cosPitch = Cos(m.pitch)
+      p = m.target.position
+      camX = p.x - sinHeading * cosPitch * m.distance
+      camY = p.y - Sin(m.pitch) * m.distance + m.height
+      camZ = p.z + cosHeading * cosPitch * m.distance
+      if invalid <> m.terrain
+        camY = BGE.Math.Max(camY, m.terrain.heightAt(camX, camZ) + m.groundClearance)
+      end if
+      lookPitch = m.pitch - m.lookDown
+      cosLook = Cos(lookPitch)
+      m.camera.position = BGE.Math.VectorOps.create(camX, camY, camZ)
+      m.camera.orientation = BGE.Math.VectorOps.create(sinHeading * cosLook, Sin(lookPitch), -cosHeading * cosLook)
+      m.camera.rollDegrees = BGE.Math.RadiansToDegrees(m.roll)
+    end sub
+
+  end class
+
+end namespace

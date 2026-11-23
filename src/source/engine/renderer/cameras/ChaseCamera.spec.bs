@@ -1,0 +1,173 @@
+namespace tests
+
+  @suite("BGE.ChaseCamera")
+  class ChaseCameraTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+    camera as BGE.Camera3d
+    target as BGE.GameEntity
+
+    protected override function beforeEach()
+      m.game = new BGE.Game(320, 240)
+      m.camera = new BGE.Camera3d()
+      m.target = m.game.addEntity(new BGE.GameEntity(m.game, {name: "Target"}))
+    end function
+
+    private function assertNear(actual as float, expected as float, message = "" as string)
+      m.assertTrue(Abs(actual - expected) < 0.01, `${message} expected ${expected}, got ${actual}`)
+    end function
+
+    @describe("new")
+
+    @it("places the camera behind the target's rotation.y straight away")
+    function _()
+      m.target.rotation.y = BGE.Math.HALF_PI
+      chase = new BGE.ChaseCamera(m.camera, m.target, {distance: 100, height: 0})
+      m.assertNear(chase.heading, BGE.Math.HALF_PI, "heading")
+      m.assertNear(m.camera.position.x, -100, "x")
+      m.assertNear(m.camera.position.z, 0, "z")
+    end function
+
+    @it("takes a heading option instead")
+    function _()
+      m.target.rotation.y = BGE.Math.HALF_PI
+      chase = new BGE.ChaseCamera(m.camera, m.target, {distance: 100, height: 0, heading: 0})
+      m.assertNear(chase.heading, 0, "heading")
+      m.assertNear(m.camera.position.z, 100, "z")
+    end function
+
+    @describe("snapBehind")
+
+    @it("puts the camera behind and above the target, looking a little down")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target, {distance: 100, height: 20, lookDown: 0.1})
+      chase.snapBehind(0)
+      ' Heading 0 faces -z, so behind is +z
+      m.assertNear(m.camera.position.x, 0, "x")
+      m.assertNear(m.camera.position.y, 20, "y")
+      m.assertNear(m.camera.position.z, 100, "z")
+      m.assertNear(m.camera.orientation.x, 0, "look x")
+      m.assertNear(m.camera.orientation.y, Sin(-0.1), "look y")
+      m.assertNear(m.camera.orientation.z, -Cos(-0.1), "look z")
+      m.assertNear(m.camera.rollDegrees, 0, "roll")
+    end function
+
+    @it("follows the heading convention: a quarter turn faces +x")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target, {distance: 100, height: 0, lookDown: 0})
+      chase.snapBehind(BGE.Math.HALF_PI)
+      m.assertNear(m.camera.position.x, -100, "x")
+      m.assertNear(m.camera.position.z, 0, "z")
+      m.assertNear(m.camera.orientation.x, 1, "look x")
+    end function
+
+    @describe("update")
+
+    @it("eases the heading toward the target's rather than snapping")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target, {followRate: 4})
+      chase.snapBehind(0)
+      chase.update(0.1, 1)
+      m.assertNear(chase.heading, 1 - Exp(-0.4), "heading")
+      for i = 1 to 100
+        chase.update(0.1, 1)
+      end for
+      m.assertNear(chase.heading, 1, "settled heading")
+    end function
+
+    @it("turns the short way across the wrap")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target)
+      chase.snapBehind(BGE.Math.PI - 0.1)
+      for i = 1 to 100
+        chase.update(0.1, -BGE.Math.PI + 0.1)
+      end for
+      m.assertNear(Abs(chase.heading), BGE.Math.PI - 0.1, "heading")
+    end function
+
+    @it("takes up pitchFollow of the pitch, up to maxPitch")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target, {pitchFollow: 0.5, maxPitch: 0.3})
+      chase.snapBehind(0)
+      for i = 1 to 100
+        chase.update(0.1, 0, 0.4)
+      end for
+      m.assertNear(chase.pitch, 0.2, "half the pitch")
+      for i = 1 to 100
+        chase.update(0.1, 0, 1.2)
+      end for
+      m.assertNear(chase.pitch, 0.3, "capped")
+    end function
+
+    @it("rolls by rollFollow of the bank")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target, {rollFollow: 0.5})
+      chase.snapBehind(0)
+      for i = 1 to 100
+        chase.update(0.1, 0, 0, 0.6)
+      end for
+      m.assertNear(m.camera.rollDegrees, BGE.Math.RadiansToDegrees(0.3), "roll")
+    end function
+
+    @it("stays groundClearance above the terrain under it")
+    function _()
+      ' a 64x64 map at height 10 (x heightScale 2 = 20 world units), centred on the target
+      heights = CreateObject("roArray", 64 * 64, false)
+      colors = CreateObject("roArray", 64 * 64, false)
+      for i = 0 to 64 * 64 - 1
+        heights[i] = 10
+        colors[i] = 0
+      end for
+      map = BGE.VoxelMaps.fromArrays(64, heights, colors, [&h00FF00])
+      owner = new BGE.GameEntity(m.game, {name: "terrain"})
+      owner.position = BGE.Math.VectorOps.create(-512, 0, -512)
+      terrain = new BGE.DrawableVoxelTerrain(owner, map, {cellSize: 16, heightScale: 2})
+      chase = new BGE.ChaseCamera(m.camera, m.target, {distance: 100, height: 0, terrain: terrain, groundClearance: 8, heading: 0})
+      m.assertNear(m.camera.position.y, 28, "lifted off the ground")
+      m.target.position.y = 200
+      chase.snapBehind(0)
+      m.assertNear(m.camera.position.y, 200, "left alone when clear")
+    end function
+
+    @describe("follow")
+
+    @it("reads heading, pitch and bank from the input")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target, {pitchFollow: 1, rollFollow: 1})
+      for i = 1 to 100
+        chase.follow(0.1, {heading: 1, pitch: 0.2, bank: 0.3})
+      end for
+      m.assertNear(chase.heading, 1, "heading")
+      m.assertNear(chase.pitch, 0.2, "pitch")
+      m.assertNear(chase.roll, 0.3, "roll")
+    end function
+
+    @it("defaults the heading to the target's rotation.y, pitch and bank to level")
+    function _()
+      chase = new BGE.ChaseCamera(m.camera, m.target)
+      chase.pitch = 0.2
+      m.target.rotation.y = 0.5
+      for i = 1 to 100
+        chase.follow(0.1, {})
+      end for
+      m.assertNear(chase.heading, 0.5, "heading")
+      m.assertNear(chase.pitch, 0, "pitch")
+    end function
+
+    @describe("getLookAt")
+
+    @it("is the target's position, as a copy")
+    function _()
+      m.target.position = BGE.Math.VectorOps.create(1, 2, 3)
+      chase = new BGE.ChaseCamera(m.camera, m.target)
+      lookAt = chase.getLookAt()
+      m.assertNear(lookAt.x, 1, "x")
+      m.assertNear(lookAt.y, 2, "y")
+      m.assertNear(lookAt.z, 3, "z")
+      lookAt.x = 50
+      m.assertNear(m.target.position.x, 1, "target untouched")
+    end function
+
+  end class
+
+end namespace
