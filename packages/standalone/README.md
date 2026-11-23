@@ -37,4 +37,4 @@ Optional `bge-standalone.json` in the folder you run from:
 
 Full guide: https://markwpearce.github.io/brighterscript-game-engine/standalone-builds
 
-Tested with brighterscript-game-engine 0.8.0, brs-engine 2.6.2 and Electron 45.3.2.
+Tested with brighterscript-game-engine 0.8.0, brs-engine 2.7.0 and Electron 45.3.2.
