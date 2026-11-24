@@ -53,6 +53,8 @@ loader.loadBitmap("mapThumb", "pkg:/images/worldMap.png", {width: 320, height: 1
 loader.loadBitmap("hero", "pkg:/images/hero.png", {width: 64, height: 64, smooth: false})
 ```
 
+An animated GIF or WebP loads only its first frame. For animation, use a sprite sheet with `AnimatedImage` (see [Sprite atlases](#sprite-atlases)). Roku's native `roAnimatedImage` plays animated WebP and Lottie, but the engine doesn't use it (#664). It can't play GIFs. It doesn't exist on older Rokus. You can't make an `roRegion` from it, and `DrawScaledObject` with a colour and `DrawTransformedObject` reject it, so it misses most of what `Image` does. Each copy also decodes on its own and gets slow when there are many. A sprite sheet costs the same to draw. rendererTest's `animated-image-probe` and `animated-image-benchmark` demos show this.
+
 Give both `width` and `height`. `game.unloadBitmap(name)` frees the texture manager's copy too, so free a scene's big images when you leave it (or let the scene own them, below).
 
 > Before Roku OS 16, you can't draw into a bitmap from the texture manager. If you'll draw into a loaded image, pass `drawable: true`. That image is decoded the slower way, in a single frame. Drawing *from* a loaded bitmap (regions, sprites, `DrawObject`) works either way.
