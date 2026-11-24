@@ -893,7 +893,10 @@ occlusion and impostor counts to the line.
 - `Game.log(message, level)` records a message (`BGE.Debug.LogLevel.info`/`warning`/`error`,
   defaulting to `info`) that's both printed and kept in a short history `BGE.Debug.LogDisplay`
   reads from - prefer it over a raw `print` in your own game code so failures are visible
-  on-screen, not just over telnet.
+  on-screen, not just over telnet. Code with no `Game` to hand can call
+  `BGE.Debug.logMessage(message, level)`, which goes through the most recently created `Game`
+  (or is just printed on a thread with none, e.g. a Task). The engine's own warnings and errors
+  use it too.
 - `examples/rendererTest` is a menu-driven suite of `Renderer` demos built *without* `Game`/`GameScene`
   at all - useful for trying out a specific rendering capability (draw modes, texture columns,
   camera projection) in isolation before wiring it into a real game.
