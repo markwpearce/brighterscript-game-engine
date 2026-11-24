@@ -1,0 +1,267 @@
+' Times the native roAnimatedImage against a sprite sheet of the same 12-frame, 128px spinner
+' (issue #664). Each case draws `count` copies per frame in a grid, every copy a frame apart:
+'
+' - sheet: one roBitmap sheet, 12 roRegions, each copy picks its region from the clock (what
+'   BGE.AnimatedImage does)
+' - webp-shared / lottie-shared: one manual-clock roAnimatedImage, Update() once a frame,
+'   drawn `count` times (every copy shows the same frame)
+' - webp-each: one manual-clock roAnimatedImage per copy, each Update()d every frame
+'' - webp-baked: one manual-clock roAnimatedImage drawn into a 128px roBitmap each frame, and
+'   that bitmap drawn `count` times (the route to the draw calls that reject roAnimatedImage)
+' - `-scaled` variants draw at 1.5x with DrawScaledObject
+'
+' Reports CPU µs for the Update() calls and the draw calls, the SwapBuffers() ms (where queued
+' GPU work lands) and whole-frame ms. Launch params: runid=, counts=1,20,60 (comma list),
+' cases=sheet,webp-shared,... warmup=30 samples=120.
+class AnimatedImageBenchmark extends RendererTest
+
+  private counts as integer[] = [1, 20, 60]
+  private caseNames as string[] = ["sheet", "sheet-scaled", "webp-shared", "webp-shared-scaled", "webp-baked", "webp-baked-scaled", "webp-each", "lottie-shared"]
+  private warmupFrames = 30
+  private sampleFrames = 120
+
+  private trials as object = []
+  private trialIndex = -1
+  private trial as object = invalid
+  private results as string[] = []
+  private done = false
+
+  private port as roMessagePort
+  private sheetRegions as roRegion[] = []
+  private images as object = []
+  private pendingReady = 0
+  private loadTimer as roTimespan
+  private timer as roTimespan
+  private clockUs = 0
+  private font as roFont
+  private baked as roBitmap
+
+  sub new()
+    super("roAnimatedImage Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(16, false, false)
+    m.port = CreateObject("roMessagePort")
+    m.loadTimer = CreateObject("roTimespan")
+    m.timer = CreateObject("roTimespan")
+    params = m.launchParams
+    if params.counts <> invalid
+      m.counts = []
+      for each part in params.counts.split(",")
+        m.counts.push(part.toInt())
+      end for
+    end if
+    if params.cases <> invalid
+      m.caseNames = params.cases.split(",")
+    end if
+    if params.warmup <> invalid
+      m.warmupFrames = params.warmup.toInt()
+    end if
+    if params.samples <> invalid
+      m.sampleFrames = params.samples.toInt()
+    end if
+    deviceInfo = CreateObject("roDeviceInfo")
+    print "[AnimatedImageBenchmark] start "; params.runid; " model="; deviceInfo.GetModel(); " os="; FormatJson(deviceInfo.GetOSVersion())
+
+    m.baked = CreateObject("roBitmap", {width: 128, height: 128, AlphaEnable: true})
+    sheet = CreateObject("roBitmap", "pkg:/images/animated/spin-sheet.png")
+    for i = 0 to 11
+      m.sheetRegions.push(CreateObject("roRegion", sheet, i * 128, 0, 128, 128))
+    end for
+    for each caseName in m.caseNames
+      for each count in m.counts
+        m.trials.push({name: caseName, count: count})
+      end for
+    end for
+    m.startNextTrial()
+  end sub
+
+  private sub startNextTrial()
+    m.images = []
+    m.trialIndex++
+    if m.trialIndex >= m.trials.count()
+      m.trial = invalid
+      m.done = true
+      print "[AnimatedImageBenchmark] done "; m.launchParams.runid
+      return
+    end if
+    trial = m.trials[m.trialIndex]
+    trial.frame = 0
+    trial.updateUs = 0
+    trial.drawUs = 0
+    trial.swapMs = 0
+    trial.frameMs = 0.0
+    trial.worstFrameMs = 0.0
+    trial.loadMs = 0
+    trial.failed = ""
+    trial.scale = 1.0
+    if trial.name.Instr("-scaled") >= 0
+      trial.scale = 1.5
+    end if
+    m.trial = trial
+    m.pendingReady = 0
+    m.loadTimer.Mark()
+    if trial.name.Instr("sheet") = 0
+      return
+    end if
+    uri = "pkg:/images/animated/spin.webp"
+    if trial.name.Instr("lottie") = 0
+      uri = "pkg:/images/animated/spin.json"
+    end if
+    instances = 1
+    if trial.name.Instr("-each") >= 0
+      instances = trial.count
+    end if
+    for i = 1 to instances
+      image = CreateObject("roAnimatedImage")
+      if image = invalid
+        trial.failed = "unsupported"
+        return
+      end if
+      image.SetMessagePort(m.port)
+      image.SetContent({uri: uri, animationStrategy: "manual"})
+      image.SetTargetState("loop")
+      m.images.push(image)
+      m.pendingReady++
+    end for
+  end sub
+
+  override sub update(dt as float)
+    trial = m.trial
+    if trial = invalid
+      return
+    end if
+    msg = m.port.GetMessage()
+    while msg <> invalid
+      if type(msg) = "roAnimatedImageEvent"
+        m.pendingReady--
+        if msg.GetMessage() <> "ready"
+          trial.failed = msg.GetMessage()
+        end if
+        if m.pendingReady = 0
+          trial.loadMs = m.loadTimer.TotalMilliseconds()
+          for each image in m.images
+            image.SetTargetState("loop")
+          end for
+          ' stagger the per-copy instances a frame (100ms) apart, as the sheet copies are
+          for i = 0 to m.images.count() - 1
+            m.images[i].Update(i * 100000)
+          end for
+        end if
+      end if
+      msg = m.port.GetMessage()
+    end while
+    if trial.failed <> ""
+      m.record()
+      return
+    end if
+    if m.pendingReady > 0
+      return
+    end if
+
+    trial.frame++
+    if trial.frame > m.warmupFrames
+      frameMs = dt * 1000
+      trial.frameMs += frameMs
+      trial.swapMs += m.lastSwapMs
+      if frameMs > trial.worstFrameMs
+        trial.worstFrameMs = frameMs
+      end if
+    end if
+    if trial.frame > m.warmupFrames + m.sampleFrames
+      m.record()
+      return
+    end if
+
+    dtUs = Int(dt * 1000000)
+    m.timer.Mark()
+    m.clockUs += dtUs
+    for each image in m.images
+      image.Update(dtUs)
+    end for
+    if trial.frame > m.warmupFrames
+      trial.updateUs += m.timer.TotalMicroseconds()
+    end if
+  end sub
+
+  private sub record()
+    trial = m.trial
+    samples = trial.frame - m.warmupFrames - 1
+    line = trial.name + " x" + trial.count.toStr() + ": "
+    if trial.failed <> ""
+      line += "FAILED " + trial.failed
+    else if samples > 0
+      line += "update " + Int(trial.updateUs / samples).toStr() + "us, draw " + Int(trial.drawUs / samples).toStr() + "us, swap " + Str(Int(trial.swapMs * 10 / samples) / 10).Trim() + "ms, frame " + Str(Int(trial.frameMs * 10 / samples) / 10).Trim() + "ms (worst " + Int(trial.worstFrameMs).toStr() + "), load " + trial.loadMs.toStr() + "ms"
+    end if
+    print "[AnimatedImageBenchmark] "; m.launchParams.runid; " "; line
+    m.results.push(line)
+    m.startNextTrial()
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    screen = m.screenRef
+    screen.Clear(&h202030FF)
+    trial = m.trial
+    if trial <> invalid and trial.failed = "" and m.pendingReady = 0 and trial.frame > 0
+      m.timer.Mark()
+      m.drawCopies(screen, trial)
+      if trial.frame > m.warmupFrames
+        trial.drawUs += m.timer.TotalMicroseconds()
+      end if
+    end if
+    status = "Done"
+    if not m.done
+      status = "Trial " + (m.trialIndex + 1).toStr() + "/" + m.trials.count().toStr()
+    end if
+    screen.DrawRect(120, 520, 1040, 30 + m.results.count() * 20, &h000000C0)
+    renderer.drawText(status, 140, 525, BGE.Colors.White, m.font)
+    y = 548
+    for each line in m.results
+      renderer.drawText(line, 140, y, BGE.Colors.Lime, m.font)
+      y += 20
+    end for
+  end sub
+
+  private sub drawCopies(screen as roScreen, trial as object)
+    count = trial.count
+    scale = trial.scale
+    isSheet = trial.name.Instr("sheet") = 0
+    isEach = trial.name.Instr("-each") >= 0
+    isBaked = trial.name.Instr("-baked") >= 0
+    ' 12 frames at 100ms each
+    baseIndex = Int(m.clockUs / 100000) mod 12
+    shared = invalid
+    if not isSheet and not isEach
+      shared = m.images[0]
+    end if
+    if isBaked
+      m.baked.Clear(&h00000000)
+      m.baked.DrawObject(0, 0, shared)
+      shared = m.baked
+    end if
+    for i = 0 to count - 1
+      x = 140 + (i mod 15) * 66
+      ' wrapped onto 4 rows so heavy counts stay on screen (overlapping)
+      y = 80 + (Int(i / 15) mod 4) * 100
+      if isSheet
+        source = m.sheetRegions[(baseIndex + i) mod 12]
+      else if isEach
+        source = m.images[i]
+      else
+        source = shared
+      end if
+      if scale = 1.0
+        screen.DrawObject(x, y, source)
+      else
+        screen.DrawScaledObject(x, y, scale, scale, source)
+      end if
+    end for
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    m.images = []
+    m.trial = invalid
+  end sub
+
+end class

@@ -1,0 +1,239 @@
+' Shows what the native roAnimatedImage can do on this device (issue #664). Row 1 loads the
+' same 12-frame, 128px spinner as animated WebP, GIF and Lottie (auto clock), and as WebP on
+' the manual clock (`animationStrategy: "manual"`, advanced with Update() from this demo's dt).
+' The rows below try every native draw call the engine uses on the manual WebP (green: worked,
+' red: threw or failed), plus the GIF loaded as a plain roBitmap.
+'
+' Two more manual instances play once in 10ms Update() steps to find the loop length. On a
+' Roku (OS 16) the auto-clock images report ready but draw nothing, and Update() doesn't
+' decode synchronously, so the stepping never finds the real length. brs-node does both.
+'
+' OK pauses the manual clock (the auto ones should keep spinning). Capabilities and load
+' times are printed to the console as "[AnimatedImageProbe]" lines.
+class AnimatedImageProbe extends RendererTest
+
+  private port as roMessagePort
+  private entries as object = []
+  private manual as object = invalid
+  private loadTimer as roTimespan
+  private offscreen as roBitmap
+  private manualRegion as object = invalid
+  private opsLogged = false
+  private durationProbes as object = []
+  private offscreen2 as roBitmap
+  private gifBitmap as object = invalid
+  private paused = false
+  private font as roFont
+
+  sub new()
+    super("roAnimatedImage Probe (OK: pause manual clock)")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(16, false, false)
+    m.port = CreateObject("roMessagePort")
+    m.loadTimer = CreateObject("roTimespan")
+    print "[AnimatedImageProbe] start "; m.launchParams.runid; " model="; CreateObject("roDeviceInfo").GetModel(); " os="; FormatJson(CreateObject("roDeviceInfo").GetOSVersion())
+    m.addEntry("webp auto", "pkg:/images/animated/spin.webp", "automatic")
+    m.addEntry("gif auto", "pkg:/images/animated/spin.gif", "automatic")
+    m.addEntry("lottie auto", "pkg:/images/animated/spin.json", "automatic")
+    m.manual = m.addEntry("webp manual", "pkg:/images/animated/spin.webp", "manual")
+    ' played once on the manual clock in 10ms steps, to find the loop length (not in the API)
+    m.durationProbes.push(m.addEntry("webp once", "pkg:/images/animated/spin.webp", "manual"))
+    m.durationProbes.push(m.addEntry("lottie once", "pkg:/images/animated/spin.json", "manual"))
+    m.gifBitmap = CreateObject("roBitmap", "pkg:/images/animated/spin.gif")
+    print "[AnimatedImageProbe] gif as roBitmap valid="; m.gifBitmap <> invalid
+    m.offscreen = CreateObject("roBitmap", {width: 128, height: 128, AlphaEnable: true})
+    m.offscreen2 = CreateObject("roBitmap", {width: 128, height: 128, AlphaEnable: true})
+  end sub
+
+  private function addEntry(label as string, uri as string, strategy as string) as object
+    entry = {label: label, uri: uri, image: invalid, state: "n/a", readyMs: -1, message: "", width: 0, height: 0}
+    image = CreateObject("roAnimatedImage")
+    if image = invalid
+      entry.message = "CreateObject invalid"
+      print "[AnimatedImageProbe] "; label; ": roAnimatedImage unsupported (CreateObject returned invalid)"
+    else
+      image.SetMessagePort(m.port)
+      image.SetContent({uri: uri, animationStrategy: strategy})
+      accepted = image.SetTargetState("loop")
+      entry.image = image
+      entry.id = image.GetID()
+      print "[AnimatedImageProbe] "; label; ": id="; entry.id; " loop accepted="; accepted; " state="; image.GetState()
+    end if
+    m.entries.push(entry)
+    return entry
+  end function
+
+  override sub update(dt as float)
+    msg = m.port.GetMessage()
+    while msg <> invalid
+      if type(msg) = "roAnimatedImageEvent"
+        m.onEvent(msg)
+      end if
+      msg = m.port.GetMessage()
+    end while
+    if m.manual <> invalid and m.manual.image <> invalid and not m.paused
+      m.manual.image.Update(Int(dt * 1000000))
+    end if
+    for each entry in m.entries
+      if entry.image <> invalid
+        entry.state = entry.image.GetState()
+      end if
+    end for
+  end sub
+
+  private sub onEvent(msg as object)
+    info = msg.GetInfo()
+    for each entry in m.entries
+      if info <> invalid and entry.id = info.id
+        entry.readyMs = m.loadTimer.TotalMilliseconds()
+        entry.message = msg.GetMessage()
+        image = entry.image
+        entry.width = image.GetWidth()
+        entry.height = image.GetHeight()
+        ' SetTargetState() is refused until the image is ready
+        if entry.message = "ready" and entry.label.Instr("once") >= 0
+          m.measureDuration(entry)
+        else if entry.message = "ready"
+          image.SetTargetState("loop")
+        end if
+        print "[AnimatedImageProbe] "; entry.label; ": "; entry.message; " after "; entry.readyMs; "ms, "; entry.width; "x"; entry.height; " valid="; image.IsValid(); " state="; image.GetState(); " info="; FormatJson(info)
+      end if
+    end for
+  end sub
+
+  private sub measureDuration(entry as object)
+    image = entry.image
+    accepted = image.SetTargetState("play")
+    stepTimer = CreateObject("roTimespan")
+    steps = 0
+    while image.GetState() <> "stop" and steps < 1000
+      image.Update(10000)
+      steps++
+    end while
+    print "[AnimatedImageProbe] "; entry.label; ": play accepted="; accepted; " reached "; image.GetState(); " after "; steps * 10; "ms of Update() ("; steps; " steps in "; stepTimer.TotalMilliseconds(); "ms)"
+  end sub
+
+  override sub onInput(buttonName as string)
+    if buttonName = "OK"
+      m.paused = not m.paused
+    end if
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    screen = m.screenRef
+    screen.Clear(&h303040FF)
+    x = 140
+    for each entry in m.entries
+      m.drawPanelBack(screen, x, 70)
+      if entry.image <> invalid and entry.message = "ready"
+        screen.DrawObject(x, 70, entry.image)
+      end if
+      renderer.drawText(entry.label, x, 205, BGE.Colors.White, m.font)
+      renderer.drawText(entry.state + " " + entry.message, x, 225, BGE.Colors.Gray, m.font)
+      if entry.readyMs >= 0
+        renderer.drawText(entry.width.toStr() + "x" + entry.height.toStr() + " in " + entry.readyMs.toStr() + "ms", x, 245, BGE.Colors.Gray, m.font)
+      end if
+      x += 260
+    end for
+
+    if m.manual = invalid or m.manual.image = invalid or m.manual.message <> "ready"
+      renderer.drawText("manual WebP not ready", 140, 300, BGE.Colors.Red, m.font)
+      return
+    end if
+    image = m.manual.image
+    ' row 2: every native draw call the engine uses, each in a try so one failure doesn't
+    ' stop the rest; results print once
+    ops = ["DrawObject rgba", "DrawScaledObject .75", "DrawScaledObject -1,1", "DrawScaledObject rgba", "DrawRotatedObject 45", "DrawTransformedObject", "bitmap.DrawObject", "bitmap.DrawScaledObject", "roRegion"]
+    x = 140
+    y = 300
+    for i = 0 to ops.count() - 1
+      m.drawPanelBack(screen, x, y)
+      ok = m.tryDraw(screen, ops[i], image, x, y)
+      color = BGE.Colors.Lime
+      if not ok
+        color = BGE.Colors.Red
+      end if
+      renderer.drawText(ops[i], x, y + 135, color, m.font)
+      if not m.opsLogged
+        print "[AnimatedImageProbe] op "; ops[i]; " ok="; ok; " "; m.lastError
+      end if
+      x += 200
+      if x > 1100
+        x = 140
+        y += 190
+      end if
+    end for
+    m.opsLogged = true
+    top = 560
+    m.drawPanelBack(screen, 940, top)
+    if m.gifBitmap <> invalid
+      screen.DrawObject(940, top, m.gifBitmap)
+    end if
+    renderer.drawText("gif as roBitmap", 940, top + 140, BGE.Colors.White, m.font)
+    pausedText = "manual clock running"
+    if m.paused
+      pausedText = "manual clock PAUSED"
+    end if
+    renderer.drawText(pausedText, 940, top + 160, BGE.Colors.Yellow, m.font)
+  end sub
+
+  private lastError = ""
+
+  ' Draws `image` with one native call (offset into the panel at x, y); false if it threw or
+  ' the call reported failure.
+  private function tryDraw(screen as roScreen, op as string, image as object, x as integer, y as integer) as boolean
+    m.lastError = ""
+    target = screen as dynamic
+    ok = true
+    try
+      if op = "DrawObject rgba"
+        result = target.DrawObject(x, y, image, &hFF4040FF)
+      else if op = "DrawScaledObject .75"
+        result = target.DrawScaledObject(x, y, 0.75, 0.75, image)
+      else if op = "DrawScaledObject -1,1"
+        result = target.DrawScaledObject(x + 128, y, -1, 1, image)
+      else if op = "DrawScaledObject rgba"
+        result = target.DrawScaledObject(x, y, 1, 1, image, &hFFFFFF60)
+      else if op = "DrawRotatedObject 45"
+        result = target.DrawRotatedObject(x + 20, y + 100, 45, image)
+      else if op = "DrawTransformedObject"
+        result = target.DrawTransformedObject(x + 64, y + 64, 30, -0.75, 0.75, image)
+      else if op = "bitmap.DrawObject"
+        m.offscreen.Clear(&h00000000)
+        result = m.offscreen.DrawObject(0, 0, image)
+        screen.DrawObject(x, y, m.offscreen)
+      else if op = "bitmap.DrawScaledObject"
+        m.offscreen2.Clear(&h00000000)
+        result = (m.offscreen2 as dynamic).DrawScaledObject(0, 0, 0.5, 0.5, image)
+        screen.DrawScaledObject(x, y, 2, 2, m.offscreen2)
+      else
+        if m.manualRegion = invalid
+          m.manualRegion = CreateObject("roRegion", image, 0, 0, 64, 64)
+        end if
+        result = m.manualRegion <> invalid
+        if result
+          screen.DrawObject(x, y, m.manualRegion)
+        end if
+      end if
+      ok = result <> false
+    catch e
+      ok = false
+      m.lastError = e.message
+    end try
+    return ok
+  end function
+
+  private sub drawPanelBack(screen as roScreen, x as integer, y as integer)
+    screen.DrawRect(x, y, 128, 128, &h505068FF)
+    screen.DrawRect(x - 3, y - 3, 6, 6, &hFFFF00FF)
+  end sub
+
+  override sub teardown(renderer as BGE.Renderer)
+    m.entries = []
+    m.manual = invalid
+    m.manualRegion = invalid
+  end sub
+
+end class
