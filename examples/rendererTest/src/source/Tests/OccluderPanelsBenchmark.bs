@@ -1,0 +1,115 @@
+' Times BGE.Occlusion.buildModelPanels() (issue #347) on generated meshes: flat grids of
+' N x N quads (row order, then shuffled) and a bumpy heightfield whose triangles are each
+' on their own plane. One case runs per frame, smallest first, and a shape stops growing
+' once a case passes 5 s so the rest don't hang the app. Logs an `OCCPANELS` console
+' line per case with its build time and how many panels it merged into; `sizes=` takes a
+' comma list of grid sizes and `shapes=` (flat, shuffled, bumpy) picks the meshes.
+class OccluderPanelsBenchmark extends RendererTest
+
+  private sizes as integer[] = [4, 8, 16, 24, 32]
+  private shapes as string[] = ["flat", "shuffled", "bumpy"]
+  private caseIndex as integer = 0
+  private stoppedShapes = {} as roAssociativeArray
+  private results as string[] = []
+  private font as roFont
+  private slowMs as integer = 5000
+
+  sub new()
+    super("Occluder Panels Benchmark")
+  end sub
+
+  override sub setup(renderer as BGE.Renderer)
+    m.font = CreateObject("roFontRegistry").GetDefaultFont(22, false, false)
+    if invalid <> m.launchParams.sizes
+      m.sizes = []
+      for each size in m.launchParams.sizes.split(",")
+        m.sizes.push(size.toInt())
+      end for
+    end if
+    if invalid <> m.launchParams.shapes
+      m.shapes = []
+      for each shape in m.launchParams.shapes.split(",")
+        m.shapes.push(shape)
+      end for
+    end if
+    print `OCCPANELS start ${m.launchParams.runid}`
+  end sub
+
+  override sub update(dt as float)
+    caseCount = m.sizes.count() * m.shapes.count()
+    if m.caseIndex >= caseCount
+      return
+    end if
+    shape = m.shapes[m.caseIndex \ m.sizes.count()]
+    size = m.sizes[m.caseIndex mod m.sizes.count()]
+    m.caseIndex++
+    if m.stoppedShapes.DoesExist(shape)
+      line = `${shape} ${size}x${size}: skipped`
+    else
+      faces = m.makeGrid(size, shape)
+      timer = CreateObject("roTimespan")
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      ms = timer.TotalMilliseconds()
+      if ms > m.slowMs
+        m.stoppedShapes[shape] = true
+      end if
+      line = `${shape} ${size}x${size}: ${faces.count()} tris -> ${panels.count()} panels in ${ms} ms`
+    end if
+    print `OCCPANELS ${line}`
+    m.results.push(line)
+    if m.caseIndex >= caseCount
+      print "OCCPANELS done"
+    end if
+  end sub
+
+  override sub draw(renderer as BGE.Renderer)
+    y = 120
+    for each line in m.results
+      renderer.drawText(line, 80, y, &hFFFFFFFF, m.font)
+      y += 30
+    end for
+  end sub
+
+  ' Two same-winding triangles per quad on the y = 0 plane, or on a heightfield when bumpy.
+  private function makeGrid(size as integer, shape as string) as BGE.Model3dFace[]
+    cell = 10.0
+    heights = []
+    for row = 0 to size
+      heightRow = []
+      for col = 0 to size
+        if shape = "bumpy"
+          ' fixed, so runs compare panel counts
+          heightRow.push(((row * 7919 + col * 104729) mod 97) / 24.0)
+        else
+          heightRow.push(0.0)
+        end if
+      end for
+      heights.push(heightRow)
+    end for
+    faces = [] as BGE.Model3dFace[]
+    for row = 0 to size - 1
+      for col = 0 to size - 1
+        a = BGE.Math.VectorOps.create(col * cell, heights[row][col], row * cell)
+        b = BGE.Math.VectorOps.create((col + 1) * cell, heights[row][col + 1], row * cell)
+        c = BGE.Math.VectorOps.create((col + 1) * cell, heights[row + 1][col + 1], (row + 1) * cell)
+        d = BGE.Math.VectorOps.create(col * cell, heights[row + 1][col], (row + 1) * cell)
+        faces.push(m.makeFace(a, c, b))
+        faces.push(m.makeFace(a, d, c))
+      end for
+    end for
+    if shape = "shuffled"
+      for i = faces.count() - 1 to 1 step -1
+        j = (i * 7919 + 13) mod (i + 1)
+        swap = faces[i]
+        faces[i] = faces[j]
+        faces[j] = swap
+      end for
+    end if
+    return faces
+  end function
+
+  private function makeFace(a as BGE.Math.Vector, b as BGE.Math.Vector, c as BGE.Math.Vector) as BGE.Model3dFace
+    return {vertices: [a, b, c], normal: BGE.Math.VectorOps.create(0, 1, 0), brightness: 1.0, priority: 0.0, color: &hFFFFFFFF}
+  end function
+
+end class

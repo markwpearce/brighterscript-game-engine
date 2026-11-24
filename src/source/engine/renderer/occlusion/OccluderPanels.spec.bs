@@ -47,6 +47,69 @@ namespace tests
       return faces
     end function
 
+    ' Two same-winding triangles per cell of a size x size grid on y = 0 (or a bumpy
+    ' heightfield), facing up, optionally shuffled.
+    private function gridFaces(size as integer, bumpy as boolean, shuffled as boolean) as BGE.Model3dFace[]
+      heights = []
+      for row = 0 to size
+        heightRow = []
+        for col = 0 to size
+          if bumpy
+            heightRow.push(((row * 7 + col * 13) mod 5) * 0.3)
+          else
+            heightRow.push(0.0)
+          end if
+        end for
+        heights.push(heightRow)
+      end for
+      faces = []
+      for row = 0 to size - 1
+        for col = 0 to size - 1
+          a = [col, heights[row][col], row]
+          b = [col + 1, heights[row][col + 1], row]
+          c = [col + 1, heights[row + 1][col + 1], row + 1]
+          d = [col, heights[row + 1][col], row + 1]
+          faces.push(m.tri(a, c, b))
+          faces.push(m.tri(a, d, c))
+        end for
+      end for
+      if shuffled
+        for i = faces.Count() - 1 to 1 step -1
+          j = (i * 7919 + 13) mod (i + 1)
+          swap = faces[i]
+          faces[i] = faces[j]
+          faces[j] = swap
+        end for
+      end if
+      return faces
+    end function
+
+    private function area(vertices as BGE.Math.Vector[], normal as BGE.Math.Vector) as float
+      total = BGE.Math.VectorOps.create()
+      count = vertices.Count()
+      for i = 0 to count - 1
+        total = BGE.Math.VectorOps.add(total, BGE.Math.VectorOps.crossProduct(vertices[i], vertices[(i + 1) mod count]))
+      end for
+      return Abs(BGE.Math.VectorOps.dotProduct(total, normal)) / 2
+    end function
+
+    private function facesArea(faces as BGE.Model3dFace[]) as float
+      total = 0.0
+      for each face in faces
+        cross = BGE.Math.VectorOps.crossProduct(BGE.Math.VectorOps.subtract(face.vertices[1], face.vertices[0]), BGE.Math.VectorOps.subtract(face.vertices[2], face.vertices[0]))
+        total += BGE.Math.VectorOps.length(cross) / 2
+      end for
+      return total
+    end function
+
+    private function panelsArea(panels as BGE.OccluderPanel[]) as float
+      total = 0.0
+      for each panel in panels
+        total += m.area(panel.vertices, panel.normal)
+      end for
+      return total
+    end function
+
     @describe("buildModelPanels")
 
     @it("merges two coplanar triangles sharing an edge into one 4-vertex panel")
@@ -132,6 +195,49 @@ namespace tests
       m.assertEqual(panels.Count(), 1)
       m.assertEqual(panels[0].vertices.Count(), 4)
       m.assertFalse(panels[0].hasInnerVertices)
+    end function
+
+    @it("merges a flat grid into one rectangle with inner corners (issue #347)")
+    function _()
+      panels = BGE.Occlusion.buildModelPanels(m.gridFaces(6, false, false))
+      m.assertEqual(panels.Count(), 1)
+      m.assertEqual(panels[0].vertices.Count(), 4)
+      m.assertTrue(panels[0].hasInnerVertices)
+      m.assertTrue(Abs(m.area(panels[0].vertices, panels[0].normal) - 36) < 0.001)
+    end function
+
+    @it("covers a shuffled grid exactly with convex panels")
+    function _()
+      faces = m.gridFaces(6, false, true)
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertTrue(panels.Count() >= 1)
+      m.assertTrue(panels.Count() < 12, `${panels.Count()} panels`)
+      for each panel in panels
+        m.assertTrue(m.isConvex(panel))
+      end for
+      m.assertTrue(Abs(m.panelsArea(panels) - 36) < 0.001, `area ${m.panelsArea(panels)}`)
+    end function
+
+    @it("covers a bumpy heightfield exactly, one panel per merged plane")
+    function _()
+      faces = m.gridFaces(5, true, false)
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertTrue(panels.Count() <= faces.Count())
+      for each panel in panels
+        m.assertTrue(m.isConvex(panel))
+      end for
+      m.assertTrue(Abs(m.panelsArea(panels) - m.facesArea(faces)) < 0.001, `panels ${m.panelsArea(panels)} vs faces ${m.facesArea(faces)}`)
+    end function
+
+    @it("merges across a shared corner that's off by less than the weld tolerance")
+    function _()
+      faces = [
+        m.tri([0, 0, 0], [1, 0, 0], [1, 1, 0]),
+        m.tri([0, 0, 0], [1.0000004, 1, 0], [0, 1, 0])
+      ]
+      panels = BGE.Occlusion.buildModelPanels(faces)
+      m.assertEqual(panels.Count(), 1)
+      m.assertEqual(panels[0].vertices.Count(), 4)
     end function
 
     @it("ignores degenerate faces")
