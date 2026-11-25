@@ -105,7 +105,8 @@ end class
 `onStart(game)` and `onEnd(game)` are for loading and freeing what the card needs. Call
 `super.update(dt)` if you override `update()`, so `elapsed` keeps counting. Override
 `getBackgroundColor()` and `getForegroundColor()` so the cross-fade and loading bar match your
-card.
+card. The last card has `isLast` set when it starts: the splash fades it to black itself, so it
+shouldn't fade out on its own.
 
 ## Skipping
 
@@ -127,7 +128,9 @@ cards, the last card stays up and a progress bar appears under it, in the card's
 colour. The scene's loading screen isn't shown.
 
 While the splash shows, the scene, its entities and `gameUi` get no callbacks: no `onUpdate()`,
-`onInput()` or drawing. When it ends, the screen fades from black into the scene.
+`onInput()` or drawing. When it ends, the screen fades from black into the scene. A
+`changeSceneWithFade()` from the scene's `onCreate()`, or from before `play()`, runs instead of
+that fade. Buttons held when it ends are ignored until they're released.
 
 If your first scene has nothing to load, its `onCreate()` runs when you call `changeScene()` in
 `Main()`, before the splash. It still gets no `onUpdate()` until the splash ends. A `GameTimer` you
