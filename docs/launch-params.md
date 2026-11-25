@@ -64,6 +64,13 @@ doesn't exist.
 `quality=<0-4>` and returns true. With no param, or a bad one, it changes nothing and returns
 false, so the game chooses its own default (adaptive quality, a profiling level...).
 
+## Splash screen
+
+`game.applyLaunchSplash(params)` turns the [splash screen](/splash-screen) off with `splash=0`
+(or `false`/`no`/`off`), so a deep link to a level doesn't sit through it every time. Like
+`applyLaunchQuality()`, it returns false and changes nothing when the param isn't there. Every
+example calls it.
+
 Debug state for a story game (`flags=`, `items=`) goes through
 `BGE.Story.applyDebugState()`, which takes the strings as given: see [Story](/story). Turn
 saving off (`slot.enabled = false`, see [Saving](/saving)) while a deep link is testing a level.

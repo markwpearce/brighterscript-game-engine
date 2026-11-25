@@ -24,6 +24,21 @@ game.play()
 
 Please keep it, or credit the engine somewhere else in your game, such as a credits screen.
 
+While testing, skip it with a launch param instead. Call `game.applyLaunchSplash()` in `Main()`
+and launch with `splash=0` (e.g. `rokubot launch dev --param splash=0`):
+
+```brightscript
+sub Main(args as dynamic)
+  game = new BGE.Game(1280, 720)
+  ' ...
+  game.applyLaunchSplash(new BGE.LaunchParams(args))
+  game.play()
+end sub
+```
+
+It plays once per launch, so a game that makes a new `BGE.Game` later (coming back from a
+SceneGraph screen, say) doesn't show it again.
+
 ## Colours and sound
 
 The engine's card is `game.splash.engineCard`. Pick one of four colour schemes:
