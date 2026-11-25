@@ -14,6 +14,7 @@ import "../Renderer.bs"
 import "../RendererHelpers.bs"
 import "SceneObject.bs"
 import "PlaneBitmapSizing.bs"
+import "../../debug/Log.bs"
 
 namespace BGE
 
@@ -112,6 +113,14 @@ namespace BGE
     ' Physical/logical pixel ratio: 1.0 until logical size exceeds getMaxSuperTextureDimension()'s
     ' budget, then tiles downscale and every pixel-space consumer must apply this factor.
     private superTextureScale as float = 1.0
+    ' m.tiledScratchBmp's size in logical (texture-pixel) units
+    private tiledScratchLogicalWidth as float = 0
+    private tiledScratchLogicalHeight as float = 0
+    ' The scratch's size in tiles, and getScratchTileCounts()' last answer and what it was for
+    private scratchTilesAcross as integer = 0
+    private scratchTilesDown as integer = 0
+    private scratchTileCounts as roAssociativeArray = invalid
+    private scratchTileCountsKey as string = ""
 
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
     ' canvasSize x canvasSize square can be rotated by any angle without exposing an
@@ -244,7 +253,7 @@ namespace BGE
         m.prePerspectiveBmpBuiltForMaxDrawDistance = -1
         m.prePerspectiveBmp = m.getPrePerspectiveBmp(rendererObj)
         if invalid = m.prePerspectiveBmp
-          print "[BGE.SceneObjectPlane] warning: couldn't allocate the plane's perspective bitmap for draw distance "; maxDrawDistance; " - skipping this frame"
+          BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate the plane's perspective bitmap for draw distance " + maxDrawDistance.toStr() + " - skipping this frame", BGE.Debug.LogLevel.warning)
           return false
         end if
         m.prePerspectiveBmpBuiltForMaxDrawDistance = maxDrawDistance
@@ -278,7 +287,7 @@ namespace BGE
         else
           m.poolBaseBmp = invalid
         end if
-        wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
+        wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped)
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, textureDest, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale, textureTint)
         if gotPreBmp and pools.count() > 0
           if invalid <> m.poolBaseBmp
@@ -491,7 +500,7 @@ namespace BGE
       m.releaseBakedSourceRegion()
       bmp = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
       if invalid = bmp
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; width; "x"; height; " lit texture - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate a " + width.toStr() + "x" + height.toStr() + " lit texture - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         return invalid
       end if
       bmp.Clear(&h00000000)
@@ -564,7 +573,7 @@ namespace BGE
       existing = invalid
       bmp = CreateObject("roBitmap", {width: like.GetWidth(), height: like.GetHeight(), AlphaEnable: true})
       if invalid = bmp
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate the plane's light pool base bitmap - pools will redraw the whole plane"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate the plane's light pool base bitmap - pools will redraw the whole plane", BGE.Debug.LogLevel.warning)
       end if
       return bmp
     end function
@@ -815,7 +824,7 @@ namespace BGE
 
       projectedRay = BGE.Math.projectRayOntoPlane(plane, {origin: camera.position, direction: camera.getViewForward()})
       if projectedRay = invalid
-        print "failed to project camera ray onto plane"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] failed to project camera ray onto plane", BGE.Debug.LogLevel.warning)
         return invalid
       end if
 
@@ -963,7 +972,7 @@ namespace BGE
       m.stretchedSourceRegion = invalid
       bmp = CreateObject("roBitmap", {width: width, height: height, AlphaEnable: true})
       if invalid = bmp
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; width; "x"; height; " stretched decal - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate a " + width.toStr() + "x" + height.toStr() + " stretched decal - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         return invalid
       end if
       bmp.Clear(&h00000000)
@@ -1014,8 +1023,13 @@ namespace BGE
       camera = rendererObj.camera as Camera3d
       textureSize = m.getTextureSize()
       worldDrawDistance = m.getWorldDrawDistance(camera)
+      scratchTiles = m.getScratchTileCounts(camera, worldDrawDistance, textureSize)
       if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = worldDrawDistance and m.superTextureBuiltForTileWidth = textureSize.width and m.superTextureBuiltForTileHeight = textureSize.height
-        return true
+        ' A bigger scratch than the view needs is fine, so a narrower view (zoom, the end of a
+        ' roll) keeps it rather than rebuilding
+        if scratchTiles.across <= m.scratchTilesAcross and scratchTiles.down <= m.scratchTilesDown
+          return true
+        end if
       end if
       ' Release the old bitmaps before allocating replacements, and leave the cache
       ' key unset until the build succeeds so a failed allocation is retried.
@@ -1032,33 +1046,20 @@ namespace BGE
       m.tileHeight = BGE.Math.Max(1, textureSize.height)
       smallestTileDimension = BGE.Math.Min(m.tileWidth, m.tileHeight)
 
-      ' m.tiledScratchBmp (the rotate destination) must stay at this unpadded,
-      ' maxDrawDistance-bounded size - drawScaledObjectTo reads it whole into the
-      ' final composite with no sub-crop, so it can't grow with the rotation padding
-      ' computed below. Computed from real tile-quantized dimensions, not an estimate.
-      unpaddedTilesPerAxis = Fix(2 * (worldDrawDistance / m.getTexelScale()) / smallestTileDimension) + 1
-      if (unpaddedTilesPerAxis mod 2) = 0
-        unpaddedTilesPerAxis = unpaddedTilesPerAxis + 1
-      end if
-      unpaddedScratchWidth = unpaddedTilesPerAxis * m.tileWidth
-      unpaddedScratchHeight = unpaddedTilesPerAxis * m.tileHeight
+      ' m.tiledScratchBmp (the rotate destination) holds the largest rectified view quad
+      ' (see getScratchTileCounts()), not the supertexture's rotation margin below -
+      ' drawScaledObjectTo reads it whole into the final composite with no sub-crop.
+      unpaddedScratchWidth = scratchTiles.across * m.tileWidth
+      unpaddedScratchHeight = scratchTiles.down * m.tileHeight
 
-      ' The rotate call places the wrapped anchor at the destination canvas's ORIGIN,
-      ' not its center, so the region needing coverage after rotation is a full D x D
-      ' quadrant extending from the anchor - a FULL diagonal away, not the half-diagonal
-      ' getRollCanvasSize() uses for its center-anchored case. Since
-      ' wrapAnchorIntoSuperTexture() re-centers the anchor in this supertexture, its
-      ' half-side must be at least that full diagonal to cover every rotation angle,
-      ' or corners bleed through with visible rotation/pitch-dependent artifacts.
-      requiredDiagonal = Sqr(unpaddedScratchWidth * unpaddedScratchWidth + unpaddedScratchHeight * unpaddedScratchHeight)
-      rotationPaddedWorldDiameter = 2 * requiredDiagonal
-
-      m.tilesPerAxis = Fix(rotationPaddedWorldDiameter / smallestTileDimension) + 1
-      if (m.tilesPerAxis mod 2) = 0
-        ' Keep it odd, so a tile sits exactly centered in the supertexture - the
-        ' center tile is where wrapAnchorIntoSuperTexture() re-centers every anchor.
-        m.tilesPerAxis = m.tilesPerAxis + 1
-      end if
+      ' wrapAnchorIntoSuperTexture() puts the centre of the part of the scratch the warp
+      ' reads in the center tile, so at any rotation everything read is within half the
+      ' scratch's diagonal of a point in that tile. The center tile's edges must be that
+      ' far from the supertexture's, or corners bleed through (#138: anchoring the quad's
+      ' corner instead needed the full diagonal, 4x the area).
+      halfDiagonal = Sqr(unpaddedScratchWidth * unpaddedScratchWidth + unpaddedScratchHeight * unpaddedScratchHeight) / 2
+      ' odd, so a tile sits exactly centered
+      m.tilesPerAxis = 2 * (Fix(halfDiagonal / smallestTileDimension) + 1) + 1
 
       ' Not truncated - m.tilesPerAxis feeds the corner-bleed coverage math above.
       ' bmpWidth/bmpHeight are the supertexture's LOGICAL size (world coverage / wrap
@@ -1074,7 +1075,7 @@ namespace BGE
       physicalHeight = bmpHeight * m.superTextureScale
       m.superTextureBmp = CreateObject("roBitmap", {width: physicalWidth, height: physicalHeight, AlphaEnable: true})
       if invalid = m.superTextureBmp
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; physicalWidth; "x"; physicalHeight; " tiledImage supertexture - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate a " + physicalWidth.toStr() + "x" + physicalHeight.toStr() + " tiledImage supertexture - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         return false
       end if
       m.superTextureBmp.SetAlphaEnable(true)
@@ -1094,7 +1095,7 @@ namespace BGE
       strip = CreateObject("roBitmap", {width: physicalWidth, height: stripHeight, AlphaEnable: true})
       m.superTextureStrip = strip
       if invalid = strip
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate the tiledImage tile strip - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate the tiledImage tile strip - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         m.superTextureBmp = invalid
         return false
       end if
@@ -1111,12 +1112,12 @@ namespace BGE
         end if
       end for
       if failedBlits > 0
-        print "[BGE.SceneObjectPlane] warning: "; failedBlits; " of "; 2 * m.tilesPerAxis; " tiledImage supertexture blits failed - the ground will have gaps"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] " + failedBlits.toStr() + " of " + (2 * m.tilesPerAxis).toStr() + " tiledImage supertexture blits failed - the ground will have gaps", BGE.Debug.LogLevel.warning)
       end if
 
       m.superTextureRegion = CreateObject("roRegion", m.superTextureBmp, 0, 0, physicalWidth, physicalHeight)
       if invalid = m.superTextureRegion
-        print "[BGE.SceneObjectPlane] warning: couldn't create the tiledImage supertexture region - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't create the tiledImage supertexture region - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         m.superTextureBmp = invalid
         return false
       end if
@@ -1124,30 +1125,95 @@ namespace BGE
       ' must not grow with the source's rotation padding.
       m.tiledScratchBmp = CreateObject("roBitmap", {width: unpaddedScratchWidth * m.superTextureScale, height: unpaddedScratchHeight * m.superTextureScale, AlphaEnable: true})
       if invalid = m.tiledScratchBmp
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate the tiledImage scratch bitmap - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate the tiledImage scratch bitmap - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         return false
       end if
       m.tiledScratchBmp.SetAlphaEnable(true)
+      m.tiledScratchLogicalWidth = unpaddedScratchWidth
+      m.tiledScratchLogicalHeight = unpaddedScratchHeight
+      m.scratchTilesAcross = scratchTiles.across
+      m.scratchTilesDown = scratchTiles.down
       m.superTextureBuiltForMaxDrawDistance = worldDrawDistance
       m.superTextureBuiltForTileWidth = textureSize.width
       m.superTextureBuiltForTileHeight = textureSize.height
       return true
     end function
 
-    ' Wraps an unbounded world-derived texture-pixel anchor into this supertexture's
-    ' center tile. Only the anchor needs wrapping (not every corner) since the warp's
-    ' rotation/scale are translation-invariant. Wrap period is in logical (world/tile)
-    ' units; the result is converted to physical pixel space (m.superTextureScale)
-    ' only at the end, for the rotate step which reads real bitmap pixels.
+    ' How many tiles across and down the scratch needs to hold the rectified view quad the
+    ' warp reads: the top edge across, the bottom right corner's distance from it down
+    ' (issue #673). With draw distance D (in texels) and half FOVs h and v:
+    ' - Down: the far edge is at view depth D, which just above the ground with the camera
+    '   pitched down by v is D / cos(v) along it, and the near edge is at the camera's feet.
+    '   A level view (shear pitch) reaches only D.
+    ' - Across: the frustum's width at the far edge. getPerspectivePointsByCamera()' corner
+    '   rays turn by h then v, so where they meet the ground short of D they're wider than the
+    '   frame: 2D tan(h) / cos(v). Shear's rays are the frame's own corners: 2D tan(h).
+    ' Rolled, the plane renders a square canvas covering the frame's diagonal; its depth is
+    ' covered, but not its full width, whose top corners can crop (as before #673).
+    ' Zoom narrows the view, so it's sized for zoom 1 or wider: zooming in never rebuilds.
     '
-    ' @param {BGE.Math.Vector} point
+    ' @param {Camera3d} camera
+    ' @param {float} worldDrawDistance
+    ' @param {SizeWH} textureSize
+    ' @return {roAssociativeArray} {across: integer, down: integer}
+    private function getScratchTileCounts(camera as Camera3d, worldDrawDistance as float, textureSize as SizeWH) as roAssociativeArray
+      isRolled = camera.rollDegrees <> 0
+      key = `${worldDrawDistance} ${textureSize.width} ${textureSize.height} ${camera.projectionVersion} ${isRolled} ${camera.pitchMode}`
+      if key = m.scratchTileCountsKey
+        return m.scratchTileCounts
+      end if
+      halfWidth = BGE.Math.Max(1, camera.frameSize.x) / 2
+      focal = BGE.Math.Min(camera.getFocalLength(), halfWidth / tan(BGE.Math.DegreesToRadians(camera.fieldOfViewDegrees) / 2))
+      tanAcross = halfWidth / focal
+      tanDown = (camera.frameSize.y / 2) / focal
+      across = 2 * tanAcross
+      down = 1.0
+      if camera.pitchMode <> BGE.CameraPitchMode.shear
+        across = across * Sqr(1 + tanDown * tanDown)
+        if isRolled
+          tanDown = (m.getRollCanvasSizeFor(camera) / 2) / focal
+        end if
+        down = Sqr(1 + tanDown * tanDown)
+      end if
+      drawDistance = worldDrawDistance / m.getTexelScale()
+      ' a whole tile over, for rounding in the quad and the rotate
+      m.scratchTileCounts = {
+        across: Fix(drawDistance * across / BGE.Math.Max(1, textureSize.width)) + 1,
+        down: Fix(drawDistance * down / BGE.Math.Max(1, textureSize.height)) + 1
+      }
+      m.scratchTileCountsKey = key
+      return m.scratchTileCounts
+    end function
+
+    ' The rotate anchor (the quad's top left, an unbounded texture-pixel point) moved by
+    ' whole tiles so the middle of what the warp reads lands in this supertexture's center
+    ' tile. The warp is the same for any whole-tile shift. That middle is the centre of
+    ' the quad's rectified rectangle - the top edge along scratch row 0, the bottom right
+    ' corner's distance from it down - clamped to the scratch, which crops the rest.
+    ' Worked in logical (world/tile) units; the result is in physical pixels
+    ' (m.superTextureScale), for the rotate step which reads real bitmap pixels.
+    '
+    ' @param {BGE.Math.CornerPoints} cp the quad in texture pixels
     ' @return {BGE.Math.Vector}
-    private function wrapAnchorIntoSuperTexture(point as BGE.Math.Vector) as BGE.Math.Vector
+    private function wrapAnchorIntoSuperTexture(cp as BGE.Math.CornerPoints) as BGE.Math.Vector
+      edgeX = cp.topRight.x - cp.topLeft.x
+      edgeY = cp.topRight.y - cp.topLeft.y
+      edgeLength = Sqr(edgeX * edgeX + edgeY * edgeY)
+      halfAcross = 0.0
+      halfDown = 0.0
+      if edgeLength > 0
+        edgeX = edgeX / edgeLength
+        edgeY = edgeY / edgeLength
+        ' scratch +y is the top edge's direction turned a quarter towards the bottom
+        depth = (cp.bottomRight.y - cp.topLeft.y) * edgeX - (cp.bottomRight.x - cp.topLeft.x) * edgeY
+        halfAcross = BGE.Math.Min(edgeLength, m.tiledScratchLogicalWidth) / 2
+        halfDown = BGE.Math.Min(Abs(depth), m.tiledScratchLogicalHeight) / 2
+      end if
+      middleX = cp.topLeft.x + edgeX * halfAcross - edgeY * halfDown
+      middleY = cp.topLeft.y + edgeY * halfAcross + edgeX * halfDown
       centerTileIndex = Int(m.tilesPerAxis / 2)
-      wrappedX = BGE.Math.wrapValue(point.x, m.tileWidth)
-      wrappedY = BGE.Math.wrapValue(point.y, m.tileHeight)
-      logicalX = centerTileIndex * m.tileWidth + wrappedX
-      logicalY = centerTileIndex * m.tileHeight + wrappedY
+      logicalX = centerTileIndex * m.tileWidth + BGE.Math.wrapValue(middleX, m.tileWidth) - (middleX - cp.topLeft.x)
+      logicalY = centerTileIndex * m.tileHeight + BGE.Math.wrapValue(middleY, m.tileHeight) - (middleY - cp.topLeft.y)
       return BGE.Math.VectorOps.create(logicalX * m.superTextureScale, logicalY * m.superTextureScale, 0)
     end function
 
@@ -1222,7 +1288,7 @@ namespace BGE
         bounds = m.getRotatedSourceBounds(srcRegion, anchorPoint, rotation)
         m.decalScratchBmp = BGE.RendererHelpers.growOrClearBitmap(m.decalScratchBmp, bounds.width, bounds.height)
         if invalid = m.decalScratchBmp
-          print "[BGE.SceneObjectPlane] warning: couldn't allocate the decal scratch bitmap - skipping this plane this frame"
+          BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate the decal scratch bitmap - skipping this plane this frame", BGE.Debug.LogLevel.warning)
           return false
         end if
         scratchDrawTo = m.decalScratchBmp
@@ -1238,7 +1304,7 @@ namespace BGE
       worked = rendererObj.drawRotatedImageWithCenterTo(scratchDrawTo, srcRegion, anchorPoint, rotation, rotateTranslation)
       worked = worked and rendererObj.drawScaledObjectTo(destRegion, scratchOffset.x * horizScale, scratchOffset.y * vertScale, horizScale, vertScale, scratchDrawTo, rgba)
       if not worked
-        print "[BGE.SceneObjectPlane] warning: couldn't draw the ground texture into the plane's perspective bitmap - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't draw the ground texture into the plane's perspective bitmap - skipping this plane this frame", BGE.Debug.LogLevel.warning)
       end if
 
       return worked
@@ -1442,7 +1508,7 @@ namespace BGE
         m.tempBitmap = CreateObject("roBitmap", {width: destWidth, height: canvasHeight, AlphaEnable: true})
       end if
       if invalid = m.tempBitmap
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate a "; destWidth; "x"; canvasHeight; " composite bitmap - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate a " + destWidth.toStr() + "x" + canvasHeight.toStr() + " composite bitmap - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         return false
       end if
       m.tempBitmap.Clear(&h00000000)
@@ -1453,7 +1519,7 @@ namespace BGE
         slice = slices[i]
         sliceRegion = CreateObject("roRegion", srcBmp, slice.srcX, slice.srcY, slice.srcWidth, slice.srcHeight)
         if invalid = sliceRegion
-          print "[BGE.SceneObjectPlane] warning: couldn't create a perspective slice region - skipping this plane this frame"
+          BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't create a perspective slice region - skipping this plane this frame", BGE.Debug.LogLevel.warning)
           return false
         end if
         thisSliceWorked = rendererObj.drawScaledObjectTo(m.tempBitmap, Int(slice.destX + 0.5), Int(slice.destY + 0.5), slice.scaleX, slice.scaleY, sliceRegion)
@@ -1484,7 +1550,7 @@ namespace BGE
         m.rotatedTempBitmap = CreateObject("roBitmap", {width: camera.frameSize.x, height: camera.frameSize.y, AlphaEnable: true})
       end if
       if invalid = m.rotatedTempBitmap
-        print "[BGE.SceneObjectPlane] warning: couldn't allocate the rolled composite bitmap - skipping this plane this frame"
+        BGE.Debug.logMessage("[BGE.SceneObjectPlane] couldn't allocate the rolled composite bitmap - skipping this plane this frame", BGE.Debug.LogLevel.warning)
         return false
       end if
       m.rotatedTempBitmap.Clear(&h00000000)

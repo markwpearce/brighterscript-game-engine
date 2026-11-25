@@ -1050,10 +1050,14 @@ depth-sort tie-break every `SceneObject` uses) - add the base layer first, as in
 so later calls draw on top of it.
 
 `tiledImage` builds and caches a "supertexture" bitmap the first time it draws (lazily, per
-`DrawablePlane` instance, and rebuilt only if `Camera3d.maxDrawDistance` changes afterward) by
-tiling `region` across a grid roughly `2 * maxDrawDistance / tileSize` tiles per axis, where
-`tileSize` is the tile's own smaller dimension. That means the tile count built up front - and so
-the build cost and cached bitmap size - scales with `(maxDrawDistance / tileSize)²`. Pick a tile
+`DrawablePlane` instance, and rebuilt only if `Camera3d.maxDrawDistance` changes afterward, or the
+view gets wider: a wider FOV, zooming out, or the first roll) by tiling `region` across a grid
+roughly `2.6 * maxDrawDistance / tileSize` tiles per axis at the default 90 degree FOV on a 16:9
+frame (enough for the view's footprint at any heading and pitch; more for a wider view), where
+`tileSize` is the tile's own smaller dimension.
+That means the tile count built up front - and so the build cost and cached bitmap size - scales
+with `(maxDrawDistance / tileSize)²`. Past 1600 pixels a side (1024 below FHD) the bitmap is
+capped and the tiles are stored downscaled, so a far-reaching small tile gets blurrier. Pick a tile
 size (and consider `maxDrawDistance`) with that in mind: a small tile paired with a large
 `maxDrawDistance` builds a much bigger cached bitmap than a coarser tile would.
 
