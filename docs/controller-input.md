@@ -44,7 +44,8 @@ connected, the built-in page also sends its standard-mapping face/menu buttons u
 these same names (alongside their raw numeric index, e.g. `"0"`), so a binding to
 `"ok"`/`"b"`/`"back"` works for a touch tap, a remote press, and a real controller
 button with no extra binding needed - see "Simulator gamepad buttons" below.
-The gamepad's X/Y also send `"x"`/`"y"` (and L1/R1 send `"l1"`/`"r1"`). Controller
+The gamepad's X/Y also send `"x"`/`"y"` (and L1/R1 send `"l1"`/`"r1"`), and its D-pad
+sends `"up"`/`"down"`/`"left"`/`"right"` and drives stick `"1"` while held. Controller
 input reaches `gameUi` widgets' `onInput()` too (not just entities and the focus
 system), so a custom widget can handle a gamepad press the same as a remote one.
 
