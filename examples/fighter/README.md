@@ -1,10 +1,10 @@
 # Ironyard Brawl (fighter)
 
-A *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)): one player against the CPU, two players on their own controllers, or training against a dummy. There are four fighters (Blaze and Frost with four colour palettes each, Bruno and Nova with two), each with three special moves, plus throws, knockdowns, best-of-3 rounds, an announcer and music.
+A *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)): one player against the CPU, two players on their own controllers, or training against a dummy. There are four fighters (Blaze, Frost, Bruno and Nova, two colours each), each with three special moves, plus throws, knockdowns, best-of-3 rounds, an announcer and music.
 
 ## Playing
 
-The title menu picks **Arcade** (vs CPU), **2 Players** or **Training**, the CPU's level (Easy, Normal, Hard), and **Controllers**. On the select screen, move with left/right and pick with an attack button. Each button picks a different colour (LP, HP, LK, HK are palettes 1-4). In 2 Players, P2 joins by pressing any button. Against the CPU, a second controller pressing a button is a new challenger and goes back to the select screen for a 2-player match. In Training, it takes over the dummy.
+The title menu picks **Arcade** (vs CPU), **2 Players** or **Training**, the CPU's level (Easy, Normal, Hard), and **Controllers**. On the select screen, left/right picks a fighter, up/down picks their colour, and any attack button locks it in. In 2 Players, P2 joins by pressing any button. Against the CPU, a second controller pressing a button is a new challenger and goes back to the select screen for a 2-player match. In Training, it takes over the dummy.
 
 Each player uses their own controller (`multi_controllers=1`; every remote, gamepad and phone gets its own player index, in the order they're first used). On the select screen, whichever controller presses first is P1 (and in 2 Players, the next one is P2). The **Controllers** screen sets P1 and P2 up front, and shows a QR code for using a phone as a controller.
 
