@@ -116,6 +116,11 @@ namespace BGE
     ' m.tiledScratchBmp's size in logical (texture-pixel) units
     private tiledScratchLogicalWidth as float = 0
     private tiledScratchLogicalHeight as float = 0
+    ' The scratch's size in tiles, and getScratchTileCounts()' last answer and what it was for
+    private scratchTilesAcross as integer = 0
+    private scratchTilesDown as integer = 0
+    private scratchTileCounts as roAssociativeArray = invalid
+    private scratchTileCountsKey as string = ""
 
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
     ' canvasSize x canvasSize square can be rotated by any angle without exposing an
@@ -1018,8 +1023,13 @@ namespace BGE
       camera = rendererObj.camera as Camera3d
       textureSize = m.getTextureSize()
       worldDrawDistance = m.getWorldDrawDistance(camera)
+      scratchTiles = m.getScratchTileCounts(camera, worldDrawDistance, textureSize)
       if invalid <> m.superTextureBmp and m.superTextureBuiltForMaxDrawDistance = worldDrawDistance and m.superTextureBuiltForTileWidth = textureSize.width and m.superTextureBuiltForTileHeight = textureSize.height
-        return true
+        ' A bigger scratch than the view needs is fine, so a narrower view (zoom, the end of a
+        ' roll) keeps it rather than rebuilding
+        if scratchTiles.across <= m.scratchTilesAcross and scratchTiles.down <= m.scratchTilesDown
+          return true
+        end if
       end if
       ' Release the old bitmaps before allocating replacements, and leave the cache
       ' key unset until the build succeeds so a failed allocation is retried.
@@ -1036,16 +1046,11 @@ namespace BGE
       m.tileHeight = BGE.Math.Max(1, textureSize.height)
       smallestTileDimension = BGE.Math.Min(m.tileWidth, m.tileHeight)
 
-      ' m.tiledScratchBmp (the rotate destination) must stay at this unpadded,
-      ' maxDrawDistance-bounded size - drawScaledObjectTo reads it whole into the
-      ' final composite with no sub-crop, so it can't grow with the rotation padding
-      ' computed below. Computed from real tile-quantized dimensions, not an estimate.
-      unpaddedTilesPerAxis = Fix(2 * (worldDrawDistance / m.getTexelScale()) / smallestTileDimension) + 1
-      if (unpaddedTilesPerAxis mod 2) = 0
-        unpaddedTilesPerAxis = unpaddedTilesPerAxis + 1
-      end if
-      unpaddedScratchWidth = unpaddedTilesPerAxis * m.tileWidth
-      unpaddedScratchHeight = unpaddedTilesPerAxis * m.tileHeight
+      ' m.tiledScratchBmp (the rotate destination) holds the largest rectified view quad
+      ' (see getScratchTileCounts()), not the supertexture's rotation margin below -
+      ' drawScaledObjectTo reads it whole into the final composite with no sub-crop.
+      unpaddedScratchWidth = scratchTiles.across * m.tileWidth
+      unpaddedScratchHeight = scratchTiles.down * m.tileHeight
 
       ' wrapAnchorIntoSuperTexture() puts the centre of the part of the scratch the warp
       ' reads in the center tile, so at any rotation everything read is within half the
@@ -1126,10 +1131,58 @@ namespace BGE
       m.tiledScratchBmp.SetAlphaEnable(true)
       m.tiledScratchLogicalWidth = unpaddedScratchWidth
       m.tiledScratchLogicalHeight = unpaddedScratchHeight
+      m.scratchTilesAcross = scratchTiles.across
+      m.scratchTilesDown = scratchTiles.down
       m.superTextureBuiltForMaxDrawDistance = worldDrawDistance
       m.superTextureBuiltForTileWidth = textureSize.width
       m.superTextureBuiltForTileHeight = textureSize.height
       return true
+    end function
+
+    ' How many tiles across and down the scratch needs to hold the rectified view quad the
+    ' warp reads: the top edge across, the bottom right corner's distance from it down
+    ' (issue #673). With draw distance D (in texels) and half FOVs h and v:
+    ' - Down: the far edge is at view depth D, which just above the ground with the camera
+    '   pitched down by v is D / cos(v) along it, and the near edge is at the camera's feet.
+    '   A level view (shear pitch) reaches only D.
+    ' - Across: the frustum's width at the far edge. getPerspectivePointsByCamera()' corner
+    '   rays turn by h then v, so where they meet the ground short of D they're wider than the
+    '   frame: 2D tan(h) / cos(v). Shear's rays are the frame's own corners: 2D tan(h).
+    ' Rolled, the plane renders a square canvas covering the frame's diagonal; its depth is
+    ' covered, but not its full width, whose top corners can crop (as before #673).
+    ' Zoom narrows the view, so it's sized for zoom 1 or wider: zooming in never rebuilds.
+    '
+    ' @param {Camera3d} camera
+    ' @param {float} worldDrawDistance
+    ' @param {SizeWH} textureSize
+    ' @return {roAssociativeArray} {across: integer, down: integer}
+    private function getScratchTileCounts(camera as Camera3d, worldDrawDistance as float, textureSize as SizeWH) as roAssociativeArray
+      isRolled = camera.rollDegrees <> 0
+      key = `${worldDrawDistance} ${textureSize.width} ${textureSize.height} ${camera.projectionVersion} ${isRolled} ${camera.pitchMode}`
+      if key = m.scratchTileCountsKey
+        return m.scratchTileCounts
+      end if
+      halfWidth = BGE.Math.Max(1, camera.frameSize.x) / 2
+      focal = BGE.Math.Min(camera.getFocalLength(), halfWidth / tan(BGE.Math.DegreesToRadians(camera.fieldOfViewDegrees) / 2))
+      tanAcross = halfWidth / focal
+      tanDown = (camera.frameSize.y / 2) / focal
+      across = 2 * tanAcross
+      down = 1.0
+      if camera.pitchMode <> BGE.CameraPitchMode.shear
+        across = across * Sqr(1 + tanDown * tanDown)
+        if isRolled
+          tanDown = (m.getRollCanvasSizeFor(camera) / 2) / focal
+        end if
+        down = Sqr(1 + tanDown * tanDown)
+      end if
+      drawDistance = worldDrawDistance / m.getTexelScale()
+      ' a whole tile over, for rounding in the quad and the rotate
+      m.scratchTileCounts = {
+        across: Fix(drawDistance * across / BGE.Math.Max(1, textureSize.width)) + 1,
+        down: Fix(drawDistance * down / BGE.Math.Max(1, textureSize.height)) + 1
+      }
+      m.scratchTileCountsKey = key
+      return m.scratchTileCounts
     end function
 
     ' The rotate anchor (the quad's top left, an unbounded texture-pixel point) moved by
