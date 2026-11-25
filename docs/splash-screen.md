@@ -133,6 +133,11 @@ If your first scene has nothing to load, its `onCreate()` runs when you call `ch
 `Main()`, before the splash. It still gets no `onUpdate()` until the splash ends. A `GameTimer` you
 start in `onCreate()` counts the splash time, so start timers on the first update if that matters.
 
+Music waits for the splash too. Music started with `game.musicPlay()` before `play()`, such as in
+`Main()` or the first scene's `onCreate()`, or during the splash, starts from the beginning when the
+splash ends, rather than playing under the startup sound. `game.isMusicWaitingForSplash()` says
+whether some is waiting.
+
 `game.isSplashActive()` tells you whether the splash is showing, and `game.isTransitioning()` is
 true meanwhile too. A `changeScene()` during the splash happens when it ends.
 
