@@ -18,3 +18,5 @@ paths:
 - Network fakes: override `DownloadTask.createTransfer()`/`createPort()` or `AssetLoader.newDownloadTask()`; swap in `tests.FakeTextureLoader`.
 - Tests cover engine code only; example runtime code needs an on-device/simulator run.
 - Iterating on one test: tag it `@only`, full `npm run check` at the end.
+- **Two runners.** roScreen tests (everything with a `BGE.Game`) run on a patched Rooibos runner (`scripts/rooibos-roscreen-runner-plugin.js`): once an roScreen exists, SceneGraph calls hang on a device. SceneGraph tests (`@SGNode` suites) go under `src/components/` and run in the `scenegraph` shard on stock Rooibos. They must never make a `BGE.Game`; `run-tests-sharded.js` enforces both.
+- **Must pass on a device too** (`npm run test:device`): read pixels with `tests.readPixels()`, not `GetByteArray()` (a device reads zeros from drawn bitmaps), and hand engine code that reads pixels a `tests.loadedCopy()`. Translucent pixels read back premultiplied on a device. Don't assume brs-cli's font widths, device info, or Integer vs Float results from native calls. The runner pins `BGE.getDeviceRenderTier()` to `simulator`.
