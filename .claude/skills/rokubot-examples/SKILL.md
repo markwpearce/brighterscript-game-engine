@@ -161,11 +161,12 @@ app, so to deep-link (`launch dev --param ...`) after a sideload, `press home` f
 
 ## Debugging a crash or unresponsive screen
 
-Every example built on `BGE.Game` (all but `rendererTest`) opens with the engine's ~3s splash
-screen (`game.splash`, docs/splash-screen.md) before its first scene, so a screenshot right after
-launch shows the cannon logo. Launch with `--param splash=0` to skip it (every example but
-`hybrid` reads it; `npm run run-example -- <name> splash=0`), or wait ~3.5s, or press any key once
-to skip (`loading` also has a 1.5s second card).
+The game examples (asteroids, breakout, fighter, flightSim, platformer, pong, rpg, snake,
+thirdPerson, visualnovel) open with the engine's ~3s splash screen (`game.splash`,
+docs/splash-screen.md) before their first scene, so a screenshot right after launch shows the
+cannon logo. Launch them with `--param splash=0` to skip it (`npm run run-example -- <name>
+splash=0`), or wait ~3.5s, or press any key once to skip (`asteroids` also has a 1.5s second
+card). The demos turn the splash off.
 
 If a screenshot looks frozen/unchanged across several actions, don't assume rokubot is broken —
 the app may have crashed into the BrightScript Micro Debugger, which just keeps showing the last

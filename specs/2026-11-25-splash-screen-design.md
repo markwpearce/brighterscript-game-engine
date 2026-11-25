@@ -204,6 +204,7 @@ load shows the progress bar.
 
 - A new `docs/splash-screen.md` covering the opt-out, schemes, custom cards and the loading
   behaviour. Link it from `docs/loading-assets.md` and `docs/game-engine-overview.md`.
-- `examples/loading` gets a studio-logo `ImageSplashCard` after the engine card.
+- `examples/asteroids` gets a studio-logo `ImageSplashCard` after the engine card. Only the game
+  examples show the splash; demos set `game.splash.enabled = false`.
 - Every other example now shows the engine splash. The rokubot drive scripts and any example
   tests that screenshot the first scene need to wait about 3s, or press a key to skip.
