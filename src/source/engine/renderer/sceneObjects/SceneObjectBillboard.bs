@@ -79,6 +79,11 @@ namespace BGE
     private billboardCornersCache as roAssociativeArray = invalid
     ' Scratch for projecting the directScaled quad's corners: x, y, depth per corner.
     private cameraFacingProjected as float[] = []
+    ' The world corners cameraFacingProjected was projected from, whether they all projected,
+    ' and the draw mode, once cameraFacingQuadFound this frame
+    private cameraFacingCorners as BGE.Math.Vector[] = invalid
+    private cameraFacingProjectedOk as boolean = false
+    private cameraFacingMode as SceneObjectDrawMode = BGE.SceneObjectDrawMode.directScaled
     ' The camera-facing quad's world centre, kept only for isShaded lighting
     private cameraFacingQuadCenter as BGE.Math.Vector = invalid
 
@@ -1283,18 +1288,24 @@ namespace BGE
     ' @param {Renderer} rendererObj
     ' @return {boolean} true if every corner projected onto the canvas
     protected function updateCanvasPointsForCameraFacingQuad(rendererObj as Renderer, drawMode = BGE.SceneObjectDrawMode.directScaled as SceneObjectDrawMode) as boolean
-      corners = m.getCameraFacingQuadWorldCorners(rendererObj.camera, drawMode)
+      isCamera3d = rendererObj.camera.name = "Camera3d"
+      projectedOk = false
+      if isCamera3d
+        ' the terrain hide test may already have projected them this frame
+        projectedOk = m.projectCameraFacingQuadThisFrame(rendererObj.camera as Camera3d, drawMode)
+        corners = m.cameraFacingCorners
+      else
+        corners = m.getCameraFacingQuadWorldCorners(rendererObj.camera, drawMode)
+      end if
       if m.drawable.isShaded
         ' top left and bottom right
         m.cameraFacingQuadCenter = BGE.Math.VectorOps.create((corners[0].x + corners[3].x) / 2, (corners[0].y + corners[3].y) / 2, (corners[0].z + corners[3].z) / 2)
       end if
-      if rendererObj.camera.name = "Camera3d"
-        camera3d = rendererObj.camera as Camera3d
-        ' the same canvas points as worldPointToCanvasPoint(), in one cheaper pass
-        projected = m.cameraFacingProjected
-        if not camera3d.projectPointsWithDepth(corners, projected)
+      if isCamera3d
+        if not projectedOk
           return false
         end if
+        projected = m.cameraFacingProjected
         canvasPoints = m.canvasPoints
         m.setCanvasCorner(canvasPoints.topLeft, projected, 0)
         m.setCanvasCorner(canvasPoints.topRight, projected, 3)
@@ -1331,55 +1342,44 @@ namespace BGE
       corner.z = 0
     end sub
 
-    ' directScaled's quad faces the view plane, so its corners share one depth: its canvas box
-    ' is its projected top left plus its world size at that depth, with no corners to build.
+    ' The camera-facing quad's box is the one draw() projects this frame, so draw() reuses it.
     protected override function projectOcclusionCornersForMode(camera as Camera3d, drawMode as SceneObjectDrawMode, projected as float[], depthPoints as BGE.Math.Vector[]) as boolean
-      if m.drawable.banksWithCameraRoll or drawMode <> BGE.SceneObjectDrawMode.directScaled
+      if not isCameraFacingQuadDrawMode(drawMode)
         return false
       end if
-      ' the corner math of getCameraFacingQuadWorldCorners()' default branch
-      right = camera.getRightVector()
-      up = camera.getUpVector()
-      worldSize = m.getDirectModeCanvasSize()
-      pretrans = m.drawable.getPretranslation()
-      ownerScale = m.drawable.getOwnerScale()
-      offsetX = pretrans.x * m.drawable.scale.x * ownerScale.x
-      offsetY = pretrans.y * m.drawable.scale.y * ownerScale.y
-      p = m.worldPosition
-      pz = p.z ?? 0
-      topLeft = BGE.Math.VectorOps.create(p.x + right.x * offsetX - up.x * offsetY, p.y + right.y * offsetX - up.y * offsetY, pz + (right.z ?? 0) * offsetX - (up.z ?? 0) * offsetY)
-      bottomLeft = BGE.Math.VectorOps.create(topLeft.x - up.x * worldSize.height, topLeft.y - up.y * worldSize.height, topLeft.z - (up.z ?? 0) * worldSize.height)
+      size = m.getDirectModeCanvasSize()
+      ' a polygon or model has no width/height of its own: left to getOcclusionTestPoints()
+      if size.width = 0 or size.height = 0
+        return false
+      end if
+      if not m.projectCameraFacingQuadThisFrame(camera, drawMode)
+        return false
+      end if
+      projected.Clear()
+      projected.Append(m.cameraFacingProjected)
       depthPoints.Clear()
-      depthPoints.push(topLeft)
-      depthPoints.push(bottomLeft)
-      ' rolled and pitched, the right edge can be nearer in level depth than the left
-      if camera.rollDegrees <> 0
-        w = worldSize.width
-        depthPoints.push(BGE.Math.VectorOps.create(topLeft.x + right.x * w, topLeft.y + right.y * w, topLeft.z + (right.z ?? 0) * w))
-        depthPoints.push(BGE.Math.VectorOps.create(bottomLeft.x + right.x * w, bottomLeft.y + right.y * w, bottomLeft.z + (right.z ?? 0) * w))
-      end if
-      if not camera.projectPointsWithDepth([topLeft], projected)
-        return false
-      end if
-      perUnit = camera.pixelsPerWorldUnitAt(topLeft)
-      if perUnit <= 0
-        return false
-      end if
-      x = projected[0]
-      y = projected[1]
-      depth = projected[2]
-      width = worldSize.width * perUnit
-      height = worldSize.height * perUnit
-      projected.push(x + width)
-      projected.push(y)
-      projected.push(depth)
-      projected.push(x)
-      projected.push(y + height)
-      projected.push(depth)
-      projected.push(x + width)
-      projected.push(y + height)
-      projected.push(depth)
+      depthPoints.Append(m.cameraFacingCorners)
       return true
+    end function
+
+    ' getCameraFacingQuadWorldCorners() projected into cameraFacingProjected (x, y, depth per
+    ' corner), worked out at most once a frame (update() clears it): the terrain hide test and
+    ' draw() both want it, and draw() comes straight after the test.
+    '
+    ' @param {Camera3d} camera
+    ' @param {SceneObjectDrawMode} drawMode
+    ' @return {boolean} false when a corner won't project
+    private function projectCameraFacingQuadThisFrame(camera as Camera3d, drawMode as SceneObjectDrawMode) as boolean
+      if m.cameraFacingQuadFound and m.cameraFacingMode = drawMode
+        return m.cameraFacingProjectedOk
+      end if
+      corners = m.getCameraFacingQuadWorldCorners(camera, drawMode)
+      m.cameraFacingCorners = corners
+      m.cameraFacingMode = drawMode
+      ' the same canvas points as worldPointToCanvasPoint(), in one cheaper pass
+      m.cameraFacingProjectedOk = camera.projectPointsWithDepth(corners, m.cameraFacingProjected)
+      m.cameraFacingQuadFound = true
+      return m.cameraFacingProjectedOk
     end function
 
     ' The world corners of the camera-facing quad directScaled draws - see

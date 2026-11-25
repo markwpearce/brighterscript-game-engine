@@ -11,6 +11,7 @@ import "cameras/Camera2d.bs"
 import "cameras/Camera3d.bs"
 import "Renderer.bs"
 import "sceneObjects/SceneObject.bs"
+import "sceneObjects/SceneObjectBillboard.bs"
 import "sceneObjects/SceneObjectVoxelTerrain.bs"
 
 namespace tests
@@ -276,48 +277,118 @@ namespace tests
       m.assertEqual(near, m.terrain.view.spanCount)
     end function
 
-    @it("boxes a directScaled billboard as its projected corners do, without them")
+    @it("boxes a camera-facing billboard exactly as its projected corners do")
     function _()
       m.addTerrain(10)
-      for each roll in [0.0, 25.0]
-        m.camera.rollDegrees = roll
-        entity = new BGE.GameEntity(m.game, {name: "sprite"})
-        entity.position = BGE.Math.VectorOps.create(40, 0, -400)
-        entity.updateTransformationMatrix()
-        bitmap = CreateObject("roBitmap", {width: 10, height: 30, alphaEnable: true})
-        region = CreateObject("roRegion", bitmap, 0, 0, 10, 30)
-        drawable = new BGE.Image(entity, region, {drawMode: BGE.SceneObjectDrawMode.directScaled})
-        drawable.setAnchor(0.5, 1)
-        sprite = drawable.addToRenderer(m.renderer)
-        m.renderFrames()
-        fast = [] as float[]
-        depthPoints = [] as BGE.Math.Vector[]
-        m.assertTrue(sprite.projectOcclusionCorners(m.camera, fast, depthPoints), `fast path, roll ${roll}`)
-        slow = [] as float[]
-        m.camera.projectPointsWithDepth(sprite.getOcclusionTestPoints(m.camera), slow)
-        fastBox = m.boxOf(fast)
-        slowBox = m.boxOf(slow)
-        for i = 0 to 3
-          m.assertTrue(abs(fastBox[i] - slowBox[i]) <= 1.5, `roll ${roll} edge ${i}: ${fastBox[i]} vs ${slowBox[i]}`)
+      for each mode in [BGE.SceneObjectDrawMode.directScaled, BGE.SceneObjectDrawMode.axisAligned]
+        for each roll in [0.0, 25.0]
+          m.camera.rollDegrees = roll
+          sprite = m.newSprite(m.renderer, 40, 0, -400, mode)
+          m.renderFrames()
+          fast = [] as float[]
+          depthPoints = [] as BGE.Math.Vector[]
+          m.assertTrue(sprite.projectOcclusionCorners(m.camera, fast, depthPoints), `fast path, mode ${mode} roll ${roll}`)
+          slow = [] as float[]
+          m.camera.projectPointsWithDepth(sprite.getOcclusionTestPoints(m.camera), slow)
+          m.assertEqual(slow, fast, `mode ${mode} roll ${roll}`)
+          m.assertEqual(4, depthPoints.count())
+          m.renderer.removeSceneObject(sprite)
         end for
-        m.renderer.removeSceneObject(sprite)
       end for
-      ' another mode takes the corner path
-      upright = m.newBillboard(0, 0, -400)
+      ' an oriented one takes the corner path
+      entity = new BGE.GameEntity(m.game, {name: "card"})
+      entity.position = BGE.Math.VectorOps.create(0, 0, -400)
+      entity.updateTransformationMatrix()
+      region = CreateObject("roRegion", CreateObject("roBitmap", {width: 10, height: 10, alphaEnable: true}), 0, 0, 10, 10)
+      card = (new BGE.Image(entity, region, {drawMode: BGE.SceneObjectDrawMode.orientedDrawBackFace})).addToRenderer(m.renderer)
       m.renderFrames()
-      m.assertFalse(upright.projectOcclusionCorners(m.camera, [] as float[], [] as BGE.Math.Vector[]))
+      m.assertFalse(card.projectOcclusionCorners(m.camera, [] as float[], [] as BGE.Math.Vector[]))
     end function
 
-    ' left, top, right, bottom of projected x, y, depth triples
-    private function boxOf(projected as float[]) as float[]
-      edges = [1.0e9, 1.0e9, -1.0e9, -1.0e9] as float[]
-      for i = 0 to projected.count() - 1 step 3
-        edges[0] = BGE.Math.Min(edges[0], projected[i])
-        edges[1] = BGE.Math.Min(edges[1], projected[i + 1])
-        edges[2] = BGE.Math.Max(edges[2], projected[i])
-        edges[3] = BGE.Math.Max(edges[3], projected[i + 1])
+    @it("draws a billboard the hills were tested against exactly where it draws without them (issue #678)")
+    function _()
+      m.addTerrain(0)
+      ' the same scene with no terrain, so nothing projects the quad ahead of draw()
+      plainCamera = new BGE.Camera3d()
+      plainCamera.fieldOfViewDegrees = 90
+      plainCamera.maxDrawDistance = 1000
+      plainCamera.drawDistanceFadeFraction = 0
+      plainCamera.drawDistanceTransitionSeconds = 0
+      plain = new BGE.Renderer(CreateObject("roBitmap", {width: 1280, height: 720, alphaEnable: true}), m.game, plainCamera)
+      ' a new pose each frame, so a box left from the frame before would be wrong
+      poses = [
+        {x: 0, y: 50, z: 0, ox: 0, oy: 0, oz: -1, roll: 0, shear: false},
+        {x: 10, y: 80, z: -20, ox: 0.1, oy: -0.2, oz: -1, roll: 0, shear: false},
+        {x: -30, y: 60, z: 10, ox: 0.2, oy: 0.15, oz: -1, roll: 20, shear: false},
+        {x: 25, y: 120, z: -50, ox: -0.1, oy: -0.4, oz: -1, roll: -35, shear: false},
+        {x: 5, y: 70, z: -5, ox: 0.05, oy: -0.3, oz: -1, roll: 50, shear: true},
+        {x: 60, y: 40, z: 30, ox: -0.25, oy: 0.05, oz: -1, roll: 0, shear: true}
+      ]
+      for each mode in [BGE.SceneObjectDrawMode.directScaled, BGE.SceneObjectDrawMode.axisAligned]
+        tested = m.newSprite(m.renderer, 40, 30, -400, mode)
+        untested = m.newSprite(plain, 40, 30, -400, mode)
+        for each pose in poses
+          for each cam in [m.camera, plainCamera]
+            cam.position = BGE.Math.VectorOps.create(pose.x, pose.y, pose.z)
+            cam.orientation = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.create(pose.ox, pose.oy, pose.oz))
+            cam.rollDegrees = pose.roll
+            cam.pitchMode = BGE.CameraPitchMode.rotate
+            if pose.shear
+              cam.pitchMode = BGE.CameraPitchMode.shear
+            end if
+          end for
+          m.renderFrames(1)
+          plain.setupCameraForFrame()
+          plain.render()
+          label = `mode ${mode} at (${pose.x}, ${pose.y}, ${pose.z}) roll ${pose.roll}`
+          m.assertTrue(tested.didDrawLastFrame(), label)
+          m.assertTrue(untested.didDrawLastFrame(), label)
+          ' draw() kept the corners the hide test left in the renderer's scratch
+          testedPoints = (m.renderer as dynamic).terrainDepthPoints
+          m.assertEqual(4, testedPoints.count(), label)
+          testedPoints[0].markedByTest = true
+          m.assertEqual(true, (tested as dynamic).cameraFacingCorners[0].markedByTest, label)
+          m.assertEqual(m.cornersOf(untested), m.cornersOf(tested), label)
+        end for
+        m.renderer.removeSceneObject(tested)
+        plain.removeSceneObject(untested)
       end for
-      return edges
+    end function
+
+    @it("doesn't reuse a box the hide test projected once the camera moves (issue #678)")
+    function _()
+      m.addTerrain(0)
+      sprite = m.newSprite(m.renderer, 40, 30, -400, BGE.SceneObjectDrawMode.directScaled)
+      m.renderFrames()
+      before = m.cornersOf(sprite)
+      m.camera.position.x = -40
+      m.camera.rollDegrees = 15
+      m.renderFrames(1)
+      after = m.cornersOf(sprite)
+      m.assertNotEqual(before[0], after[0])
+      ' as draw() projects it with nothing shared
+      expected = [] as float[]
+      m.camera.projectPointsWithDepth(sprite.getOcclusionTestPoints(m.camera), expected)
+      m.assertEqual([expected[0], expected[1], expected[3], expected[4], expected[6], expected[7], expected[9], expected[10]], after)
+    end function
+
+    ' A 10 x 30 camera-facing sprite anchored at its feet, at (x, y, z)
+    private function newSprite(rendererObj as BGE.Renderer, x as float, y as float, z as float, mode as BGE.SceneObjectDrawMode) as BGE.SceneObject
+      entity = new BGE.GameEntity(m.game, {name: "sprite"})
+      entity.position = BGE.Math.VectorOps.create(x, y, z)
+      entity.updateTransformationMatrix()
+      bitmap = CreateObject("roBitmap", {width: 10, height: 30, alphaEnable: true})
+      bitmap.Clear(&hFF0000FF)
+      region = CreateObject("roRegion", bitmap, 0, 0, 10, 30)
+      drawable = new BGE.Image(entity, region, {drawMode: mode})
+      drawable.setAnchor(0.5, 1)
+      return drawable.addToRenderer(rendererObj)
+    end function
+
+    ' A billboard's canvas corners: x, y of top left, top right, bottom left, bottom right
+    private function cornersOf(sceneObj as BGE.SceneObject) as float[]
+      quad = (sceneObj as BGE.SceneObjectBillboard).getCanvasPoints()
+      return [quad.topLeft.x, quad.topLeft.y, quad.topRight.x, quad.topRight.y, quad.bottomLeft.x, quad.bottomLeft.y, quad.bottomRight.x, quad.bottomRight.y]
     end function
 
     @describe("roll")
