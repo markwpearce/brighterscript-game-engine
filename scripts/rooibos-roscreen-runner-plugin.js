@@ -55,8 +55,9 @@ const PATCHES = {
     ],
     'source/rooibos/testgroup.brs': [
         {
-            find: /\n(\s*)m\.runSuiteFunction\(m\.afterEachFunctionName, "afterEach", test\)\n/,
-            replace: (match, indent) => `\n${indent}m.runSuiteFunction(m.afterEachFunctionName, "afterEach", test)\n${indent}RunGarbageCollector()\n`
+            // both the sync and @async paths
+            find: /\n(\s*)m\.runSuiteFunction\(m\.afterEachFunctionName, "afterEach", (test|m\.currentTest)\)\n/g,
+            replace: (match, indent, test) => `\n${indent}m.runSuiteFunction(m.afterEachFunctionName, "afterEach", ${test})\n${indent}RunGarbageCollector()\n`
         }
     ]
 };
