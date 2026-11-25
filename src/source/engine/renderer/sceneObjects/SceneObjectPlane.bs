@@ -113,6 +113,9 @@ namespace BGE
     ' Physical/logical pixel ratio: 1.0 until logical size exceeds getMaxSuperTextureDimension()'s
     ' budget, then tiles downscale and every pixel-space consumer must apply this factor.
     private superTextureScale as float = 1.0
+    ' m.tiledScratchBmp's size in logical (texture-pixel) units
+    private tiledScratchLogicalWidth as float = 0
+    private tiledScratchLogicalHeight as float = 0
 
     ' Sized to at least the camera frame's diagonal, so a composite rendered into a
     ' canvasSize x canvasSize square can be rotated by any angle without exposing an
@@ -279,7 +282,7 @@ namespace BGE
         else
           m.poolBaseBmp = invalid
         end if
-        wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped.topLeft)
+        wrappedAnchor = m.wrapAnchorIntoSuperTexture(m.perspectivePoints.mapped)
         gotPreBmp = m.populatePerspectiveBmp(rendererObj, m.perspectivePoints.mapped, m.superTextureRegion, textureDest, wrappedAnchor, m.tiledScratchBmp, 1 / m.superTextureScale, textureTint)
         if gotPreBmp and pools.count() > 0
           if invalid <> m.poolBaseBmp
@@ -1044,22 +1047,14 @@ namespace BGE
       unpaddedScratchWidth = unpaddedTilesPerAxis * m.tileWidth
       unpaddedScratchHeight = unpaddedTilesPerAxis * m.tileHeight
 
-      ' The rotate call places the wrapped anchor at the destination canvas's ORIGIN,
-      ' not its center, so the region needing coverage after rotation is a full D x D
-      ' quadrant extending from the anchor - a FULL diagonal away, not the half-diagonal
-      ' getRollCanvasSize() uses for its center-anchored case. Since
-      ' wrapAnchorIntoSuperTexture() re-centers the anchor in this supertexture, its
-      ' half-side must be at least that full diagonal to cover every rotation angle,
-      ' or corners bleed through with visible rotation/pitch-dependent artifacts.
-      requiredDiagonal = Sqr(unpaddedScratchWidth * unpaddedScratchWidth + unpaddedScratchHeight * unpaddedScratchHeight)
-      rotationPaddedWorldDiameter = 2 * requiredDiagonal
-
-      m.tilesPerAxis = Fix(rotationPaddedWorldDiameter / smallestTileDimension) + 1
-      if (m.tilesPerAxis mod 2) = 0
-        ' Keep it odd, so a tile sits exactly centered in the supertexture - the
-        ' center tile is where wrapAnchorIntoSuperTexture() re-centers every anchor.
-        m.tilesPerAxis = m.tilesPerAxis + 1
-      end if
+      ' wrapAnchorIntoSuperTexture() puts the centre of the part of the scratch the warp
+      ' reads in the center tile, so at any rotation everything read is within half the
+      ' scratch's diagonal of a point in that tile. The center tile's edges must be that
+      ' far from the supertexture's, or corners bleed through (#138: anchoring the quad's
+      ' corner instead needed the full diagonal, 4x the area).
+      halfDiagonal = Sqr(unpaddedScratchWidth * unpaddedScratchWidth + unpaddedScratchHeight * unpaddedScratchHeight) / 2
+      ' odd, so a tile sits exactly centered
+      m.tilesPerAxis = 2 * (Fix(halfDiagonal / smallestTileDimension) + 1) + 1
 
       ' Not truncated - m.tilesPerAxis feeds the corner-bleed coverage math above.
       ' bmpWidth/bmpHeight are the supertexture's LOGICAL size (world coverage / wrap
@@ -1129,26 +1124,43 @@ namespace BGE
         return false
       end if
       m.tiledScratchBmp.SetAlphaEnable(true)
+      m.tiledScratchLogicalWidth = unpaddedScratchWidth
+      m.tiledScratchLogicalHeight = unpaddedScratchHeight
       m.superTextureBuiltForMaxDrawDistance = worldDrawDistance
       m.superTextureBuiltForTileWidth = textureSize.width
       m.superTextureBuiltForTileHeight = textureSize.height
       return true
     end function
 
-    ' Wraps an unbounded world-derived texture-pixel anchor into this supertexture's
-    ' center tile. Only the anchor needs wrapping (not every corner) since the warp's
-    ' rotation/scale are translation-invariant. Wrap period is in logical (world/tile)
-    ' units; the result is converted to physical pixel space (m.superTextureScale)
-    ' only at the end, for the rotate step which reads real bitmap pixels.
+    ' The rotate anchor (the quad's top left, an unbounded texture-pixel point) moved by
+    ' whole tiles so the middle of what the warp reads lands in this supertexture's center
+    ' tile. The warp is the same for any whole-tile shift. That middle is the centre of
+    ' the quad's rectified rectangle - the top edge along scratch row 0, the bottom right
+    ' corner's distance from it down - clamped to the scratch, which crops the rest.
+    ' Worked in logical (world/tile) units; the result is in physical pixels
+    ' (m.superTextureScale), for the rotate step which reads real bitmap pixels.
     '
-    ' @param {BGE.Math.Vector} point
+    ' @param {BGE.Math.CornerPoints} cp the quad in texture pixels
     ' @return {BGE.Math.Vector}
-    private function wrapAnchorIntoSuperTexture(point as BGE.Math.Vector) as BGE.Math.Vector
+    private function wrapAnchorIntoSuperTexture(cp as BGE.Math.CornerPoints) as BGE.Math.Vector
+      edgeX = cp.topRight.x - cp.topLeft.x
+      edgeY = cp.topRight.y - cp.topLeft.y
+      edgeLength = Sqr(edgeX * edgeX + edgeY * edgeY)
+      halfAcross = 0.0
+      halfDown = 0.0
+      if edgeLength > 0
+        edgeX = edgeX / edgeLength
+        edgeY = edgeY / edgeLength
+        ' scratch +y is the top edge's direction turned a quarter towards the bottom
+        depth = (cp.bottomRight.y - cp.topLeft.y) * edgeX - (cp.bottomRight.x - cp.topLeft.x) * edgeY
+        halfAcross = BGE.Math.Min(edgeLength, m.tiledScratchLogicalWidth) / 2
+        halfDown = BGE.Math.Min(Abs(depth), m.tiledScratchLogicalHeight) / 2
+      end if
+      middleX = cp.topLeft.x + edgeX * halfAcross - edgeY * halfDown
+      middleY = cp.topLeft.y + edgeY * halfAcross + edgeX * halfDown
       centerTileIndex = Int(m.tilesPerAxis / 2)
-      wrappedX = BGE.Math.wrapValue(point.x, m.tileWidth)
-      wrappedY = BGE.Math.wrapValue(point.y, m.tileHeight)
-      logicalX = centerTileIndex * m.tileWidth + wrappedX
-      logicalY = centerTileIndex * m.tileHeight + wrappedY
+      logicalX = centerTileIndex * m.tileWidth + BGE.Math.wrapValue(middleX, m.tileWidth) - (middleX - cp.topLeft.x)
+      logicalY = centerTileIndex * m.tileHeight + BGE.Math.wrapValue(middleY, m.tileHeight) - (middleY - cp.topLeft.y)
       return BGE.Math.VectorOps.create(logicalX * m.superTextureScale, logicalY * m.superTextureScale, 0)
     end function
 
