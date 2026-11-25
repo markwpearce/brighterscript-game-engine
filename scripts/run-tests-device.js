@@ -67,7 +67,6 @@ async function runShardOnDevice(shard, zipPath) {
         consoleProcess.kill();
         return { outcome: 'console-busy', log };
     }
-    const start = log.length;
 
     await rokubot(['press', 'home']);
     const sideload = await rokubot(['sideload', zipPath, '--deleteDevChannel']);
@@ -75,6 +74,10 @@ async function runShardOnDevice(shard, zipPath) {
         consoleProcess.kill();
         return { outcome: 'sideload-failed', log: sideload.output };
     }
+    // Only output from here on is this run's: a slow history replay can run past
+    // CONSOLE_REPLAY_MS and carry the last shard's [Rooibos Result]. This run's result comes long
+    // after the sideload returns (a compile error missed here still ends as "hung").
+    const start = log.length;
 
     const started = Date.now();
     let lastLength = log.length;
