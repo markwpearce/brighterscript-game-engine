@@ -265,9 +265,9 @@ function projectile(frame, core, mid, edge) {
 }
 
 function floorTile() {
-  // 256x48, tiles horizontally. Top is the back of the floor.
+  // 256x64, tiles horizontally. Top is the back of the floor.
   const w = 256;
-  const h = 48;
+  const h = 64;
   const c = createCanvas(w, h);
   const g = c.getContext('2d');
   const grad = g.createLinearGradient(0, 0, 0, h);
@@ -277,7 +277,7 @@ function floorTile() {
   g.fillStyle = grad;
   g.fillRect(0, 0, w, h);
   // Rows of plates get taller toward the front.
-  const rows = [0, 5, 12, 22, 35, 48];
+  const rows = [0, 5, 12, 21, 33, 47, 64];
   for (let r = 0; r < rows.length - 1; r++) {
     g.fillStyle = 'rgba(0,0,0,0.55)';
     g.fillRect(0, rows[r], w, 1);
