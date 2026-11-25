@@ -290,20 +290,123 @@ namespace tests
           tiledPlane.update(camera)
           tiledPlane.draw(m.game.canvas.renderer)
 
-          ' a pixel the supertexture didn't cover stays transparent
-          topDown = dynamicPlane.prePerspectiveBmp as roBitmap
-          width = topDown.GetWidth()
-          height = topDown.GetHeight()
-          for y = 1 to height - 2 step Int(height / 12)
-            for x = 1 to width - 2 step Int(width / 12)
-              m.assertTrue(topDown.GetByteArray(x, y, 1, 1)[3] > 0, `gap at (${x}, ${y}) heading ${degrees} offset ${offset}`)
-            end for
-            m.assertTrue(topDown.GetByteArray(width - 2, y, 1, 1)[3] > 0, `gap at the right edge, row ${y}, heading ${degrees} offset ${offset}`)
-          end for
-          m.assertTrue(topDown.GetByteArray(width - 2, height - 2, 1, 1)[3] > 0, `gap at the bottom right, heading ${degrees} offset ${offset}`)
+          m.assertTopDownCovered(dynamicPlane, `heading ${degrees} offset ${offset}`)
         end for
       end for
     end function
+
+    ' The rectified quad is deepest just above the ground with the camera pitched down by
+    ' half its vertical FOV: the far edge sits at the draw distance in view depth, past it
+    ' on the ground (issue #673).
+    @it("fills the whole top-down bitmap at any pitch, height and FOV, rolled or not (issue #673)")
+    function _()
+      tile = CreateObject("roBitmap", {width: 64, height: 64, AlphaEnable: false})
+      tile.Clear(&h336633FF)
+      region = CreateObject("roRegion", tile, 0, 0, 64, 64)
+      tiledDrawable = new BGE.DrawablePlane(m.testScene, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      (camera as object).maxDrawDistanceDeviceCap = 2500
+      camera.maxDrawDistance = 1000
+      camera.planeDrawDistanceOverride = 1500
+      dynamicPlane = tiledPlane as object
+      ' {fov, roll, half the vertical FOV} for this suite's 200x100 frame (rolled, the square
+      ' canvas covering its diagonal). Steep views are left out: their quad is so small that
+      ' the scratch is magnified past what brs-cli draws, and they're nowhere near as deep.
+      views = [
+        {fov: 90, roll: 0, halfVertical: 26.57},
+        {fov: 60, roll: 0, halfVertical: 16.10},
+        {fov: 110, roll: 0, halfVertical: 35.52},
+        {fov: 90, roll: 30, halfVertical: 48.37}
+      ]
+      ' {height, pitch past halfVertical}: deepest is just above the ground at halfVertical
+      poses = [
+        {height: 2, pitch: -16},
+        {height: 2, pitch: -1},
+        {height: 2, pitch: 0},
+        {height: 60, pitch: -1},
+        {height: 60, pitch: 0.5},
+        {height: 60, pitch: 2},
+        {height: 60, pitch: 2.1},
+        {height: 400, pitch: 8}
+      ]
+      caseIndex = 0
+      for each view in views
+        camera.fieldOfViewDegrees = view.fov
+        camera.rollDegrees = view.roll
+        for each pose in poses
+          caseIndex++
+          pitch = view.halfVertical + pose.pitch
+          heading = BGE.Math.DegreesToRadians(caseIndex * 47)
+          pitchRadians = BGE.Math.DegreesToRadians(pitch)
+          position = BGE.Math.VectorOps.create(caseIndex * 13, pose.height, -caseIndex * 7)
+          camera.position = position
+          camera.setTarget(BGE.Math.VectorOps.add(position, BGE.Math.VectorOps.create(100 * sin(heading) * cos(pitchRadians), -100 * sin(pitchRadians), -100 * cos(heading) * cos(pitchRadians))))
+          camera.checkMovement()
+          tiledPlane.update(camera)
+          tiledPlane.draw(m.game.canvas.renderer)
+          m.assertTopDownCovered(dynamicPlane, `fov ${view.fov} roll ${view.roll} pitch ${pitch} height ${pose.height}`, view.roll <> 0)
+        end for
+      end for
+    end function
+
+    @it("sizes the rotate scratch to the view's footprint, not a square (issue #673)")
+    function _()
+      tile = CreateObject("roBitmap", {width: 64, height: 64, AlphaEnable: false})
+      region = CreateObject("roRegion", tile, 0, 0, 64, 64)
+      tiledDrawable = new BGE.DrawablePlane(m.testScene, region, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.tiledImage})
+      tiledPlane = new BGE.SceneObjectPlane("tiledPlane", tiledDrawable)
+      camera = m.game.canvas.renderer.camera as BGE.Camera3d
+      (camera as object).maxDrawDistanceDeviceCap = 2500
+      camera.maxDrawDistance = 1000
+      camera.planeDrawDistanceOverride = 1500
+      camera.checkMovement()
+      dynamicPlane = tiledPlane as object
+      m.assertTrue(dynamicPlane.buildSuperTextureIfNeeded(m.game.canvas.renderer))
+      ' 2 x 1500 x tan(45) / cos(26.6) across, 1500 / cos(26.6) down, in whole tiles
+      m.assertEqual(53.0 * 64, dynamicPlane.tiledScratchLogicalWidth)
+      m.assertEqual(27.0 * 64, dynamicPlane.tiledScratchLogicalHeight)
+      ' the 47x47 tile square needed 69
+      m.assertEqual(61, dynamicPlane.tilesPerAxis)
+
+      ' a narrower view needs no rebuild; a rolled one (deeper) does, once
+      camera.zoom = 2
+      camera.checkMovement()
+      m.assertTrue(dynamicPlane.buildSuperTextureIfNeeded(m.game.canvas.renderer))
+      m.assertEqual(27.0 * 64, dynamicPlane.tiledScratchLogicalHeight)
+      camera.zoom = 1
+      camera.rollDegrees = 10
+      camera.checkMovement()
+      m.assertTrue(dynamicPlane.buildSuperTextureIfNeeded(m.game.canvas.renderer))
+      m.assertTrue(dynamicPlane.tiledScratchLogicalHeight > 27.0 * 64, `${dynamicPlane.tiledScratchLogicalHeight}`)
+      camera.rollDegrees = 0
+      camera.checkMovement()
+      m.game.canvas.renderer.resetDrawCallCounter()
+      m.assertTrue(dynamicPlane.buildSuperTextureIfNeeded(m.game.canvas.renderer))
+      m.assertEqual(0, m.game.canvas.renderer.getDrawCallsLastFrame(), "rebuilt after the roll ended")
+    end function
+
+    ' A pixel the supertexture didn't cover stays transparent. Rolled, the quad's far corners
+    ' can be wider than the scratch (they're off the rotated frame), so only its left half is checked.
+    private sub assertTopDownCovered(dynamicPlane as object, label as string, leftHalfOnly = false as boolean)
+      topDown = dynamicPlane.prePerspectiveBmp as roBitmap
+      width = topDown.GetWidth()
+      height = topDown.GetHeight()
+      right = width - 2
+      if leftHalfOnly
+        right = Int(width / 2)
+      end if
+      for y = 1 to height - 2 step Int(height / 12)
+        for x = 1 to right step Int(width / 12)
+          m.assertTrue(topDown.GetByteArray(x, y, 1, 1)[3] > 0, `gap at (${x}, ${y}) ${label}`)
+        end for
+        m.assertTrue(topDown.GetByteArray(right, y, 1, 1)[3] > 0, `gap at (${right}, ${y}) ${label}`)
+      end for
+      for x = 1 to right step Int(width / 12)
+        m.assertTrue(topDown.GetByteArray(x, height - 2, 1, 1)[3] > 0, `gap at the bottom, column ${x}, ${label}`)
+      end for
+      m.assertTrue(topDown.GetByteArray(right, height - 2, 1, 1)[3] > 0, `gap at (${right}, ${height - 2}) ${label}`)
+    end sub
 
     @it("builds the supertexture with one blit per tile column and one per row (issue #252)")
     function _()
