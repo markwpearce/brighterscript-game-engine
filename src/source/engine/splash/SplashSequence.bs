@@ -1,0 +1,231 @@
+import "SplashCard.bs"
+import "EngineSplashCard.bs"
+import "../Game.bs"
+import "../GameInput.bs"
+import "../renderer/Renderer.bs"
+import "../loading/LoadingScreen.bs"
+import "../../utils/colors.bs"
+import "../../math/math.bs"
+
+namespace BGE
+
+  ' The startup splash: a sequence of full-screen cards, the engine's logo first, shown once
+  ' when `game.play()` starts. The first scene loads underneath and starts when the cards are done
+  ' and it has loaded. It's `game.splash`:
+  '
+  ' ```
+  ' game.splash.engineCard.useScheme(BGE.SplashScheme.Dark)
+  ' game.splash.addCard(new BGE.ImageSplashCard("pkg:/images/studio.png"))
+  ' ' or, to turn it off
+  ' game.splash.enabled = false
+  ' ```
+  class SplashSequence
+
+    ' Whether `game.play()` shows the splash
+    enabled as boolean = true
+    ' The engine's card, always first
+    engineCard as BGE.EngineSplashCard
+    ' When the cards are done but the first scene is still loading, the loading bar waits this long
+    barDelaySeconds as float = 0.25
+    ' The fade to black at the end, before the first scene fades in
+    outroSeconds as float = 0.25
+
+    private game as BGE.Game = invalid
+    private extraCards as BGE.SplashCard[] = []
+    private cards as BGE.SplashCard[] = []
+    private index as integer = 0
+    ' "", "cards", "waiting", "outro" or "done"
+    private state as string = ""
+    private stateSeconds as float = 0.0
+    private previousBackground as integer = BGE.Colors.Black
+    private cardEnded as boolean = false
+    private barLayout as BGE.DefaultLoadingScreen = invalid
+
+    sub new()
+      m.engineCard = new BGE.EngineSplashCard()
+    end sub
+
+    ' Adds a card after the engine card and any added before it.
+    '
+    ' @param {BGE.SplashCard} card
+    sub addCard(card as BGE.SplashCard)
+      m.extraCards.push(card)
+    end sub
+
+    ' Every card in the order they play, the engine card first.
+    '
+    ' @return {BGE.SplashCard[]}
+    function getCards() as BGE.SplashCard[]
+      cards = [m.engineCard] as BGE.SplashCard[]
+      cards.append(m.extraCards)
+      return cards
+    end function
+
+    ' Starts the first card. Called by `Game.play()`.
+    '
+    ' @param {BGE.Game} game
+    sub start(game as BGE.Game)
+      m.game = game
+      m.cards = m.getCards()
+      m.index = 0
+      m.previousBackground = BGE.Colors.Black
+      m.setState("cards")
+      m.startCard()
+    end sub
+
+    ' Passes a button press on to the current card, which skips it if it can.
+    '
+    ' @param {BGE.GameInput} input
+    sub onInput(input as BGE.GameInput)
+      if m.state = "cards" and input.press
+        m.cards[m.index].trySkip()
+      end if
+    end sub
+
+    ' Moves the sequence on. Called every frame while it's showing.
+    '
+    ' @param {float} dt - seconds since the last frame
+    ' @param {boolean} loading - whether the first scene is still loading
+    sub update(dt as float, loading as boolean)
+      if m.state = "cards"
+        card = m.cards[m.index]
+        card.update(dt)
+        m.stateSeconds += dt
+        if card.isFinished()
+          m.nextCard(loading)
+        end if
+        return
+      end if
+      if m.state = "waiting"
+        if loading
+          m.stateSeconds += dt
+          return
+        end if
+        m.setState("outro")
+      end if
+      if m.state = "outro"
+        m.stateSeconds += dt
+        if m.stateSeconds >= m.outroSeconds - 0.0001
+          m.finish(m.game)
+        end if
+      end if
+    end sub
+
+    ' Draws the current card (and the loading bar, while waiting on the first scene).
+    '
+    ' @param {BGE.Renderer} renderer - the UI canvas renderer
+    ' @param {float} progress - the first scene's loading progress, 0 to 1
+    sub draw(renderer as BGE.Renderer, progress as float)
+      size = renderer.getCanvasSize()
+      if m.state = "" or m.state = "done"
+        renderer.drawRectangle(0, 0, size.x, size.y, BGE.Colors.Black)
+        return
+      end if
+      card = m.cards[m.index]
+      if m.state = "cards"
+        fade = 1.0
+        if card.fadeSeconds > 0
+          fade = BGE.Math.Clamp(m.stateSeconds / card.fadeSeconds, 0.0, 1.0)
+        end if
+        if fade < 1
+          renderer.drawRectangle(0, 0, size.x, size.y, m.previousBackground)
+        end if
+        card.draw(renderer, fade)
+      else if m.state = "waiting"
+        card.draw(renderer, 1.0)
+        if m.isShowingLoadingBar() and progress < 1
+          m.drawLoadingBar(renderer, size, progress, card.getForegroundColor())
+        end if
+      else if m.state = "outro"
+        renderer.drawRectangle(0, 0, size.x, size.y, BGE.Colors.Black)
+        card.draw(renderer, 1.0 - BGE.Math.Clamp(m.stateSeconds / m.outroSeconds, 0.0, 1.0))
+      end if
+    end sub
+
+    ' Whether every card has played and the fade to black is done.
+    '
+    ' @return {boolean}
+    function isFinished() as boolean
+      return m.state = "done"
+    end function
+
+    ' Whether the splash has started this launch.
+    '
+    ' @return {boolean}
+    function hasPlayed() as boolean
+      return m.state <> ""
+    end function
+
+    ' Ends the splash now, calling `onEnd()` on the current card if it hasn't had it.
+    '
+    ' @param {BGE.Game} game
+    sub finish(game as BGE.Game)
+      if m.state = "" or m.state = "done"
+        return
+      end if
+      m.endCard(game)
+      m.setState("done")
+    end sub
+
+    ' The position of the current card in `getCards()`.
+    '
+    ' @return {integer}
+    function getCurrentIndex() as integer
+      return m.index
+    end function
+
+    ' Whether the cards are done and the loading bar is showing over the last one.
+    '
+    ' @return {boolean}
+    function isShowingLoadingBar() as boolean
+      return m.state = "waiting" and m.stateSeconds >= m.barDelaySeconds - 0.0001
+    end function
+
+    private sub nextCard(loading as boolean)
+      if m.index < m.cards.count() - 1
+        m.previousBackground = m.cards[m.index].getBackgroundColor()
+        m.endCard(m.game)
+        m.index++
+        m.setState("cards")
+        m.startCard()
+      else if loading
+        m.setState("waiting")
+      else
+        m.setState("outro")
+      end if
+    end sub
+
+    private sub startCard()
+      m.cardEnded = false
+      m.cards[m.index].onStart(m.game)
+    end sub
+
+    private sub endCard(game as BGE.Game)
+      if not m.cardEnded and m.index < m.cards.count()
+        m.cardEnded = true
+        m.cards[m.index].onEnd(game)
+      end if
+    end sub
+
+    private sub setState(state as string)
+      m.state = state
+      m.stateSeconds = 0.0
+    end sub
+
+    private sub drawLoadingBar(renderer as BGE.Renderer, size as BGE.Math.Vector, progress as float, color as integer)
+      if invalid = m.barLayout
+        m.barLayout = new BGE.DefaultLoadingScreen()
+      end if
+      bar = m.barLayout.getBarRect(size.x, size.y)
+      ' below the logo rather than across it
+      top = size.y * 0.75
+      renderer.drawRectangle(bar.x, top, bar.width, bar.height, BGE.colorOpacity(color, 0.3))
+      filled = bar.width * BGE.Math.Clamp(progress, 0.0, 1.0)
+      if filled >= 1
+        renderer.drawRectangle(bar.x, top, filled, bar.height, color)
+      end if
+    end sub
+
+  end class
+
+end namespace
