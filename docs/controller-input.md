@@ -140,8 +140,9 @@ their own names.
 
 A brs-engine simulator gamepad arrives through the same remote-event path as
 the Roku remote (not the browser-controller path above). A gamepad paired to
-a real Roku doesn't reach the channel at all - use the browser controller page
-for that (see below). The simulator gamepad's face/shoulder
+a real Roku barely reaches the channel: its A can arrive as the remote's OK,
+but its D-pad and sticks send nothing. Use the browser controller page for
+that (see below). The simulator gamepad's face/shoulder
 buttons report as `"a"`, `"b"`, `"x"`, `"y"`, `"l1"`, `"r1"`, `"l2"`, `"r2"`
 (see `BGE.buttonNameFromCode`). `"a"`/`"b"` are aliased to `"ok"`/`"back"`
 (the conventional gamepad meaning - A confirms, B cancels), so no extra
@@ -169,7 +170,7 @@ so a `bindAction` already bound to those needs no changes at all. Its D-pad
 sends `"up"`/`"down"`/`"left"`/`"right"` and also drives stick `"1"` while
 held, so a `bindAxis` on stick 1 moves with the D-pad or the left stick.
 This is the way to use a gamepad with a real Roku, which doesn't pass a
-paired gamepad's input to channels.
+paired gamepad's D-pad or sticks to channels.
 
 ## Ignoring a press that's still held
 
