@@ -24,6 +24,9 @@ const ATLAS_WIDTH = 2048;
 const PADDING = 1;
 const PORTRAIT_SIZE = 200;
 const PORTRAIT_COLUMNS = 4;
+// Lower than the default q90: the atlases are most of the channel's size (the simulator
+// refuses channels over 7 MB), and the fighters are scaled up anyway.
+const ATLAS_QUALITY = 75;
 
 // A rule recolours pixels whose HSL (h 0-360, s/l 0-1) falls in `match`: `h` replaces the
 // hue, `s` the saturation (or `sMul` scales it) and `lMul` scales the lightness.
@@ -289,7 +292,7 @@ async function buildCharacter(key, character, portraits, portraitIndex) {
     const data = new Uint8ClampedArray(base.data);
     recolor(data, character.palettes[p]);
     const outFile = path.join(OUT_DIR, `${key}-${p}.webp`);
-    await writeWebp(data, atlas.width, atlas.height, outFile);
+    await writeWebp(data, atlas.width, atlas.height, outFile, { quality: ATLAS_QUALITY });
     console.log(`${outFile}: ${frames.length} frames, ${atlas.width}x${atlas.height}`);
 
     const pc = createCanvas(PORTRAIT_SIZE, PORTRAIT_SIZE);

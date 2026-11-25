@@ -60,7 +60,7 @@ Generated assets are rebuilt with scripts (each needs `npm install` at the repo 
 - `npm run build-ui-art` draws the announcement words, logo, HUD pieces, hit sparks, fireballs, floor and shadow into `src/sprites/ui/ui.webp` + `ui.json`. It also draws the splash screens, channel icons and title backdrop.
 - `npm run synth-audio` synthesizes the whooshes, jump/land thuds, fireball, menu blips and the KO sting.
 
-The voice lines, hits and grunts were converted from their packs to 22.05 kHz mono WAV, and the music to 64 kbps MP3, with `ffmpeg`.
+The voice lines, hits and grunts were converted from their packs to 16 kHz mono WAV, and the music to 40 kbps mono MP3, with `ffmpeg`, to keep the channel under the simulator's 7 MB limit.
 
 ## Still needed
 

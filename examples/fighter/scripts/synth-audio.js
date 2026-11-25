@@ -8,7 +8,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const RATE = 22050;
+const RATE = 16000;
 
 // Seeded so every run writes identical files.
 let seed = 12345;

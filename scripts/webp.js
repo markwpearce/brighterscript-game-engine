@@ -13,12 +13,13 @@ const LOSSLESS = { lossless: true, effort: 6, exact: true };
  * @param {number} width
  * @param {number} height
  * @param {string} outPath
- * @param {{lossless?: boolean}} [options] lossy (q90) by default
+ * @param {{lossless?: boolean, quality?: number}} [options] lossy (q90) by default; `quality` overrides the lossy quality
  */
 async function writeWebp(rgba, width, height, outPath, options = {}) {
   const raw = Buffer.from(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+  const lossy = options.quality ? { ...LOSSY, quality: options.quality } : LOSSY;
   await sharp(raw, { raw: { width, height, channels: 4 } })
-    .webp(options.lossless ? LOSSLESS : LOSSY)
+    .webp(options.lossless ? LOSSLESS : lossy)
     .toFile(outPath);
 }
 
