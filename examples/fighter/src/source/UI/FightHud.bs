@@ -1,33 +1,58 @@
 import "pkg:/source/engine/ui/UiWidget.bs"
 import "../Fight/MatchRules.bs"
+import "UiArt.bs"
+import "PortraitSet.bs"
 
-const HUD_BAR_BACK_RGBA = &h301010FF
-const HUD_BAR_FILL_RGBA = &hF0D030FF
-const HUD_BAR_TRAIL_RGBA = &hD03020FF
-const HUD_BAR_EDGE_RGBA = &hFFFFFFFF
+const HUD_BAR_BACK_RGBA = &h1A0C0CFF
+const HUD_BAR_FILL_RGBA = &hF0C828FF
+const HUD_BAR_FILL_LIGHT_RGBA = &hFFF07AFF
+const HUD_BAR_LOW_RGBA = &hF06A28FF
+const HUD_BAR_TRAIL_RGBA = &hC02818FF
 const HUD_TEXT_RGBA = &hFFFFFFFF
-const HUD_WIN_MARK_RGBA = &hF0D030FF
-const HUD_EMPTY_MARK_RGBA = &h505050FF
+const HUD_COMBO_RGBA = &hFFD84AFF
+const HUD_SHADOW_RGBA = &h000000C0
+' Where the bar's window sits inside the barFrame art.
+' (UI canvas pixels at 1280x720.)
+const HUD_BAR_INSET_X = 12
+const HUD_BAR_INSET_Y = 10
+const HUD_BAR_W = 440
+const HUD_BAR_H = 24
 
 ' What the HUD shows; FightScene writes it every frame.
 class HudState
   health as integer[] = [MAX_HEALTH, MAX_HEALTH]
   trail as integer[] = [MAX_HEALTH, MAX_HEALTH]
   wins as integer[] = [0, 0]
+  ' ui atlas pieces with each fighter's name, and their portrait numbers.
+  names as string[] = ["nameBlaze", "nameFrost"]
+  portraits as integer[] = [0, 4]
+  ' -1 hides the number (training).
   secondsLeft as integer = ROUND_SECONDS
+  ' A ui atlas piece shown big in the middle, popping in over its first few ticks.
   announcement as string = ""
-  p2Prompt as string = ""
+  announcementTicks as integer = 0
+  ' Hits in each player's current combo (shown from 2).
+  combo as integer[] = [0, 0]
+  comboTicks as integer[] = [0, 0]
+  ' Small text along the bottom, e.g. "P2: press any button to join".
+  prompt as string = ""
+  frame as integer = 0
 end class
 
-' Health bars (with a recent-damage trail), round timer, round-win markers and the big
-' centre announcement. All inside the 10% title-safe margin.
+' Health bars (with a recent-damage trail), portraits, round timer and KO badge, round-win
+' stars, combo counters and the big centre announcement. All inside the 10% title-safe margin.
+' Laid out for the UI canvas at 1280x720 (the art is drawn at that scale).
 class FightHud extends BGE.UI.UiWidget
 
   hudState as HudState
+  private art as UiArt
+  private portraits as PortraitSet
 
-  sub new(game as BGE.Game, state as HudState)
+  sub new(game as BGE.Game, state as HudState, art as UiArt, portraits as PortraitSet)
     super(game)
     m.hudState = state
+    m.art = art
+    m.portraits = portraits
   end sub
 
   override sub draw(parent = invalid as BGE.UI.UiWidget)
@@ -37,55 +62,129 @@ class FightHud extends BGE.UI.UiWidget
     safeX = Int(canvasW * 0.1)
     safeY = Int(canvasH * 0.1)
     centre = Int(canvasW / 2)
-    timerGap = Int(canvasW * 0.05)
-    barW = centre - timerGap - safeX
-    barH = Int(canvasH * 0.035)
+    state = m.hudState
+    frameW = m.art.width("barFrame")
     font = m.game.getFont("hud")
-    bigFont = m.game.getFont("announce")
 
-    m.drawBar(renderer, safeX, safeY, barW, barH, 0, true)
-    m.drawBar(renderer, centre + timerGap, safeY, barW, barH, 1, false)
-    renderer.drawText(m.hudState.secondsLeft.toStr(), centre, safeY - 4, HUD_TEXT_RGBA, font, "center", "top")
-    renderer.drawText("P1", safeX, safeY + barH + 4, HUD_TEXT_RGBA, font, "left", "top")
-    renderer.drawText("P2", canvasW - safeX, safeY + barH + 4, HUD_TEXT_RGBA, font, "right", "top")
+    ' Bars meet at the KO badge in the middle; P2's is the mirror image.
+    m.drawBar(renderer, safeX, safeY, 0, true)
+    m.drawBar(renderer, canvasW - safeX - frameW, safeY, 1, false)
+    lowHealth = state.health[0] < MAX_HEALTH / 4 or state.health[1] < MAX_HEALTH / 4
+    badgeColor = -1
+    if lowHealth and (state.frame mod 30) < 15
+      badgeColor = &hFFFFFFA0
+    end if
+    m.art.drawCentered(renderer, "koBadge", centre, safeY + 22, 1.0, badgeColor)
 
-    ' Round-win markers, next to each player's label.
-    markSize = Int(barH * 0.8)
-    markY = safeY + barH + 8
+    timerY = safeY + 48
+    timerW = m.art.width("timerBox")
+    renderer.drawRegion(m.art.region("timerBox"), centre - timerW / 2, timerY)
+    if state.secondsLeft >= 0
+      digits = state.secondsLeft.toStr()
+      if state.secondsLeft < 10
+        digits = "0" + digits
+      end if
+      timerColor = HUD_TEXT_RGBA
+      if state.secondsLeft <= 10
+        timerColor = &hFF6A4AFF
+      end if
+      renderer.drawText(digits, centre, timerY + 8, timerColor, m.game.getFont("timer"), "center", "top")
+    else
+      renderer.drawText("--", centre, timerY + 8, HUD_TEXT_RGBA, m.game.getFont("timer"), "center", "top")
+    end if
+
+    ' PortraitSet under the outer end of each bar, then names and round stars.
+    portraitY = safeY + 52
+    frameSize = m.art.width("portraitFrame")
+    m.drawPortrait(renderer, safeX, portraitY, 0, 1)
+    m.drawPortrait(renderer, canvasW - safeX - frameSize, portraitY, 1, -1)
+    nameScale = 0.7
+    renderer.drawRegion(m.art.region(state.names[0]), safeX + frameSize + 8, portraitY, nameScale, nameScale)
+    p2NameW = m.art.width(state.names[1]) * nameScale
+    renderer.drawRegion(m.art.region(state.names[1]), canvasW - safeX - frameSize - 8 - p2NameW, portraitY, nameScale, nameScale)
+    markY = portraitY + 46
     for i = 0 to ROUNDS_TO_WIN - 1
-      p1Color = HUD_EMPTY_MARK_RGBA
-      if m.hudState.wins[0] > i
-        p1Color = HUD_WIN_MARK_RGBA
+      p1Mark = "markEmpty"
+      if state.wins[0] > i
+        p1Mark = "markWon"
       end if
-      renderer.drawRectangle(centre - timerGap - (i + 1) * (markSize + 6), markY, markSize, markSize, p1Color)
-      p2Color = HUD_EMPTY_MARK_RGBA
-      if m.hudState.wins[1] > i
-        p2Color = HUD_WIN_MARK_RGBA
+      renderer.drawRegion(m.art.region(p1Mark), safeX + frameSize + 12 + i * 32, markY)
+      p2Mark = "markEmpty"
+      if state.wins[1] > i
+        p2Mark = "markWon"
       end if
-      renderer.drawRectangle(centre + timerGap + 6 + i * (markSize + 6), markY, markSize, markSize, p2Color)
+      renderer.drawRegion(m.art.region(p2Mark), canvasW - safeX - frameSize - 40 - i * 32, markY)
     end for
 
-    if m.hudState.announcement <> ""
-      renderer.drawText(m.hudState.announcement, centre, Int(canvasH * 0.38), HUD_TEXT_RGBA, bigFont, "center", "top")
+    m.drawCombo(renderer, font, safeX, safeY + 170, 0, "left")
+    m.drawCombo(renderer, font, canvasW - safeX, safeY + 170, 1, "right")
+
+    if state.announcement <> ""
+      ' Pops in from big, with a slight overshoot.
+      t = state.announcementTicks / 10.0
+      scale = 1.0
+      if t < 1
+        scale = 1.8 - 0.9 * t
+      else if t < 1.5
+        scale = 0.9 + 0.2 * (t - 1)
+      end if
+      m.art.drawCentered(renderer, state.announcement, centre, Int(canvasH * 0.42), scale)
     end if
-    if m.hudState.p2Prompt <> ""
-      renderer.drawText(m.hudState.p2Prompt, canvasW - safeX, canvasH - safeY, HUD_TEXT_RGBA, font, "right", "bottom")
+    if state.prompt <> ""
+      renderer.drawText(state.prompt, centre + 2, canvasH - safeY + 2, HUD_SHADOW_RGBA, font, "center", "bottom")
+      renderer.drawText(state.prompt, centre, canvasH - safeY, HUD_TEXT_RGBA, font, "center", "bottom")
     end if
   end sub
 
-  ' Health drains toward the outer edge, so both bars stay anchored at the timer.
-  private sub drawBar(renderer as BGE.Renderer, x as integer, y as integer, w as integer, h as integer, playerIndex as integer, anchorRight as boolean)
-    renderer.drawRectangle(x - 2, y - 2, w + 4, h + 4, HUD_BAR_EDGE_RGBA)
-    renderer.drawRectangle(x, y, w, h, HUD_BAR_BACK_RGBA)
-    trailW = Int(w * m.hudState.trail[playerIndex] / MAX_HEALTH)
-    fillW = Int(w * m.hudState.health[playerIndex] / MAX_HEALTH)
-    if anchorRight
-      renderer.drawRectangle(x + w - trailW, y, trailW, h, HUD_BAR_TRAIL_RGBA)
-      renderer.drawRectangle(x + w - fillW, y, fillW, h, HUD_BAR_FILL_RGBA)
-    else
-      renderer.drawRectangle(x, y, trailW, h, HUD_BAR_TRAIL_RGBA)
-      renderer.drawRectangle(x, y, fillW, h, HUD_BAR_FILL_RGBA)
+  ' Health drains toward the outer edge, so both bars stay anchored at the middle.
+  private sub drawBar(renderer as BGE.Renderer, x as integer, y as integer, playerIndex as integer, anchorRight as boolean)
+    state = m.hudState
+    barX = x + HUD_BAR_INSET_X
+    barY = y + HUD_BAR_INSET_Y
+    renderer.drawRectangle(barX, barY, HUD_BAR_W, HUD_BAR_H, HUD_BAR_BACK_RGBA)
+    trailW = Int(HUD_BAR_W * state.trail[playerIndex] / MAX_HEALTH)
+    fillW = Int(HUD_BAR_W * state.health[playerIndex] / MAX_HEALTH)
+    fill = HUD_BAR_FILL_RGBA
+    if state.health[playerIndex] < MAX_HEALTH / 4
+      fill = HUD_BAR_LOW_RGBA
     end if
+    trailX = barX
+    fillX = barX
+    if anchorRight
+      trailX = barX + HUD_BAR_W - trailW
+      fillX = barX + HUD_BAR_W - fillW
+    end if
+    renderer.drawRectangle(trailX, barY, trailW, HUD_BAR_H, HUD_BAR_TRAIL_RGBA)
+    renderer.drawRectangle(fillX, barY, fillW, HUD_BAR_H, fill)
+    renderer.drawRectangle(fillX, barY + 4, fillW, 6, HUD_BAR_FILL_LIGHT_RGBA)
+    frame = m.art.region("barFrame")
+    if anchorRight
+      renderer.drawRegion(frame, x, y)
+    else
+      renderer.drawRegion(frame, x + frame.GetWidth(), y, -1, 1)
+    end if
+  end sub
+
+  ' facing: 1 looks right (P1), -1 is mirrored to look left (P2).
+  private sub drawPortrait(renderer as BGE.Renderer, x as integer, y as integer, playerIndex as integer, facing as integer)
+    renderer.drawRegion(m.art.region("portraitFrame"), x, y)
+    inner = m.art.width("portraitFrame") - 12
+    region = m.portraits.region(m.hudState.portraits[playerIndex])
+    scale = inner / region.GetWidth()
+    if facing > 0
+      renderer.drawRegion(region, x + 6, y + 6, scale, scale)
+    else
+      renderer.drawRegion(region, x + 6 + inner, y + 6, -scale, scale)
+    end if
+  end sub
+
+  private sub drawCombo(renderer as BGE.Renderer, font as roFont, x as integer, y as integer, playerIndex as integer, align as string)
+    if m.hudState.combo[playerIndex] < 2 or m.hudState.comboTicks[playerIndex] <= 0
+      return
+    end if
+    text = m.hudState.combo[playerIndex].toStr() + " HITS"
+    renderer.drawText(text, x + 2, y + 2, HUD_SHADOW_RGBA, font, align, "top")
+    renderer.drawText(text, x, y, HUD_COMBO_RGBA, font, align, "top")
   end sub
 
 end class

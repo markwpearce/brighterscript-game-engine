@@ -1,0 +1,183 @@
+import "MoveData.bs"
+import "MatchRules.bs"
+import "../Entities/Fighter.bs"
+import "../Entities/Projectile.bs"
+
+' One step of a CPU plan: hold a direction (x is relative to facing, +1 toward the opponent)
+' for `ticks`, pressing `press` on its first tick.
+interface CpuStep
+  x as float
+  y as float
+  press as string
+  ticks as integer
+end interface
+
+' How well the CPU plays, by level 1-3.
+interface CpuLevel
+  reactionTicks as integer ' pause between decisions
+  blockChance as float
+  antiAirChance as float
+end interface
+
+function getCpuLevel(level as integer) as CpuLevel
+  levels = [
+    {reactionTicks: 26, blockChance: 0.3, antiAirChance: 0.15},
+    {reactionTicks: 15, blockChance: 0.55, antiAirChance: 0.4},
+    {reactionTicks: 8, blockChance: 0.8, antiAirChance: 0.7}
+  ] as CpuLevel[]
+  index = BGE.Math.Clamp(level, 1, 3) - 1
+  return levels[index]
+end function
+
+' A simple CPU opponent: every so often it looks at the distance and what the player is
+' doing, picks a short plan (block, anti-air, fireball, jump in, a normal or two, a throw),
+' and plays it out as stick directions and button presses in a FighterInput.
+class CpuBrain
+  level as CpuLevel
+  private plan as CpuStep[] = []
+  private stepTicks as integer = 0
+  private waitTicks as integer = 30
+
+  sub new(levelNumber as integer)
+    m.level = getCpuLevel(levelNumber)
+  end sub
+
+  sub reset()
+    m.plan = []
+    m.stepTicks = 0
+    m.waitTicks = 30
+  end sub
+
+  ' Fills `input` for this tick. `incoming` is the opponent's projectile, or invalid.
+  sub think(input as FighterInput, cpuFighter as Fighter, opponent as Fighter, incoming as dynamic)
+    input.moveX = 0.0
+    input.moveY = 0.0
+    if m.plan.count() > 0
+      m.playStep(input, cpuFighter)
+      return
+    end if
+    if m.waitTicks > 0
+      m.waitTicks--
+      ' Keep a guard up while being pressured.
+      if opponent.state = FighterState.attack and Abs(opponent.position.x - cpuFighter.position.x) < 100 and Rnd(0) < m.level.blockChance * 0.1
+        m.queue([m.step(-1, m.guardHeight(opponent), "", 12)])
+      end if
+      return
+    end if
+    if not cpuFighter.isFree()
+      return
+    end if
+    m.decide(cpuFighter, opponent, incoming)
+    m.waitTicks = m.level.reactionTicks + Rnd(m.level.reactionTicks)
+    if m.plan.count() > 0
+      m.playStep(input, cpuFighter)
+    end if
+  end sub
+
+  private sub decide(cpuFighter as Fighter, opponent as Fighter, incoming as dynamic)
+    gap = Abs(opponent.position.x - cpuFighter.position.x)
+    roll = Rnd(0)
+
+    if incoming <> invalid
+      shot = incoming as Projectile
+      shotGap = Abs(shot.position.x - cpuFighter.position.x)
+      if shotGap < 150
+        if roll < 0.35 and gap > 110
+          m.queue([m.step(1, 1, "", 16), m.step(1, 0, AttackButton.heavyKick, 20)])
+        else if roll < 0.35 + m.level.blockChance
+          m.queue([m.step(-1, 0, "", 26)])
+        end if
+        return
+      end if
+    end if
+
+    if opponent.isAirborne() and opponent.vy < 1 and gap < 100 and roll < m.level.antiAirChance
+      m.queue([m.step(1, 0, "", 2), m.step(0, -1, "", 2), m.step(1, -1, AttackButton.heavyPunch, 3)])
+      return
+    end if
+
+    if opponent.state = FighterState.attack and gap < 110 and roll < m.level.blockChance
+      m.queue([m.step(-1, m.guardHeight(opponent), "", 18)])
+      return
+    end if
+
+    if gap > 220
+      if roll < 0.35 and cpuFighter.canFireProjectile
+        m.queueFireball(Rnd(0) < 0.5)
+      else
+        m.queue([m.step(1, 0, "", 20 + Rnd(20))])
+      end if
+    else if gap > 90
+      if roll < 0.32
+        m.queue([m.step(1, 0, "", 12 + Rnd(16))])
+      else if roll < 0.5
+        m.queue([m.step(1, 1, "", 18), m.step(1, 0, AttackButton.heavyKick, 20)])
+      else if roll < 0.65 and cpuFighter.canFireProjectile
+        m.queueFireball(Rnd(0) < 0.5)
+      else if roll < 0.75
+        m.queue([m.step(0, -1, "", 2), m.step(-1, -1, "", 2), m.step(-1, 0, AttackButton.heavyKick, 3)])
+      else
+        m.queue([m.step(-1, 0, "", 10 + Rnd(10))])
+      end if
+    else
+      m.closeRange(cpuFighter, opponent, gap, roll)
+    end if
+  end sub
+
+  private sub closeRange(cpuFighter as Fighter, opponent as Fighter, gap as float, roll as float)
+    if gap <= THROW_RANGE and roll < 0.18 and opponent.isThrowable()
+      m.queue([m.step(1, 0, AttackButton.heavyPunch, 4)])
+    else if roll < 0.3
+      m.queue([m.step(0, 0, AttackButton.lightPunch, 10), m.step(0, 0, AttackButton.lightPunch, 10), m.step(0, 0, AttackButton.heavyPunch, 4)])
+    else if roll < 0.45
+      m.queue([m.step(0, -1, AttackButton.lightKick, 12), m.step(0, -1, AttackButton.heavyKick, 4)])
+    else if roll < 0.6
+      m.queue([m.step(0, 0, AttackButton.heavyKick, 4)])
+    else if roll < 0.7
+      m.queue([m.step(0, -1, AttackButton.heavyPunch, 4)])
+    else if roll < 0.82 and gap < 70
+      m.queue([m.step(1, 0, "", 2), m.step(0, -1, "", 2), m.step(1, -1, AttackButton.lightPunch, 3)])
+    else
+      m.queue([m.step(-1, 0, "", 12)])
+    end if
+  end sub
+
+  private sub queueFireball(heavy as boolean)
+    button = AttackButton.lightPunch
+    if heavy
+      button = AttackButton.heavyPunch
+    end if
+    m.queue([m.step(0, -1, "", 3), m.step(1, -1, "", 3), m.step(1, 0, button, 3)])
+  end sub
+
+  ' Crouch to block a crouching attacker's lows, stand for everything else.
+  private function guardHeight(opponent as Fighter) as float
+    if opponent.crouching
+      return -1.0
+    end if
+    return 0.0
+  end function
+
+  private function step(x as float, y as float, press as string, ticks as integer) as CpuStep
+    return {x: x, y: y, press: press, ticks: ticks}
+  end function
+
+  private sub queue(steps as CpuStep[])
+    m.plan = steps
+    m.stepTicks = 0
+  end sub
+
+  private sub playStep(input as FighterInput, cpuFighter as Fighter)
+    current = m.plan[0]
+    input.moveX = current.x * cpuFighter.facing
+    input.moveY = current.y
+    if m.stepTicks = 0 and current.press <> ""
+      input.latchPress(current.press)
+    end if
+    m.stepTicks++
+    if m.stepTicks >= current.ticks
+      m.plan.shift()
+      m.stepTicks = 0
+    end if
+  end sub
+end class
