@@ -1,0 +1,159 @@
+import "pkg:/source/engine/ui/UiWidget.bs"
+import "pkg:/source/engine/ui/ControllerQrWidget.bs"
+import "../UI/UiArt.bs"
+import "../Fight/PlayerSlots.bs"
+
+' What the Controllers screen shows; ControlsScene updates it.
+class ControlsState
+  ' 0: waiting for P1's controller, 1: waiting for P2's, 2: done.
+  step as integer = 0
+  frame as integer = 0
+end class
+
+' Draws the Controllers screen (laid out for the 1280x720 UI canvas): who's P1 and P2, the
+' prompt, and the button lists. The QR code is its own widget.
+class ControlsView extends BGE.UI.UiWidget
+  private art as UiArt
+  private slots as PlayerSlots
+  private state as ControlsState
+
+  sub new(game as BGE.Game, art as UiArt, slots as PlayerSlots, state as ControlsState)
+    super(game)
+    m.art = art
+    m.slots = slots
+    m.state = state
+  end sub
+
+  override sub draw(parent = invalid as BGE.UI.UiWidget)
+    m.state.frame++
+    renderer = m.canvas.renderer
+    canvasW = m.canvas.getWidth()
+    canvasH = m.canvas.getHeight()
+    backdrop = m.game.getBitmap("titleBg")
+    renderer.drawScaledObject(0, 0, canvasW / backdrop.GetWidth(), canvasH / backdrop.GetHeight(), backdrop)
+    renderer.drawRectangle(0, 0, canvasW, canvasH, &h05081098)
+    safeX = canvasW * 0.1
+    safeY = canvasH * 0.1
+    heading = m.game.getFont("heading")
+    font = m.game.getFont("hud")
+    small = m.game.getFont("small")
+    gold = &hFFD84AFF
+    white = &hFFFFFFFF
+    dimText = &hA0B0C0FF
+    renderer.drawText("CONTROLLERS", canvasW / 2, safeY, gold, heading, "center", "top")
+
+    ' Right column: the two players, then the prompt.
+    x = canvasW * 0.42
+    y = safeY + 80
+    for slot = 0 to 1
+      label = "Player " + (slot + 1).toStr() + ": "
+      if m.slots.claimed[slot]
+        label += "controller " + (m.slots.devices[slot] + 1).toStr()
+      else if m.state.step = slot
+        label += "..."
+      else
+        label += "not set"
+      end if
+      color = white
+      if slot = 0
+        color = &hFF7A5AFF
+      else
+        color = &h7AB8FFFF
+      end if
+      renderer.drawText(label, x, y + slot * 44, color, font, "left", "top")
+    end for
+    prompt = ""
+    if m.state.step < 2
+      prompt = "Press any button on Player " + (m.state.step + 1).toStr() + "'s controller"
+      if m.state.step = 1
+        prompt += " (Back: skip)"
+      end if
+    else
+      prompt = "All set! Press any button to go back"
+    end if
+    if (m.state.frame mod 60) < 45
+      renderer.drawText(prompt, x, y + 104, gold, font, "left", "top")
+    end if
+
+    ' Button lists.
+    listY = y + 180
+    columns = [
+      {title: "Roku remote", lines: ["D-pad: move", "Rewind / Play: punch", "OK / Fast-fwd: kick", "Back: pause", "*: debug info"]},
+      {title: "Gamepad", lines: ["Stick / D-pad: move", "X / Y: punch", "A / B: kick"]},
+      {title: "Phone", lines: ["Stick: move", "x / y: punch", "ok / b: kick"]}
+    ]
+    columnW = (canvasW - safeX - x) / columns.count()
+    for c = 0 to columns.count() - 1
+      cx = x + c * columnW
+      renderer.drawText(columns[c].title, cx, listY, gold, font, "left", "top")
+      for i = 0 to columns[c].lines.count() - 1
+        renderer.drawText(columns[c].lines[i], cx, listY + 40 + i * 28, white, small, "left", "top")
+      end for
+    end for
+    renderer.drawText("Back on the remote returns to the title", canvasW / 2, canvasH - safeY, dimText, small, "center", "bottom")
+  end sub
+end class
+
+' Sets up which controller is P1 and which is P2, with a QR code for a phone controller.
+class ControlsScene extends BGE.GameScene
+
+  private art as UiArt
+  private slots as PlayerSlots
+  private state as ControlsState
+
+  sub new(game as BGE.Game, art as UiArt, slots as PlayerSlots)
+    super(game)
+    m.name = "ControlsScene"
+    m.art = art
+    m.slots = slots
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.state = new ControlsState()
+    m.slots.reset()
+    m.addUi(new ControlsView(m.game, m.art, m.slots, m.state))
+    canvasW = m.game.uiCanvas.getWidth()
+    canvasH = m.game.uiCanvas.getHeight()
+    qr = new BGE.UI.ControllerQrWidget(m.game, m.game.getControllerConnectionInfo())
+    qr.fontName = "small"
+    qr.caption = "Scan to use your phone as a controller"
+    qr.showUrl = true
+    qr.setQrSize(canvasH * 0.3)
+    qr.setWidth(canvasW * 0.28)
+    qr.customPosition = true
+    qr.customX = canvasW * 0.1
+    qr.customY = canvasH * 0.1 + 80
+    m.addUi(qr)
+    m.game.musicPlay("pkg:/music/title.mp3", true, false)
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press
+      return
+    end if
+    if input.isRemoteBack()
+      if m.state.step = 1
+        ' Skip P2.
+        m.state.step = 2
+        m.game.playSound("menuMove", 60)
+      else
+        m.game.changeSceneWithFade("TitleScene")
+      end if
+      return
+    end if
+    if m.state.step = 0
+      m.slots.claim(0, input.playerIndex)
+      m.state.step = 1
+      m.game.playSound("menuSelect", 70)
+    else if m.state.step = 1
+      if input.playerIndex <> m.slots.devices[0]
+        m.slots.claim(1, input.playerIndex)
+        m.state.step = 2
+        m.game.playSound("menuSelect", 70)
+      end if
+    else
+      m.game.changeSceneWithFade("TitleScene")
+    end if
+  end sub
+
+end class

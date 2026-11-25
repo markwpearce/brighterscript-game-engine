@@ -22,8 +22,8 @@ const CELL_H = 124;
 const FEET_X = 68;
 const FEET_Y = 118;
 const ATLAS_COLS = 24;
-// The neutral stance frame used to find each sheet's feet position, and for portraits.
-const REFERENCE_FRAME = 3;
+// A fighting-stance frame (mid idle loop) used to find each sheet's feet position.
+const REFERENCE_FRAME = 8;
 const PORTRAIT_SIZE = 200;
 const PORTRAIT_FRAME = 920;
 

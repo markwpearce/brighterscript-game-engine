@@ -4,17 +4,18 @@ A *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/
 
 ## Playing
 
-The title menu picks **Arcade** (vs CPU), **2 Players** or **Training**, and the CPU's level (Easy, Normal, Hard). On the select screen, move with left/right and pick with an attack button. Each button picks a different colour (LP, HP, LK, HK are palettes 1-4). In 2 Players, P2 joins by pressing any button. Against the CPU, a second controller pressing a button is a new challenger and goes back to the select screen for a 2-player match. In Training, it takes over the dummy.
+The title menu picks **Arcade** (vs CPU), **2 Players** or **Training**, the CPU's level (Easy, Normal, Hard), and **Controllers**. On the select screen, move with left/right and pick with an attack button. Each button picks a different colour (LP, HP, LK, HK are palettes 1-4). In 2 Players, P2 joins by pressing any button. Against the CPU, a second controller pressing a button is a new challenger and goes back to the select screen for a 2-player match. In Training, it takes over the dummy.
 
-Each player uses their own controller (`multi_controllers=1`; every remote, gamepad and browser controller gets its own player index).
+Each player uses their own controller (`multi_controllers=1`; every remote, gamepad and phone gets its own player index, in the order they're first used). On the select screen, whichever controller presses first is P1 (and in 2 Players, the next one is P2). The **Controllers** screen sets P1 and P2 up front, and shows a QR code for using a phone as a controller.
 
 | Action | Gamepad | Roku remote | Browser controller |
 | --- | --- | --- | --- |
 | Walk / jump / crouch | D-pad or left stick | D-pad | Stick 1 |
 | Block | Hold away from the opponent (crouch to block lows) | same | same |
 | Light / heavy punch | X / Y | Rewind / Play | x / y |
-| Light / heavy kick | A / B | OK / Fast-forward (and Back) | ok / b |
-| Pause | - | `*` | - |
+| Light / heavy kick | A / B | OK / Fast-forward | ok / b |
+| Pause | - | Back | - |
+| Debug info (FPS, then everything with colliders, then off) | - | `*` | - |
 
 Moves, in numpad notation (6 is toward the opponent, 2 down). The diagonals are optional, since the remote's d-pad can't press them:
 
@@ -30,7 +31,7 @@ Knocked-down fighters can't be hit until they're back up. An airborne fighter ca
 
 ### Launch params
 
-`scene=fight` skips the menus. It takes `mode=cpu|versus|training`, `p1=blaze:0` and `p2=frost:2` (character and palette), `cpu=1-3`, and `dummy=stand|crouch` for how the training dummy guards. `scene=select` goes straight to the select screen. `debug=1` makes Instant Replay toggle the hitbox and hurtbox outlines. For example:
+`scene=fight` skips the menus. It takes `mode=cpu|versus|training`, `p1=blaze:0` and `p2=frost:2` (character and palette), `cpu=1-3`, and `dummy=stand|crouch` for how the training dummy guards. `scene=select` goes straight to the select screen. For example:
 
 ```
 npm run run-example -- fighter scene=fight mode=training dummy=crouch
@@ -42,6 +43,7 @@ npm run run-example -- fighter scene=fight mode=training dummy=crouch
 - `Fight/MoveData.bs`: every attack's frame data (startup/active/recovery in 60 Hz ticks, damage, stun, knockback, block height, hitbox), plus the specials and the throw.
 - `Fight/MotionInput.bs`: the input history and motion detection for specials.
 - `Fight/FrameLogic.bs`, `Fight/MatchRules.bs`, `Fight/Roster.bs`: pure rules (move phases, blocking, push-apart, damage, rounds, the health-bar trail, the fixed-step clock, picks and palettes). These and the motion inputs are covered by `tests/` (`npm test`).
+- `Fight/PlayerSlots.bs`: which controller (engine player index) each fighter's `p0...`/`p1...` actions are bound to. `Scenes/ControlsScene.bs` sets it up.
 - `Fight/CpuBrain.bs`: the CPU. Every so often it looks at the distance and what the player is doing, picks a short plan (block, anti-air, fireball, jump in, a normal or two, a throw), and plays it out as stick directions and presses, so it uses the same input path as a player.
 - `Fight/Announcer.bs`: voice lines and stings go on sound channel 1 (`game.playSound(name, volume, channel)`), so hit sounds on channel 0 don't cut them off.
 - `Entities/Fighter.bs`: movement and the move state machine, with separate `hurt` and `attack` colliders. The attack collider is enabled only during a move's active frames. `Entities/Projectile.bs`, `Entities/HitSpark.bs`.
