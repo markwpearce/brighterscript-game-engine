@@ -31,7 +31,7 @@ Knocked-down fighters can't be hit until they're back up. An airborne fighter ca
 
 ### Launch params
 
-`scene=fight` skips the menus. It takes `mode=cpu|versus|training`, `p1=blaze:0` and `p2=frost:2` (character and palette), `cpu=1-3`, and `dummy=stand|crouch` for how the training dummy guards. `scene=select` goes straight to the select screen. For example:
+`scene=fight` skips the menus. It takes `mode=cpu|versus|training`, `p1=blaze:0` and `p2=frost:1` (character and palette), `cpu=1-3`, and `dummy=stand|crouch` for how the training dummy guards. `scene=select` goes straight to the select screen. For example:
 
 ```
 npm run run-example -- fighter scene=fight mode=training dummy=crouch
