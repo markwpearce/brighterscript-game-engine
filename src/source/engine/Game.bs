@@ -36,6 +36,7 @@ import "renderer/lighting/Light.bs"
 import "GameScene.bs"
 import "loading/AssetLoader.bs"
 import "loading/LoadingScreen.bs"
+import "splash/SplashSequence.bs"
 import "loading/SpriteAtlas.bs"
 import "loading/TextureLoader.bs"
 import "loading/TiledMapLoadTask.bs"
@@ -102,6 +103,8 @@ namespace BGE
     private leavingScene as GameScene = invalid
     private sceneLoading as boolean = false
     private sceneLoadFinished as boolean = false
+    ' The startup splash (see `splash`) is showing
+    private splashActive as boolean = false
     private sceneLoadingSeconds as float = 0.0
     private activeLoadingScreen as BGE.LoadingScreen = invalid
     private loadingScreenShown as boolean = false
@@ -237,6 +240,11 @@ namespace BGE
 
     ' Full-screen overlay used by changeSceneWithFade() - see BGE.ScreenFade.
     screenFade as BGE.ScreenFade = new BGE.ScreenFade()
+
+    ' The startup splash, shown once when play() starts: the engine's logo, then any cards added
+    ' with `splash.addCard()`, while the first scene loads underneath. Set `splash.enabled = false`
+    ' before play() to turn it off. See docs/splash-screen.md.
+    splash as BGE.SplashSequence = new BGE.SplashSequence()
 
     ' Container for all UI
     gameUi as BGE.UI.UiContainer
@@ -454,6 +462,7 @@ namespace BGE
       audio_guide_suppression_ticker = 0
 
       m.running = true
+      m.startSplashIfNeeded()
 
       while m.running
         ' sceneChangedThisFrame is NOT reset here: a change requested while a scene loads stays pending
@@ -578,53 +587,58 @@ namespace BGE
           end for
         end if
 
-        ' ----------------------Process UI input first, so a widget that consumes-------------
-        ' ----------------------an event (GameInput.consume()) can capture input before-------
-        ' ----------------------regular entities are dispatched this same frame---------------
-        m.processUiInput(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
-        m.processDebugToggle(universalControlEvents, controllerInputs)
         uiInputTime = 0
-        if m.debugging.print_perf_stats
-          uiInputTime = m.dtTimer.TotalMilliseconds()
-        end if
-
-        ' ----------------------Handle entity interactions (collisions, etc)--------------------
-        m.processEntitiesPreDraw(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
-        m.updateSceneLoading()
-        m.assets.update(m.assetsBudgetMs)
         updateAndCollisionTime = 0
-        if m.debugging.print_perf_stats
-          updateAndCollisionTime = m.dtTimer.TotalMilliseconds() - uiInputTime
-        end if
-
-        ' a camera starting to move from still drops quality before it draws, not after
-        if not m.sceneLoading and m.renderQuality.beforeDraw()
-          m.dispatchQualityChanged()
-        end if
-
-        ' ----------------------Clear the screen before drawing entities-------------------------
-        if m.background_color <> invalid
-          m.canvas.clear(m.background_color)
-        end if
-        m.uiCanvas.clear(0) ' clear with transparent color so that it doesn't cover the game canvas
-
-        ' ----------------------Then draw all of the entities and call onDrawBegin() and onDrawEnd()-------------------------
-        m.drawEntities()
         entityDrawTime = 0
-        if m.debugging.print_perf_stats
-          entityDrawTime = m.dtTimer.TotalMilliseconds() - uiInputTime - updateAndCollisionTime
+        if m.splashActive
+          ' the splash covers everything: just it, the first scene's loading and the debug UI
+          m.runSplashFrame(universalControlEvents, controllerInputs)
+        else
+          ' ----------------------Process UI input first, so a widget that consumes-------------
+          ' ----------------------an event (GameInput.consume()) can capture input before-------
+          ' ----------------------regular entities are dispatched this same frame---------------
+          m.processUiInput(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
+          m.processDebugToggle(universalControlEvents, controllerInputs)
+          if m.debugging.print_perf_stats
+            uiInputTime = m.dtTimer.TotalMilliseconds()
+          end if
+
+          ' ----------------------Handle entity interactions (collisions, etc)--------------------
+          m.processEntitiesPreDraw(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
+          m.updateSceneLoading()
+          m.assets.update(m.assetsBudgetMs)
+          if m.debugging.print_perf_stats
+            updateAndCollisionTime = m.dtTimer.TotalMilliseconds() - uiInputTime
+          end if
+
+          ' a camera starting to move from still drops quality before it draws, not after
+          if not m.sceneLoading and m.renderQuality.beforeDraw()
+            m.dispatchQualityChanged()
+          end if
+
+          ' ----------------------Clear the screen before drawing entities-------------------------
+          if m.background_color <> invalid
+            m.canvas.clear(m.background_color)
+          end if
+          m.uiCanvas.clear(0) ' clear with transparent color so that it doesn't cover the game canvas
+
+          ' ----------------------Then draw all of the entities and call onDrawBegin() and onDrawEnd()-------------------------
+          m.drawEntities()
+          if m.debugging.print_perf_stats
+            entityDrawTime = m.dtTimer.TotalMilliseconds() - uiInputTime - updateAndCollisionTime
+          end if
+
+          ' ---------------------- Draw debug items in game space -------------------------
+          m.drawDebugItems()
+
+          ' -------------------Draw everything to the screen----------------------------
+          if not m.canvas_is_screen
+            m.screen.DrawScaledObject(m.canvas.offset.x, m.canvas.offset.y, m.canvas.scale.x, m.canvas.scale.y, m.canvas.bitmap)
+          end if
+
+          ' ---------------------- Draw UI (input already processed earlier this frame) -----
+          m.drawUI()
         end if
-
-        ' ---------------------- Draw debug items in game space -------------------------
-        m.drawDebugItems()
-
-        ' -------------------Draw everything to the screen----------------------------
-        if not m.canvas_is_screen
-          m.screen.DrawScaledObject(m.canvas.offset.x, m.canvas.offset.y, m.canvas.scale.x, m.canvas.scale.y, m.canvas.bitmap)
-        end if
-
-        ' ---------------------- Draw UI (input already processed earlier this frame) -----
-        m.drawUI()
 
         ' ---------------------- Handle all Debug UI updates and draws -------------------------
         m.processAndDrawDebugUI(universalControlEvents, controllerInputs, remoteHeldInputs, musicMsg, ecpMsg, urlMsg)
@@ -641,7 +655,7 @@ namespace BGE
         m.canvas.renderer.onSwapBuffers()
         m.uiCanvas.renderer.onSwapBuffers()
 
-        if m.sceneLoading
+        if m.sceneLoading or m.splashActive
           m.renderQuality.notifyLoading()
         else if m.renderQuality.update(frameSeconds) ' the real frame time, not the capped one
           m.dispatchQualityChanged()
@@ -2743,7 +2757,8 @@ namespace BGE
 
         m.sceneChangedThisFrame = true
         m.sceneChangeDetails = {scene: m.Scenes[sceneName] as GameScene, args: args}
-        if invalid = m.currentScene or not m.running
+        ' the splash holds scene changes like a running game does, except for the first scene
+        if invalid = m.currentScene or (not m.running and not m.splashActive)
           m.handleSceneChange()
         end if
         return true
@@ -2796,7 +2811,15 @@ namespace BGE
     '
     ' @return {boolean}
     function isTransitioning() as boolean
-      return m.fadeTransitionPhase <> "" or m.sceneLoading
+      return m.fadeTransitionPhase <> "" or m.sceneLoading or m.splashActive
+    end function
+
+    ' Whether the startup splash (`splash`) is showing. The scene and entities get no callbacks
+    ' meanwhile.
+    '
+    ' @return {boolean}
+    function isSplashActive() as boolean
+      return m.splashActive
     end function
 
     ' Whether a scene is in its loading stage (after `changeScene()`, before its `onCreate()`).
@@ -2864,6 +2887,25 @@ namespace BGE
       m.updateFadeTransition()
       m.updateSceneLoading()
       m.assets.update(m.assetsBudgetMs)
+      m.applyEndOfFrameSceneWork()
+    end sub
+
+    ' Test-only: what Play() does before its first frame - start the splash if it's enabled and
+    ' hasn't played.
+    sub startSplashForTest()
+      m.startSplashIfNeeded()
+    end sub
+
+    ' Test-only: one frame of the splash with a given dt and controller-style inputs, then the
+    ' end-of-frame scene work, as Play() runs them.
+    '
+    ' @param {float} dt
+    ' @param {BGE.GameInput[]} inputs
+    sub runSplashFrameForTest(dt as float, inputs as BGE.GameInput[])
+      m.dt = dt
+      if m.splashActive
+        m.runSplashFrame([] as roUniversalControlEvent[], inputs)
+      end if
       m.applyEndOfFrameSceneWork()
     end sub
 
@@ -2986,7 +3028,8 @@ namespace BGE
         m.sceneLoadFinished = true
         return
       end if
-      if not m.loadingScreenShown and m.sceneLoadingSeconds >= m.activeLoadingScreen.showAfterSeconds
+      ' the splash shows the first scene's loading itself
+      if not m.splashActive and not m.loadingScreenShown and m.sceneLoadingSeconds >= m.activeLoadingScreen.showAfterSeconds
         m.loadingScreenShown = true
         m.activeLoadingScreen.onShow()
       end if
@@ -2995,6 +3038,13 @@ namespace BGE
     ' End of a frame: finish a scene load that completed this frame (onCreate), then apply any
     ' scene change requested meanwhile (during loading, in onLoad or onCreate).
     private sub applyEndOfFrameSceneWork()
+      if m.splashActive
+        ' onCreate() and scene changes wait for the splash
+        if m.splash.isFinished()
+          m.endSplash()
+        end if
+        return
+      end if
       if m.sceneLoading and m.sceneLoadFinished
         m.finishSceneLoading()
       end if
@@ -3022,6 +3072,57 @@ namespace BGE
       end if
       m.lastGarbageCollection = runGarbageCollector()
       m.garbageCollectionTimer.mark()
+    end sub
+
+    private sub startSplashIfNeeded()
+      if not m.splash.enabled or m.splash.hasPlayed()
+        return
+      end if
+      m.splashActive = true
+      m.splash.start(m)
+    end sub
+
+    ' One frame of the splash: input skips cards, the first scene keeps loading, and only the
+    ' splash is drawn. Entities, the scene and gameUi are held.
+    private sub runSplashFrame(universalControlEvents as roUniversalControlEvent[], controllerInputs as GameInput[])
+      for each msg in universalControlEvents
+        m.splash.onInput(m.gameInputForRemoteMsg(msg))
+      end for
+      for each input in controllerInputs
+        m.splash.onInput(input)
+      end for
+      m.updateSceneLoading()
+      m.assets.update(m.assetsBudgetMs)
+      m.splash.update(m.dt, m.sceneLoading and not m.sceneLoadFinished)
+
+      m.canvas.clear(BGE.Colors.Black)
+      m.uiCanvas.clear(0)
+      if not m.canvas_is_screen
+        m.screen.DrawScaledObject(m.canvas.offset.x, m.canvas.offset.y, m.canvas.scale.x, m.canvas.scale.y, m.canvas.bitmap)
+      end if
+      m.uiCanvas.renderer.setupCameraForFrame()
+      m.splash.draw(m.uiCanvas.renderer, m.getLoadingProgress())
+    end sub
+
+    ' The splash is done: start the first scene (if it was waiting) and fade it in from black.
+    private sub endSplash()
+      m.splashActive = false
+      m.splash.finish(m)
+      m.screenFade.opacity = 1.0
+      m.fadeTransitionSeconds = 0.3
+      if m.sceneLoading and m.sceneLoadFinished
+        ' finishSceneLoading() turns this into the fade in
+        m.fadeTransitionPhase = "out"
+        m.finishSceneLoading()
+      else
+        m.fadeTransitionPhase = "in"
+        m.screenFade.fadeTo(0, m.fadeTransitionSeconds)
+      end if
+      if m.sceneChangedThisFrame and not m.sceneLoading
+        m.handleSceneChange()
+      end if
+      ' the scene's first dt shouldn't be the splash's length
+      m.dtTimer.Mark()
     end sub
 
     private function resolveLoadingScreen() as BGE.LoadingScreen
