@@ -43,8 +43,9 @@ it likes (e.g. `"reload"`) and bind to it with no engine change. When a real gam
 connected, the built-in page also sends its standard-mapping face/menu buttons under
 these same names (alongside their raw numeric index, e.g. `"0"`), so a binding to
 `"ok"`/`"b"`/`"back"` works for a touch tap, a remote press, and a real controller
-button with no extra binding needed - see "Simulator/physical gamepad buttons" below.
-The gamepad's X/Y also send `"x"`/`"y"` (and L1/R1 send `"l1"`/`"r1"`). Controller
+button with no extra binding needed - see "Simulator gamepad buttons" below.
+The gamepad's X/Y also send `"x"`/`"y"` (and L1/R1 send `"l1"`/`"r1"`), and its D-pad
+sends `"up"`/`"down"`/`"left"`/`"right"` and drives stick `"1"` while held. Controller
 input reaches `gameUi` widgets' `onInput()` too (not just entities and the focus
 system), so a custom widget can handle a gamepad press the same as a remote one.
 
@@ -136,11 +137,13 @@ to one player at bind time, so `isActionPressed("p2fire")`/`getAxis("p2move")`
 already know which controller they refer to. Give each player's actions
 their own names.
 
-## Simulator/physical gamepad buttons
+## Simulator gamepad buttons
 
-A brs-engine simulator gamepad, or a real controller paired to a Roku that
-supports `multi_controllers`, arrives through the same remote-event path as
-the Roku remote (not the browser-controller path above) - its face/shoulder
+A brs-engine simulator gamepad arrives through the same remote-event path as
+the Roku remote (not the browser-controller path above). A gamepad paired to
+a real Roku barely reaches the channel: its A can arrive as the remote's OK,
+but its D-pad and sticks send nothing. Use the browser controller page for
+that (see below). The simulator gamepad's face/shoulder
 buttons report as `"a"`, `"b"`, `"x"`, `"y"`, `"l1"`, `"r1"`, `"l2"`, `"r2"`
 (see `BGE.buttonNameFromCode`). `"a"`/`"b"` are aliased to `"ok"`/`"back"`
 (the conventional gamepad meaning - A confirms, B cancels), so no extra
@@ -164,7 +167,11 @@ Back, so B can mean "cancel" without leaving the game.
 A real gamepad plugged into the *browser* controller page is a separate,
 unrelated case - see "Mapping input" above: its standard-mapping face/menu
 buttons send the same `"ok"`/`"b"`/`"back"` names the on-screen buttons do,
-so a `bindAction` already bound to those needs no changes at all.
+so a `bindAction` already bound to those needs no changes at all. Its D-pad
+sends `"up"`/`"down"`/`"left"`/`"right"` and also drives stick `"1"` while
+held, so a `bindAxis` on stick 1 moves with the D-pad or the left stick.
+This is the way to use a gamepad with a real Roku, which doesn't pass a
+paired gamepad's D-pad or sticks to channels.
 
 ## Ignoring a press that's still held
 

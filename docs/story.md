@@ -345,7 +345,10 @@ end function, player)
 {"label": "Buy a drink (5 coins)", "when": [{"coinsGte": 5}], "effects": [{"giveCoins": -5}], "goto": "drink"}
 ```
 
-A registered key wins over a built-in one with the same name. An unknown key
+A registered key wins over a built-in one with the same name. Keys match
+ignoring case, because a Roku lowercases the unquoted keys of a BrightScript
+literal (`{coinsGte: 5}` reads back as `coinsgte`), so don't register two keys
+that differ only in case. An unknown key
 logs a `[BGE.Story] warning` every time it's evaluated and fails the condition
 (or does nothing, for an effect) - `validateStory()` finds these up front.
 The `examples/rpg` story registers `coinsGte`, `giveCoins`,
