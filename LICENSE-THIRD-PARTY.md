@@ -42,6 +42,6 @@ The BrightScript port additionally carries: "QR Code generator library
 ## Montserrat (`src/source/engine/splash/images/bge_title_*.webp`)
 
 The splash screen's title art is rendered from the
-[Montserrat](https://github.com/JulietaUla/Montserrat) font (Copyright 2011 The Montserrat
+[Montserrat](https://github.com/JulietaUla/Montserrat) font (Copyright 2024 The Montserrat.Git
 Project Authors, SIL Open Font License 1.1). The font itself isn't included; its license is in
 `tools/splash/Montserrat-OFL.txt` alongside the script that renders the art.
