@@ -1,31 +1,29 @@
 #!/usr/bin/env node
-// Cuts the frames named in src/sprites/fighters/animations.json out of each 997-frame
-// Mustermann sheet in art/ and packs them, at half size, into one atlas per character and
-// colour palette (palette swaps recolour the trousers/belt/shirt by hue). Also writes a
-// portrait atlas for the HUD and select screen. The full sheets are ~8000x6900 - far too
-// big for a Roku texture.
+// Cuts each character's animation frames out of their source art in art/, trims each one
+// to its visible pixels and packs them into one atlas per character and colour palette
+// (palette swaps recolour clothes by hue). atlas.json lists every frame's rectangle and
+// where the feet are in it, so the game can line the frames up. Also writes a portrait
+// atlas for the HUD and select screen. The source sheets are far too big for a Roku
+// texture (the Mustermann ones are ~8000x6900).
+//
+// Sources are either a grid sheet (cols x rows) or an animated GIF (one frame per GIF
+// frame, extracted with ffmpeg, which must be on PATH). Each character's frames are named
+// in src/sprites/fighters/animations-<set>.json.
 //
 // Usage (from examples/fighter): node scripts/build-sprites.js
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { createCanvas, loadImage } = require('canvas');
 const { writeWebp } = require('../../../scripts/webp');
 
 const ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(ROOT, 'src', 'sprites', 'fighters');
-const SHEET_COLS = 35;
-const SHEET_ROWS = 29;
-const SCALE = 0.5;
-// Atlas cell, and where the feet sit in it, in atlas pixels.
-const CELL_W = 136;
-const CELL_H = 124;
-const FEET_X = 68;
-const FEET_Y = 118;
-const ATLAS_COLS = 24;
-// A fighting-stance frame (mid idle loop) used to find each sheet's feet position.
-const REFERENCE_FRAME = 8;
+const ATLAS_WIDTH = 2048;
+const PADDING = 1;
 const PORTRAIT_SIZE = 200;
-const PORTRAIT_FRAME = 920;
+const PORTRAIT_COLUMNS = 4;
 
 // A rule recolours pixels whose HSL (h 0-360, s/l 0-1) falls in `match`: `h` replaces the
 // hue, `s` the saturation (or `sMul` scales it) and `lMul` scales the lightness.
@@ -34,10 +32,18 @@ const BLAZE_BELT = { h: [200, 270], s: [0.35, 1], l: [0, 1] };
 const BLAZE_SHIRT = { h: [0, 360], s: [0, 0.06], l: [0.08, 0.75] };
 const FROST_TROUSERS = { h: [195, 265], s: [0.3, 1], l: [0, 1] };
 const FROST_SHIRT = { h: [0, 360], s: [0, 0.08], l: [0.4, 1] };
+const BRUNO_JEANS = { h: [195, 240], s: [0.12, 1], l: [0.1, 0.9] };
+const NOVA_SHIRT = { h: [75, 165], s: [0.2, 1], l: [0.05, 0.9] };
 
+// scale: source pixels to atlas pixels. reference: a fighting-stance frame used to find the
+// feet. portrait: a frame facing forward for the portrait.
 const CHARACTERS = {
   blaze: {
-    sheet: 'Orangeblack.png',
+    source: { sheet: 'Orangeblack.png', cols: 35, rows: 29 },
+    set: 'mustermann',
+    scale: 0.5,
+    reference: 8,
+    portrait: 920,
     palettes: [
       [],
       [{ match: BLAZE_TROUSERS, h: 352 }, { match: BLAZE_BELT, h: 48, sMul: 0.9 }],
@@ -46,13 +52,34 @@ const CHARACTERS = {
     ]
   },
   frost: {
-    sheet: 'Blueehite.png',
+    source: { sheet: 'Blueehite.png', cols: 35, rows: 29 },
+    set: 'mustermann',
+    scale: 0.5,
+    reference: 8,
+    portrait: 920,
     palettes: [
       [],
       [{ match: FROST_TROUSERS, h: 8 }, { match: FROST_SHIRT, h: 45, s: 0.55, lMul: 0.92 }],
       [{ match: FROST_TROUSERS, h: 105, lMul: 0.85 }, { match: FROST_SHIRT, s: 0, lMul: 0.3 }],
       [{ match: FROST_TROUSERS, s: 0.05, lMul: 0.55 }, { match: FROST_SHIRT, h: 0, s: 0.7, lMul: 0.75 }]
     ]
+  },
+  bruno: {
+    source: { sheet: 'RJD-Spritesheet.png', cols: 34, rows: 43 },
+    set: 'bruno',
+    // A big man: a little taller than the others.
+    scale: 0.72,
+    reference: 0,
+    portrait: 834,
+    palettes: [[], [{ match: BRUNO_JEANS, h: 32, s: 0.4, lMul: 0.95 }]]
+  },
+  nova: {
+    source: { gif: 'human-fighter.gif' },
+    set: 'nova',
+    scale: 0.52,
+    reference: 0,
+    portrait: 80,
+    palettes: [[], [{ match: NOVA_SHIRT, h: 290, sMul: 1.1 }]]
   }
 };
 
@@ -126,79 +153,137 @@ function recolor(data, rules) {
   }
 }
 
-function cellCanvas(img, cellW, cellH, frame) {
-  const c = createCanvas(Math.ceil(cellW), Math.ceil(cellH));
-  const g = c.getContext('2d');
-  g.drawImage(img, (frame % SHEET_COLS) * cellW, Math.floor(frame / SHEET_COLS) * cellH, cellW, cellH, 0, 0, cellW, cellH);
-  return c;
+// Gives frame(n) -> a canvas of source frame n, plus the source cell size.
+async function openSource(source) {
+  if (source.sheet) {
+    const img = await loadImage(path.join(ROOT, 'art', source.sheet));
+    const cellW = img.width / source.cols;
+    const cellH = img.height / source.rows;
+    return {
+      cellW,
+      cellH,
+      frame(n) {
+        const c = createCanvas(Math.ceil(cellW), Math.ceil(cellH));
+        c.getContext('2d').drawImage(img, (n % source.cols) * cellW, Math.floor(n / source.cols) * cellH, cellW, cellH, 0, 0, cellW, cellH);
+        return c;
+      }
+    };
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fighter-gif-'));
+  execFileSync('ffmpeg', ['-v', 'error', '-i', path.join(ROOT, 'art', source.gif), path.join(dir, 'f%04d.png')]);
+  const files = fs.readdirSync(dir).sort();
+  const images = [];
+  for (const f of files) images.push(await loadImage(path.join(dir, f)));
+  fs.rmSync(dir, { recursive: true, force: true });
+  return {
+    cellW: images[0].width,
+    cellH: images[0].height,
+    frame(n) {
+      const c = createCanvas(images[n].width, images[n].height);
+      c.getContext('2d').drawImage(images[n], 0, 0);
+      return c;
+    }
+  };
 }
 
-// Bottom-most opaque row and the opaque pixels' mean x, within one sheet cell.
-function findFeet(img, cellW, cellH, frame) {
-  const c = cellCanvas(img, cellW, cellH, frame);
-  const { data, width, height } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
-  let bottom = 0;
+// The opaque pixels' bounding box (inclusive) and mean x.
+function opaqueBounds(canvas) {
+  const { data, width, height } = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+  let top = height;
+  let bottom = -1;
+  let left = width;
+  let right = -1;
   let sumX = 0;
   let count = 0;
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
-      if (data[(y * width + x) * 4 + 3] > 16) {
+      if (data[(y * width + x) * 4 + 3] > 8) {
+        top = Math.min(top, y);
         bottom = y;
+        left = Math.min(left, x);
+        right = Math.max(right, x);
         sumX += x;
         count++;
       }
     }
   }
-  return { x: sumX / count, y: bottom };
+  return { top, bottom, left, right, meanX: count ? sumX / count : width / 2, data, width };
 }
 
 // A square around the head: the top opaque row, centred on the opaque pixels just below it.
-function headBox(img, cellW, cellH, frame) {
-  const c = cellCanvas(img, cellW, cellH, frame);
-  const { data, width, height } = c.getContext('2d').getImageData(0, 0, c.width, c.height);
-  const opaque = (x, y) => data[(y * width + x) * 4 + 3] > 16;
-  let top = 0;
-  while (top < height && ![...Array(width).keys()].some((x) => opaque(x, top))) top++;
-  const size = Math.round(cellW * 0.24);
+function headBox(canvas, cellW) {
+  const b = opaqueBounds(canvas);
+  const size = Math.round(Math.max(cellW * 0.24, (b.bottom - b.top) * 0.36));
   let sumX = 0;
   let count = 0;
-  for (let y = top; y < top + size * 0.6; y++) {
-    for (let x = 0; x < width; x++) {
-      if (opaque(x, y)) {
+  for (let y = b.top; y < b.top + size * 0.6; y++) {
+    for (let x = 0; x < b.width; x++) {
+      if (b.data[(y * b.width + x) * 4 + 3] > 16) {
         sumX += x;
         count++;
       }
     }
   }
-  const cx = sumX / count;
-  return { x: cx - size / 2, y: top - size * 0.12, size };
+  return { x: sumX / count - size / 2, y: b.top - size * 0.12, size };
 }
 
-async function buildCharacter(key, character, frames, portraits, portraitIndex) {
-  const img = await loadImage(path.join(ROOT, 'art', character.sheet));
-  const cellW = img.width / SHEET_COLS;
-  const cellH = img.height / SHEET_ROWS;
-  const feet = findFeet(img, cellW, cellH, REFERENCE_FRAME);
-  const rows = Math.ceil(frames.length / ATLAS_COLS);
-  const atlas = createCanvas(CELL_W * ATLAS_COLS, CELL_H * rows);
-  const g = atlas.getContext('2d');
+// Scales a source frame into a canvas big enough for it, with the reference feet at
+// (feetX, feetY), then trims it to its opaque pixels.
+function trimmedFrame(sourceFrame, scale, ref) {
+  const w = Math.ceil(sourceFrame.width * scale);
+  const h = Math.ceil(sourceFrame.height * scale);
+  const c = createCanvas(w, h);
+  const g = c.getContext('2d');
   g.imageSmoothingEnabled = true;
-  frames.forEach((frame, i) => {
-    const dx = (i % ATLAS_COLS) * CELL_W;
-    const dy = Math.floor(i / ATLAS_COLS) * CELL_H;
-    g.save();
-    g.beginPath();
-    g.rect(dx, dy, CELL_W, CELL_H);
-    g.clip();
-    // Place the sheet cell so its feet land on (FEET_X, FEET_Y).
-    const ox = dx + FEET_X - feet.x * SCALE;
-    const oy = dy + FEET_Y - feet.y * SCALE;
-    g.drawImage(img, (frame % SHEET_COLS) * cellW, Math.floor(frame / SHEET_COLS) * cellH, cellW, cellH, ox, oy, cellW * SCALE, cellH * SCALE);
-    g.restore();
-  });
+  g.drawImage(sourceFrame, 0, 0, w, h);
+  const feetX = ref.meanX * scale;
+  const feetY = ref.bottom * scale;
+  const b = opaqueBounds(c);
+  if (b.right < 0) {
+    return { canvas: createCanvas(1, 1), anchorX: 0, anchorY: 0 };
+  }
+  const tw = b.right - b.left + 1 + PADDING * 2;
+  const th = b.bottom - b.top + 1 + PADDING * 2;
+  const t = createCanvas(tw, th);
+  t.getContext('2d').drawImage(c, b.left - PADDING, b.top - PADDING, tw, th, 0, 0, tw, th);
+  return { canvas: t, anchorX: feetX - b.left + PADDING, anchorY: feetY - b.top + PADDING };
+}
+
+// Shelf packing, tallest first.
+function pack(items) {
+  const order = items.map((item, i) => i).sort((a, b) => items[b].canvas.height - items[a].canvas.height);
+  const rects = new Array(items.length);
+  let x = 0;
+  let y = 0;
+  let shelf = 0;
+  for (const i of order) {
+    const { width, height } = items[i].canvas;
+    if (x + width > ATLAS_WIDTH) {
+      x = 0;
+      y += shelf;
+      shelf = 0;
+    }
+    rects[i] = { x, y, w: width, h: height };
+    x += width;
+    shelf = Math.max(shelf, height);
+  }
+  return { rects, height: y + shelf };
+}
+
+async function buildCharacter(key, character, portraits, portraitIndex) {
+  const animations = JSON.parse(fs.readFileSync(path.join(OUT_DIR, `animations-${character.set}.json`), 'utf8'));
+  const frames = usedFrames(animations);
+  const source = await openSource(character.source);
+  const ref = opaqueBounds(source.frame(character.reference));
+  const items = frames.map((frame) => trimmedFrame(source.frame(frame), character.scale, ref));
+  const { rects, height } = pack(items);
+  const atlas = createCanvas(ATLAS_WIDTH, height);
+  const g = atlas.getContext('2d');
+  items.forEach((item, i) => g.drawImage(item.canvas, rects[i].x, rects[i].y));
   const base = g.getImageData(0, 0, atlas.width, atlas.height);
 
-  const head = headBox(img, cellW, cellH, PORTRAIT_FRAME);
+  const portraitFrame = source.frame(character.portrait);
+  const head = headBox(portraitFrame, source.cellW);
   const pg = portraits.getContext('2d');
   for (let p = 0; p < character.palettes.length; p++) {
     const data = new Uint8ClampedArray(base.data);
@@ -209,45 +294,35 @@ async function buildCharacter(key, character, frames, portraits, portraitIndex) 
 
     const pc = createCanvas(PORTRAIT_SIZE, PORTRAIT_SIZE);
     const pcg = pc.getContext('2d');
-    const sx = (PORTRAIT_FRAME % SHEET_COLS) * cellW + head.x;
-    const sy = Math.floor(PORTRAIT_FRAME / SHEET_COLS) * cellH + head.y;
-    pcg.drawImage(img, sx, sy, head.size, head.size, 0, 0, PORTRAIT_SIZE, PORTRAIT_SIZE);
+    pcg.drawImage(portraitFrame, head.x, head.y, head.size, head.size, 0, 0, PORTRAIT_SIZE, PORTRAIT_SIZE);
     const pd = pcg.getImageData(0, 0, PORTRAIT_SIZE, PORTRAIT_SIZE);
     recolor(pd.data, character.palettes[p]);
     pcg.putImageData(pd, 0, 0);
     const index = portraitIndex + p;
-    pg.drawImage(pc, (index % 4) * PORTRAIT_SIZE, Math.floor(index / 4) * PORTRAIT_SIZE);
+    pg.drawImage(pc, (index % PORTRAIT_COLUMNS) * PORTRAIT_SIZE, Math.floor(index / PORTRAIT_COLUMNS) * PORTRAIT_SIZE);
   }
-  return character.palettes.length;
+  return {
+    animationSet: character.set,
+    paletteCount: character.palettes.length,
+    portraitIndex,
+    frames,
+    // Per frame: x, y, w, h in the atlas, then the feet position within that rectangle.
+    rects: rects.map((r, i) => [r.x, r.y, r.w, r.h, Math.round(items[i].anchorX), Math.round(items[i].anchorY)])
+  };
 }
 
 async function main() {
-  const animations = JSON.parse(fs.readFileSync(path.join(OUT_DIR, 'animations.json'), 'utf8'));
-  const frames = usedFrames(animations);
   const total = Object.values(CHARACTERS).reduce((n, c) => n + c.palettes.length, 0);
-  const portraits = createCanvas(PORTRAIT_SIZE * 4, PORTRAIT_SIZE * Math.ceil(total / 4));
-  const palettes = {};
+  const portraits = createCanvas(PORTRAIT_SIZE * PORTRAIT_COLUMNS, PORTRAIT_SIZE * Math.ceil(total / PORTRAIT_COLUMNS));
+  const characters = {};
   let portraitIndex = 0;
   for (const [key, character] of Object.entries(CHARACTERS)) {
-    palettes[key] = { count: await buildCharacter(key, character, frames, portraits, portraitIndex), portraitIndex };
-    portraitIndex += palettes[key].count;
+    characters[key] = await buildCharacter(key, character, portraits, portraitIndex);
+    portraitIndex += character.palettes.length;
   }
   const pd = portraits.getContext('2d').getImageData(0, 0, portraits.width, portraits.height);
   await writeWebp(pd.data, portraits.width, portraits.height, path.join(OUT_DIR, 'portraits.webp'));
-  for (const old of ['p1.webp', 'p2.webp']) {
-    fs.rmSync(path.join(OUT_DIR, old), { force: true });
-  }
-  const layout = {
-    cellWidth: CELL_W,
-    cellHeight: CELL_H,
-    columns: ATLAS_COLS,
-    feetX: FEET_X,
-    feetY: FEET_Y,
-    portraitSize: PORTRAIT_SIZE,
-    portraitColumns: 4,
-    palettes,
-    frames
-  };
+  const layout = { portraitSize: PORTRAIT_SIZE, portraitColumns: PORTRAIT_COLUMNS, characters };
   fs.writeFileSync(path.join(OUT_DIR, 'atlas.json'), JSON.stringify(layout) + '\n');
 }
 

@@ -41,6 +41,11 @@ const ICE = [
   [0.4, '#9ff0ff'],
   [1, '#1a6fd0']
 ];
+const VIOLET = [
+  [0, '#ffffff'],
+  [0.4, '#ffb0f0'],
+  [1, '#8a1fd0']
+];
 const GOLD = [
   [0, '#fffbe0'],
   [0.5, '#ffd84a'],
@@ -452,6 +457,8 @@ async function main() {
     chooseFighter: word('CHOOSE YOUR FIGHTER', 60, GOLD),
     nameBlaze: word('BLAZE', 60, FIRE),
     nameFrost: word('FROST', 60, ICE, { outlineColor: '#06213f' }),
+    nameBruno: word('BRUNO', 60, GOLD),
+    nameNova: word('NOVA', 60, VIOLET, { outlineColor: '#2a0640' }),
     barFrame: barFrame(),
     koBadge: koBadge(),
     markWon: roundMark(true),
@@ -468,6 +475,7 @@ async function main() {
   for (let f = 0; f < 4; f++) {
     pieces[`fire${f}`] = projectile(f, '#fff2a0', '#ff9a1a', 'rgba(220,40,0,0)');
     pieces[`ice${f}`] = projectile(f, '#e6ffff', '#56d8ff', 'rgba(20,80,255,0)');
+    pieces[`wind${f}`] = projectile(f, '#ffe6ff', '#d070ff', 'rgba(120,20,220,0)');
   }
   const { sheet, rects } = pack(pieces);
   fs.mkdirSync(OUT_DIR, { recursive: true });

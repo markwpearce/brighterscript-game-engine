@@ -1,6 +1,6 @@
 # Ironyard Brawl (fighter)
 
-A *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)): one player against the CPU, two players on their own controllers, or training against a dummy. There are two fighters, each with four colour palettes, three special moves, throws, knockdowns, best-of-3 rounds, an announcer and music.
+A *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)): one player against the CPU, two players on their own controllers, or training against a dummy. There are four fighters (Blaze and Frost with four colour palettes each, Bruno and Nova with two), each with three special moves, plus throws, knockdowns, best-of-3 rounds, an announcer and music.
 
 ## Playing
 
@@ -21,9 +21,9 @@ Moves, in numpad notation (6 is toward the opponent, 2 down). The diagonals are 
 
 | Move | Input | Notes |
 | --- | --- | --- |
-| Fireball | 2, 3, 6 + punch | Heavy punch throws a faster one. One on screen at a time; fireballs cancel each other. |
-| Rising uppercut | 6, 2, 3 + punch | Can't be hit for its first frames: a good anti-air. Knocks down, but is slow to recover if it's blocked. |
-| Cartwheel kick | 2, 1, 4 + kick | Travels forward and knocks down. |
+| Special 1 | 2, 3, 6 + punch | Blaze/Frost/Nova: fireball (heavy punch throws a faster one; one on screen at a time; fireballs cancel). Bruno: shoulder charge, travels forward and knocks down. |
+| Special 2 | 6, 2, 3 + punch | Blaze/Frost: rising uppercut. Nova: flip kick. Both can't be hit for their first frames (anti-air), knock down, and are slow to recover if blocked. Bruno: overhead hammer fist (block it standing). |
+| Special 3 | 2, 1, 4 + kick | Blaze/Frost: cartwheel kick. Bruno/Nova: slide kick (hits low). Both travel forward and knock down. |
 | Throw | Toward or away + heavy punch, up close | Can't be blocked. Holding away throws them behind you. |
 | Sweep | Crouching heavy kick | Hits low and knocks down. |
 
@@ -55,25 +55,29 @@ The fight runs at a fixed 60 Hz (so frame data means the same thing at 30 or 60 
 
 Generated assets are rebuilt with scripts (each needs `npm install` at the repo root for `canvas`):
 
-- `npm run build-sprites` cuts the animation frames named in `src/sprites/fighters/animations.json` out of the two Mustermann sheets in `art/` (each a 35x29 grid of 997 frames, about 8000x6900 px, far too big for a Roku texture). It packs them at half size, feet aligned, into one atlas per character and palette (`blaze-0.webp` ... `frost-3.webp`, 204 frames, 3264x1116, ~14.6 MB of texture memory each; only the two fighting are loaded). Palette swaps recolour the trousers, belt and shirt by hue. It also writes `atlas.json` and `portraits.webp`. Attack animations list `startup`/`active`/`recovery` frames, and each list is stretched over that phase of the move, so the extended limb shows exactly while the hitbox is out.
+- `npm run build-sprites` cuts the animation frames named in `src/sprites/fighters/animations-<set>.json` out of each character's source art in `art/`: the two Mustermann sheets (35x29 grids of 997 frames, about 8000x6900 px), the RJD sheet (34x43) and Nova's animated GIF (561 frames, extracted with `ffmpeg`). Each frame is scaled, trimmed to its visible pixels and shelf-packed into one 2048-wide atlas per character and palette (about 2048x450, ~3.7 MB of texture memory; only the two fighting are loaded). `atlas.json` keeps each frame's rectangle and where the feet are in it, and the fighter sets its anchor per frame. Palette swaps recolour clothes by hue. It also writes `portraits.webp`. Attack animations list `startup`/`active`/`recovery` frames, and each list is stretched over that phase of the move, so the extended limb shows exactly while the hitbox is out.
+- `npm run preview-animations` draws every animation as a strip of frames (attack strips mark the active frames) into `out/animation-previews/<character>.png`, for checking frame picks without running the game.
 - `npm run build-ui-art` draws the announcement words, logo, HUD pieces, hit sparks, fireballs, floor and shadow into `src/sprites/ui/ui.webp` + `ui.json`. It also draws the splash screens, channel icons and title backdrop.
-- `npm run synth-audio` synthesizes the whooshes, jump/land thuds, fireball, menu blips, KO sting and the chiptune music (`src/music/*.mp3`; needs `ffmpeg`).
+- `npm run synth-audio` synthesizes the whooshes, jump/land thuds, fireball, menu blips and the KO sting.
 
-The voice lines, hits and grunts were converted from their packs to 22.05 kHz mono WAV with `ffmpeg`.
+The voice lines, hits and grunts were converted from their packs to 22.05 kHz mono WAV, and the music to 64 kbps MP3, with `ffmpeg`.
 
 ## Still needed
 
 - Frame picks and hitboxes in `MoveData.bs` are tuned by eye; they'd benefit from a careful pass against the art.
-- More characters with their own moves (both fighters share a moveset; they differ in palette, walk speed and damage).
+- More characters (Blaze and Frost share a moveset; Bruno and Nova have their own specials but share the normal-move frame data).
 - More stages.
 - Possible engine promotions to discuss: a hitbox/hurtbox frame-data helper, a motion-input reader, and a health bar widget with a damage trail in `BGE.UI`.
 
 ## Credits
 
-- Fighters: [Fighting character template Mustermann 2 (karate)](https://opengameart.org/content/fighting-character-template-mustermann-2-a001aaaa001-karate) by Puffolotti, CC0.
+- Blaze and Frost: [Fighting character template Mustermann 2 (karate)](https://opengameart.org/content/fighting-character-template-mustermann-2-a001aaaa001-karate) by Puffolotti, CC0.
+- Bruno: [RJD MUGEN/Fighting character](https://opengameart.org/content/rjd-mugenfighting-character-based-on-bud-spencer-something-left-to-be-fixed) by Puffolotti, CC0.
+- Nova: [Generic woman for fighting games (stardrinkers style)](https://opengameart.org/content/generic-woman-for-fighting-games-stardrinkers-style) by Puffolotti, CC0.
+- Music: [Strap Yourselves In](https://opengameart.org/content/strap-yourselves-in) (title) and [To the Wire](https://opengameart.org/content/to-the-wire) (fight loop and victory outro) by congusbongus, CC-BY 4.0 / OGA-BY.
 - Stage: [Industrial Parallax Background](https://opengameart.org/content/industrial-parallax-background) by Luis Zuno ([@ansimuz](https://ansimuz.com)), CC0.
 - Announcer: [Voiceover Pack: Fighter](https://kenney.nl/assets/voiceover-pack-fighter) by Kenney, CC0.
 - Hit and block sounds: [Fleshy Fight Sounds](https://opengameart.org/content/fleshy-fight-sounds) by will_leamon, OGA-BY 3.0.
 - Grunts: [DAMAGE SOUNDS (Male) - Audio Pack](https://opengameart.org/content/damage-sounds-male-audio-pack) by VoiceBosch, CC-BY-SA 4.0. The converted `grunt*.wav` files are shared under the same license.
 - Font: Viper Command, from [FontSpace](https://www.fontspace.com/viper-command-font-f157886) (see `src/fonts/CREDITS.md`).
-- Music, synthesized sounds, logo and UI art: made for this example (`scripts/`).
+- Synthesized sounds, logo and UI art: made for this example (`scripts/`).
