@@ -345,6 +345,17 @@ function logo(scale = 1) {
   return c;
 }
 
+function newChallenger() {
+  const top = word('HERE COMES A', 56, STEEL, { outlineColor: '#0d1324' });
+  const bottom = word('NEW CHALLENGER!', 84, FIRE);
+  const w = Math.max(top.width, bottom.width);
+  const c = createCanvas(w, top.height + bottom.height - 10);
+  const g = c.getContext('2d');
+  g.drawImage(top, (w - top.width) / 2, 0);
+  g.drawImage(bottom, (w - bottom.width) / 2, top.height - 10);
+  return c;
+}
+
 async function stageBackdrop(width, height) {
   const c = createCanvas(width, height);
   const g = c.getContext('2d');
@@ -454,6 +465,7 @@ async function main() {
     cpuWins: word('CPU WINS', 120, GOLD),
     paused: word('PAUSED', 96, STEEL, { outlineColor: '#0d1324' }),
     vs: word('VS', 128, FIRE),
+    newChallenger: newChallenger(),
     chooseFighter: word('CHOOSE YOUR FIGHTER', 60, GOLD),
     nameBlaze: word('BLAZE', 60, FIRE),
     nameFrost: word('FROST', 60, ICE, { outlineColor: '#06213f' }),

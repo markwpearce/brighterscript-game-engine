@@ -76,7 +76,7 @@ The voice lines, hits and grunts were converted from their packs to 16 kHz mono 
 - Nova: [Generic woman for fighting games (stardrinkers style)](https://opengameart.org/content/generic-woman-for-fighting-games-stardrinkers-style) by Puffolotti, CC0.
 - Music: [Strap Yourselves In](https://opengameart.org/content/strap-yourselves-in) (title) and [To the Wire](https://opengameart.org/content/to-the-wire) (fight loop and victory outro) by congusbongus, CC-BY 4.0 / OGA-BY.
 - Stage: [Industrial Parallax Background](https://opengameart.org/content/industrial-parallax-background) by Luis Zuno ([@ansimuz](https://ansimuz.com)), CC0.
-- Announcer: [Voiceover Pack: Fighter](https://kenney.nl/assets/voiceover-pack-fighter) by Kenney, CC0.
+- Announcer: [Voiceover Pack: Fighter](https://kenney.nl/assets/voiceover-pack-fighter) by Kenney, CC0. "K.O.", the fighters' names, "wins" and "Here comes a new challenger" were made for this example.
 - Hit and block sounds: [Fleshy Fight Sounds](https://opengameart.org/content/fleshy-fight-sounds) by will_leamon, OGA-BY 3.0.
 - Grunts: [DAMAGE SOUNDS (Male) - Audio Pack](https://opengameart.org/content/damage-sounds-male-audio-pack) by VoiceBosch, CC-BY-SA 4.0. The converted `grunt*.wav` files are shared under the same license.
 - Font: Viper Command, from [FontSpace](https://www.fontspace.com/viper-command-font-f157886) (see `src/fonts/CREDITS.md`).
