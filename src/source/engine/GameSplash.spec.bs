@@ -1,0 +1,320 @@
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameInput.bs"
+import "pkg:/source/engine/loading/AssetLoader.bs"
+import "pkg:/source/utils/LaunchParams.bs"
+
+namespace tests
+
+  ' The startup splash in Game: startSplashForTest() does what Play() does before its first
+  ' frame, and runSplashFrameForTest() one splash frame plus the end-of-frame scene work.
+  @suite("BGE.Game startup splash")
+  class GameSplashTests extends rooibos.BaseTestSuite
+
+    game as BGE.Game
+
+    protected override function beforeEach()
+      ' the splash plays once per launch, and every test is the same launch
+      GetGlobalAA().Delete(BGE.SPLASH_PLAYED_GLOBAL)
+      m.game = new BGE.Game(320, 240)
+      m.game.splash.engineCard.sound = false
+      m.game.defineScene(new SplashTestScene(m.game, "Plain", 0))
+      m.game.defineScene(new SplashTestScene(m.game, "Loading", 3))
+      m.game.defineScene(new SplashTestScene(m.game, "Slow", 60))
+    end function
+
+    @describe("without Play()")
+
+    @it("is on by default but doesn't run until Play() starts")
+    function _()
+      m.assertTrue(m.game.splash.enabled)
+      m.game.changeScene("Plain")
+      m.assertFalse(m.game.isSplashActive())
+      m.assertEqual(1, (m.game.currentScene as SplashTestScene).createCalls)
+    end function
+
+    @it("doesn't start when turned off")
+    function _()
+      m.game.splash.enabled = false
+      m.game.changeScene("Loading")
+      m.game.startSplashForTest()
+      m.assertFalse(m.game.isSplashActive())
+    end function
+
+    @describe("a first scene that loads")
+
+    @it("holds onCreate until the splash ends, then fades in")
+    function _()
+      m.game.changeScene("Loading")
+      m.game.startSplashForTest()
+      m.assertTrue(m.game.isSplashActive())
+      m.assertTrue(m.game.isTransitioning())
+      scene = m.game.currentScene as SplashTestScene
+      m.runFrames(10)
+      m.assertEqual(0, scene.createCalls)
+      m.assertFalse(m.game.isLoadingScreenShown())
+
+      m.runFrames(23)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertEqual(1, scene.createCalls)
+      m.assertEqual(1.0, m.game.screenFade.opacity)
+      m.assertTrue(m.game.screenFade.isFading())
+    end function
+
+    @it("waits for loading that outlasts the cards")
+    function _()
+      m.game.changeScene("Slow")
+      m.game.startSplashForTest()
+      scene = m.game.currentScene as SplashTestScene
+      m.runFrames(40)
+      m.assertTrue(m.game.isSplashActive())
+      m.assertTrue(m.game.splash.isShowingLoadingBar())
+      m.assertEqual(0, scene.createCalls)
+      m.runFrames(25)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertEqual(1, scene.createCalls)
+    end function
+
+    @describe("a first scene created before Play()")
+
+    @it("gets no updates during the splash, and fades in after it")
+    function _()
+      m.game.changeScene("Plain")
+      scene = m.game.currentScene as SplashTestScene
+      m.game.startSplashForTest()
+      m.runFrames(33)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertEqual(1, scene.createCalls)
+      m.assertEqual(0, scene.updateCalls)
+      m.assertTrue(m.game.screenFade.isFading())
+      m.game.processEntitiesPreDrawForTest()
+      m.assertEqual(1, scene.updateCalls)
+    end function
+
+    @describe("scene changes")
+
+    @it("applies a change requested during the splash after it")
+    function _()
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.runFrames(5)
+      m.game.changeScene("Loading")
+      m.assertEqual("Plain", m.game.currentScene.name)
+      m.runFrames(28)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertEqual("Loading", m.game.currentScene.name)
+    end function
+
+    @it("loads the first scene straight away when it's changed to during the splash")
+    function _()
+      m.game.startSplashForTest()
+      m.runFrames(2)
+      m.game.changeScene("Loading")
+      m.assertEqual("Loading", m.game.currentScene.name)
+      m.assertTrue(m.game.isLoading())
+    end function
+
+    @it("lets the first scene's onCreate() start a changeSceneWithFade()")
+    function _()
+      (m.game.Scenes["Loading"] as SplashTestScene).fadeToOnCreate = "Plain"
+      m.game.changeScene("Loading")
+      m.game.startSplashForTest()
+      m.runFrames(33)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertTrue((m.game.currentScene as SplashTestScene).fadeAccepted)
+      ' 0.3s of fade, which steps at most 1/30s a frame
+      for i = 1 to 12
+        m.game.updateFadeTransitionForTest(0.1)
+        end for
+      m.assertEqual("Plain", m.game.currentScene.name)
+    end function
+
+    @it("carries on a changeSceneWithFade() from before play() after it")
+    function _()
+      (m.game.Scenes["Plain"] as SplashTestScene).fadeToOnCreate = "Loading"
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.runFrames(33)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertEqual("Plain", m.game.currentScene.name)
+      ' 0.3s of fade, which steps at most 1/30s a frame
+      for i = 1 to 12
+        m.game.updateFadeTransitionForTest(0.1)
+      end for
+      m.assertEqual("Loading", m.game.currentScene.name)
+    end function
+
+    @describe("skipping")
+
+    @it("a press skips the engine card")
+    function _()
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.runFrames(5)
+      ' 6 is OK's press
+      m.game.runSplashFrameForTest(0.1, [new BGE.GameInput(6, 0)])
+      m.runFrames(3)
+      m.assertFalse(m.game.isSplashActive())
+      ' the press that skipped it doesn't reach the scene
+      m.assertTrue(m.game.isInputSuppressed())
+    end function
+
+    @it("an unskippable engine card ignores presses")
+    function _()
+      m.game.splash.engineCard.skippable = false
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.runFrames(5)
+      m.game.runSplashFrameForTest(0.1, [new BGE.GameInput(6, 0)])
+      m.runFrames(3)
+      m.assertTrue(m.game.isSplashActive())
+    end function
+
+    @it("plays only once")
+    function _()
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.runFrames(33)
+      m.game.startSplashForTest()
+      m.assertFalse(m.game.isSplashActive())
+    end function
+
+    @it("doesn't play again for another Game in the same launch")
+    function _()
+      m.game.startSplashForTest()
+      m.assertTrue(m.game.isSplashActive())
+      other = new BGE.Game(320, 240)
+      other.startSplashForTest()
+      m.assertFalse(other.isSplashActive())
+    end function
+
+    @describe("music")
+
+    @it("holds music started before play() until the splash ends")
+    function _()
+      ' pkg:/manifest stands in for a music file: musicPlay() only checks the path exists
+      m.game.musicPlay("pkg:/manifest", true)
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.assertTrue(m.game.isMusicWaitingForSplash())
+      m.assertEqual("pkg:/manifest", m.game.getMusicPath())
+      m.runFrames(33)
+      m.assertFalse(m.game.isSplashActive())
+      m.assertFalse(m.game.isMusicWaitingForSplash())
+      m.assertEqual("pkg:/manifest", m.game.getMusicPath())
+    end function
+
+    @it("holds music started during the splash")
+    function _()
+      m.game.changeScene("Plain")
+      m.game.startSplashForTest()
+      m.assertFalse(m.game.isMusicWaitingForSplash())
+      m.assertTrue(m.game.musicPlay("pkg:/manifest", true))
+      m.assertTrue(m.game.isMusicWaitingForSplash())
+      m.assertEqual("pkg:/manifest", m.game.getMusicPath())
+    end function
+
+    @it("forgets held music that's stopped during the splash")
+    function _()
+      m.game.musicPlay("pkg:/manifest", true)
+      m.game.startSplashForTest()
+      m.game.musicStop()
+      m.assertFalse(m.game.isMusicWaitingForSplash())
+      m.assertEqual("", m.game.getMusicPath())
+    end function
+
+    @it("holds music from before play() without starting it, if the splash will show")
+    function _()
+      m.game.musicPlay("pkg:/manifest", true)
+      m.assertTrue(m.game.isMusicWaitingForSplash())
+    end function
+
+    @it("starts held music straight away when the splash is turned off before play()")
+    function _()
+      m.game.musicPlay("pkg:/manifest", true)
+      m.game.applyLaunchSplash(new BGE.LaunchParams({splash: "0"}))
+      m.game.startSplashForTest()
+      m.assertFalse(m.game.isSplashActive())
+      m.assertFalse(m.game.isMusicWaitingForSplash())
+      m.assertEqual("pkg:/manifest", m.game.getMusicPath())
+    end function
+
+    @it("doesn't hold music when the splash is off")
+    function _()
+      m.game.splash.enabled = false
+      m.game.musicPlay("pkg:/manifest", true)
+      m.game.startSplashForTest()
+      m.assertFalse(m.game.isMusicWaitingForSplash())
+    end function
+
+    @describe("applyLaunchSplash")
+
+    @it("turns the splash off with splash=0")
+    function _()
+      m.assertTrue(m.game.applyLaunchSplash(new BGE.LaunchParams({splash: "0"})))
+      m.assertFalse(m.game.splash.enabled)
+      m.game.startSplashForTest()
+      m.assertFalse(m.game.isSplashActive())
+    end function
+
+    @it("leaves it on with splash=1, and changes nothing without the param")
+    function _()
+      m.assertTrue(m.game.applyLaunchSplash(new BGE.LaunchParams({splash: "on"})))
+      m.assertTrue(m.game.splash.enabled)
+      m.game.splash.enabled = false
+      m.assertFalse(m.game.applyLaunchSplash(new BGE.LaunchParams({})))
+      m.assertFalse(m.game.splash.enabled)
+    end function
+
+    @it("takes another key")
+    function _()
+      m.assertTrue(m.game.applyLaunchSplash(new BGE.LaunchParams({intro: "off"}), "intro"))
+      m.assertFalse(m.game.splash.enabled)
+    end function
+
+    private sub runFrames(count as integer)
+      for i = 1 to count
+        m.game.runSplashFrameForTest(0.1, [] as BGE.GameInput[])
+      end for
+    end sub
+
+  end class
+
+  ' Queues one task taking `taskSteps` frames (none for 0), and counts onCreate/onUpdate.
+  class SplashTestScene extends BGE.GameScene
+    createCalls as integer = 0
+    updateCalls as integer = 0
+    taskSteps as integer = 0
+    ' a scene changeSceneWithFade() goes to from onCreate() ("" for none)
+    fadeToOnCreate as string = ""
+    fadeAccepted as boolean = false
+
+    sub new(game as BGE.Game, name as string, taskSteps as integer)
+      super(game, {name: name})
+      m.taskSteps = taskSteps
+    end sub
+
+    override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+      if m.taskSteps = 0
+        return
+      end if
+      context = {remaining: m.taskSteps, total: m.taskSteps}
+      loader.addStep(function(ctx as object) as dynamic
+        ctx.remaining = ctx.remaining - 1
+        return 1.0 - ctx.remaining / ctx.total
+      end function, context, 1.0, true)
+    end sub
+
+    override sub onCreate(args as roAssociativeArray)
+      m.createCalls++
+      if m.fadeToOnCreate <> ""
+        m.fadeAccepted = m.game.changeSceneWithFade(m.fadeToOnCreate)
+        m.fadeToOnCreate = ""
+      end if
+    end sub
+
+    override sub onUpdate(dt as float)
+      m.updateCalls++
+    end sub
+  end class
+
+end namespace

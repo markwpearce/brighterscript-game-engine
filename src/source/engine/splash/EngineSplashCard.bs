@@ -1,0 +1,216 @@
+import "SplashCard.bs"
+import "EngineSplashArt.bs"
+import "../Game.bs"
+import "../renderer/Renderer.bs"
+import "../../utils/colors.bs"
+import "../../math/math.bs"
+import "../../math/vector.bs"
+
+namespace BGE
+
+  ' The BrighterScript Game Engine logo: a cannon fires a ball beside the title, with the
+  ' startup sound. It's always the first card of `game.splash`; restyle it through
+  ' `game.splash.engineCard`.
+  class EngineSplashCard extends SplashCard
+
+    ' Packed RGBA
+    backgroundColor as integer = &h421866FF
+    ' Packed RGBA, for the cannon and its ball
+    cannonColor as integer = &hFFFFFFFF
+    ' Packed RGBA
+    titleColor as integer = &hFFFFFFFF
+    ' Whether to play the startup sound
+    sound as boolean = true
+
+    private canvasWidth as integer = 1280
+    private canvasHeight as integer = 720
+    private layout as BGE.EngineSplashLayout = invalid
+    private title as roBitmap = invalid
+    private ball as roBitmap = invalid
+    private frames as roRegion[] = []
+    private soundLoaded as boolean = false
+
+    sub new()
+      super()
+      m.layout = BGE.EngineSplashArt.getLayout(false)
+    end sub
+
+    ' Sets the background, cannon and title colours to one of the preset schemes.
+    '
+    ' @param {BGE.SplashScheme} scheme
+    sub useScheme(scheme as BGE.SplashScheme)
+      if scheme = BGE.SplashScheme.Dark
+        m.setColors(&h121826FF, &hFFAA28FF, &hF0F0F5FF)
+      else if scheme = BGE.SplashScheme.Cream
+        m.setColors(&hF5F0E4FF, &h421866FF, &h1E1E28FF)
+      else if scheme = BGE.SplashScheme.Teal
+        m.setColors(&h0A786EFF, &hFFE678FF, &hFFFFFFFF)
+      else
+        m.setColors(&h421866FF, &hFFFFFFFF, &hFFFFFFFF)
+      end if
+    end sub
+
+    ' Picks the art size and scale for a canvas this many lines high (16:9). `onStart()` sets
+    ' it from the UI canvas.
+    '
+    ' @param {integer} height
+    sub setCanvasHeight(height as integer)
+      m.setCanvasSize(Int(height * 16 / 9), height)
+    end sub
+
+    ' Lays the card out for a canvas of this size. `onStart()` calls it with the UI canvas's.
+    '
+    ' @param {integer} width
+    ' @param {integer} height
+    sub setCanvasSize(width as integer, height as integer)
+      m.canvasWidth = width
+      m.canvasHeight = height
+      m.layout = BGE.EngineSplashArt.getLayout(m.isFhd())
+    end sub
+
+    ' Whether the FHD art is used (the UI canvas is at least 1080 lines high).
+    '
+    ' @return {boolean}
+    function isFhd() as boolean
+      return m.canvasHeight >= 1080
+    end function
+
+    override sub onStart(game as BGE.Game)
+      m.setCanvasSize(game.uiCanvas.getWidth(), game.uiCanvas.getHeight())
+      layout = m.layout
+      game.loadBitmap(BGE.EngineSplashArt.TITLE_BITMAP, layout.titlePath)
+      game.loadBitmap(BGE.EngineSplashArt.CANNON_BITMAP, layout.sheetPath)
+      game.loadBitmap(BGE.EngineSplashArt.BALL_BITMAP, layout.ballPath)
+      m.title = game.getBitmap(BGE.EngineSplashArt.TITLE_BITMAP, false)
+      m.ball = game.getBitmap(BGE.EngineSplashArt.BALL_BITMAP, false)
+      sheet = game.getBitmap(BGE.EngineSplashArt.CANNON_BITMAP, false)
+      m.frames = []
+      if invalid <> sheet
+        for i = 0 to BGE.EngineSplashArt.FRAME_COUNT - 1
+          x = (i mod BGE.EngineSplashArt.SHEET_COLUMNS) * layout.frameWidth
+          y = (i \ BGE.EngineSplashArt.SHEET_COLUMNS) * layout.frameHeight
+          m.frames.push(CreateObject("roRegion", sheet, x, y, layout.frameWidth, layout.frameHeight))
+        end for
+      end if
+      if m.sound
+        game.loadSound(BGE.EngineSplashArt.SOUND_NAME, BGE.EngineSplashArt.SOUND_PATH)
+        m.soundLoaded = true
+        game.playSound(BGE.EngineSplashArt.SOUND_NAME, 100, 0)
+      end if
+    end sub
+
+    override function isFinished() as boolean
+      ' a little slack, so 30 steps of 0.1s count as three seconds despite float rounding
+      return m.skipped or m.elapsed * 1000 >= BGE.EngineSplashArt.DURATION_MS - 0.5
+    end function
+
+    override function getBackgroundColor() as integer
+      return m.backgroundColor
+    end function
+
+    override function getForegroundColor() as integer
+      return m.titleColor
+    end function
+
+    ' The cannon frame showing now.
+    '
+    ' @return {integer}
+    function getFrameIndex() as integer
+      return BGE.EngineSplashArt.getFrameIndexAt(m.elapsed * 1000)
+    end function
+
+    ' Where the centre of the flying cannonball is on the canvas, or invalid before it's fired.
+    '
+    ' @return {BGE.Math.Vector}
+    function getBallPosition() as BGE.Math.Vector
+      flightSeconds = m.elapsed - BGE.EngineSplashArt.BALL_SPAWN_MS / 1000
+      if flightSeconds < 0
+        return invalid
+      end if
+      scale = m.getScale()
+      ' speed and gravity are in FHD pixels; the canvas is canvasHeight high
+      physicsScale = m.canvasHeight / 1080
+      t = flightSeconds + BGE.EngineSplashArt.BALL_LEAD_SECONDS
+      speed = BGE.EngineSplashArt.BALL_SPEED_FHD * physicsScale
+      gravity = BGE.EngineSplashArt.BALL_GRAVITY_FHD * physicsScale
+      origin = m.getCannonOrigin()
+      x = origin.x + m.layout.ballSpawnX * scale + BGE.EngineSplashArt.BALL_DIR_X * speed * t
+      ' +y down on the canvas
+      y = origin.y + m.layout.ballSpawnY * scale + BGE.EngineSplashArt.BALL_DIR_Y * speed * t + 0.5 * gravity * t * t
+      return BGE.Math.VectorOps.create(x, y)
+    end function
+
+    override sub draw(renderer as BGE.Renderer, opacity as float)
+      size = renderer.getCanvasSize()
+      renderer.drawRectangle(0, 0, size.x, size.y, BGE.colorOpacity(m.backgroundColor, opacity))
+      scale = m.getScale()
+      cannonTint = BGE.colorOpacity(m.cannonColor, opacity)
+      origin = m.getCannonOrigin()
+      frameIndex = m.getFrameIndex()
+      if frameIndex < m.frames.count()
+        renderer.drawScaledObject(Int(origin.x), Int(origin.y), scale, scale, m.frames[frameIndex], cannonTint)
+      end if
+      if invalid <> m.title
+        titlePos = m.getTitlePosition()
+        renderer.drawScaledObject(Int(titlePos.x), Int(titlePos.y), scale, scale, m.title, BGE.colorOpacity(m.titleColor, opacity))
+      end if
+      ballPos = m.getBallPosition()
+      if invalid <> m.ball and invalid <> ballPos and ballPos.y < size.y and ballPos.x < size.x
+        half = m.layout.ballSize * scale / 2
+        renderer.drawScaledObject(Int(ballPos.x - half), Int(ballPos.y - half), scale, scale, m.ball, cannonTint)
+      end if
+    end sub
+
+    override sub onEnd(game as BGE.Game)
+      m.frames = []
+      m.title = invalid
+      m.ball = invalid
+      game.unloadBitmap(BGE.EngineSplashArt.TITLE_BITMAP)
+      game.unloadBitmap(BGE.EngineSplashArt.CANNON_BITMAP)
+      game.unloadBitmap(BGE.EngineSplashArt.BALL_BITMAP)
+      if m.soundLoaded
+        game.unloadSound(BGE.EngineSplashArt.SOUND_NAME)
+        m.soundLoaded = false
+      end if
+    end sub
+
+    private sub setColors(background as integer, cannon as integer, titleColor as integer)
+      m.backgroundColor = background
+      m.cannonColor = cannon
+      m.titleColor = titleColor
+    end sub
+
+    ' Art pixels to canvas pixels.
+    private function getScale() as float
+      return m.canvasHeight / m.layout.refHeight
+    end function
+
+    ' The cannon and title are one group, centred; the title is vertically centred and the
+    ' cannon's body sits `gap` to its left, bottoms level.
+    private function getGroupLeft() as float
+      scale = m.getScale()
+      groupWidth = (m.layout.bodyWidth + m.layout.gap + m.layout.titleWidth) * scale
+      return (m.canvasWidth - groupWidth) / 2
+    end function
+
+    private function getTitleTop() as float
+      return (m.canvasHeight - m.layout.titleHeight * m.getScale()) / 2
+    end function
+
+    ' Top-left of the cannon frame.
+    private function getCannonOrigin() as BGE.Math.Vector
+      scale = m.getScale()
+      x = m.getGroupLeft() - m.layout.bodyX * scale
+      y = m.getTitleTop() - m.layout.bodyY * scale
+      return BGE.Math.VectorOps.create(x, y)
+    end function
+
+    private function getTitlePosition() as BGE.Math.Vector
+      scale = m.getScale()
+      x = m.getGroupLeft() + (m.layout.bodyWidth + m.layout.gap) * scale
+      return BGE.Math.VectorOps.create(x, m.getTitleTop())
+    end function
+
+  end class
+
+end namespace
