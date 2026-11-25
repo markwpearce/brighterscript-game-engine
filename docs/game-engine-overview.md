@@ -65,6 +65,9 @@ sub Main()
 end sub
 ```
 
+`play()` first shows the engine's splash screen for about three seconds while your first scene
+loads. See [Splash Screen](/splash-screen) to restyle it, add your own logos or turn it off.
+
 `GameScene` is just a `GameEntity` subclass - a natural place to spawn your initial entities in
 `onCreate` and to route global input (pause, quit) in `onInput`:
 

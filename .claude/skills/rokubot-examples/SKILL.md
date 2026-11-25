@@ -161,6 +161,11 @@ app, so to deep-link (`launch dev --param ...`) after a sideload, `press home` f
 
 ## Debugging a crash or unresponsive screen
 
+Every example built on `BGE.Game` (all but `rendererTest`) opens with the engine's ~3s splash
+screen (`game.splash`, docs/splash-screen.md) before its first scene, so a screenshot right after
+launch shows the cannon logo. Wait ~3.5s, or press any key once to skip it (`loading` also has a
+1.5s second card).
+
 If a screenshot looks frozen/unchanged across several actions, don't assume rokubot is broken —
 the app may have crashed into the BrightScript Micro Debugger, which just keeps showing the last
 rendered frame. Check directly instead of guessing:

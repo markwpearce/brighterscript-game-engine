@@ -291,6 +291,8 @@ class DotsLoadingScreen extends BGE.LoadingScreen
 end class
 ```
 
+The first scene's loading is shown by the [splash screen](/splash-screen) instead, if it's still loading when the splash starts.
+
 `onShow()` and `onHide()` are also available. A single scene can use its own screen by overriding `getLoadingScreen()` to return one. Otherwise `game.loadingScreen` is used, then `DefaultLoadingScreen`. Because the scene's `getLoadingScreen()` is called while it's loading, build the screen there rather than relying on anything `onCreate()` sets up. `game.isLoading()` and `game.getLoadingProgress()` are there if you want to draw progress yourself.
 
 ## Background loading
