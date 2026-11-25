@@ -1,0 +1,323 @@
+import "pkg:/source/engine/ui/UiWidget.bs"
+import "../UI/UiArt.bs"
+import "../UI/PortraitSet.bs"
+import "../Fight/Roster.bs"
+import "../Fight/MoveData.bs"
+import "../Fight/Announcer.bs"
+import "FightScene.bs"
+
+const SELECT_CPU_ROULETTE_TICKS = 40
+const SELECT_CONFIRMED_PAUSE = 0.8
+const SELECT_VS_SECONDS = 2.4
+const SELECT_P1_RGBA = &hE8402AFF
+const SELECT_P2_RGBA = &h2A8CE8FF
+
+' What the select screen shows; SelectScene updates it.
+class SelectState
+  ' Which character each player's cursor is on (roster index), and whether they've picked.
+  cursor as integer[] = [0, 1]
+  palette as integer[] = [0, 0]
+  confirmed as boolean[] = [false, false]
+  p2Joined as boolean = false
+  p2Label as string = "2P"
+  showVs as boolean = false
+  vsTicks as integer = 0
+  frame as integer = 0
+end class
+
+' Draws the select screen and the VS splash on the UI canvas (laid out for 1280x720).
+class SelectView extends BGE.UI.UiWidget
+  private art as UiArt
+  private portraits as PortraitSet
+  private state as SelectState
+
+  sub new(game as BGE.Game, art as UiArt, portraits as PortraitSet, state as SelectState)
+    super(game)
+    m.art = art
+    m.portraits = portraits
+    m.state = state
+  end sub
+
+  override sub draw(parent = invalid as BGE.UI.UiWidget)
+    m.state.frame++
+    renderer = m.canvas.renderer
+    canvasW = m.canvas.getWidth()
+    canvasH = m.canvas.getHeight()
+    backdrop = m.game.getBitmap("titleBg")
+    renderer.drawScaledObject(0, 0, canvasW / backdrop.GetWidth(), canvasH / backdrop.GetHeight(), backdrop)
+    renderer.drawRectangle(0, 0, canvasW, canvasH, &h05081090)
+    if m.state.showVs
+      m.drawVs(renderer, canvasW, canvasH)
+    else
+      m.drawSelect(renderer, canvasW, canvasH)
+    end if
+  end sub
+
+  private sub drawSelect(renderer as BGE.Renderer, canvasW as integer, canvasH as integer)
+    m.art.drawCentered(renderer, "chooseFighter", canvasW / 2, canvasH * 0.16)
+    roster = getRoster()
+    cardSize = 240
+    for i = 0 to roster.count() - 1
+      cx = canvasW / 2 + (i - (roster.count() - 1) / 2) * 340
+      cy = canvasH * 0.45
+      x = cx - cardSize / 2
+      y = cy - cardSize / 2
+      renderer.drawRectangle(x - 6, y - 6, cardSize + 12, cardSize + 12, &h11131CFF)
+      ' Show the colour a player has picked here, else the first.
+      palette = 0
+      for p = 0 to 1
+        if m.state.cursor[p] = i and m.state.confirmed[p]
+          palette = m.state.palette[p]
+        end if
+      end for
+      region = m.portraits.region(m.portraits.indexOf(newPick(roster[i].id, palette)))
+      scale = cardSize / region.GetWidth()
+      if i = 0
+        renderer.drawRegion(region, x, y, scale, scale)
+      else
+        renderer.drawRegion(region, x + cardSize, y, -scale, scale)
+      end if
+      m.art.drawCentered(renderer, roster[i].nameArt, cx, y + cardSize + 44)
+      ' The four palettes, one per attack button.
+      for p = 0 to PALETTE_COUNT - 1
+        swatch = m.portraits.region(m.portraits.indexOf(newPick(roster[i].id, p)))
+        sx = cx - 2 * 58 + p * 58 + 2
+        renderer.drawRectangle(sx - 2, y + cardSize + 82, 56, 56, &h11131CFF)
+        renderer.drawRegion(swatch, sx, y + cardSize + 84, 52 / swatch.GetWidth(), 52 / swatch.GetWidth())
+      end for
+    end for
+    m.drawCursor(renderer, canvasW, canvasH, 0, cardSize)
+    if m.state.p2Joined
+      m.drawCursor(renderer, canvasW, canvasH, 1, cardSize)
+    end if
+    font = m.game.getFont("hud")
+    hint = "Left/Right to choose - pick a colour with a punch or kick button"
+    if m.state.confirmed[0] and not m.state.p2Joined
+      hint = "2P: press any button to join"
+    end if
+    renderer.drawText(hint, canvasW / 2, canvasH * 0.9, &hFFFFFFFF, font, "center", "bottom")
+  end sub
+
+  private sub drawCursor(renderer as BGE.Renderer, canvasW as integer, canvasH as integer, playerIndex as integer, cardSize as integer)
+    roster = getRoster()
+    cx = canvasW / 2 + (m.state.cursor[playerIndex] - (roster.count() - 1) / 2) * 340
+    cy = canvasH * 0.45
+    ' P2's frame sits just inside P1's when both are on one card.
+    inset = -10
+    if playerIndex = 1
+      inset = -2
+    end if
+    color = SELECT_P1_RGBA
+    label = "1P"
+    if playerIndex = 1
+      color = SELECT_P2_RGBA
+      label = m.state.p2Label
+    end if
+    if m.state.confirmed[playerIndex] and (m.state.frame mod 16) < 8
+      color = &hFFFFFFFF
+    end if
+    x = cx - cardSize / 2 + inset
+    y = cy - cardSize / 2 + inset
+    size = cardSize - inset * 2
+    renderer.drawRectangleOutline(x, y, size, size, color, 6)
+    font = m.game.getFont("hud")
+    if playerIndex = 0
+      renderer.drawRectangle(x, y - 36, 64, 36, color)
+      renderer.drawText(label, x + 32, y - 34, &hFFFFFFFF, font, "center", "top")
+    else
+      renderer.drawRectangle(x + size - 80, y - 36, 80, 36, color)
+      renderer.drawText(label, x + size - 40, y - 34, &hFFFFFFFF, font, "center", "top")
+    end if
+  end sub
+
+  private sub drawVs(renderer as BGE.Renderer, canvasW as integer, canvasH as integer)
+    m.state.vsTicks++
+    roster = getRoster()
+    size = 400
+    ' The portraits slide in from the sides.
+    slide = BGE.Math.Max(0, 1 - m.state.vsTicks / 15.0)
+    for p = 0 to 1
+      character = roster[m.state.cursor[p]]
+      region = m.portraits.region(m.portraits.indexOf(newPick(character.id, m.state.palette[p])))
+      scale = size / region.GetWidth()
+      y = canvasH / 2 - size / 2 - 30
+      if p = 0
+        x = canvasW * 0.27 - size / 2 - slide * 600
+        renderer.drawRegion(region, x, y, scale, scale)
+        m.art.drawCentered(renderer, character.nameArt, canvasW * 0.27, y + size + 40, 1.3)
+      else
+        x = canvasW * 0.73 - size / 2 + slide * 600
+        renderer.drawRegion(region, x + size, y, -scale, scale)
+        m.art.drawCentered(renderer, character.nameArt, canvasW * 0.73, y + size + 40, 1.3)
+      end if
+    end for
+    vsScale = 1.0
+    if m.state.vsTicks < 20
+      vsScale = 2.5 - 1.5 * m.state.vsTicks / 20.0
+    end if
+    m.art.drawCentered(renderer, "vs", canvasW / 2, canvasH / 2, vsScale)
+  end sub
+end class
+
+' Character select. Each player moves a cursor with left/right and picks with an attack
+' button, which also picks the colour (LP, HP, LK, HK). Against the CPU it picks after P1;
+' in versus P2 joins with any button. Then a VS splash, then the fight.
+'
+' Args: mode (FightMode), cpuLevel (1-3), challenger (true: P2 just pressed to join).
+class SelectScene extends BGE.GameScene
+
+  private art as UiArt
+  private portraits as PortraitSet
+  private state as SelectState
+  private announcer as Announcer
+  private mode as string = FightMode.cpu
+  private cpuLevel as integer = 2
+  private lastMoveX as float[] = [0.0, 0.0]
+  private rouletteTicks as integer = 0
+  private doneTimer as float = 0.0
+
+  sub new(game as BGE.Game, art as UiArt, portraits as PortraitSet)
+    super(game)
+    m.name = "SelectScene"
+    m.art = art
+    m.portraits = portraits
+    m.announcer = new Announcer(game)
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.state = new SelectState()
+    m.mode = FightMode.cpu
+    if args.mode <> invalid
+      m.mode = args.mode
+    end if
+    if args.cpuLevel <> invalid
+      m.cpuLevel = args.cpuLevel
+    end if
+    m.state.p2Label = "2P"
+    if m.mode = FightMode.cpu
+      m.state.p2Label = "CPU"
+    else if m.mode = FightMode.training
+      m.state.p2Label = "DUMMY"
+    end if
+    m.state.p2Joined = args.challenger = true
+    m.rouletteTicks = 0
+    m.doneTimer = 0.0
+    m.lastMoveX = [0.0, 0.0]
+    m.addUi(new SelectView(m.game, m.art, m.portraits, m.state))
+    m.game.musicPlay("pkg:/music/title.mp3", true, false)
+    m.announcer.say("vChoose", 0.3)
+    ' Swallow the press that got us here.
+    m.game.controls.blockHeldActions()
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    if not input.press
+      return
+    end if
+    if input.isRemoteBack() and input.playerIndex = 0
+      if m.state.confirmed[0] and not m.state.showVs
+        m.state.confirmed[0] = false
+        m.rouletteTicks = 0
+        if m.mode <> FightMode.versus
+          m.state.confirmed[1] = false
+          m.state.p2Joined = false
+        end if
+      else if not m.state.showVs
+        m.game.changeSceneWithFade("TitleScene")
+      end if
+      return
+    end if
+    if input.playerIndex = 1 and m.mode = FightMode.versus and not m.state.p2Joined
+      m.state.p2Joined = true
+      m.game.playSound("menuSelect", 70)
+      m.game.controls.blockHeldActions()
+    end if
+  end sub
+
+  override sub onUpdate(deltaTime as float)
+    m.announcer.update(deltaTime)
+    if m.state.showVs
+      m.doneTimer += deltaTime
+      if m.doneTimer >= SELECT_VS_SECONDS
+        m.startFight()
+      end if
+      return
+    end if
+    m.readPlayer(0)
+    if m.mode = FightMode.versus
+      if m.state.p2Joined
+        m.readPlayer(1)
+      end if
+    else if m.state.confirmed[0] and not m.state.confirmed[1]
+      m.pickForCpu()
+    end if
+    if m.state.confirmed[0] and m.state.confirmed[1]
+      m.doneTimer += deltaTime
+      if m.doneTimer >= SELECT_CONFIRMED_PAUSE
+        m.doneTimer = 0.0
+        m.state.showVs = true
+        m.state.vsTicks = 0
+        m.game.playSound("koSting", 80, VOICE_CHANNEL)
+      end if
+    end if
+  end sub
+
+  private sub readPlayer(playerIndex as integer)
+    if m.state.confirmed[playerIndex]
+      return
+    end if
+    prefix = "p" + playerIndex.toStr()
+    moveX = m.game.controls.getAxis(prefix + "move").x
+    previous = m.lastMoveX[playerIndex]
+    m.lastMoveX[playerIndex] = moveX
+    rosterSize = getRoster().count()
+    if moveX > 0.5 and previous <= 0.5
+      m.state.cursor[playerIndex] = (m.state.cursor[playerIndex] + 1) mod rosterSize
+      m.game.playSound("menuMove", 60)
+    else if moveX < -0.5 and previous >= -0.5
+      m.state.cursor[playerIndex] = (m.state.cursor[playerIndex] + rosterSize - 1) mod rosterSize
+      m.game.playSound("menuMove", 60)
+    end if
+    for each button in [AttackButton.lightPunch, AttackButton.heavyPunch, AttackButton.lightKick, AttackButton.heavyKick]
+      if m.game.controls.isActionPressed(prefix + button)
+        m.confirm(playerIndex, paletteForButton(button))
+        exit for
+      end if
+    end for
+  end sub
+
+  private sub confirm(playerIndex as integer, palette as integer)
+    m.state.palette[playerIndex] = palette
+    m.state.confirmed[playerIndex] = true
+    m.game.playSound("menuSelect", 80)
+    if playerIndex = 1
+      roster = getRoster()
+      p1 = newPick(roster[m.state.cursor[0]].id, m.state.palette[0])
+      p2 = newPick(roster[m.state.cursor[1]].id, palette)
+      m.state.palette[1] = resolvePaletteClash(p1, p2)
+    end if
+  end sub
+
+  ' The CPU (or training dummy) flicks between fighters for a moment, then settles.
+  private sub pickForCpu()
+    m.state.p2Joined = true
+    m.rouletteTicks++
+    rosterSize = getRoster().count()
+    if m.rouletteTicks mod 5 = 0
+      m.state.cursor[1] = (m.state.cursor[1] + 1) mod rosterSize
+      m.game.playSound("menuMove", 40)
+    end if
+    if m.rouletteTicks >= SELECT_CPU_ROULETTE_TICKS
+      m.state.cursor[1] = Rnd(rosterSize) - 1
+      m.confirm(1, Rnd(PALETTE_COUNT) - 1)
+    end if
+  end sub
+
+  private sub startFight()
+    roster = getRoster()
+    p1 = newPick(roster[m.state.cursor[0]].id, m.state.palette[0])
+    p2 = newPick(roster[m.state.cursor[1]].id, m.state.palette[1])
+    m.game.changeSceneWithFade("FightScene", {mode: m.mode, p1: p1, p2: p2, cpuLevel: m.cpuLevel})
+  end sub
+
+end class

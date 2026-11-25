@@ -233,6 +233,18 @@ complete. Its share of the progress bar jumps from 0 to done, so give a big down
 download would freeze the game. Given a URL they log an error and return false.
 `game.musicPlay()` does take a URL - the music player streams it.
 
+## Playing sounds
+
+`game.playSound("boom")` plays a loaded WAV, with an optional volume (0-100) and channel. A new
+sound stops whatever its channel was playing. Devices have one or two channels
+(`game.getSoundChannelCount()`), so put a sound that mustn't be cut off, like a voice line, on
+channel 1 and the rest on 0:
+
+```brighterscript
+m.game.playSound("announceFight", 100, 1)
+m.game.playSound("punch", 80)
+```
+
 ## Errors
 
 A failed task is logged and its message kept. Check for them in `onCreate()`:

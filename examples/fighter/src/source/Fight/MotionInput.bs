@@ -1,0 +1,143 @@
+' Motion inputs for special moves. Directions use fighting-game numpad notation relative
+' to the fighter's facing: 6 is toward the opponent, 4 away, 2 down, 8 up, 5 neutral.
+
+' How many ticks a motion has to be completed within, ending at the button press.
+const MOTION_WINDOW_TICKS = 24
+const INPUT_HISTORY_TICKS = 40
+const DRAGON_PUNCH_WINDOW_TICKS = 30
+' A dragon punch's forward is a tap of at most this many ticks, and down follows it within
+' DRAGON_PUNCH_DOWN_TICKS.
+const DRAGON_PUNCH_TAP_TICKS = 8
+const DRAGON_PUNCH_DOWN_TICKS = 8
+
+' The numpad direction for a stick reading, relative to `facing` (+1 right, -1 left).
+function numpadDirection(moveX as float, moveY as float, facing as integer) as integer
+  x = 0
+  if moveX * facing > 0.5
+    x = 1
+  else if moveX * facing < -0.5
+    x = -1
+  end if
+  y = 0
+  if moveY > 0.5
+    y = 1
+  else if moveY < -0.5
+    y = -1
+  end if
+  return 5 + x + y * 3
+end function
+
+' The last few ticks of one fighter's stick directions.
+class InputHistory
+  ' Oldest first.
+  directions as integer[] = []
+
+  sub record(direction as integer)
+    m.directions.push(direction)
+    if m.directions.count() > INPUT_HISTORY_TICKS
+      m.directions.shift()
+    end if
+  end sub
+
+  sub clear()
+    m.directions = []
+  end sub
+
+  ' True if `steps` were held in order within the last `window` ticks (other directions may
+  ' come between them). Each step is a list of directions that count, e.g. [[2], [3, 6]].
+  function matches(steps as object, window = MOTION_WINDOW_TICKS as integer) as boolean
+    stepIndex = steps.count() - 1
+    first = m.directions.count() - window
+    if first < 0
+      first = 0
+    end if
+    i = m.directions.count() - 1
+    while i >= first and stepIndex >= 0
+      for each accepted in steps[stepIndex]
+        if m.directions[i] = accepted
+          stepIndex--
+          exit for
+        end if
+      end for
+      i--
+    end while
+    return stepIndex < 0
+  end function
+
+  ' Down, (down-forward,) forward. The diagonal is optional: a Roku remote's d-pad can't
+  ' press one.
+  function isQuarterCircleForward() as boolean
+    return m.matches([[2], [3, 6]])
+  end function
+
+  ' Down, (down-back,) back.
+  function isQuarterCircleBack() as boolean
+    return m.matches([[2], [1, 4]])
+  end function
+
+  ' A tap forward, then down soon after, then down-forward (or forward again). A long
+  ' forward (walking) doesn't count, so walking into a quarter circle is still a fireball.
+  function isDragonPunch() as boolean
+    last = m.directions.count() - 1
+    first = last - DRAGON_PUNCH_WINDOW_TICKS + 1
+    if first < 0
+      first = 0
+    end if
+    for i = first to last - 1
+      ' The last tick of a run of forwards.
+      if m.directions[i] = 6 and m.directions[i + 1] <> 6 and m.forwardRunLength(i) <= DRAGON_PUNCH_TAP_TICKS
+        downBy = i + DRAGON_PUNCH_DOWN_TICKS
+        if downBy > last
+          downBy = last
+        end if
+        for j = i + 1 to downBy
+          if m.directions[j] = 2
+            for k = j + 1 to last
+              if m.directions[k] = 3 or m.directions[k] = 6
+                return true
+              end if
+            end for
+          end if
+        end for
+      end if
+    end for
+    return false
+  end function
+
+  private function forwardRunLength(lastIndex as integer) as integer
+    length = 0
+    i = lastIndex
+    while i >= 0
+      if m.directions[i] <> 6
+        exit while
+      end if
+      length++
+      i--
+    end while
+    return length
+  end function
+end class
+
+' Which special move a press makes, given the recent motion, or "".
+function specialForPress(history as InputHistory, button as string) as string
+  isPunch = button = AttackButton.lightPunch or button = AttackButton.heavyPunch
+  if isPunch
+    ' A dragon punch contains a quarter circle forward, so check it first.
+    if history.isDragonPunch()
+      return "uppercut"
+    end if
+    if history.isQuarterCircleForward()
+      return "fireball"
+    end if
+    return ""
+  end if
+  if history.isQuarterCircleBack()
+    return "cartwheel"
+  end if
+  return ""
+end function
+
+' Is this a heavy button?
+function isHeavyButton(button as string) as boolean
+  return button = AttackButton.heavyPunch or button = AttackButton.heavyKick
+end function
