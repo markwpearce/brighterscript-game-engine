@@ -594,3 +594,106 @@ another press (see Choices, above).
 position, the backlog (so the history is still there after Continue) and the
 current stage, so a resumed game shows the same background and portraits.
 `runner.backlog` can be assigned back after `restore()`.
+
+## Reference
+
+### StoryState
+
+| Member | What it does |
+|---|---|
+| `flags`, `inventory`, `items` | the `StoryFlags`, the `Inventory`, and the story's item definitions by id |
+| `evaluate(conditions)` | true if every condition passes (`invalid` passes) |
+| `applyEffects(effects)` | runs effects and returns a `StoryResult` |
+| `runEvent(eventName, data)` | runs the event rules for an event and returns a `StoryResult` |
+| `settle()` | runs `storyChanged` rules until nothing more changes |
+| `visitCount(key)` | how many times a node, candidate or choice was entered (0 if never) |
+| `interpolate(text)` | fills in each `${flag}` |
+| `registerCondition(key, handler, context)` | adds a condition key; a registered key wins over a built-in one |
+| `registerEffect(key, handler, context)` | adds an effect key |
+| `isKnownCondition(condition)`, `isKnownEffect(effect)` | true if the item has a key that is built in or registered |
+| `conditionKeys(condition)`, `effectKeys(effect)` | the known keys of one condition or effect |
+| `reset()` | clears flags, inventory and visits; registered vocabulary stays |
+| `toSaveData()`, `loadSaveData(data)` | save and load everything; malformed data loads as a fresh state |
+
+### StoryFlags
+
+| Member | What it does |
+|---|---|
+| `get(key)` | the value as stored, or `invalid` |
+| `getInt(key)` | the value as an integer (floats are truncated), or 0 |
+| `isSet(key)` | the test the `flag` condition uses |
+| `set(key, value)` | sets a flag; returns true if the stored value changed |
+| `add(key, amount)` | adds to a number, starting from 0; returns true if it changed |
+| `clear()` | removes every flag |
+| `toAA()`, `loadAA(data)` | a copy of the flags, and a replacement from one; values that aren't a boolean, number or string are dropped |
+
+### Inventory
+
+| Member | What it does |
+|---|---|
+| `count(id)`, `has(id)` | how many are carried, and whether at least one is |
+| `canAdd(id)` | true if the item is defined and below its `max` |
+| `add(id)` | adds one; false if it isn't defined or is at its max. It doesn't run `onAcquire` (the `giveItem` effect does) |
+| `remove(id)` | removes one; false if none are carried |
+| `clear()` | empties the inventory |
+| `toAA()`, `loadAA(data)` | a copy of the counts, and a replacement from one; unknown items are dropped and counts are capped at `max` |
+
+### StorySession
+
+These go beside `start()`, `advance()`, `choose()`, `runEvent()`, `applyEffects()` and `toSaveData()`, which are covered above.
+
+| Member | What it does |
+|---|---|
+| `postEvents` | true (the default) sends each post out with `game.postGameEvent(name, {})` |
+| `changedEventName` | posted when the state changes; `"storyUpdated"` by default, `""` for none |
+| `onChanged` | an optional `function(session)` called when the state changes, after `onStoryChanged(result)`. `m` is the session |
+| `onStoryChanged(result)` | does nothing by default; override it, e.g. to autosave |
+| `queueMessage(text, speaker = "")` | adds a message to the queue that `takeMessages()` reads |
+| `takeMessages()`, `hasMessages()` | the queued messages, oldest first (and emptied), and whether there are any |
+| `beforeStep()` (protected) | called before each story step runs. Override it to point handlers at the current player |
+| `listenTo(eventNames)`, `stopListening(eventName)` | forward game events to the story's event rules, or stop |
+
+### Interactables
+
+`BGE.Interactables` is the registry behind "talk to the thing in front of me".
+
+| Member | What it does |
+|---|---|
+| `add(entity, id, label = "", data = invalid)` | adds one and returns it; an existing one with the same id is replaced |
+| `get(id)`, `remove(id)`, `clear()` | find one, remove one, or remove all |
+| `count()`, `getAll()` | how many there are, and every one in the order added |
+| `prune()` | drops ones whose entity has been destroyed |
+| `nearestInArc(origin, heading, reach, halfAngle)` | the nearest enabled one within `reach` and `halfAngle` of `heading`, on the ground plane (x/z) |
+| `nearestInRect(x, y, width, height, originX, originY)` | the nearest enabled one inside the rectangle, measured in x/y |
+| `promptFor(target, buttonText = "OK")` | `"OK: Talk to Bram"`; just the label if `buttonText` is `""`; `""` for no target |
+
+Each `BGE.Interactable` has `id`, `label`, `entity`, `data` and `radius` (its body radius, so it counts once its edge is in reach). Set `enabled = false` on it to stop it being picked.
+
+### DialogueView layout
+
+Set these fields on the view before it opens (`open()`, or `start()`, which opens it).
+
+| Field (default) | What it does |
+|---|---|
+| `linesPerPage` (3) | wrapped lines shown at once |
+| `boxPadding` (32), `speakerGap` (8) | padding round the text, and the space between speaker and text |
+| `speakerFontName`, `textFontName` (`"body"`) | theme fonts |
+| `moreText` (`"..."`) | shown while there's another page |
+| `choiceLayout` (`"column"`) | `"column"`, `"row"` or `"list"` |
+| `choiceHeight` (52), `choiceGap` (10), `choiceWidth` (0) | column and row buttons; `choiceWidth` 0 is 60% of the box |
+| `listKeepsLine` (true), `listDivider` (true), `listDividerColor` (0) | list layout: keep the line above the choices, draw a rule, and its colour (0 is the theme's) |
+| `listMarker` (`"> "`) | the focused choice's marker |
+| `listTextColor`, `listFocusedColor`, `listDisabledColor` | list choice colours (0 for the theme's) |
+| `listRowHeight` (0) | list row height; 0 is the font's line height plus 6 |
+| `showDisabledChoices` (true) | show disabled list choices, dimmed |
+| `choicesWithLastLine` (true) | show choices with the last page, or after one more press |
+| `advanceButton` (`"ok"`), `cancelButton` (`"back"`) | the button that turns the page, and the one that leaves |
+| `advanceAction` (`""`) | a `Game.controls` action that also turns the page |
+| `closeOnBack` (true), `modal` (true) | close on the back button, and pause the game while open |
+| `backgroundImage` (invalid) | drawn behind the box instead of the theme's panel |
+| `listener` (invalid) | gets `onDialogueLine(view, line)` and `onDialogueEnded(view, cancelled)`, if it has them |
+
+### Case rules and the step guard
+
+- Node ids, candidate ids and visit counts ignore case, because they're looked up in ordinary AAs. Flags don't: `Gate.Open` and `gate.open` are different flags.
+- The runner stops a conversation that runs 200 steps (`RUNNER_MAX_STEPS`, not configurable) without showing a line or a choice. A step is each phase a node goes through, so a loop of nodes that only jump to each other ends this way. It logs a `[BGE.Story]` warning and cancels the conversation.

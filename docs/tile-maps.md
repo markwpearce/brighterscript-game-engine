@@ -612,3 +612,68 @@ Tiled saves the final tile for every cell, a Tiled map doesn't need
 [auto-tiling](#auto-tiling); runtime auto-tiling is still useful for maps
 made in code or by the game, and for re-tiling around a cell that changes
 during play.
+
+## Reference
+
+### SolidWorld
+
+| Member | What it does |
+|---|---|
+| `new(bucketSize = 128)` | the constructor. Solids are grouped in square buckets this size, so a move only tests nearby solids. 0 or less uses 128. There is no getter for it |
+| `getSolids()` | a copy of every solid, `{x, y, w, h, id}` |
+| `getSolidsInArea(x, y, w, h)` | copies of the solids overlapping a box. A solid only touching the box's edge doesn't count |
+| `isAreaFree(x, y, w, h)` | true if no solid overlaps the box |
+| `getSolidCount()` | how many solids there are |
+
+### moveAndSlide
+
+`moveAndSlide(mover, dx, dy, options)` returns a `SlideResult`: the new `x` and `y` of the box, and `blockedX` and `blockedY`, which are true when a solid stopped movement along that axis.
+
+| Option | What it does |
+|---|---|
+| `maxStep` (4) | the longest sub-step in px. A fast move is split up so it can't skip a thin solid. 0 or less uses 4 |
+| `cornerNudge` (8) | how far a box that clips a corner is eased round it, when moving along one axis. 0 turns it off |
+
+### CharGrid
+
+`new(rows, args)` takes `cellSize` (world units per cell), `origin` (the -x/-z corner of cell 0, 0; the grid is centred on the origin by default) and `solidKinds` (characters that `isSolid()` counts, `"#"` by default).
+
+| Member | What it does |
+|---|---|
+| `isInside(col, row)` | true if the cell is on the grid |
+| `cellCenter(col, row)` | the world position of a cell's centre, on the ground (y 0). Takes fractions |
+| `groupCenter(group)` | the world position of the middle of a group of cells |
+| `cellAt(x, z)` | the cell a world position is in. Its `kind` is `""` outside the grid |
+| `toSolidWorld(kinds = "")` | a `SolidWorld` with a cell-sized solid per solid cell, plus a wall one cell thick round the grid. `kinds` picks the characters to make solid; `""` uses `isSolid()` |
+
+### GridSides
+
+Sides are `"n"` (-z, row - 1), `"e"` (+x), `"s"` (+z) and `"w"` (-x).
+
+| Member | What it does |
+|---|---|
+| `all()` | `["n", "e", "s", "w"]` |
+| `offset(side)` | the `[col, row]` step to the neighbouring cell across that side |
+| `normal(side)` | the unit vector on the ground pointing out through that side |
+| `opposite(side)` | the side across the cell |
+| `heading(side)` | the heading facing out through that side: n 0, e PI/2, s PI, w -PI/2 |
+| `wallRotation(side)` | the y rotation that hangs a drawable or model (built facing +z) on that wall |
+
+### Tiled helpers
+
+These are the functions under `BGE.Tiled` that the loader and the guide above are built on. Use them when you want to read a map yourself.
+
+| Function | What it does |
+|---|---|
+| `getLayer(map, name)` | the first layer with that name, group children included. Invalid if none |
+| `getTileAt(map, layer, col, row)` | what a tile layer holds in one cell (rows count down from the top). Invalid for an empty cell or one outside the layer |
+| `getLayerCells(map, layer)` | every non-empty cell of a tile layer, row by row |
+| `toWorldX(map, pixelX, offsetX = 0)` | a Tiled pixel x as a world x |
+| `toWorldY(map, pixelY, offsetY = 0)` | a Tiled pixel y as a world y, with the map's bottom edge at 0 |
+| `layerToColliderCells(map, layer, propertyName = "collision")` | a `BGE.TileMap.ColliderCell` for each cell whose tile has that property, ready for `mergeTileColliderRuns()`. Hidden layers count |
+| `layerToTileSpecs(map, layer, options)` | a `BGE.TileMap.TileSpec` for each non-empty cell, ready for `bakeTileMapImages()` |
+| `resolveGid(map, gid)` | what a GID refers to: its tileset, local id, tile entry and flips. Invalid for 0 or an unknown GID |
+| `parseMapFile(filePath)` | loads a `.tmj` or `.json` map, with its external `.tsj` tilesets. Invalid on failure |
+| `parseMapJson(json, baseDir, tilesets = invalid)` | parses a map already in memory. `tilesets` maps resolved `.tsj` paths to their parsed JSON, so they aren't read |
+| `listExternalTilesets(json, baseDir)` | the `.tsj` paths a map names, to load before `parseMapJson()` |
+| `listTiledMapImages(map)` | the image paths its tilesets use, to load before `layerToTileSpecs()` |
