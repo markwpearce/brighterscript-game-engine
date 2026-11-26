@@ -13,7 +13,7 @@ anywhere: strings written in code, arrays of tile ids, a generated layout, or
 a map made in [Tiled](https://www.mapeditor.org/) (see
 [Tiled maps](#tiled-maps)).
 
-![The town in examples/rpg, a Tiled map: cobbled paths, grass, a fountain, benches and a pond, with NPCs walking about](images/tile-maps-rpg-town.jpg)
+![The town in examples/rpg, built from tile rows in code: cobbled paths, grass, a fountain, benches and a pond, with NPCs walking about](images/tile-maps-rpg-town.jpg)
 
 The helpers, all in the `BGE.TileMap` namespace unless noted:
 
