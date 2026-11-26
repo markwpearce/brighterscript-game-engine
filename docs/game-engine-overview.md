@@ -459,6 +459,9 @@ it next frame unless something moves the player back into it. A "grounded" flag 
 every frame and expect `onCollision` to set again will flicker. Keep applying gravity while
 grounded, or check for ground directly, as the platformer's `Player` does.
 
+For 3D games, `addSphereCollider3d()` and `addBoxCollider3d()` do the same job with true 3D overlap,
+and `game.raycast()` casts a ray through either kind. See [3D Colliders and Raycasts](/colliders-3d).
+
 ### Tags
 
 Every entity and collider has a `tagsList` (`BGE.TagList`) for marking what it is, so

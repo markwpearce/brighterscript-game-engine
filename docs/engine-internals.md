@@ -386,7 +386,7 @@ The 3D colliders, `SphereCollider3d` and `BoxCollider3d` (`addSphereCollider3d()
 use the same compositor. Each one owns two 2D colliders, one on the real (x, y) plane and one on a
 (y, z) plane. A pair is only a candidate when it overlaps on both, and then a true 3D check confirms
 the hit. The (y, z) colliders carry the reserved `BGE.COLLIDER_3D_YZ_PLANE_FLAG` bit, so keep it out
-of your own flags.
+of your own flags. See [3D Colliders and Raycasts](/colliders-3d) for how to use them.
 
 An `isStatic` entity never starts a check of its own - anything that moves into it finds it from
 its own side - so a town full of walls and buildings doesn't test them against each other every
