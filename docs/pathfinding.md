@@ -230,3 +230,31 @@ after a burst of searches. Search cost grows too: a search expands roughly the c
 start and goal, and an unreachable goal expands every reachable cell up to
 `maxExpandedCells`. On big maps, use cells as coarse as your narrowest
 gaps allow, cap `maxExpandedCells`, and spread searches over frames.
+
+## Reference
+
+### NavGrid
+
+| Member | What it does |
+|---|---|
+| `isWalkable(x, y)` | true if the point is in an open cell. Outside the grid is not walkable |
+| `cellCenter(col, row)` | the centre of a cell, as a `BGE.NavPoint` `{x, y}` |
+| `colAt(x)`, `rowAt(y)` | the column or row containing a coordinate. It may be outside the grid |
+| `isCellBlocked(col, row)` | true if a cell is blocked by a solid or by hand. Cells outside the grid count as blocked |
+| `isInGrid(col, row)` | true if the cell is inside the grid |
+| `setCellBlocked(col, row, blocked)` | blocks or opens one cell on top of the solids. `rebuild()` keeps it |
+| `findNearestOpenCell(x, y, maxRings = 8)` | the nearest open cell as `{col, row}`, searching outwards ring by ring, or invalid if none is that close |
+| `smoothPath(points)` | drops points that can be skipped: the middle of straight runs, and turns the line of sight doesn't need. Returns short paths unchanged |
+| `rebuild()` | rebuilds every cell from the world's solids, after the solids changed. Every cell is tested, so use `rebuildArea()` for a small change |
+| `rebuildArea(x, y, w, h)` | rebuilds only the cells near a changed area, e.g. after a door's solid was removed |
+| `releaseSearchMemory()` | frees the search memory the grid keeps for reuse. Running searches are unaffected |
+
+### NavFollower
+
+`NavFollower` options are set by name when you create it, or as fields after that.
+
+| Member | What it does |
+|---|---|
+| `minRepathInterval` (0.25) | with `repathDistance`, the least time between two searches. A target that moved far enough still waits this long after the last search |
+| `searchOptions` | a `BGE.NavSearchOptions`, passed to every `startSearch()` the follower makes |
+| `sightSnapRings` (2) | passed to `hasLineOfSight()` by the default `checkSight()`, as how far an end in a blocked cell is moved out |

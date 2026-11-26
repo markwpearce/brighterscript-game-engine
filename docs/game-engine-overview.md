@@ -459,6 +459,9 @@ it next frame unless something moves the player back into it. A "grounded" flag 
 every frame and expect `onCollision` to set again will flicker. Keep applying gravity while
 grounded, or check for ground directly, as the platformer's `Player` does.
 
+For 3D games, `addSphereCollider3d()` and `addBoxCollider3d()` do the same job with true 3D overlap,
+and `game.raycast()` casts a ray through either kind. See [3D Colliders and Raycasts](/colliders-3d).
+
 ### Tags
 
 Every entity and collider has a `tagsList` (`BGE.TagList`) for marking what it is, so
@@ -960,6 +963,8 @@ occlusion and impostor counts to the line.
   explaining the collider-offset and velocity choices made for each entity.
 - Loading lots of assets, or building a big level? See [Loading Assets](/loading-assets) for
   `onLoad()`, loading screens and background loading, and `examples/loading` for a runnable demo.
+- Making a 3D level? See [Occlusion Culling](/occlusion) for marking big solid objects so the
+  renderer skips what's hidden behind them.
 - Building a level out of tiles? See [Tile Maps](/tile-maps) for baking the ground, tile
   collision for side-scrolling and top-down games, and auto-tiling.
 - See [Engine Internals](/engine-internals) for how the renderer, camera, and collision

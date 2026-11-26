@@ -132,3 +132,8 @@ just draws the title instead of a panel. Subclass it to change the look (`create
 leaves or resets the scene the widget is removed after `onDestroy()`, and its buttons stop
 taking focus. A `MenuList` opened with no parent is added this way. Add a widget to
 `game.gameUi` directly to keep it across scenes, e.g. a HUD owned by a persistent entity.
+
+## Form widgets
+
+Checkboxes, sliders, selects, text input and the on-screen keyboard are covered in
+[Form Widgets](/form-widgets), with a settings screen built from them.
