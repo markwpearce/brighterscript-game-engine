@@ -9,14 +9,14 @@ Real 2D and 3D games on a Roku: chase cameras, voxel terrain, textured 3D models
 
 <img src="assets/screenshots/hero.jpg" alt="Six screenshots from the examples running on a Roku: a biplane flying through a gold ring over a voxel island, rolling voxel hills with a lake and a hot-air balloon, a knight fighting a skeleton and an orc at night, a pixel-art street fighter landing a K.O. kick, a jungle platformer, and a sci-fi visual novel with character portraits and a choice menu">
 
-<sub>Top: [flightSim](examples/flightSim), [voxel terrain](examples/rendererTest), [thirdPerson](examples/thirdPerson). Bottom: [fighter](examples/fighter), [platformer](examples/platformer), [visualnovel](examples/visualnovel). Every one of these is a capture from a real Roku.</sub>
+<sub>Top: [flightSim](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/flightSim), [voxel terrain](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rendererTest), [thirdPerson](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/thirdPerson). Bottom: [fighter](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/fighter), [platformer](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/platformer), [visualnovel](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/visualnovel). Every one of these is a capture from a real Roku.</sub>
 
 ## See it move
 
 <p>
-  <a href="examples/flightSim"><img src="assets/clips/flightSim.gif" width="32%" alt="A red biplane, chase camera behind it, climbs over a voxel mountain and through a gold ring"></a>
-  <a href="examples/thirdPerson"><img src="assets/clips/thirdPerson.gif" width="32%" alt="A knight with a sword and shield fights a skeleton on a moonlit field while an orc runs in"></a>
-  <a href="examples/rendererTest"><img src="assets/clips/voxelTerrain.gif" width="32%" alt="The camera sweeps across voxel hills, lakes, pine trees and snowy peaks, with hot-air balloons overhead"></a>
+  <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/flightSim"><img src="assets/clips/flightSim.gif" width="32%" alt="A red biplane, chase camera behind it, climbs over a voxel mountain and through a gold ring"></a>
+  <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/thirdPerson"><img src="assets/clips/thirdPerson.gif" width="32%" alt="A knight with a sword and shield fights a skeleton on a moonlit field while an orc runs in"></a>
+  <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rendererTest"><img src="assets/clips/voxelTerrain.gif" width="32%" alt="The camera sweeps across voxel hills, lakes, pine trees and snowy peaks, with hot-air balloons overhead"></a>
 </p>
 
 ## Features
@@ -111,7 +111,7 @@ class Player extends BGE.GameEntity
 end class
 ```
 
-This exact code, plus a Back button to quit, lives in [`examples/quickstart`](examples/quickstart) as a runnable app. See the [Documentation](https://markwpearce.github.io/brighterscript-game-engine) for the full API, and the examples below for complete, runnable projects.
+This exact code, plus a Back button to quit, lives in [`examples/quickstart`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/quickstart) as a runnable app. See the [Documentation](https://markwpearce.github.io/brighterscript-game-engine) for the full API, and the examples below for complete, runnable projects.
 
 ## Examples
 
@@ -121,41 +121,41 @@ The `examples/` directory has full Roku channels you can build and run.
 
 | Example | What it shows | |
 | --- | --- | --- |
-| [`flightSim`](examples/flightSim) | Fly a biplane round a voxel island through a course of rings, with a chase camera | <img src="assets/screenshots/flightSim.jpg" width="160" alt="Biplane over a voxel island"> |
-| [`thirdPerson`](examples/thirdPerson) | A souls-like action game in 3D (work in progress, issue #385): a walled town, a graveyard and a three-level crypt with bosses, lock-on combat, stamina, fog and torchlight | <img src="assets/screenshots/thirdPerson.jpg" width="160" alt="Knight fighting a skeleton and an orc"> |
-| [`fighter`](examples/fighter) | A two-player fighting game (work in progress, issue #295): one controller per player, 60 Hz frame data, hitboxes and hurtboxes, blocking, hit-pause, a parallax stage and a best-of-3 HUD | <img src="assets/screenshots/fighter.jpg" width="160" alt="Pixel-art fighters, one landing a K.O. kick"> |
-| [`platformer`](examples/platformer) | A side-scrolling, multi-level platformer: gravity, jumping and collision *resolution* built on the engine's detection-only colliders, a level from a [Tiled](https://www.mapeditor.org/) map, sound, particles and a full `BGE.UI` menu and HUD | <img src="assets/screenshots/platformer.jpg" width="160" alt="Jungle platformer"> |
-| [`rpg`](examples/rpg) | A top-down RPG: an auto-tiled town and castle built from character-grid maps, movement that slides along walls, props you walk in front of and behind, and fade transitions between areas | <img src="assets/screenshots/rpg.jpg" width="160" alt="Top-down town square with a fountain"> |
-| [`visualnovel`](examples/visualnovel) | *The Mutiny*, a branching sci-fi visual novel: portraits, choices, flags, an inventory and saves | <img src="assets/screenshots/visualnovel.jpg" width="160" alt="Character portraits with a choice menu"> |
-| [`asteroids`](examples/asteroids) | A complete 2D game: movement, bullets, collisions, explosions and sound | <img src="assets/screenshots/asteroids.jpg" width="160" alt="Rocket ship among asteroids"> |
-| [`breakout`](examples/breakout) | Bricks, a paddle and a ball, with a score and lives HUD | |
-| [`pong`](examples/pong) | Classic Pong, playable with a 2D or 3D camera | |
-| [`snake`](examples/snake) | Grid-based movement and a growing collision shape, in 2D and 3D | <img src="assets/screenshots/snake.jpg" width="160" alt="Snake on a grid"> |
+| [`flightSim`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/flightSim) | Fly a biplane round a voxel island through a course of rings, with a chase camera | <img src="assets/screenshots/flightSim.jpg" width="160" alt="Biplane over a voxel island"> |
+| [`thirdPerson`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/thirdPerson) | A souls-like action game in 3D (work in progress, issue #385): a walled town, a graveyard and a three-level crypt with bosses, lock-on combat, stamina, fog and torchlight | <img src="assets/screenshots/thirdPerson.jpg" width="160" alt="Knight fighting a skeleton and an orc"> |
+| [`fighter`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/fighter) | A two-player fighting game (work in progress, issue #295): one controller per player, 60 Hz frame data, hitboxes and hurtboxes, blocking, hit-pause, a parallax stage and a best-of-3 HUD | <img src="assets/screenshots/fighter.jpg" width="160" alt="Pixel-art fighters, one landing a K.O. kick"> |
+| [`platformer`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/platformer) | A side-scrolling, multi-level platformer: gravity, jumping and collision *resolution* built on the engine's detection-only colliders, a level from a [Tiled](https://www.mapeditor.org/) map, sound, particles and a full `BGE.UI` menu and HUD | <img src="assets/screenshots/platformer.jpg" width="160" alt="Jungle platformer"> |
+| [`rpg`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rpg) | A top-down RPG: an auto-tiled town and castle built from character-grid maps, movement that slides along walls, props you walk in front of and behind, and fade transitions between areas | <img src="assets/screenshots/rpg.jpg" width="160" alt="Top-down town square with a fountain"> |
+| [`visualnovel`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/visualnovel) | *The Mutiny*, a branching sci-fi visual novel: portraits, choices, flags, an inventory and saves | <img src="assets/screenshots/visualnovel.jpg" width="160" alt="Character portraits with a choice menu"> |
+| [`asteroids`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/asteroids) | A complete 2D game: movement, bullets, collisions, explosions and sound | <img src="assets/screenshots/asteroids.jpg" width="160" alt="Rocket ship among asteroids"> |
+| [`breakout`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/breakout) | Bricks, a paddle and a ball, with a score and lives HUD | |
+| [`pong`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/pong) | Classic Pong, playable with a 2D or 3D camera | |
+| [`snake`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/snake) | Grid-based movement and a growing collision shape, in 2D and 3D | <img src="assets/screenshots/snake.jpg" width="160" alt="Snake on a grid"> |
 
 **Demos**
 
 | Example | What it shows | |
 | --- | --- | --- |
-| [`quickstart`](examples/quickstart) | The minimal `MainScene`/`Player` example from above | |
-| [`3d`](examples/3d) | Images, text, textured `.obj` and `.stl` models, cubes, circles, polygons and trees in 3D, one scene each | <img src="assets/screenshots/3d.jpg" width="160" alt="A rotating 3D cube"> |
-| [`terrain`](examples/terrain) | A 3D world with ground planes, a skybox, walls, trees and guards | <img src="assets/screenshots/terrain.jpg" width="160" alt="3D terrain"> |
-| [`collisions3d`](examples/collisions3d) | Sphere and box colliders in 3D | |
-| [`depthsort`](examples/depthsort) | How depth sorting orders overlapping 3D objects | |
-| [`particles`](examples/particles) | Particle emitters: lines, rectangles, images, animated images, moving emitters and bursts | |
-| [`pixels`](examples/pixels) | A tour of 2D drawables: polygons, rectangles, circles and sprites, one scene each | |
-| [`parallax`](examples/parallax) | Parallax scrolling layers | |
-| [`tweens`](examples/tweens) | `BGE.TweenManager`: position, scale and color tweens with easing | |
-| [`canvas`](examples/canvas) | The engine's canvas and renderer as a standalone drawing surface | |
-| [`navigation`](examples/navigation) | Four agents path through a maze with `BGE.NavGrid`, re-planning as doors open and close | |
-| [`story`](examples/story) | A branching story played as plain text and buttons | |
-| [`ui`](examples/ui) | UI widgets: an analog cursor, nine-patch and image backgrounds, select styles and text input | <img src="assets/screenshots/ui.jpg" width="160" alt="Select widgets in inline, popup and horizontal styles"> |
-| [`controller`](examples/controller) | Phones and gamepads as controllers, one player per device, joined by QR code | |
-| [`audio`](examples/audio) | Sound effects and background music | |
-| [`loading`](examples/loading) | Loading local and remote assets behind a loading screen, including failures | |
-| [`http`](examples/http) | URL requests with loading, success and error states, against a public trivia API | |
-| [`hybrid`](examples/hybrid) | The engine's `Draw2D` rendering inside a SceneGraph app | |
-| [`scenegraph`](examples/scenegraph) | The engine's SceneGraph shape components, with no `roScreen` or game loop | |
-| [`rendererTest`](examples/rendererTest) | A test harness for the renderer: lighting, concave polygons, voxel terrain and more | |
+| [`quickstart`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/quickstart) | The minimal `MainScene`/`Player` example from above | |
+| [`3d`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/3d) | Images, text, textured `.obj` and `.stl` models, cubes, circles, polygons and trees in 3D, one scene each | <img src="assets/screenshots/3d.jpg" width="160" alt="A rotating 3D cube"> |
+| [`terrain`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/terrain) | A 3D world with ground planes, a skybox, walls, trees and guards | <img src="assets/screenshots/terrain.jpg" width="160" alt="3D terrain"> |
+| [`collisions3d`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/collisions3d) | Sphere and box colliders in 3D | |
+| [`depthsort`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/depthsort) | How depth sorting orders overlapping 3D objects | |
+| [`particles`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/particles) | Particle emitters: lines, rectangles, images, animated images, moving emitters and bursts | |
+| [`pixels`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/pixels) | A tour of 2D drawables: polygons, rectangles, circles and sprites, one scene each | |
+| [`parallax`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/parallax) | Parallax scrolling layers | |
+| [`tweens`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/tweens) | `BGE.TweenManager`: position, scale and color tweens with easing | |
+| [`canvas`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/canvas) | The engine's canvas and renderer as a standalone drawing surface | |
+| [`navigation`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/navigation) | Four agents path through a maze with `BGE.NavGrid`, re-planning as doors open and close | |
+| [`story`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/story) | A branching story played as plain text and buttons | |
+| [`ui`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/ui) | UI widgets: an analog cursor, nine-patch and image backgrounds, select styles and text input | <img src="assets/screenshots/ui.jpg" width="160" alt="Select widgets in inline, popup and horizontal styles"> |
+| [`controller`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/controller) | Phones and gamepads as controllers, one player per device, joined by QR code | |
+| [`audio`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/audio) | Sound effects and background music | |
+| [`loading`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/loading) | Loading local and remote assets behind a loading screen, including failures | |
+| [`http`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/http) | URL requests with loading, success and error states, against a public trivia API | |
+| [`hybrid`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/hybrid) | The engine's `Draw2D` rendering inside a SceneGraph app | |
+| [`scenegraph`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/scenegraph) | The engine's SceneGraph shape components, with no `roScreen` or game loop | |
+| [`rendererTest`](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rendererTest) | A test harness for the renderer: lighting, concave polygons, voxel terrain and more | |
 
 Scaffold a new example (manifest, icons/splash, `package.json`, a minimal `MainScene`) with:
 
