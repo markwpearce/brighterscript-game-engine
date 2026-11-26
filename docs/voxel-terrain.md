@@ -14,6 +14,8 @@ better done with a [`DrawablePlane`](/drawables-and-scene-objects).
 
 It needs a `Camera3d`, and a renderer draws one terrain at most.
 
+![examples/flightSim at Ultra: a biplane flying towards a gold ring over a voxel island of green hills and grey and white mountains, with the sea behind](images/voxel-terrain-flightsim.jpg)
+
 ## Maps
 
 A `BGE.VoxelMap` is a square grid, 64 to 1024 cells along each side (a power of 2), with a height
@@ -39,7 +41,8 @@ Python 3. Load the file in your game:
 map = BGE.VoxelMaps.fromFile("pkg:/maps/island.bvox")
 ```
 
-Loading is quick (a 256 map takes ~2 ms on a Roku Ultra), so do it whenever you need it.
+Loading is quick (a 256 map takes ~2 ms on a Roku Ultra), so do it whenever you need it. The file's
+byte layout, and the code for making and editing maps, are at the end of this guide.
 
 ### Other ways to make one
 
@@ -143,3 +146,150 @@ Objects cost the same as anywhere else, plus the hill test for each one in view:
 Express: ~0.9 ms per sprite (35 ms for 40 at Medium).
 The rendererTest app's **Voxel Terrain** demo (`demo=voxel-terrain`) shows all of this, and with
 `sweep=1` it prints these numbers for your own device.
+
+## The .bvox format
+
+A `.bvox` file is a `BGE.VoxelMap` as bytes. `tools/voxel-map.py` and `map.saveToFile()` write
+one, and `BGE.VoxelMaps.fromFile()` reads one. Every field is a single byte, so there's no byte
+order to get wrong. This is version 1; the reader rejects any other version. Bump the version for
+any change to the layout.
+
+| Offset | Bytes | Field | Value |
+| ------ | ----- | ----- | ----- |
+| 0 | 4 | magic | `BGEV` (66 71 69 86) |
+| 4 | 1 | version | `1` |
+| 5 | 1 | size shift | log2 of the side length, 6 to 10 (64 to 1024) |
+| 6 | 1 | level count | 1 to 6, fewer for small maps (a 64 map has at most 4) |
+| 7 | 1 | edge mode | `0` wrap, `1` flat |
+| 8 | 1 | flat height | 0-255, used with flat edges |
+| 9 | 1 | flat colour | a palette index, used with flat edges (must be in the palette even with wrap) |
+| 10 | 1 | palette count | 1-255, or `0` for 256 |
+| 11 | 3 per colour | palette | red, green, blue for each colour, in order |
+| 11 + 3 x palette count | 2 per cell, per level | levels | level 0 first |
+
+Each level is `2^(size shift - level)` cells square. Within a level, the file holds all its heights
+(one byte each, 0-255), then all its palette indexes, both row by row. Cell (x, z) is at index
+`z * side + x`.
+
+So the file is `11 + 3 x palette count + 2 x (sum of side x side over the levels)` bytes. A 64 map
+with 4 levels and 3 colours is 11 + 9 + 2 x (4096 + 1024 + 256 + 64) = 10,900 bytes.
+
+The reader checks the magic, version, size shift, level count, edge mode, that the flat colour is
+in the palette, and the exact length. It doesn't check the heights or palette indexes in the
+levels. A palette index past the palette draws as palette colour 0, so a bad file can't crash a
+draw.
+
+## VoxelMap data API
+
+Make a map with a function on `BGE.VoxelMaps`. Each one returns a `BGE.VoxelMap`, or `invalid`
+with the reason printed to the log, so check for `invalid` before you use the result.
+
+- `fromFile(path)` loads a `.bvox` file.
+- `fromByteArray(bytes)` reads a `.bvox` from an `roByteArray` you have in memory. It copies
+  every cell in a loop, so it's much slower than `fromFile` for a big map. If you can, write the
+  bytes to `tmp:/` and load that with `fromFile`.
+- `fromArrays(size, heights, colors, palette, options)` takes flat arrays, row by row (index
+  `z * size + x`), and builds the mip levels for you. It checks every value: size a power of 2 from
+  64 to 1024, 1-256 palette colours, heights 0-255, and colour indexes inside the palette.
+- `fromLevels(sizeShift, palette, heightLevels, colorLevels, options)` takes mip levels you have
+  already built, such as a generator's. It checks the level sizes and the edge settings, but not the
+  cell values, so the levels must be right.
+
+`options` is a `BGE.VoxelMapOptions`. Its fields are all optional: `edgeMode` (`"wrap"` by
+default, or `"flat"`), `flatHeight` and `flatColor`.
+
+Here's a 64 map from a formula, flat past its edges:
+
+```brighterscript
+size = 64
+heights = [] as integer[]
+colors = [] as integer[]
+for z = 0 to size - 1
+  for x = 0 to size - 1
+    heights.push((x + z) mod 256)
+    colors.push((x + z) mod 3)
+  end for
+end for
+palette = [&hFF0000, &h00FF00, &h0000FF]
+map = BGE.VoxelMaps.fromArrays(size, heights, colors, palette, {
+  edgeMode: BGE.VoxelEdgeMode.flat,
+  flatHeight: 40,
+  flatColor: 2
+})
+if map = invalid
+  print "the map isn't valid, see the log"
+end if
+```
+
+With mip levels you've built yourself, use `fromLevels`. Level 0 comes first, and each level is a
+quarter the size of the one before:
+
+```brighterscript
+function makeFromLevels(heightLevels as roByteArray[], colorLevels as roByteArray[]) as dynamic
+  palette = [&h2A5DA8, &h808080] as integer[]
+  return BGE.VoxelMaps.fromLevels(6, palette, heightLevels, colorLevels, {edgeMode: "wrap"})
+end function
+```
+
+### Mip rules
+
+A map has up to 6 levels, level 0 being the full size. Each level halves the side, and no level is
+smaller than 8 x 8. Each cell of a level is made from the 2 x 2 cells above it:
+
+- Heights: the average of the four, rounded down: `(a + b + c + d) \ 4`.
+- Colours: the most common palette index of the four. On a tie, the first in this order wins:
+  (x, z), (x + 1, z), (x, z + 1), (x + 1, z + 1). If all four are different, that's (x, z).
+
+`tools/voxel-map.py` uses the same rules, so `fromArrays` and the tool give the same levels. If you
+bake levels in your own tool, follow these rules too.
+
+### Other members
+
+A `BGE.VoxelMap` has these for a tool author to use:
+
+| Member | What it does |
+| ------ | ------------ |
+| `getLevelCount()` | the number of levels, level 0 included |
+| `cellHeight(ix, iz)` | the height (0-255) of a cell, past the edges by `edgeMode` |
+| `colorAt(ix, iz)` | the palette index of a cell, past the edges by `edgeMode` |
+| `heightAt(x, z)` | the height at a map position in cells, blended from the four nearest cells (cell i's centre is at i + 0.5) |
+| `toByteArray()` | the map as `.bvox` bytes |
+| `saveToFile(path)` | writes the `.bvox` file, and returns whether it worked |
+
+The fields `size`, `sizeShift`, `mask` (`size - 1`), `palette`, `heightLevels`, `colorLevels`,
+`edgeMode`, `flatHeight` and `flatColor` are public too. `heightLevels` and `colorLevels` are per
+level, level 0 first.
+
+Editing `heightLevels[0]` in place doesn't update the other levels, so the mips go stale. The
+simplest fix is to read the map out, change it, and rebuild it with `fromArrays`:
+
+```brighterscript
+' Raises a square of cells to the top of the scale. Rebuilds the map, so the mips stay right.
+function raiseSquare(map as BGE.VoxelMap, x0 as integer, z0 as integer, side as integer) as dynamic
+  size = map.size
+  heights = [] as integer[]
+  colors = [] as integer[]
+  for z = 0 to size - 1
+    for x = 0 to size - 1
+      heights.push(map.cellHeight(x, z))
+      colors.push(map.colorAt(x, z))
+    end for
+  end for
+  for z = z0 to z0 + side - 1
+    for x = x0 to x0 + side - 1
+      ' clip to the map (a wrap map could use `and map.mask` to wrap instead)
+      if x >= 0 and x < size and z >= 0 and z < size
+        heights[z * size + x] = 255
+      end if
+    end for
+  end for
+  return BGE.VoxelMaps.fromArrays(size, heights, colors, map.palette, {
+    edgeMode: map.edgeMode,
+    flatHeight: map.flatHeight,
+    flatColor: map.flatColor
+  })
+end function
+```
+
+That's fine for a one-off edit. It's a full pass over the map, so bake the result to a `.bvox`
+rather than editing at load time.

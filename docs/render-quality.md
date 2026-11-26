@@ -11,6 +11,8 @@ Each level is a bundle of draw-quality settings: how far the camera draws, how m
 slices a ground plane uses, how small triangles are drawn, and when billboards can
 use a cheaper draw call.
 
+![The same view in examples/flightSim at Basic (left) and Ultra (right): Basic draws fewer, wider voxel columns and fades the far hills into fog much sooner](images/render-quality-basic-vs-ultra.jpg)
+
 ## Default: chosen for the device
 
 You don't need to do anything. When your `Game` is created, the engine picks a
@@ -142,6 +144,11 @@ camera) reuses last frame's rendering instead of drawing again:
   16 pixels.
 - `billboardReuseMaxAngleDegrees` - how far the direction it's seen from may turn before it's
   redrawn. 180 (no limit) up to Medium, 20 at High, 10 at Ultra.
+
+Model impostors (a `DrawableModel` reusing its last drawing while the camera moves) have their
+own: `modelImpostorError`, `modelImpostorMaxSizeChange`, `modelImpostorMaxAngleDegrees`,
+`modelImpostorMaxDepthRatio` and the rest, with values at every level. See
+[Model Impostors](/model-impostors#quality-settings).
 
 ## Walls
 
