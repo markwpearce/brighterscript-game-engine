@@ -151,12 +151,13 @@ Give obstacles 3D colliders (`BoxCollider3d`, `SphereCollider3d`). The boom test
 too, but a ray treats one as a column that runs the whole length of z. See
 [3D Colliders and Raycasts](/colliders-3d#flags) for how flags apply to raycasts. Put walls and
 buildings on their own `memberFlags` bit and set the boom's `collidableFlags` to it, so the
-characters' own colliders don't pull the camera in:
+characters' own colliders don't pull the camera in. Keep the default bit (1) too if characters
+on default flags should still collide with them:
 
 ```brighterscript
 wall.isStatic = true
 collider = wall.addBoxCollider3d("body", 200, 300, 40)
-collider.memberFlags = CAMERA_BLOCKER
+collider.memberFlags = 1 or CAMERA_BLOCKER
 ```
 
 A box collider is axis-aligned unless you turn it: `collider.yaw` (radians) turns it about the

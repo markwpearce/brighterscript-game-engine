@@ -147,18 +147,10 @@ A box collider has the same field, typed as `Box3dCollisionResult`. Check
 
 ## Flags
 
-On a 3D collider, `collidableFlags` does nothing, and `memberFlags` only matters for
-raycasts and the camera.
-
-For collisions, a 3D collider's own flags don't decide what it collides with. Its two
-internal planes keep their own flags: the XY plane uses the default, and the YZ plane
-uses the reserved bit. So any two overlapping 3D colliders collide. Setting
-`memberFlags` on a 3D collider changes what raycasts and the camera see, not what the
-collider touches. If you need flags to filter collisions, use a 2D collider. (Issue
-[#726](https://github.com/markwpearce/brighterscript-game-engine/issues/726) tracks fixing this.)
-
-Raycasts do use each collider's own `memberFlags`. Choose bits for your groups as you
-would for 2D colliders. Don't use `BGE.COLLIDER_3D_YZ_PLANE_FLAG` for your own groups.
+`memberFlags` and `collidableFlags` work on 3D colliders as they do on 2D ones: a
+collider only reports a collision with another whose `memberFlags` overlap its own
+`collidableFlags`. Raycasts and the camera read `memberFlags` too. Don't use
+`BGE.COLLIDER_3D_YZ_PLANE_FLAG` for your own groups.
 
 ```brighterscript
 const WALL_FLAG = 2
@@ -167,6 +159,9 @@ const ENEMY_FLAG = 4
 wall.isStatic = true
 collider = wall.addBoxCollider3d("body", 200, 300, 40)
 collider.memberFlags = WALL_FLAG
+
+' Movers only hit the wall if their collidableFlags include its bit
+playerCollider.collidableFlags = 1 or WALL_FLAG
 ```
 
 ## Raycasts
