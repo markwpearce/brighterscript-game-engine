@@ -669,7 +669,7 @@ These go beside `start()`, `advance()`, `choose()`, `runEvent()`, `applyEffects(
 | `nearestInRect(x, y, width, height, originX, originY)` | the nearest enabled one inside the rectangle, measured in x/y |
 | `promptFor(target, buttonText = "OK")` | `"OK: Talk to Bram"`; just the label if `buttonText` is `""`; `""` for no target |
 
-Each `BGE.Interactable` has `id`, `label`, `entity`, `data` and `radius` (its body radius, so it counts once its edge is in reach). Set `enabled = false` on it to stop it being picked.
+Each `BGE.Interactable` has `id`, `label`, `entity`, `data` and `radius` (its body radius, so it counts once its edge is in reach; `nearestInArc()` only). Set `enabled = false` on it to stop it being picked.
 
 ### DialogueView layout
 
@@ -682,10 +682,11 @@ Set these fields on the view before it opens (`open()`, or `start()`, which open
 | `speakerFontName`, `textFontName` (`"body"`) | theme fonts |
 | `moreText` (`"..."`) | shown while there's another page |
 | `choiceLayout` (`"column"`) | `"column"`, `"row"` or `"list"` |
-| `choiceHeight` (52), `choiceGap` (10), `choiceWidth` (0) | column and row buttons; `choiceWidth` 0 is 60% of the box |
+| `choiceHeight` (52), `choiceGap` (10), `choiceWidth` (0) | button height and spacing for column and row choices. `choiceWidth` is for column choices only (row buttons share the box's width); 0 is 60% of the box |
 | `listKeepsLine` (true), `listDivider` (true), `listDividerColor` (0) | list layout: keep the line above the choices, draw a rule, and its colour (0 is the theme's) |
 | `listMarker` (`"> "`) | the focused choice's marker |
-| `listTextColor`, `listFocusedColor`, `listDisabledColor` | list choice colours (0 for the theme's) |
+| `listTextColor`, `listFocusedColor` (0) | list choice colours; 0 is the theme's text and title colour |
+| `listDisabledColor` (`&h707070FF`) | a disabled list choice's colour. 0 isn't replaced by a theme colour |
 | `listRowHeight` (0) | list row height; 0 is the font's line height plus 6 |
 | `showDisabledChoices` (true) | show disabled list choices, dimmed |
 | `choicesWithLastLine` (true) | show choices with the last page, or after one more press |

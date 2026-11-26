@@ -673,7 +673,7 @@ These are the functions under `BGE.Tiled` that the loader and the guide above ar
 | `toWorldX(map, pixelX, offsetX = 0)` | a Tiled pixel x as a world x |
 | `toWorldY(map, pixelY, offsetY = 0)` | a Tiled pixel y as a world y, with the map's bottom edge at 0 |
 | `layerToColliderCells(map, layer, propertyName = "collision")` | a `BGE.TileMap.ColliderCell` for each cell whose tile has that property, ready for `mergeTileColliderRuns()`. Hidden layers count |
-| `layerToTileSpecs(map, layer, options)` | a `BGE.TileMap.TileSpec` for each non-empty cell, ready for `bakeTileMapImages()` |
+| `layerToTileSpecs(map, layer, options)` | a `BGE.TileMap.TileSpec` for each non-empty cell, ready for `bakeTileMapImages()`. A hidden layer gives none |
 | `resolveGid(map, gid)` | what a GID refers to: its tileset, local id, tile entry and flips. Invalid for 0 or an unknown GID |
 | `parseMapFile(filePath)` | loads a `.tmj` or `.json` map, with its external `.tsj` tilesets. Invalid on failure |
 | `parseMapJson(json, baseDir, tilesets = invalid)` | parses a map already in memory. `tilesets` maps resolved `.tsj` paths to their parsed JSON, so they aren't read |
