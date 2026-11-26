@@ -240,7 +240,8 @@ gaps allow, cap `maxExpandedCells`, and spread searches over frames.
 | `isWalkable(x, y)` | true if the point is in an open cell. Outside the grid is not walkable |
 | `cellCenter(col, row)` | the centre of a cell, as a `BGE.NavPoint` `{x, y}` |
 | `colAt(x)`, `rowAt(y)` | the column or row containing a coordinate. It may be outside the grid |
-| `isCellBlocked(col, row)`, `isInGrid(col, row)` | a cell is blocked by a solid or by hand. Cells outside the grid count as blocked |
+| `isCellBlocked(col, row)` | true if a cell is blocked by a solid or by hand. Cells outside the grid count as blocked |
+| `isInGrid(col, row)` | true if the cell is inside the grid |
 | `setCellBlocked(col, row, blocked)` | blocks or opens one cell on top of the solids. `rebuild()` keeps it |
 | `findNearestOpenCell(x, y, maxRings = 8)` | the nearest open cell as `{col, row}`, searching outwards ring by ring, or invalid if none is that close |
 | `smoothPath(points)` | drops points that can be skipped: the middle of straight runs, and turns the line of sight doesn't need. Returns short paths unchanged |

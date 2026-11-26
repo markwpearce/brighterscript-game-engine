@@ -607,7 +607,7 @@ current stage, so a resumed game shows the same background and portraits.
 | `evaluate(conditions)` | true if every condition passes (`invalid` passes) |
 | `applyEffects(effects)` | runs effects and returns a `StoryResult` |
 | `runEvent(eventName, data)` | runs the event rules for an event and returns a `StoryResult` |
-| `settle()` | runs `storyChanged` rules until nothing more changes |
+| `settle()` | runs `storyChanged` rules until nothing more changes, at most four passes (then it logs a warning and stops) |
 | `visitCount(key)` | how many times a node, candidate or choice was entered (0 if never) |
 | `interpolate(text)` | fills in each `${flag}` |
 | `registerCondition(key, handler, context)` | adds a condition key; a registered key wins over a built-in one |
@@ -622,10 +622,10 @@ current stage, so a resumed game shows the same background and portraits.
 | Member | What it does |
 |---|---|
 | `get(key)` | the value as stored, or `invalid` |
-| `getInt(key)` | the value as an integer (floats are truncated), or 0 |
+| `getInt(key)` | the value as an integer (floats are rounded down with `Int()`, so -2.5 is -3), or 0 |
 | `isSet(key)` | the test the `flag` condition uses |
 | `set(key, value)` | sets a flag; returns true if the stored value changed |
-| `add(key, amount)` | adds to a number, starting from 0; returns true if it changed |
+| `add(key, amount)` | sets the flag to `getInt(key) + amount`, so it starts from 0 and the result is always an integer (a float is rounded down first, a string or boolean replaced); returns true if it changed |
 | `clear()` | removes every flag |
 | `toAA()`, `loadAA(data)` | a copy of the flags, and a replacement from one; values that aren't a boolean, number or string are dropped |
 
@@ -638,7 +638,7 @@ current stage, so a resumed game shows the same background and portraits.
 | `add(id)` | adds one; false if it isn't defined or is at its max. It doesn't run `onAcquire` (the `giveItem` effect does) |
 | `remove(id)` | removes one; false if none are carried |
 | `clear()` | empties the inventory |
-| `toAA()`, `loadAA(data)` | a copy of the counts, and a replacement from one; unknown items are dropped and counts are capped at `max` |
+| `toAA()`, `loadAA(data)` | a copy of the counts, and a replacement from one; unknown items and counts that aren't a positive integer are dropped, and counts are capped at `max` |
 
 ### StorySession
 
@@ -646,6 +646,7 @@ These go beside `start()`, `advance()`, `choose()`, `runEvent()`, `applyEffects(
 
 | Member | What it does |
 |---|---|
+| `apply(result)` | settles the rules and passes a `StoryResult` on (posts, messages, `onStoryChanged`). The step methods call it; call it yourself for a result from `state` directly |
 | `postEvents` | true (the default) sends each post out with `game.postGameEvent(name, {})` |
 | `changedEventName` | posted when the state changes; `"storyUpdated"` by default, `""` for none |
 | `onChanged` | an optional `function(session)` called when the state changes, after `onStoryChanged(result)`. `m` is the session |
@@ -688,7 +689,7 @@ Set these fields on the view before it opens (`open()`, or `start()`, which open
 | `listTextColor`, `listFocusedColor` (0) | list choice colours; 0 is the theme's text and title colour |
 | `listDisabledColor` (`&h707070FF`) | a disabled list choice's colour. 0 isn't replaced by a theme colour |
 | `listRowHeight` (0) | list row height; 0 is the font's line height plus 6 |
-| `showDisabledChoices` (true) | show disabled list choices, dimmed |
+| `showDisabledChoices` (true) | show choices the story marks disabled, dimmed, in every layout; false hides them |
 | `choicesWithLastLine` (true) | show choices with the last page, or after one more press |
 | `advanceButton` (`"ok"`), `cancelButton` (`"back"`) | the button that turns the page, and the one that leaves |
 | `advanceAction` (`""`) | a `Game.controls` action that also turns the page |
@@ -698,5 +699,5 @@ Set these fields on the view before it opens (`open()`, or `start()`, which open
 
 ### Case rules and the step guard
 
-- Node ids, candidate ids and visit counts ignore case, because they're looked up in ordinary AAs. Flags don't: `Gate.Open` and `gate.open` are different flags.
+- Node ids, candidate ids, item ids and visit counts ignore case: `loadStory()` parses with case-insensitive keys, and visits are kept in an ordinary AA. A story parsed some other way, e.g. plain `ParseJson()`, has case-sensitive ids. Flags don't: `Gate.Open` and `gate.open` are different flags.
 - The runner stops a conversation that runs 200 steps (`RUNNER_MAX_STEPS`, not configurable) without showing a line or a choice. A step is each phase a node goes through, so a loop of nodes that only jump to each other ends this way. It logs a `[BGE.Story]` warning and cancels the conversation.
