@@ -445,6 +445,9 @@ Compare that to the same scene with debug drawing off:
 
 ![Asteroids mid-game: a red rocket ship near a gray rock, on a starfield background](images/asteroids-gameplay.jpg)
 
+For 3D games, `addSphereCollider3d()` and `addBoxCollider3d()` do the same job with true 3D overlap,
+and `game.raycast()` casts a ray through either kind. See [3D Colliders and Raycasts](/colliders-3d).
+
 Everything above is *detection* - `onCollision` fires, but nothing stops two colliders from
 overlapping on screen. `examples/platformer` is the first example that also *resolves* what it
 detects: depenetrating the player out of solid ground/walls, tracking a grounded state so jumping

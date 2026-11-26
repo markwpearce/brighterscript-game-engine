@@ -143,7 +143,7 @@ m.orbit = new BGE.OrbitCamera(camera, m.player, {
 })
 ```
 
-Only 3D colliders (`BoxCollider3d`, `SphereCollider3d`) block the camera. Put walls and
+Only 3D colliders (`BoxCollider3d`, `SphereCollider3d`) block the camera. See [3D Colliders and Raycasts](/colliders-3d#flags) for how their flags apply to raycasts. Put walls and
 buildings on their own `memberFlags` bit and set the boom's `collidableFlags` to it, so the
 characters' own colliders don't pull the camera in:
 
