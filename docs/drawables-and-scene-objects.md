@@ -1034,7 +1034,7 @@ texture. Other `.mtl` properties (`map_Bump`, `Ks`/`Ns`, `d` transparency, `illu
 ## Deep dive: `SceneObjectPlane` (`DrawablePlane`)
 
 `DrawablePlane`/`SceneObjectPlane` render a textured, (mostly) infinite ground/floor plane -
-`examples/terrain` is a small, playable demo of it (drive a camera around above a Mario Kart track
+`examples/terrain` is a small, playable demo of it (drive a camera around above a race track
 image, or toggle to a checkerboard). It works nothing like the other `SceneObject`s, which each
 draw one small object; a plane covers the camera's entire view of the ground, so the implementation
 is closer to a classic SNES "Mode 7" renderer than to a sprite draw call.
