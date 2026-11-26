@@ -755,6 +755,8 @@ most visible one, in the order visible > occluded > offCamera > unknown. `isOnSc
 `visible` and `unknown`. Nothing in the engine skips an entity's `onUpdate()` or collisions for
 you; this is only a signal.
 
+For how the renderer decides what's hidden, the draw policies and the cost, see [Occlusion Culling](/occlusion).
+
 To see what's going on, call `game.debugDrawOcclusion(true)` (it shades the canvas areas the
 occluders cover and draws a red box around each hidden object), and read `renderer.getOccludedCountLastFrame()`. The `terrain` example has a
 static chapel that hides the trees behind it, and OK toggles occlusion in its `WorldScene`.

@@ -26,7 +26,7 @@ Real 2D and 3D games on a Roku: chase cameras, voxel terrain, textured 3D models
 - Cameras for third-person games: `OrbitCamera`, `ChaseCamera` and `FollowCamera`, with a camera boom that won't clip through walls, and lock-on. [Third-person cameras](https://markwpearce.github.io/brighterscript-game-engine/third-person-cameras)
 - Voxel terrain you can fly over, from a `.bvox` heightmap or a generated one. [Voxel terrain](https://markwpearce.github.io/brighterscript-game-engine/voxel-terrain)
 - Built to stay smooth on low-end Rokus like the Express: model impostors, fog, occlusion, and render-quality levels that adjust as the frame rate changes. [Render quality](https://markwpearce.github.io/brighterscript-game-engine/render-quality)
-- 3D colliders and raycasts, plus particles with line, rectangle, image and animated shapes.
+- 3D colliders and raycasts, plus particles with line, rectangle, image and animated shapes. [3D colliders](https://markwpearce.github.io/brighterscript-game-engine/colliders-3d)
 
 **2D and worlds**
 - Sprites, animations, shapes, text, parallax layers and tweens.
