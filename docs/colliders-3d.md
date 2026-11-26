@@ -81,7 +81,7 @@ end class
 
 If you change a static entity's collider after it's in the scene, for example by
 resizing it or moving it, call `collider.markChanged()`. A moving entity picks up
-changes to `radius`, `width`, `height`, `depth`, `offset` and `enabled` every frame.
+changes to `radius`, `width`, `height`, `depth`, `yaw`, `offset` and `enabled` every frame.
 
 ## How collisions are found
 
@@ -119,7 +119,8 @@ reports one with a 3D collider.
 ## Reading the hit
 
 In `onCollision()`, `lastCollisionResult` holds the most recent exact test for that
-collider. Read it there, because the next frame overwrites it. Its `normal` points away
+collider. Read it there, because the collider's next test overwrites it, often in the same
+frame when it touches more than one thing. Its `normal` points away
 from the other entity, toward this one. `penetrationDepth` is how far the two shapes
 overlap along that normal.
 
@@ -146,14 +147,15 @@ A box collider has the same field, typed as `Box3dCollisionResult`. Check
 
 ## Flags
 
-`memberFlags` and `collidableFlags` work as they do for 2D colliders, with one
-difference between collisions and raycasts.
+On a 3D collider, `collidableFlags` does nothing, and `memberFlags` only matters for
+raycasts and the camera.
 
 For collisions, a 3D collider's own flags don't decide what it collides with. Its two
 internal planes keep their own flags: the XY plane uses the default, and the YZ plane
 uses the reserved bit. So any two overlapping 3D colliders collide. Setting
 `memberFlags` on a 3D collider changes what raycasts and the camera see, not what the
-collider touches. If you need flags to filter collisions, use a 2D collider.
+collider touches. If you need flags to filter collisions, use a 2D collider. (Issue
+[#726](https://github.com/markwpearce/brighterscript-game-engine/issues/726) tracks fixing this.)
 
 Raycasts do use each collider's own `memberFlags`. Choose bits for your groups as you
 would for 2D colliders. Don't use `BGE.COLLIDER_3D_YZ_PLANE_FLAG` for your own groups.
@@ -184,6 +186,11 @@ end if
 - `collidableFlags` (default `&hFFFFFFFF`) keeps only colliders whose `memberFlags`
   overlap the mask. The default tests every collider.
 
+Rays hit 2D colliders too. A ray only looks at a 2D collider's (x, y) shape, so a circle or
+rectangle acts as a column that runs the whole length of z. Keep 2D colliders off the bits
+you cast against if that isn't what you want. A ray that runs straight along z never hits
+a 2D collider, even from inside it.
+
 A `BGE.RaycastHit` has `entity`, `collider`, `point`, `distance` and `normal`. The
 distance is in world units from the origin. If the origin is already inside a
 collider, the hit is at distance 0.
@@ -198,10 +205,7 @@ A line of sight check is a ray with a distance and a wall mask:
 function canSee(game as BGE.Game, from as BGE.Math.Vector, target as BGE.Math.Vector) as boolean
   toTarget = BGE.Math.VectorOps.subtract(target, from)
   hit = game.raycast(from, toTarget, BGE.Math.VectorOps.length(toTarget), WALL_FLAG)
-  if invalid = hit
-    return true
-  end if
-  return false
+  return invalid = hit
 end function
 ```
 
@@ -211,9 +215,24 @@ don't go through the compositor, so they never lag a frame behind, and they don'
 
 Each `raycast()` walks every entity. To cast many rays in one frame, get the colliders
 once with `game.getColliders(flags)`, or `game.getCollidersInBox(area, flags)` for a
-region. Then test each ray with `Collider.raycastCheck()`. That method takes a unit
-direction and returns the hit without its `entity` or `collider` filled in, so you
-set those yourself if you need them.
+region. `area` is `[minX, minY, minZ, maxX, maxY, maxZ]`. `getCollidersInBox()` only culls
+3D colliders. It returns every 2D collider on those flags, wherever it is.
+
+Then test each ray with `Collider.raycastCheck()`. Its arguments differ from `raycast()`:
+the entity's position comes first, and the direction must be a unit vector. The hit
+comes back without its `entity` or `collider` filled in, so set those yourself if you
+need them.
+
+```brighterscript
+unitDirection = BGE.Math.VectorOps.getNormalizedCopy(direction)
+for each found in m.game.getColliders(WALL_FLAG)
+  hit = found.collider.raycastCheck(found.entity.position, origin, unitDirection, 500.0)
+  if invalid <> hit
+    hit.entity = found.entity
+    hit.collider = found.collider
+  end if
+end for
+```
 
 The camera uses raycasts too. A `BGE.CameraBoom` casts rays from the look-at point to
 the camera, and pulls in at the first hit. See
