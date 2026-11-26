@@ -14,6 +14,8 @@ a short list of waypoints.
 `examples/navigation` shows it working: four agents chase a flag through a
 maze with doors, re-planning when the doors open or close.
 
+![examples/navigation: four coloured agents in a grey-walled maze with orange doors; two are following smoothed paths, drawn as lines with waypoint dots, to a yellow flag](images/pathfinding-navigation.jpg)
+
 ## Building the grid
 
 Build the grid once the world's solids are in, at scene load:
