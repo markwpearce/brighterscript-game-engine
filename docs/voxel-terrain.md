@@ -174,8 +174,8 @@ Each level is `2^(size shift - level)` cells square. Within a level, the file ho
 So the file is `11 + 3 x palette count + 2 x (sum of side x side over the levels)` bytes. A 64 map
 with 4 levels and 3 colours is 11 + 9 + 2 x (4096 + 1024 + 256 + 64) = 10,900 bytes.
 
-The reader checks the magic, version, size shift, level count, edge mode and the exact length.
-It doesn't check the heights or palette indexes in the levels. A palette index past the palette
+The reader checks the magic, version, size shift, level count, edge mode, that the flat colour is
+in the palette, and the exact length. It doesn't check the heights or palette indexes in the levels. A palette index past the palette
 draws as palette colour 0, so a bad file can't crash a draw.
 
 ## VoxelMap data API
