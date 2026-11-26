@@ -135,6 +135,9 @@ class SettingsScene extends BGE.GameScene
 end class
 ```
 
+Register the scene in `main.bs` with `game.defineScene(new SettingsScene(game))`. Save and Back
+go to a scene named `"MainScene"`, so use the name of your own menu scene there.
+
 Save is a `Button` with an `actionId` and `listener = m`, so the scene handles it in
 `onUiAction()` (see [Menus and Panels](/ui-menus)).
 The `onInput()` override is what makes Back leave the screen. It skips the press while the
@@ -251,7 +254,7 @@ While the keyboard is open, the remote does this:
 | --- | --- |
 | D-pad | Move the highlight. It wraps, and Up and Down land on the nearest key. |
 | OK | Press the highlighted key. |
-| Back | Cancel. The field gets back the text it had when the keyboard opened, and `onCancel` fires. |
+| Back | Cancel. The field gets back the text it had when the keyboard opened, and `onCancel` fires. The field's `onChanged` doesn't fire for this, so use `onCancel` to refresh anything that shows the text. |
 | Play, or the Done key | Close the keyboard, fire `onDone`, then the field's `onSubmit`. |
 | Replay | Delete. |
 | Fast-forward | Type a space. |
@@ -288,7 +291,8 @@ picks the right type for you:
   the widget.
 
 It returns `invalid` if the file can't be loaded. Load the image once, not every time the
-scene opens:
+scene opens, and pass it to the scenes that use it. `examples/ui` passes it through each
+scene's constructor:
 
 ```brighterscript
 ' in main.bs, once
@@ -298,15 +302,18 @@ panelBackground = BGE.UI.loadBackgroundImage("pkg:/images/panel.9.png")
 Then set it on the theme. Setting it on `game.defaultTheme` covers every widget in the
 game. Setting it on one `UiContainer`'s `theme` covers only that container's children. That
 is the better choice for a settings panel, because the rest of the game keeps its flat
-colors. Set `defaultTheme.backgroundImage` back to `invalid` when you leave a scene that set
-it.
+colors. A container's `theme` is `invalid` until you assign one, and the container uses it in
+place of `defaultTheme`, not on top of it. So assign `new BGE.UI.Theme()` first and set any
+colors or font you changed on `defaultTheme` again. Set `defaultTheme.backgroundImage` back
+to `invalid` when you leave a scene that set it.
 
 ```brighterscript
 m.game.defaultTheme.backgroundImage = panelBackground
 ```
 
 `Button`, `Checkbox`, `Slider`, `TextInput` and `Select` all draw the image. The image is the
-same whatever the focus or hover state.
+same whatever the focus or hover state, and it replaces the background color, so a
+`Slider`'s own `backgroundColor` has no effect while a theme image is set.
 
 To make a `.9.png`, add a one-pixel transparent border. Mark the stretchable part with black
 pixels along the top row and the left column. The border is removed when the image loads.
