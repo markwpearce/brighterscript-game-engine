@@ -818,8 +818,9 @@ Headings follow the engine's convention, 0 facing -z, so a camera's heading goes
 Positions are on the ground (x and z) by default. For a 2D game such as a twin-stick or top-down
 shooter, pass `{plane: BGE.SeparationPlane.xy}`: heading 0 then faces -y and PI/2 faces +x.
 World +y is up, so heading 0 points down the screen and headings run counterclockwise on
-screen. `nextByBearing()`'s `side` still means screen right (1) or left (-1). `BGE.Targeting.bearing()` and
-`distance()` measure the same way, e.g. to aim a turret.
+screen. `nextByBearing()`'s `side` is still the player's right (1) or left (-1), clockwise on
+screen: screen right when facing up the screen, screen left when facing down.
+`BGE.Targeting.bearing()` and `distance()` measure the same way, e.g. to aim a turret.
 `examples/thirdPerson`'s `CombatDirector` uses both for the knight's lock-on.
 
 ## The game loop
