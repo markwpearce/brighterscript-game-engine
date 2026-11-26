@@ -104,7 +104,7 @@ function main() {
             `Expected exactly ${EXPECTED_KNOWN_ERRORS} known errors, ` +
             `but got ${errorCount} - ${direction} than expected. If this is a genuine ` +
             `regression, fix it. If the upstream brighterscript/ropm bugs got fixed, update ` +
-            `EXPECTED_KNOWN_ERRORS and the README's caveat instead of just bumping this number.`
+            `EXPECTED_KNOWN_ERRORS and document it in the README instead of just bumping this number.`
         );
     }
 

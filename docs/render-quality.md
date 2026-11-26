@@ -92,7 +92,7 @@ This also turns adaptive tuning off - handy for testing, or for a settings menu.
 ## Draw distance
 
 A level scales your camera's `maxDrawDistance` rather than replacing it: Basic
-draws 0.75x as far, Low 0.825x, Medium exactly what you set, Ultra 1.5x. Set `maxDrawDistance` to
+draws 0.75x as far, Low 0.825x, Medium exactly what you set, High 1.25x, Ultra 1.5x. Set `maxDrawDistance` to
 what suits your game at Medium.
 
 To keep the draw distance from changing with the level - walls in a maze that would
@@ -104,13 +104,23 @@ game struggling.
 
 ```brighterscript
 m.qualityOptions = {fixedDrawDistance: true}
-``` The distance actually used is
-`camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
-running out of memory.
+```
 
-Ground planes (`DrawablePlane`) are the exception: they always draw out to your
-`maxDrawDistance` (capped per device), whatever the level, so the horizon never
-jumps when the level changes. Only other objects are culled closer or further.
+The distance actually used is
+`camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
+running out of memory: 900 in the simulator, 1000 on an HD Roku, 2500 on an FHD one.
+
+A change in draw distance, from a level change or a new `maxDrawDistance`, eases in over
+`camera.drawDistanceTransitionSeconds` (0.75 by default), so far objects fade in or out
+rather than popping. Set it to 0 to apply changes at once, or call `camera.snapDrawDistance()`
+to skip one transition, e.g. after a camera cut.
+
+Ground planes (`DrawablePlane`) are the exception: whatever the current level, they draw
+out to the farthest any level draws objects. That's `maxDrawDistance` times the biggest
+level scale (1.5x, from Ultra), or the biggest `drawDistanceOverride` if that's farther,
+capped per device. So the horizon never jumps when the level changes. Only other objects
+are culled closer or further. With `fixedDrawDistance` or fog on, planes draw to
+`maxDrawDistance` like everything else.
 
 ## Change what a level does
 
@@ -123,6 +133,15 @@ game.renderQuality.overridePreset(BGE.RenderQualityLevel.medium, {planeSliceCoun
 
 Fields you don't name keep the engine's values. See `BGE.RenderQualitySettings`
 for every field.
+
+Two fields control when a billboard (an image, rectangle, polygon and so on facing the
+camera) reuses last frame's rendering instead of drawing again:
+
+- `billboardReuseError` - how far off the reused rendering may be while it moves, as a
+  fraction of its size on screen. 0.08 at Basic down to 0 at Ultra, where 0 means a fixed
+  16 pixels.
+- `billboardReuseMaxAngleDegrees` - how far the direction it's seen from may turn before it's
+  redrawn. 180 (no limit) up to Medium, 20 at High, 10 at Ultra.
 
 ## Walls
 
@@ -211,5 +230,5 @@ end sub
 Every textured `DrawablePlane` on screen keeps a scratch bitmap sized off
 `maxDrawDistance`, and a `tiledImage` plane also caches a "supertexture" bitmap sized
 the same way. They grow with the square of the distance, so keep `maxDrawDistance`
-modest in scenes with several textured planes. Because planes ignore the quality
-level's draw-distance scale, a level change never rebuilds them.
+modest in scenes with several textured planes. Because planes already reach as far
+as any level draws, a level change never rebuilds them.

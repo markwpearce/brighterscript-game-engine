@@ -48,6 +48,8 @@ The gamepad's X/Y also send `"x"`/`"y"` (and L1/R1 send `"l1"`/`"r1"`), and its 
 sends `"up"`/`"down"`/`"left"`/`"right"` and drives stick `"1"` while held. Controller
 input reaches `gameUi` widgets' `onInput()` too (not just entities and the focus
 system), so a custom widget can handle a gamepad press the same as a remote one.
+`game.controls.matchesAction("jump", input)` tells it whether that one input is for a
+button bound to the action, since `isActionPressed()` only updates once a frame.
 
 The recommended way to read bound state each frame is `onControls()`, a
 `GameEntity` lifecycle hook called once per frame with the game's
@@ -67,7 +69,9 @@ one action/axis (`ControlMap.hasBindings()`) - a game that never calls
 `bindAction`/`bindAxis` never gets this callback at all, keeping the
 zero-cost-when-unused guarantee. `isActionPressed`/`isActionReleased` read
 true only on the frame the bound button was pressed/released, and
-`isActionHeld` every frame in between.
+`isActionHeld` every frame in between. `getActionHeldTimeMs("jump")` gives how
+long the bound button has been held, in ms (0 when it isn't), e.g. for a charged
+attack.
 
 You can still read `m.game.controls` directly from `onUpdate()` (or
 anywhere else) instead, if you want different per-frame ordering or would
@@ -109,7 +113,7 @@ game.enableControllerInput(8888, false)   ' port, shareFirstControllerWithRemote
 
 For a single-player game where either the remote/keyboard *or* a gamepad
 should drive the same player - regardless of which one connects or sends
-input first - pass `true` instead:
+input first - call `setCombineRemoteInputs(true)`:
 
 ```brighterscript
 game.setCombineRemoteInputs(true)

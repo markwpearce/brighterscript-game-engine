@@ -7,8 +7,9 @@ order: 14
 # HUD and Info Widgets
 
 Screen-space widgets for `game.gameUi`. Each works with defaults and has fields for its
-colors, fonts and timing. Each can also be drawn by hand from a draw hook (`drawAt()`/
-`drawOn()`, with `update(dt)` each frame) if you'd rather not put it in the widget tree.
+colors, fonts and timing. `Meter` and `Banner` can also be drawn by hand from a draw hook
+(`Meter.drawAt()`/`Banner.drawOn()`, with `update(dt)` each frame) if you'd rather not put
+them in the widget tree.
 
 ## Meter
 

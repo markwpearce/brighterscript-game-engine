@@ -32,7 +32,8 @@ end if
 ## State
 
 `start()` moves from ready (or over, as a new game with a fresh score and lives) to
-playing. `pause()`/`resume()`, `gameOver()`, `completeLevel()` and `reset()` (back to ready)
+playing. From levelComplete it keeps the score and lives, so the next level carries them on.
+`pause()`/`resume()`, `gameOver()`, `completeLevel()` and `reset()` (back to ready)
 do the rest; `setState()` moves anywhere, e.g. back to ready after a lost ball. `isPlaying()`
 and `hasEnded()` (over or levelComplete) cover the usual checks.
 
