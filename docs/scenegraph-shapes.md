@@ -12,6 +12,8 @@ BGE ships four SceneGraph components under `components/Shapes/` - `RoundedRectan
 offscreen-bitmap plumbing of your own: no `BGE.Game`, no `GameScene`, no `roScreen`. See
 `examples/scenegraph` for a runnable demo of all four.
 
+![The four shape components in examples/scenegraph: an orange rounded rectangle, a teal circle, a yellow triangle and a pink pentagon](images/scenegraph-shapes.jpg)
+
 Internally each component is a `Group` wrapping a child `Poster` and its own render `Task`,
 but none of that is visible to a consumer - same tags, same fields, same positioning via
 `translation` as a simpler `Poster`-extends design would have. That's the point: it hides an

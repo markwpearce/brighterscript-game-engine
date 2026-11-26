@@ -110,6 +110,8 @@ that only came from modals ends. `game.isModalOpen()` says whether any modal is 
 
 `BGE.PauseMenu` is a ready-made pause entity built on those:
 
+![The BGE.PauseMenu in examples/breakout: a "Paused" panel with Resume and Quit buttons over the game](images/ui-menus-pause-menu.jpg)
+
 ```brighterscript
 pause = new BGE.PauseMenu(m.game, {buttons: ["resume", "restart", "title"], titleScene: "TitleScene"})
 pause.blockWhen = function(game as BGE.Game) as boolean
