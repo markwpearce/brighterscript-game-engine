@@ -159,6 +159,9 @@ const ENEMY_FLAG = 4
 wall.isStatic = true
 collider = wall.addBoxCollider3d("body", 200, 300, 40)
 collider.memberFlags = WALL_FLAG
+
+' Movers only hit the wall if their collidableFlags include its bit
+playerCollider.collidableFlags = 1 or WALL_FLAG
 ```
 
 ## Raycasts
