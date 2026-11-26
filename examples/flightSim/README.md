@@ -10,9 +10,9 @@ course and it starts again; the best time is kept until you quit.
 ## Controls
 
 The remote and the phone controller page (`http://<roku ip>:8888`) fly the plane on a Roku. A
-real Roku doesn't pass a paired gamepad's sticks to channels, so to fly with a gamepad, plug it
-into the computer running the phone page (its D-pad and left stick drive stick 1). The gamepad
-column is for the brs-engine simulator.
+real Roku doesn't pass a paired gamepad's sticks to channels, so to fly with a gamepad, connect
+it to the phone or computer showing the phone page (its D-pad and left stick drive stick 1). The
+gamepad column is for the brs-engine simulator.
 
 | Action | Simulator gamepad | Remote | Phone page |
 | --- | --- | --- | --- |
