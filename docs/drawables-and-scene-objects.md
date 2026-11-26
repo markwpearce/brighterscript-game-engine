@@ -755,6 +755,8 @@ most visible one, in the order visible > occluded > offCamera > unknown. `isOnSc
 `visible` and `unknown`. Nothing in the engine skips an entity's `onUpdate()` or collisions for
 you; this is only a signal.
 
+For how the renderer decides what's hidden, the draw policies and the cost, see [Occlusion Culling](/occlusion).
+
 To see what's going on, call `game.debugDrawOcclusion(true)` (it shades the canvas areas the
 occluders cover and draws a red box around each hidden object), and read `renderer.getOccludedCountLastFrame()`. The `terrain` example has a
 static chapel that hides the trees behind it, and OK toggles occlusion in its `WorldScene`.
@@ -1028,8 +1030,8 @@ texture. Other `.mtl` properties (`map_Bump`, `Ks`/`Ns`, `d` transparency, `illu
 ## Deep dive: `SceneObjectPlane` (`DrawablePlane`)
 
 `DrawablePlane`/`SceneObjectPlane` render a textured, (mostly) infinite ground/floor plane -
-`examples/terrain` is a small, playable demo of it (drive a camera around above a Mario Kart track
-image, or toggle to a checkerboard). It works nothing like the other `SceneObject`s, which each
+`examples/terrain` is a small, playable demo of it (drive a camera around above a race track
+image, or cycle to a tiled checkerboard or a plain color). It works nothing like the other `SceneObject`s, which each
 draw one small object; a plane covers the camera's entire view of the ground, so the implementation
 is closer to a classic SNES "Mode 7" renderer than to a sprite draw call.
 
