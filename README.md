@@ -7,16 +7,16 @@
 
 Real 2D and 3D games on a Roku: chase cameras, voxel terrain, textured 3D models, tile maps, fighting games and visual novels, all written in object-oriented [BrighterScript](https://github.com/rokucommunity/brighterscript). Use the whole engine, or just its renderer inside your own app.
 
-<img src="assets/screenshots/hero.jpg" alt="Six screenshots from the examples running on a Roku: a biplane flying through a gold ring over a voxel island, rolling voxel hills with a lake and a hot-air balloon, a knight fighting a skeleton and an orc at night, a pixel-art street fighter landing a K.O. kick, a jungle platformer, and a sci-fi visual novel with character portraits and a choice menu">
+<img src="assets/screenshots/hero.jpg" alt="Six screenshots from the examples running on a Roku: a biplane flying through a gold ring over a voxel island, a red rocket ship among gray asteroids in a blue nebula, a knight fighting a skeleton and an orc at night, a pixel-art street fighter landing a K.O. kick, a jungle platformer, and a sci-fi visual novel with character portraits and a choice menu">
 
-<sub>Top: [flightSim](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/flightSim), [voxel terrain](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rendererTest), [thirdPerson](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/thirdPerson). Bottom: [fighter](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/fighter), [platformer](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/platformer), [visualnovel](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/visualnovel). Every one of these is a capture from a real Roku.</sub>
+<sub>Top: [flightSim](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/flightSim), [asteroids](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/asteroids), [thirdPerson](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/thirdPerson). Bottom: [fighter](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/fighter), [platformer](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/platformer), [visualnovel](https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/visualnovel). Every one of these is a capture from a real Roku.</sub>
 
 ## See it move
 
 <p>
   <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/flightSim"><img src="assets/clips/flightSim.gif" width="32%" alt="A red biplane, chase camera behind it, climbs over a voxel mountain and through a gold ring"></a>
   <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/thirdPerson"><img src="assets/clips/thirdPerson.gif" width="32%" alt="A knight with a sword and shield fights a skeleton on a moonlit field while an orc runs in"></a>
-  <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/rendererTest"><img src="assets/clips/voxelTerrain.gif" width="32%" alt="The camera sweeps across voxel hills, lakes, pine trees and snowy peaks, with hot-air balloons overhead"></a>
+  <a href="https://github.com/markwpearce/brighterscript-game-engine/tree/main/examples/platformer"><img src="assets/clips/platformer.gif" width="32%" alt="An explorer in a jungle runs right, collects three gold coins and runs past a green dinosaur"></a>
 </p>
 
 ## Features
