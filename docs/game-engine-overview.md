@@ -16,9 +16,11 @@ the engine implements these pieces internally, see [Engine Internals](/engine-in
 BGE is an object-oriented 2D-first game engine for Roku channels, written in
 [BrighterScript](https://github.com/rokucommunity/brighterscript) and distributed via
 [ROPM](https://ropm.dev). Everything lives under the `BGE` namespace. The `examples/` folder in
-the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `platformer`, `rpg`,
-`3d`, `canvas`, `pixels`, `quickstart`, `hybrid`) that are the fastest way to see any of this in action -
-`quickstart` in particular is a minimal scaffold worth copying as a starting point for a new game.
+the repo has around 30 full sample channels, and they're the fastest way to see any of this in action.
+Newer ones include `thirdPerson` (an orbit camera and lock-on combat), `flightSim`, `fighter`,
+`navigation` and `visualnovel`; the [examples table in the README](https://github.com/markwpearce/brighterscript-game-engine#examples)
+lists them all. `quickstart` in particular is a minimal scaffold worth copying as a starting point
+for a new game.
 
 ## Architecture at a glance
 
@@ -30,7 +32,7 @@ the repo has full sample channels (`pong`, `breakout`, `asteroids`, `snake`, `pl
 | `GameScene` | A `GameEntity` subclass that represents one state of your game - a title screen, a menu, a level. Only one is current at a time; switching scenes via `Game.changeScene()` destroys non-`persistent` entities. A scene can load its assets over several frames in `onLoad()`, before `onCreate()` runs (see [Loading Assets](/loading-assets)). Its `onPostUpdate()` runs once a frame after every entity has moved, for work that shouldn't depend on update order (pushing characters apart with `BGE.separateCircles()`, a follow camera). |
 | `GameEntity` | The base class for anything in your game world - a player, an enemy, a bullet. Exposes lifecycle hooks (`onCreate`, `onUpdate`, `onCollision`, `onDrawBegin`/`onDrawEnd`, `onInput`, …) meant to be overridden, plus `position`/`velocity`/`rotation`/`scale`. |
 | `Drawable` | **The recommended way to put anything on screen** - see below. A visual attachment on a `GameEntity` (`Image`, `Sprite`, `AnimatedImage`, `DrawableRectangle`, `DrawableLine`, `DrawablePolygon`, `DrawableText`, `Model3d`) that moves/rotates/scales with the entity automatically. |
-| `Collider` | A `CircleCollider` or `RectangleCollider` attached to a `GameEntity`, wrapping a `roCompositor`/`roSprite` region. Collision checks run through the compositor, not manual math. |
+| `Collider` | A `CircleCollider` or `RectangleCollider` attached to a `GameEntity`, wrapping a `roCompositor`/`roSprite` region. Collision checks run through the compositor, not manual math. 3D games can use `SphereCollider3d` and `BoxCollider3d` instead. |
 | `Renderer` | Wraps an `ifDraw2D` surface (a `Canvas`'s bitmap). Owns the `SceneObject`s it draws each frame and a `Camera`. There's one for the game canvas and a separate one for the UI canvas. |
 | `Canvas` | Pairs a bitmap with a `Renderer` and scale/offset. `Game` composites the game canvas and UI canvas to the physical `roScreen` independently each frame, so UI can stay crisp regardless of game-canvas scaling. |
 | `UiContainer` / `UiWidget` | A small retained-mode widget tree (`Label`, `Slider`, `Style`, `Alignment`) drawn to its own canvas layer above the game world. `Game.gameUi` and `Game.debugUi` are the two top-level containers. |
@@ -433,8 +435,9 @@ below the top-left, not the top-left itself. In practice:
   `offset_y = height / 2`.
 
 If a collider ever looks like it's registering at the wrong spot, `Game.debugDrawColliders(true)`
-draws every collider's actual bounds directly on screen, alongside each entity's name and position
-- almost always faster than guessing from the offset math:
+draws every collider's actual bounds and name directly on screen - almost always faster than
+guessing from the offset math. Add `Game.debugDrawEntityDetails(true)` to also label each entity
+with its name and mark its position:
 
 ![Asteroids with debug colliders and entity details visible: magenta dots marking each entity's position, circle collider outlines around the ship and rocks, and cyan entity name labels reading "Player" and "Rock"](images/asteroids-debug-colliders.jpg)
 
@@ -455,6 +458,24 @@ don't collide. Once you've snapped the player flush onto the ground, `onCollisio
 it next frame unless something moves the player back into it. A "grounded" flag that you clear
 every frame and expect `onCollision` to set again will flicker. Keep applying gravity while
 grounded, or check for ground directly, as the platformer's `Player` does.
+
+### Tags
+
+Every entity and collider has a `tagsList` (`BGE.TagList`) for marking what it is, so
+`onCollision` can ask instead of checking class names. Tags are case-insensitive:
+
+```
+' In onCreate():
+m.tagsList.add("enemy")
+
+' In the player's onCollision(collider, otherCollider, otherEntity):
+if otherEntity.tagsList.contains("enemy")
+  m.hurt(1)
+end if
+```
+
+`remove(tag)`, `clear()` and `count()` do what they say. `m.game.getEntitiesByTag("enemy")`
+returns every valid entity with that tag.
 
 ### Walls in a top-down game
 
@@ -486,7 +507,7 @@ example when a door opens.
 When knockback and `BGE.separateCircles()` also move a body, track it with
 `m.solidWorld.track(entity, radius)` and call `m.solidWorld.resolveTracked()` once everything has
 moved, e.g. in `onPostUpdate()`. Setting the scene's `trackedSolidWorld` makes the game do that for
-you after `onPostUpdate()`. See [Tile maps](tile-maps.md#tracking-bodies).
+you after `onPostUpdate()`. See [Tile maps](/tile-maps#tracking-bodies).
 
 ### Hit flash and knockback
 
@@ -546,6 +567,9 @@ camera.follow(playerEntity)
 `follow()` re-centres on the entity every frame after every `onUpdate` has run, so the view is
 never a frame behind. `setBounds()` stops the view showing past the level's edges (and centres a
 level that's smaller than the screen); it also applies to plain `setTarget()` calls.
+
+For a 3D game, see [Third-Person Cameras](/third-person-cameras) for an orbit camera that follows
+the player, lock-on, and chase cameras for vehicles.
 
 ### Zooming
 
@@ -743,6 +767,23 @@ dead; `start(true)` starts the delay over, and `cancel()` stops waiting. The sec
 and the platformer's `PlantBoss` use `StateClock` and `Health`, and the rpg's `Player` waits out
 a defeat with `RespawnTimer`.
 
+**Plain countdowns.** For a cooldown, coyote time or an input buffer, `BGE.CountdownTimer` is
+the bare version: `start(seconds)`, `tick(dt)` once a frame, then `isActive()` while time is left.
+`remaining()` gives the seconds left and `stop()` ends it early:
+
+```
+import "pkg:/source/utils/CountdownTimer.bs"
+
+m.dashCooldown = new BGE.CountdownTimer()
+
+' In onUpdate(dt):
+m.dashCooldown.tick(dt)
+if dashPressed and not m.dashCooldown.isActive()
+  m.startDash()
+  m.dashCooldown.start(0.8)
+end if
+```
+
 ## Picking targets
 
 `BGE.Targeting` answers "which enemy is the player looking at?" for lock-on, auto-aim or homing
@@ -772,8 +813,9 @@ the row keeps the current target. Both return the candidate itself; cast it back
 
 Headings follow the engine's convention, 0 facing -z, so a camera's heading goes straight in.
 Positions are on the ground (x and z) by default. For a 2D game such as a twin-stick or top-down
-shooter, pass `{plane: BGE.SeparationPlane.xy}`: heading 0 then faces -y (up the screen) and PI/2
-faces +x. `BGE.Targeting.bearing()` and `distance()` measure the same way, e.g. to aim a turret.
+shooter, pass `{plane: BGE.SeparationPlane.xy}`: heading 0 then faces -y and PI/2 faces +x.
+World +y is up, so heading 0 points down the screen. `BGE.Targeting.bearing()` and
+`distance()` measure the same way, e.g. to aim a turret.
 `examples/thirdPerson`'s `CombatDirector` uses both for the knight's lock-on.
 
 ## The game loop
@@ -784,10 +826,11 @@ faces +x. `BGE.Targeting.bearing()` and `distance()` measure the same way, e.g. 
 
 A few things fall out of this that matter in practice:
 
-- **Entity order**: the current `GameScene` is always processed first and last; everything else
-  (`sortedEntities`) runs in `zIndex` (insertion) order in between.
-- **Callbacks can invalidate their own entity.** A callback might call `Delete()` on itself, or
-  trigger a scene change. That's why the engine re-checks `isValidEntity()` before every single
+- **Entity order**: the current `GameScene` is always processed first. In update and collisions
+  the other entities (`sortedEntities`) then run newest first; in both draw passes they run in the
+  order they were added. Only the scene's `onPostUpdate()` runs after everything else.
+- **Callbacks can invalidate their own entity.** A callback might call `invalidate()` on itself
+  (or `game.destroyEntity()` on another), or trigger a scene change. That's why the engine re-checks `isValidEntity()` before every single
   callback - if you write code that processes many entities in a loop (rare for game code, common
   for engine-level tooling), follow the same pattern.
 - **Scene changes are deferred to end-of-frame.** Calling `Game.changeScene()` mid-frame doesn't
@@ -797,6 +840,10 @@ A few things fall out of this that matter in practice:
   after the new scene's `onCreate`. `Game.isTransitioning()` is true for the whole thing, so check
   it before acting on gameplay input. With no current scene yet, it changes scene straight away and
   fades in from black - a handy way to start the first scene.
+- **`Game.screenFade`** is the overlay that fade uses, and you can drive it yourself:
+  `m.game.screenFade.fadeTo(0.6, 0.25)` dims the screen behind a pause menu over a quarter
+  second, and `fadeTo(0, 0.25)` clears it. Opacity runs 0 (clear) to 1; set `screenFade.color`
+  (`&hRRGGBB`, black by default) for another colour. It draws on top of the game and the UI.
 
 ## Debugging tools worth knowing early
 
@@ -888,7 +935,7 @@ occlusion and impostor counts to the line.
   labels.
 - `Game.getDebugUI().addChild(new BGE.Debug.FpsDisplay(game))` and
   `BGE.Debug.InputDisplay`/`MemoryDisplay`/`GarbageCollectorDisplay`/`LogDisplay` are ready-made
-  debug widgets - every example wires up at least the FPS display in `main.bs`. `InputDisplay`
+  debug widgets - most examples wire up at least the FPS display in `main.bs`. `InputDisplay`
   draws a remote or gamepad per player with every held button highlighted and the analog sticks
   shown, so you can check simultaneous input from several controllers at a glance. Set its
   `mode` to `BGE.Debug.InputDisplayMode.text` (or pass `{inputDisplayMode: "text"}` to

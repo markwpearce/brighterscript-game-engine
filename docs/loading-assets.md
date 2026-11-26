@@ -116,6 +116,8 @@ there was nothing to load:
   but before any of its loads start. If the next scene asks for one of them too (the same scene
   again, for the next level or `resetScene()`, or another scene that uses the same model), it
   takes it over without loading it again, and frees it when it's left in turn.
+  `game.getLeavingScene()` returns the scene being left while the next one's `onLoad()` runs
+  (`invalid` at any other time), if you need to look at it.
 - `scene.unloadSceneAssets()` frees them early; `getSceneAssets()` and `ownsSceneAsset(kind,
   name)` say what the scene owns. Override `unloadSceneAsset(asset)` (and
   `isSceneAssetLoaded()`) to change how they're freed.
@@ -293,7 +295,7 @@ end class
 
 The first scene's loading is shown by the [splash screen](/splash-screen) instead, if it's still loading when the splash starts.
 
-`onShow()` and `onHide()` are also available. A single scene can use its own screen by overriding `getLoadingScreen()` to return one. Otherwise `game.loadingScreen` is used, then `DefaultLoadingScreen`. Because the scene's `getLoadingScreen()` is called while it's loading, build the screen there rather than relying on anything `onCreate()` sets up. `game.isLoading()` and `game.getLoadingProgress()` are there if you want to draw progress yourself.
+`onShow()` and `onHide()` are also available. A single scene can use its own screen by overriding `getLoadingScreen()` to return one. Otherwise `game.loadingScreen` is used, then `DefaultLoadingScreen`. Because the scene's `getLoadingScreen()` is called while it's loading, build the screen there rather than relying on anything `onCreate()` sets up. `game.isLoading()` and `game.getLoadingProgress()` are there if you want to draw progress yourself, and `game.isLoadingScreenShown()` says whether the screen is up yet (it waits `showAfterSeconds` before showing).
 
 ## Background loading
 

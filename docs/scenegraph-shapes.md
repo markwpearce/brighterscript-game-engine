@@ -12,7 +12,7 @@ BGE ships four SceneGraph components under `components/Shapes/` - `RoundedRectan
 offscreen-bitmap plumbing of your own: no `BGE.Game`, no `GameScene`, no `roScreen`. See
 `examples/scenegraph` for a runnable demo of all four.
 
-Internally each component is a `Group` wrapping a child `Poster` and a shared render `Task`,
+Internally each component is a `Group` wrapping a child `Poster` and its own render `Task`,
 but none of that is visible to a consumer - same tags, same fields, same positioning via
 `translation` as a simpler `Poster`-extends design would have. That's the point: it hides an
 off-render-thread redraw behind an interface indistinguishable from a native node's.
@@ -79,7 +79,7 @@ cost (see "Animating a shape" below).
 | `color` | `color` | Fill color, packed RGBA (`0xRRGGBBAA`) - the same convention every `BGE.Renderer.draw*` call uses. |
 | `width` / `height` | `float` | The shape's own bitmap size. |
 | `outlineColor` | `color` | Packed RGBA. |
-| `outlineWidth` | `integer` | Outline is only drawn when this is `> 0` - there's no separate on/off flag. `RoundedRectangle`/`Polygon` stroke a real `outlineWidth`-thick ring; `Circle`/`Triangle` always draw a single-pixel stroke regardless of this value (it just gates whether one is drawn), since `drawCircleOutline`/`drawTriangleOutlineTo` have no thickness parameter. |
+| `outlineWidth` | `integer` | Outline is only drawn when this is `> 0` - there's no separate on/off flag. `RoundedRectangle`/`Polygon` stroke a real `outlineWidth`-thick ring, but `RoundedRectangle`'s outline is a square-cornered rectangle around the bitmap's edge - it doesn't follow `cornerRadius`. `Circle`/`Triangle` always draw a single-pixel stroke regardless of this value, since `drawCircleOutline`/`drawTriangleOutlineTo` have no thickness parameter; `Circle` does inset its stroke by `outlineWidth / 2` from the edge. |
 
 ### Shape-specific fields
 
@@ -92,8 +92,8 @@ cost (see "Animating a shape" below).
 ## How it works
 
 Each shape component is a `Group` wrapping one child `Poster` (`id="image"`) and one persistent
-child `BGE_ShapeRenderTask`-style `Task` node created once in `init()` and reused across
-redraws. The child `Poster`'s `width`/`height` are never set - only its `uri` is ever swapped,
+child `ShapeRenderTask` node, declared in the component's XML as `<ShapeRenderTask id="renderTask"/>`.
+`init()` finds it with `findNode("renderTask")`, and it's reused across redraws. The child `Poster`'s `width`/`height` are never set - only its `uri` is ever swapped,
 and only once a render has actually finished - so there's no frame where a stale image gets
 stretched into a newly-set box (see "A fixed bug" below). Every field that affects the rendered
 shape is observed by an `onShapeFieldChanged` handler, but that handler never redraws directly -
@@ -141,10 +141,11 @@ under storage pressure, which `checkShapeCache()`'s existence check already hand
 just re-rendering), but a consumer driving genuinely unbounded values (e.g. a continuously
 random color) will grow `cachefs:/` without bound between OS evictions.
 
-All four shape components share one `ShapeRenderTask` component (`components/Shapes/
+All four shape components use one `ShapeRenderTask` component (`components/Shapes/
 ShapeRenderTask.xml`/`.bs`) rather than four near-duplicate `Task` subclasses - it takes a
 `shapeType` field plus the union of draw parameters every shape might need, and dispatches
-internally to the matching `BGE.Renderer.draw*To`/`draw*OutlineTo` call(s).
+internally to the matching `BGE.Renderer.draw*To`/`draw*OutlineTo` call(s). Each shape instance has
+its own `ShapeRenderTask` node, not a shared one (see "Mass construction" below).
 
 ## Animating a shape (not recommended)
 
@@ -167,7 +168,7 @@ too slow for smooth continuous animation - **all four are redraw-on-change compo
 animate-safe ones**, regardless of shape type. A discrete/repeated value (toggling between a
 couple of colors) is still free after the first render, per the caching above.
 
-Because the draw+encode+write work now runs on the shared `Task` (see below), a continuous
+Because the draw+encode+write work now runs on each shape's own `Task` (see above), a continuous
 `Animation` blocks the render thread far less than the original synchronous design did - but
 **not to zero**, measured with all four shapes animating at once (`examples/scenegraph`'s demo,
 a 50ms heartbeat `Timer`): moving the redraw off-thread removes the ~150-200ms draw+encode+write

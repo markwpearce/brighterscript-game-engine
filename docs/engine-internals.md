@@ -184,8 +184,9 @@ constructed directly:
 ' Load from a packaged asset using Android's .9.png marker convention
 m.game.defaultTheme.backgroundImage = BGE.UI.loadNinePatchImage("pkg:/images/panel.9.png")
 
-' Or load from an already-loaded .9.png roBitmap
-ninePatchBitmap = CreateObject("roBitmap", "pkg:/images/panel.9.png")
+' Or parse an already-loaded .9.png bitmap. Load it with loadBitmapOrLog(): a device's
+' roBitmap refuses any *.9.png filename, and loadBitmapOrLog() works around that
+ninePatchBitmap = BGE.UI.loadBitmapOrLog("pkg:/images/panel.9.png", "panel")
 m.game.defaultTheme.backgroundImage = BGE.UI.parseNinePatchBitmap(ninePatchBitmap)
 
 ' Or construct manually if you know the insets (requires a plain image with no border/markers)
@@ -252,7 +253,7 @@ class MyWidget extends BGE.UI.UiWidget
 end class
 ```
 
-`BGE.UI.Select` is a focusable option picker with two distinct interaction styles, controlled by its `style`
+`BGE.UI.Select` is a focusable option picker with three interaction styles, controlled by its `style`
 field (`BGE.UI.SelectStyle`):
 
 **Inline style (default):** `Select.style = BGE.UI.SelectStyle.inline`
@@ -275,6 +276,10 @@ overflow the canvas bottom (e.g., 100 options on a 720-pixel display) extends pa
 is a deliberate trade-off to keep the implementation simple and leave scrolling/virtualization as a
 follow-up. See `examples/ui/src/source/Scenes/PopupSelectScene.bs` for a working demo.
 
+**Horizontal style (opt-in):** `Select.style = BGE.UI.SelectStyle.horizontal`
+- Every option draws side by side in one row, with the current selection highlighted
+- Left/Right move straight to the next option shown, and stop at the ends (no wraparound)
+
 ### Text entry via ECP keyboard
 
 `BGE.UI.TextInput` is a focusable single-line text entry widget. Characters come from the Roku mobile app's
@@ -289,7 +294,7 @@ textInput.onChanged = sub(input as BGE.UI.TextInput)
   ' Fires after any character insertion or deletion
 end sub
 textInput.onSubmit = sub(input as BGE.UI.TextInput)
-  ' Fires on OK press while focused
+  ' Fires on OK press while focused (unless textInput.keyboard is set; then OK opens the keyboard)
 end sub
 gameUi.addChild(textInput)
 ```
@@ -304,7 +309,8 @@ gameUi.addChild(textInput)
   or once the player types anything.
 - `onChanged()` — Callback fired after any edit (character inserted or deleted). Receives the `TextInput`
   itself as an argument so a closure can read the modified `text`/`cursorIndex`.
-- `onSubmit()` — Callback fired on OK press while focused. Same callback signature as `onChanged()`.
+- `onSubmit()` — Callback fired on OK press while focused. Same callback signature as `onChanged()`. If
+  `keyboard` is set, OK opens that on-screen keyboard instead.
 
 **Text input from Roku mobile app:** When a player has the Roku mobile app open (or a comparable remote
 extension that supports on-screen text entry), any character they type through the app's keyboard arrives
@@ -360,7 +366,7 @@ cursor onto a key highlights it.
 Layouts: `BGE.UI.createAlphabeticalKeyboardLayout()` (default), `createQwertyKeyboardLayout()` and
 `createCompactKeyboardLayout()` (A–Z and 0–9 only, for arcade-style name entry); pass one to
 `new BGE.UI.Keyboard(game, layout)` or assign `keyboard.layout`. The first two have a Shift page and a
-symbols page. For your own layout, fill a `KeyboardLayout`'s `pages` with `KeyboardRow`s of `KeyboardKey`s
+symbols page. For your own layout, fill a `KeyboardLayout`'s `pages` with `KeyboardPage`s, each holding `rows` of `KeyboardRow`s of `KeyboardKey`s
 (`createKeyboardCharRow()` builds a row from a string).
 
 The key grid is baked into a bitmap whenever the page, size, layout or theme colours change, so a frame
@@ -368,13 +374,19 @@ only draws that bitmap and the highlighted key (about 0.4 ms on an Ultra, 0.7 ms
 
 ## Collision, concretely
 
-Each `Collider` (`CircleCollider`, `RectangleCollider`) wraps one `roSprite` on the `Game`'s shared
+Each 2D `Collider` (`CircleCollider`, `RectangleCollider`) wraps one `roSprite` on the `Game`'s shared
 `roCompositor`. Every frame, `Game.processEntitiesCollisions()` calls
 `roCompositor.CheckMultipleCollisions()` per entity's colliders and dispatches `onCollision(myCollider,
 otherCollider, otherEntity)` for every hit - there's no manual AABB/circle-intersection math
 anywhere in engine code. `Collider.memberFlags`/`collidableFlags` are the same bitflags as
 `ifSprite.SetMemberFlags`/`SetCollidableFlags` - two colliders only register a hit if their flags
 intersect, which is how you'd implement, say, "bullets hit enemies but not other bullets."
+
+The 3D colliders, `SphereCollider3d` and `BoxCollider3d` (`addSphereCollider3d()`/`addBoxCollider3d()`),
+use the same compositor. Each one owns two 2D colliders, one on the real (x, y) plane and one on a
+(y, z) plane. A pair is only a candidate when it overlaps on both, and then a true 3D check confirms
+the hit. The (y, z) colliders carry the reserved `BGE.COLLIDER_3D_YZ_PLANE_FLAG` bit, so keep it out
+of your own flags.
 
 An `isStatic` entity never starts a check of its own - anything that moves into it finds it from
 its own side - so a town full of walls and buildings doesn't test them against each other every
@@ -385,9 +397,8 @@ fire, so don't make a trigger zone static. Its colliders only reach the composit
 
 ## Garbage collection and entity lifecycle
 
-`Game` runs BrightScript's garbage collector on a timer (`secondsBetweenGarbageCollection`, default
-10s) rather than every frame, since running it every frame would be wasteful. `GameEntity.isValid()`
-just checks whether `id` has been set to `invalid` - `Delete()`/`invalidate()` doesn't immediately
+`Game` runs BrightScript's garbage collector on a timer (every 10s, a private setting) rather than every frame, since running it every frame would be wasteful. `GameEntity.isValid()`
+just checks whether `id` has been set to `invalid` - `invalidate()` (or `game.destroyEntity()`) doesn't immediately
 free anything, it marks the entity so the _next_ full pass skips it and the end-of-frame cleanup
 removes it from `Game.Entities`/`sortedEntities`. This is why engine code re-checks
 `isValidEntity()` after every callback (see the game loop diagram in
