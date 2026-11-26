@@ -191,8 +191,8 @@ about one rect per band it spans, so smaller bands follow it more closely for mo
 
 | Level  | `fogSilhouetteBand` |
 | ------ | ------------------- |
-| Basic  | 8                   |
-| Low    | 6                   |
+| Basic  | 16                  |
+| Low    | 8                   |
 | Medium | 4                   |
 | High   | 3                   |
 | Ultra  | 2                   |

@@ -7,8 +7,11 @@ namespace BGE.FogSilhouettes
   ' A slice whose footprint is under this fraction of the one below starts a new part
   const SHRINK = 0.5
   const MAX_PARTS = 3
-  ' Most points a part is outlined by: more are cut down to the extremes (see extremePoints())
+  ' Most points a part is outlined by, the directions extremePoints() looks along
   const MAX_HULL_POINTS = 42
+  ' A part with more points is cut down to its extremes: points inside its outline (window
+  ' insets, cuts across flat faces) only cost projecting, ~30 µs each on a Roku Express (#686)
+  const HULL_TRIM_POINTS = 4
 
   ' Splits a model into a few boxes by height, where its footprint shrinks sharply (a tower on a
   ' nave), for its fog silhouette. Each box covers every face reaching into its height range, so
@@ -308,7 +311,7 @@ namespace BGE.FogSilhouettes
           end for
         end if
       end for
-      if pts.count() > MAX_HULL_POINTS * 3
+      if pts.count() > HULL_TRIM_POINTS * 3
         pts = extremePoints(pts)
       end if
       result.push(pts)
@@ -317,8 +320,9 @@ namespace BGE.FogSilhouettes
   end function
 
   ' The points furthest along each of a fixed set of directions (the 26 of a cube's faces,
-  ' edges and corners, and 16 round the horizon), so a detailed part costs at most
-  ' MAX_HULL_POINTS a frame. Its outline can then sit a little inside the true one.
+  ' edges and corners, and 16 round the horizon), so a part costs at most MAX_HULL_POINTS a
+  ' frame. A box's or a gable roof's corners all survive; a rounder part's outline can sit a
+  ' little inside the true one.
   function extremePoints(pts as float[]) as float[]
     dirs = [] as float[]
     for dx = -1 to 1
@@ -371,22 +375,35 @@ namespace BGE.FogSilhouettes
     n = pts.count() \ stride
     xs = [] as float[]
     ys = [] as float[]
-    if n <= 64
-      ' roughly sorted natively first: whole-pixel x (+-4096) and y (+-2048) and the index
-      ' packed in a 31-bit integer (so at most 64 points: MAX_HULL_POINTS keeps parts under it)
+    ' the insertion pass below is only needed when the sort keys can't order the points exactly
+    exact = n <= 64
+    if exact
+      ' sorted natively: whole-pixel x (+-4096) and y (+-2048) and the index packed in a 31-bit
+      ' integer (so at most 64 points: MAX_HULL_POINTS keeps parts under it)
       keys = [] as integer[]
       for i = 0 to n - 1
-        x = int(pts[i * stride]) + 4096
-        y = int(pts[i * stride + 1]) + 2048
+        px = pts[i * stride]
+        py = pts[i * stride + 1]
+        x = int(px)
+        y = int(py)
+        if x <> px or y <> py
+          exact = false
+        end if
+        x += 4096
+        y += 2048
         if x > 8191
           x = 8191
+          exact = false
         else if x < 0
           x = 0
+          exact = false
         end if
         if y > 4095
           y = 4095
+          exact = false
         else if y < 0
           y = 0
+          exact = false
         end if
         keys.push(x * 262144 + y * 64 + i)
       end for
@@ -402,23 +419,28 @@ namespace BGE.FogSilhouettes
         ys.push(pts[i * stride + 1])
       end for
     end if
-    ' exact x then y order, which the chain needs: the keys miss sub-pixel and clamped
-    ' differences, so this insertion pass only moves a few
-    for k = 1 to n - 1
-      px = xs[k]
-      py = ys[k]
-      j = k - 1
-      while j >= 0 and (xs[j] > px or (xs[j] = px and ys[j] > py))
-        xs[j + 1] = xs[j]
-        ys[j + 1] = ys[j]
-        j--
-      end while
-      xs[j + 1] = px
-      ys[j + 1] = py
-    end for
+    if not exact
+      ' exact x then y order, which the chain needs: the keys miss sub-pixel and clamped
+      ' differences, so this insertion pass only moves a few
+      for k = 1 to n - 1
+        px = xs[k]
+        py = ys[k]
+        j = k - 1
+        while j >= 0 and (xs[j] > px or (xs[j] = px and ys[j] > py))
+          xs[j + 1] = xs[j]
+          ys[j + 1] = ys[j]
+          j--
+        end while
+        xs[j + 1] = px
+        ys[j + 1] = py
+      end for
+    end if
+    ' the hull's length kept in hn rather than count()/push()/pop(): this runs per caster per
+    ' frame, and each call costs microseconds on a device (#686)
     hull = [] as integer[]
+    hn = 0
     for pass = 0 to 1
-      start = hull.count()
+      start = hn
       for k = 0 to n - 1
         i = k
         if pass = 1
@@ -426,23 +448,28 @@ namespace BGE.FogSilhouettes
         end if
         px = xs[i]
         py = ys[i]
-        while hull.count() - start >= 2
-          o = hull[hull.count() - 2]
-          a = hull[hull.count() - 1]
+        while hn - start >= 2
+          o = hull[hn - 2]
+          a = hull[hn - 1]
           ox = xs[o]
           oy = ys[o]
           if (xs[a] - ox) * (py - oy) - (ys[a] - oy) * (px - ox) <= 0
-            hull.pop()
+            hn--
           else
             exit while
           end if
         end while
-        hull.push(i)
+        hull[hn] = i
+        hn++
       end for
-      hull.pop()
+      ' drop the last point, which the other pass starts from
+      if hn > 0
+        hn--
+      end if
     end for
     poly = [] as float[]
-    for each i in hull
+    for k = 0 to hn - 1
+      i = hull[k]
       poly.push(xs[i])
       poly.push(ys[i])
     end for
