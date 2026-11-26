@@ -58,4 +58,8 @@ function svg() {
 sharp(Buffer.from(svg()))
   .png({ palette: true, colors: 64 })
   .toFile(OUT)
-  .then((info) => console.log(`Wrote ${path.relative(process.cwd(), OUT)} (${info.size} bytes)`));
+  .then((info) => console.log(`Wrote ${path.relative(process.cwd(), OUT)} (${info.size} bytes)`))
+  .catch((err) => {
+    console.error(`race-track: ${err.message}`);
+    process.exit(1);
+  });
