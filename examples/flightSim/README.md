@@ -9,10 +9,12 @@ course and it starts again; the best time is kept until you quit.
 
 ## Controls
 
-The remote, a Bluetooth gamepad and the phone controller page (`http://<roku ip>:8888`) all fly
-the same plane.
+The remote and the phone controller page (`http://<roku ip>:8888`) fly the plane on a Roku. A
+real Roku doesn't pass a paired gamepad's D-pad or sticks to channels, so to fly with a gamepad,
+connect it to the phone or computer showing the phone page (its D-pad and left stick drive
+stick 1). The simulator gamepad column is for the brs-engine simulator.
 
-| Action | Gamepad | Remote | Phone page |
+| Action | Simulator gamepad | Remote | Phone page |
 | --- | --- | --- | --- |
 | Bank / pitch | left stick or d-pad | d-pad | stick 1 |
 | Faster (hold) | RT, R1, A | OK, FF | A, R1 |
@@ -39,7 +41,7 @@ around Medium at the engine's default 20 fps target.
 
 ## Art
 
-- `src/models/biplane.obj`, `propeller.obj`: a low-poly biplane (made by Claude), split so the
+- `src/models/biplane.obj`, `biplane.mtl`, `propeller.obj`: a low-poly biplane (made by Claude), split so the
   propeller can spin. Nose +x, y up. The wings and tail are single-sided but face up and back,
   so the body is drawn culled (`solid`) and only the propeller with `solidDrawBackFace`.
 - `src/maps/island.bvox`, `src/sprites/sky.png`: made by `python3 tools/make-art.py` (standard

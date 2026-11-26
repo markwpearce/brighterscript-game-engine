@@ -755,6 +755,8 @@ most visible one, in the order visible > occluded > offCamera > unknown. `isOnSc
 `visible` and `unknown`. Nothing in the engine skips an entity's `onUpdate()` or collisions for
 you; this is only a signal.
 
+For how the renderer decides what's hidden, the draw policies and the cost, see [Occlusion Culling](/occlusion).
+
 To see what's going on, call `game.debugDrawOcclusion(true)` (it shades the canvas areas the
 occluders cover and draws a red box around each hidden object), and read `renderer.getOccludedCountLastFrame()`. The `terrain` example has a
 static chapel that hides the trees behind it, and OK toggles occlusion in its `WorldScene`.
@@ -986,16 +988,10 @@ of two texels wide and runs only as far as the face's UV triangle reaches. The c
 face and strip width (`BGE.TriangleColumnCuts`, via `Model3dTexture.getColumnCuts()`) and shared by
 every instance of the model, so drawing a face only projects its strips. A moving model draws its
 faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
-With `useImpostor` (the default), only the model's own movement or turning counts: while just the
-camera moves, the impostor reuses its last capture, scaled and shifted to fit. That only lasts
-while the fit stays within the render quality's limits: `modelImpostorError` (how far off it
-may be), `modelImpostorMaxSizeChange` (how much it may grow or shrink),
-`modelImpostorMaxAngleDegrees` (how far the view direction may turn) and
-`modelImpostorMaxDepthRatio` (how deep the model may be for its distance). Past them it falls back
-to strips (`useImpostorStrips`, on by default) or redraws the model.
-Its `impostor*` fields tune that; `applyImpostorOptions()` sets them from a bag of short names
-that can come straight from deep-link params (`model.applyImpostorOptions(params.pick(["strips",
-"stripStep"]))`; see `BGE.ImpostorOptions`).
+With `useImpostor` (the default), only the model's own movement or turning redraws it: while just
+the camera moves, the model reuses its last drawing, scaled and shifted to fit. It falls back to
+strips or a redraw when the fit leaves the render quality's limits. See
+[Model Impostors](/model-impostors) for how it works, its fields, and `applyImpostorOptions()`.
 A `Camera2d` projects the strips orthographically (rendererTest's `camera2d-model` demo). A face
 that crosses the camera's near plane has its strips cut back to it. A face columns can't draw (the
 per-frame column budget is spent, or its UV triangle has no area) is filled with its shaded color
@@ -1034,8 +1030,8 @@ texture. Other `.mtl` properties (`map_Bump`, `Ks`/`Ns`, `d` transparency, `illu
 ## Deep dive: `SceneObjectPlane` (`DrawablePlane`)
 
 `DrawablePlane`/`SceneObjectPlane` render a textured, (mostly) infinite ground/floor plane -
-`examples/terrain` is a small, playable demo of it (drive a camera around above a Mario Kart track
-image, or toggle to a checkerboard). It works nothing like the other `SceneObject`s, which each
+`examples/terrain` is a small, playable demo of it (drive a camera around above a race track
+image, or cycle to a tiled checkerboard or a plain color). It works nothing like the other `SceneObject`s, which each
 draw one small object; a plane covers the camera's entire view of the ground, so the implementation
 is closer to a classic SNES "Mode 7" renderer than to a sprite draw call.
 

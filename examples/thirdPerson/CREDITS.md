@@ -12,6 +12,11 @@
 | `art/npcs/*` (`MalePeasant.blend`, `FemalePeasant4.blend`, `NobleWoman1.blend`, `Nobleman.blend` and its textures, `OldMan.blend`, `LuxPriestNPC.blend`, `Pig.blend`; as downloaded) | Danimal, Clint Bellanger, Tiziana, Quaternius | CC-BY-SA 3.0 | [Flare NPCs animated pack 1](https://opengameart.org/content/flare-npcs-animated-pack-1) |
 | `src/sprites/grass.webp` (placeholder ground, shared with `examples/terrain`) | - | CC0 | [Seamless grass textures](https://opengameart.org/content/seamless-grass-textures-20-pack) |
 | `src/sprites/night_sky.webp` (drawn by `tools/night-sky.py`) | - | CC0 | this repo |
-| `src/sprites/tree_1.webp` - `tree_5.webp` (shadow cleared, trimmed and scaled by `tools/trees.js`) | TODO | TODO | TODO: where Mark's `trees/_04` sprites came from |
+| `src/sprites/tree_1.webp`, `tree_2.webp`, `tree_3.webp`, `tree_4.webp`, `tree_5.webp` (shadow cleared, trimmed and scaled by `tools/trees.js` from isometric tree sprites `Sprite_01.png`... supplied by the repo owner) | TODO | TODO | TODO: where Mark's `trees/_04` sprites came from |
 | `src/models/props/*` (drawn by `tools/make-props.py`) | - | CC0 | this repo |
 | `src/models/chapel/*` (shared with `examples/terrain`) | - | CC0 | this repo |
+| `src/models/chapel/textures/*` (`cross.png`, `naveWall.png`, `slate.png`, `stone.png`, `towerFace.png`; the chapel's textures, shared with `examples/terrain`) | - | CC0 | this repo |
+| `src/sprites/crypt_wall.webp`, `crypt_floor.webp`, `crypt_alcove.webp`, `crypt_rubble.webp`, `crypt_bones.webp`, `crypt_altar.webp` (drawn by `tools/crypt-art.py`) | - | CC0 | this repo |
+| `src/sprites/keep_door.webp`, `chapel_door.webp`, `chapel_window.webp`, `keep_banner.webp`, `keep_banner_blue.webp` (drawn by `tools/interior-art.py`) | - | CC0 | this repo |
+| `src/sprites/fog.webp` (a plain white fog gradient, made for this repo) | - | CC0 | this repo |
+| `src/images/Channel_Icon_HD.png`, `Channel_Icon_SD.png`, `Splash_HD.png`, `Splash_SD.png` (title text on a dark background, generated for this repo) | - | CC0 | this repo |
