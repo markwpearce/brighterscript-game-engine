@@ -242,7 +242,7 @@ To use the engine directly as `BGE.*` (as shown throughout this README and the e
 }
 ```
 
-Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` - this is a normal, expected pattern for any project consuming ropm dependencies (this engine's own `bsconfig.base.json` does the same for its `rodash` dependency), and avoids noise from a couple of known upstream `ropm`/`brighterscript` typedef-validation issues ([rokucommunity/ropm#148](https://github.com/rokucommunity/ropm/issues/148), [rokucommunity/brighterscript#1757](https://github.com/rokucommunity/brighterscript/issues/1757)):
+Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json`, the usual setup for any project with ropm dependencies (this engine's own `bsconfig.base.json` does the same for `rodash`):
 
 ```jsonc
 {
@@ -252,11 +252,9 @@ Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json` -
 }
 ```
 
-### Known limitation: subclassing `BGE.GameScene`/`BGE.GameEntity`
+Without it, `bsc --validate` reports about 20 errors inside the installed engine, none in your own code: bsc's parser rejects the numeric `.toStr()` calls its own transpiler writes ([rokucommunity/brighterscript#524](https://github.com/rokucommunity/brighterscript/issues/524)), and the generated typedefs import `.brs` paths that don't exist in your project.
 
-Subclassing one of the engine's own classes and passing an instance back into an engine method (e.g. `game.defineScene(new MainScene(game))`, or calling `super(game)` in your subclass's constructor) currently trips a real upstream `brighterscript` bug ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758)): the generated type declarations reference the class's internal compiled name instead of its real type, so `bsc --validate` reports an `argument-type-mismatch` for this - completely ordinary and expected - pattern. The `roku_modules` filter above doesn't cover this, since the error is reported against **your own file**, not a `roku_modules` one.
-
-This is a static type-checker false positive only - type annotations aren't enforced at runtime, so your game still runs correctly regardless. If your own CI gates on `bsc --validate` reporting zero errors, you'll need to account for this until it's fixed upstream.
+Use `brighterscript` 1.0.0-alpha.53 or later. Older versions report a false `argument-type-mismatch` in your own code when you pass a `GameScene` or `GameEntity` subclass to the engine ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758), fixed in alpha.53).
 
 ## Documentation
 
