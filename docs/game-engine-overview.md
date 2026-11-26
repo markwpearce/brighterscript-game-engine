@@ -218,6 +218,13 @@ label.customX = width * 0.1 ' title-safe: at least 10% in from every edge
 label.customY = height * 0.1
 ```
 
+The UI canvas is a screen-sized bitmap blended over the screen each frame. On a Roku with little
+texture memory (a 64 MB Roku Express), `game.setUiDrawsToScreen(true)` draws the UI straight to
+the screen after the game instead, saving that bitmap (3.6 MB at 1280x720). It only does that
+when the game canvas is the screen itself, as a 1280x720 canvas is on a 720p Roku; elsewhere the
+UI keeps its bitmap. Only turn it on if nothing draws to the UI renderer in `onDrawBegin()`,
+which comes before the game is drawn: draw UI in `onDrawEnd()` instead.
+
 A custom-positioned `Label` lines its text up on `customX` by `horizAlign`, like
 `Renderer.drawText()`: `"center"` centres it there and `"right"` ends it there, so a score can
 sit centred on a point without measuring it:
