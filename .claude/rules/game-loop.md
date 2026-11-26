@@ -17,7 +17,7 @@ Docs: `docs/engine-internals.md`, `docs/loading-assets.md`.
 2. **UI input first** (`processUiInput`): a widget can `input.consume()` before `GameEntity.onInput()`.
 3. Update entities (current scene first, then `sortedEntities` in reverse): input callbacks, `onUpdate`, velocity; then `tweenManager` (a tween beats velocity on the same field); then the scene's `onPostUpdate` (after-everyone-moved work, e.g. `BGE.separateCircles()`, follow cameras).
 4. Collisions via `roCompositor` → `onCollision`.
-5. Draw game canvas (`onDrawBegin`/`render()`/`onDrawEnd`), UI canvas, then `debugUi` (update+draw). With `setUiDrawsToScreen(true)` and a game canvas that is the screen, the UI canvas is the screen too (no clear, no blend), so UI drawn in `onDrawBegin` gets covered. Not with a scaled canvas: its blit lands over UI drawn to the screen (Ultra, even after `Finish()`).
+5. Draw game canvas (`onDrawBegin`/`render()`/`onDrawEnd`), UI canvas, then `debugUi` (update+draw).
 6. Swap buffers, periodic GC, apply any pending scene change.
 
 Callbacks can delete entities or change scene mid-frame: re-check `isValidEntity()` after **every** callback in `Game.bs`. Internal `Game` state is fenced by `****BEGIN/END - For Internal Use****`.
