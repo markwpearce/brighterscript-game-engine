@@ -33,9 +33,8 @@ License: OGA-BY 3.0 / CC-BY 3.0. Unmodified.
 https://opengameart.org/content/retropixel-icons-v1-9x9
 License: CC0 (credit optional). Unmodified.
 
-## ../images/ (channel icons and splash screens)
-"Broadsword" key art, generated with Google Gemini (supplied by the repo owner). Each image is
-the same artwork scaled to fill and centre-cropped to that file's size.
+## ../images/
+The channel icons, splash screens and title art are credited in `../images/CREDITS.md`.
 
 ## npcs.png
 `npcs.png` from "Fantasy RPG NPCs" by Mandi Paugh. https://opengameart.org/content/fantasy-rpg-npcs
@@ -46,11 +45,6 @@ character per row, and mirrored right-facing frames added.
 From "RPG Icons Extra" by Ails (Henrique Lazarini), https://ails.deviantart.com. License: CC-BY 3.0.
 `potion.png` is `icon_29.png`, unmodified. `swordSteel.png` is an icon from the same pack, modified by
 the repo owner. `swordRusty.png` is `swordSteel.png` recoloured.
-
-## ../images/title.jpg
-Currently a copy of the splash art (the same Gemini "Broadsword" key art, supplied by the repo
-owner, monsters included), scaled to fill and centre-cropped to 1280x720. To be replaced by the
-monster-free version.
 
 ## ui/box.9.png
 "RPG GUI Block Element" by Bart. https://opengameart.org/content/rpg-gui-block-element
