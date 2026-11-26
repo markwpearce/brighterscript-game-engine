@@ -41,7 +41,7 @@ around Medium at the engine's default 20 fps target.
 
 ## Art
 
-- `src/models/biplane.obj`, `propeller.obj`: a low-poly biplane (made by Claude), split so the
+- `src/models/biplane.obj`, `biplane.mtl`, `propeller.obj`: a low-poly biplane (made by Claude), split so the
   propeller can spin. Nose +x, y up. The wings and tail are single-sided but face up and back,
   so the body is drawn culled (`solid`) and only the propeller with `solidDrawBackFace`.
 - `src/maps/island.bvox`, `src/sprites/sky.png`: made by `python3 tools/make-art.py` (standard
