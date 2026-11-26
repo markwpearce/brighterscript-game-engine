@@ -252,7 +252,7 @@ Also add the standard `roku_modules` diagnostic filter to your `bsconfig.json`, 
 }
 ```
 
-Without it, `bsc --validate` reports about 20 errors inside the installed engine, none in your own code: bsc's parser rejects the numeric `.toStr()` calls its own transpiler writes ([rokucommunity/brighterscript#524](https://github.com/rokucommunity/brighterscript/issues/524)), and the generated typedefs import `.brs` paths that don't exist in your project.
+Without it, `bsc --validate` reports about 20 errors inside the installed engine, none in your own code: bsc's parser rejects the numeric `.toStr()` calls its own transpiler writes ([rokucommunity/brighterscript#524](https://github.com/rokucommunity/brighterscript/issues/524)), and the engine's generated typedefs import `rodash.d.brs`, which doesn't exist ([rokucommunity/brighterscript#2003](https://github.com/rokucommunity/brighterscript/issues/2003)).
 
 Use `brighterscript` 1.0.0-alpha.53 or later. Older versions report a false `argument-type-mismatch` in your own code when you pass a `GameScene` or `GameEntity` subclass to the engine ([rokucommunity/brighterscript#1758](https://github.com/rokucommunity/brighterscript/issues/1758), fixed in alpha.53).
 
