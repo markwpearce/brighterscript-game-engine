@@ -15,6 +15,8 @@ them in the widget tree.
 
 `BGE.UI.Meter` is a bar on a backing, for health, stamina or a boss:
 
+![Two Meters from examples/thirdPerson: a red health bar above a green stamina bar](images/hud-meters.jpg)
+
 ```brighterscript
 health = new BGE.UI.Meter(m.game)
 health.customPosition = true
