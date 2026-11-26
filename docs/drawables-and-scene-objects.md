@@ -986,16 +986,10 @@ of two texels wide and runs only as far as the face's UV triangle reaches. The c
 face and strip width (`BGE.TriangleColumnCuts`, via `Model3dTexture.getColumnCuts()`) and shared by
 every instance of the model, so drawing a face only projects its strips. A moving model draws its
 faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
-With `useImpostor` (the default), only the model's own movement or turning counts: while just the
-camera moves, the impostor reuses its last capture, scaled and shifted to fit. That only lasts
-while the fit stays within the render quality's limits: `modelImpostorError` (how far off it
-may be), `modelImpostorMaxSizeChange` (how much it may grow or shrink),
-`modelImpostorMaxAngleDegrees` (how far the view direction may turn) and
-`modelImpostorMaxDepthRatio` (how deep the model may be for its distance). Past them it falls back
-to strips (`useImpostorStrips`, on by default) or redraws the model.
-Its `impostor*` fields tune that; `applyImpostorOptions()` sets them from a bag of short names
-that can come straight from deep-link params (`model.applyImpostorOptions(params.pick(["strips",
-"stripStep"]))`; see `BGE.ImpostorOptions`).
+With `useImpostor` (the default), only the model's own movement or turning redraws it: while just
+the camera moves, the model reuses its last drawing, scaled and shifted to fit. It falls back to
+strips or a redraw when the fit leaves the render quality's limits. See
+[Model Impostors](/model-impostors) for how it works, its fields, and `applyImpostorOptions()`.
 A `Camera2d` projects the strips orthographically (rendererTest's `camera2d-model` demo). A face
 that crosses the camera's near plane has its strips cut back to it. A face columns can't draw (the
 per-frame column budget is spent, or its UV triangle has no area) is filled with its shaded color
