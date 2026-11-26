@@ -17,6 +17,8 @@ wall. The engine has a piece for each:
 
 `examples/thirdPerson` uses all three.
 
+![examples/thirdPerson: the orbit camera behind and above the knight in a torch-lit town square at night, with health and stamina bars top left](images/third-person-chase-camera.jpg)
+
 ## Setting up an orbit camera
 
 Create it once the player exists, and update it in the scene's `onPostUpdate()`, after
@@ -66,6 +68,8 @@ the player has locked onto, and keeps it there as either moves. Look input is ig
 locked, so the look stick is free for switching targets, and the tilt eases to `lockTilt`;
 a positive one looks down on the ground between them, which makes the distance easier to judge. `releaseLock()` lets go, leaving the
 camera where it is; it also lets go by itself when the entity is invalidated.
+
+![Locked on in examples/thirdPerson's combat field: the camera looks past the knight at a skeleton](images/third-person-lock-on.jpg)
 
 ```brighterscript
 if m.game.controls.isActionPressed("lockOn")
@@ -143,7 +147,9 @@ m.orbit = new BGE.OrbitCamera(camera, m.player, {
 })
 ```
 
-Only 3D colliders (`BoxCollider3d`, `SphereCollider3d`) block the camera. Put walls and
+Give obstacles 3D colliders (`BoxCollider3d`, `SphereCollider3d`). The boom tests 2D colliders
+too, but a ray treats one as a column that runs the whole length of z. See
+[3D Colliders and Raycasts](/colliders-3d#flags) for how flags apply to raycasts. Put walls and
 buildings on their own `memberFlags` bit and set the boom's `collidableFlags` to it, so the
 characters' own colliders don't pull the camera in:
 
@@ -191,6 +197,8 @@ block on something besides the map's solid cells.
 wants the opposite: a camera that trails behind along its heading and pitch and rolls with its
 bank. `BGE.ChaseCamera` does that, eased so turns swing the view round instead of snapping it.
 It has no look input; you pass the target's attitude to `update()` each frame.
+
+![examples/flightSim: a ChaseCamera trailing a red biplane over voxel hills](images/chase-camera-flightsim.jpg)
 
 ```brighterscript
 override sub onCreate(args as roAssociativeArray)
