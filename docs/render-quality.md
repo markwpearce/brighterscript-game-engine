@@ -11,6 +11,8 @@ Each level is a bundle of draw-quality settings: how far the camera draws, how m
 slices a ground plane uses, how small triangles are drawn, and when billboards can
 use a cheaper draw call.
 
+![The same view in examples/flightSim at Basic (left) and Ultra (right): Basic draws fewer, wider voxel columns and fades the far hills into fog much sooner](images/render-quality-basic-vs-ultra.jpg)
+
 ## Default: chosen for the device
 
 You don't need to do anything. When your `Game` is created, the engine picks a

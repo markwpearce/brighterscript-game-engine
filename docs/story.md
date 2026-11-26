@@ -14,6 +14,8 @@ each node has been visited). Drawing the text, buttons and portraits is up to
 your game, so the same story code can sit behind a text box, a visual novel
 screen or a talking NPC.
 
+![examples/visualnovel: two portrait cards over a starship background, with the speaker's name and line in a text box below](images/story-visualnovel-dialogue.jpg)
+
 ## A first story
 
 A story is a JSON file (or an AA literal in code, which parses to the same
