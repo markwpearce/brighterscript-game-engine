@@ -84,6 +84,24 @@ Each frame is a `BGE.SpriteFrameRect` (see [Drawables and Scene Objects](/drawab
 
 A missing or malformed `.json`, or a sheet that won't load, fails the task with a message naming the file, and the atlas isn't registered, so `getSpriteAtlasFrames()` logs a warning and returns `invalid`. Given a URL, the `.json` and its sheets are all downloaded (see [Loading from URLs](#loading-from-urls)). `game.loadSpriteAtlas(name, path)` does the same in one frame, for local files.
 
+### Smaller sheets on HD devices
+
+A Roku Express has 64 MB of texture memory, and a big character sheet can take 10 MB of it. On an
+HD or SD Roku, `loadSpriteAtlas()` loads the sheets at 75% of their size, 56% of the memory,
+when the `.json` lists their sizes (`"sheetSizes": [[2042, 1202]]`, which
+`tools/render-character.py --packed` writes). Sprites made from them draw the same size, from
+fewer texels: `SpriteFrames.texelScale` (1.33 at 75%) carries through to each sprite's
+`Drawable.texelScale`. Pick the scale yourself with `scale`, e.g. full size for a sprite drawn big
+right in front of the camera:
+
+```brighterscript
+loader.loadSpriteAtlas("knight", "pkg:/sprites/knight.json", {scale: 1})
+```
+
+`BGE.getDefaultSpriteAtlasScale()` is the default. A packed atlas's frames sit edge to edge, so a
+shrunk frame can pick up a sliver of its neighbour along an edge. `game.loadSpriteAtlas()` always
+loads at full size.
+
 ## Tiled maps
 
 `loader.loadTiledMap("level1", path)` loads a map made in Tiled, its external `.tsj` tilesets and every tileset image, from a local path or a URL; `game.getTiledMap("level1")` then returns it. See [Tile Maps](/tile-maps#loading).

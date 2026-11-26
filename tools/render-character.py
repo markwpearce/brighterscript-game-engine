@@ -320,7 +320,8 @@ def pack_trimmed(cells, cw, ch, out, sheet_size):
         save_webp(pixels, path)
         names.append(os.path.basename(path))
     with open(base + ".json", "w") as f:
-        json.dump({"sheets": names, "frames": frames}, f, separators=(",", ":"))
+        # sheetSizes lets the engine load the sheets at a reduced size (SpriteAtlasLoadOptions.scale)
+        json.dump({"sheets": names, "sheetSizes": [[int(w), int(h)] for w, h in sizes], "frames": frames}, f, separators=(",", ":"))
     return sum(w * h * 4 for w, h in sizes)
 
 
