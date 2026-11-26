@@ -197,9 +197,6 @@ about one rect per band it spans, so smaller bands follow it more closely for mo
 | High   | 3                   |
 | Ultra  | 2                   |
 
-At Basic, `fogSilhouetteHulls` is false and silhouettes are screen boxes, as with
-`fog.silhouetteHulls = false`: outlines cost a Roku Express ~20 ms a frame in thirdPerson's town.
-
 Past `wallLodDistanceFraction` of the current draw distance, walls draw one strip per two rays,
 twice as wide: far walls are small on screen, and each strip costs about the same however big
 it is. Every ray still closes exactly, so hiding and floors are unchanged.
