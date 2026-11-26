@@ -154,13 +154,14 @@ Up or Down.
 Call `game.focusManager.ensureFocusSeeded()` at the end of `onCreate()`. Without it, nothing
 is focused until the player's first press.
 
-Keep the widgets you want to reach in one container, in the order a player should move
-through them.
+The focus order is shared by every container, not kept per container, so add the widgets in
+the order a player should move through them. Widgets in a container with `focusEnabled = false`
+never take focus.
 
 ## Checkbox
 
-`BGE.UI.Checkbox` is a box with a label to its right. Its box is 20 by 20 pixels unless you
-set `width` and `height`. Its fields and methods:
+`BGE.UI.Checkbox` is a box with a label to its right. The box is a square as wide as the
+widget's `height`, which is 20 pixels by default. Its fields and methods:
 
 - `checked` is the current state, `false` by default.
 - `setLabel(text)` sets the label.
@@ -207,7 +208,8 @@ Set `style` to choose how it works. The default is `BGE.UI.SelectStyle.inline`.
   wider than their slot are drawn past it and not clipped.
 
 Every style fires `onChanged` with the select as its argument when the selection changes.
-In `popup` style that happens on commit, not while the highlight moves.
+In `popup` style it fires on every commit, even if the player picks the option that was
+already selected, and not while the highlight moves.
 
 ```brighterscript
 m.difficultySelect.style = BGE.UI.SelectStyle.popup
@@ -228,7 +230,7 @@ m.difficultySelect.options = ["Easy", "Normal", "Hard", "Expert"]
   (unless a `keyboard` is set, in which case OK opens the keyboard). Both are called with the
   input as their argument.
 
-Left and Right move the caret, Backspace deletes before it and Enter submits. The field
+Left and Right move the caret, Backspace deletes before it and Enter acts like OK. The field
 doesn't clip or scroll, so text wider than the field runs past its right edge. Set
 `maxLength` to something that fits.
 

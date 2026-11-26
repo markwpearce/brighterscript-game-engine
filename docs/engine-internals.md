@@ -159,8 +159,9 @@ discrete stepping instead. If `analogAxisName` names an axis you forgot to actua
 `controls.bindAxis()`, `update()` detects that (`ControlMap.hasAxisBinding()`) and falls back to the
 discrete stepper instead of leaving the cursor unresponsive.
 
-For game code, see [Form Widgets](/form-widgets). The sections below describe the form widgets
-(`Checkbox`, `Slider`, `Select`, `TextInput`, `Keyboard`, `Label`) for engine work.
+For game code, see [Form Widgets](/form-widgets). The sections below cover how the widgets work
+inside: background images, `Button` sounds, the popup `Select`, text entry and the on-screen
+keyboard.
 
 ### Widget background images: 9-patch and plain
 
