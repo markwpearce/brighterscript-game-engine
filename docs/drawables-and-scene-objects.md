@@ -40,8 +40,8 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | Drawable             | SceneObject             | What it draws                                                              |
 | --------------------- | ------------------------ | --------------------------------------------------------------------------- |
 | `Image`               | `SceneObjectImage`       | A single bitmap region - the basic sprite.                                  |
-| `Sprite`              | `SceneObjectImage`       | An `Image` subclass that indexes into a sprite sheet by frame number.        |
-| `AnimatedImage`       | `SceneObjectImage`       | A `Sprite` that advances its own frame index over time.                     |
+| `AnimatedImage`       | `SceneObjectImage`       | An `Image` that steps through a list of regions over time.                   |
+| `Sprite`              | `SceneObjectImage`       | An `AnimatedImage` that cuts its frames from a sprite sheet and plays named animations. |
 | `DrawableRectangle`   | `SceneObjectRectangle`   | A filled and/or outlined rectangle.                                         |
 | `DrawableCircle`      | `SceneObjectCircle`      | A filled and/or outlined circle - foreshortens into an ellipse when oriented in 3D. |
 | `DrawableSphere`      | `SceneObjectCircle`      | A `DrawableCircle` that always renders as an undistorted circle, regardless of camera angle. |
@@ -49,18 +49,50 @@ facing from the game camera. A `DrawableText` with no font uses the system defau
 | `DrawablePolygon`     | `SceneObjectPolygon`     | A filled (its convex hull, or as drawn with `concave`) or outlined polygon (see below). |
 | `DrawableLine`        | `SceneObjectLine`        | A single line segment between two points.                                   |
 | `DrawableText`        | `SceneObjectText`        | Text rendered with a `roFont`.                                              |
-| `Model3d`             | `SceneObjectModel`       | A triangle-mesh 3D model (loaded via `Game.load3dModel`, see `STLParser`).   |
+| `DrawableModel`       | `SceneObjectModel`       | A triangle-mesh 3D model. The mesh itself is a `Model3d` (loaded via `Game.load3dModel`, see `STLParser`). |
 | `DrawablePlane`       | `SceneObjectPlane`       | A textured ground/floor plane, rendered with a Mode-7-style perspective warp (see below). |
 | `DrawableWalls`       | `SceneObjectWalls`       | A level's walls as segments at any angle with their own heights - one textured strip per few screen pixels (see below). |
 | `DrawableGridWalls`   | `SceneObjectWalls`       | `DrawableWalls` built from a grid maze's map (see below). |
 | `DrawableWall`        | `SceneObjectWall`        | A freestanding upright wall between two floor points, its texture stretched or tiled (see below). |
 | `DrawableParallaxLayer` | `SceneObjectParallaxLayer` | A scrolling/tiling background (or foreground) layer that moves at a configurable fraction of the camera's movement. |
 | `DrawableParticles`   | `SceneObjectParticle`    | A whole emitter's worth of simulated particles (lines, rectangles, or images), drawn through one `SceneObject` for the entire emitter (see below). |
-| _(billboard drawables, e.g. images used with `directToCamera`/`directScaled` draw modes)_ | `SceneObjectBillboard` | Always faces the camera regardless of its own rotation. |
+| `DrawableSkybox`      | `SceneObjectSkybox`      | A cylindrical panorama behind a `Camera3d` scene that tracks the camera's yaw, pitch and roll. |
+| `DrawableVoxelTerrain` | `SceneObjectVoxelTerrain` | Comanche-style hills from a heightmap, `Camera3d` only (see [Voxel Terrain](/voxel-terrain)). |
+
+`SceneObjectBillboard` has no drawable of its own. It's the abstract base of `SceneObjectImage`,
+`SceneObjectRectangle`, `SceneObjectCircle`, `SceneObjectPolygon`, `SceneObjectText` and
+`SceneObjectModel`, and holds their shared quad, draw-mode and outline code.
 
 Every `SceneObject` subclass lives under `src/source/engine/renderer/sceneObjects/`. If you're
 adding a new visual primitive, the pair goes together: a `Drawable` subclass that computes its own
 geometry/transform, and a `SceneObject` subclass whose `addToRenderer` call the `Drawable` invokes.
+
+## Images and sprites
+
+`Image` draws one `roRegion`. Its size is the region's size. `AnimatedImage` extends it with a
+list of regions that it steps through over `animationDurationMs`, looping (`animationTween`
+picks the easing, `"LinearTween"` by default). `Sprite` extends `AnimatedImage`: it cuts its
+frames from a sprite sheet of equal cells and plays named animations. All three draw through
+`SceneObjectImage`, and `GameEntity` has a helper for each:
+
+```brighterscript
+' one region
+m.addImage("ship", CreateObject("roRegion", m.game.getBitmap("ship"), 0, 0, 64, 64))
+' regions played in turn, the whole cycle every 560 ms
+m.addAnimatedImage("flame", flameRegions, {animationDurationMs: 560})
+' 128x128 cells, numbered left to right, top to bottom
+boom = m.addSprite("boom", m.game.getBitmap("boom"), 128, 128)
+boom.addAnimation("boom", {startFrame: 0, frameCount: 64}, 60, BGE.SpritePlayMode.Forward)
+boom.playAnimation("boom")
+```
+
+`addAnimation(name, frameList, frameRate, playMode)` takes the frames as an array of cell
+indexes or as `{startFrame, frameCount}`, a frame rate in frames per second (above 0, fractions
+are fine), and a `BGE.SpritePlayMode`: `Loop` (the default), `Forward` or `Reverse` (play once
+and hold the last frame), or `PingPong`. It returns the new `BGE.SpriteAnimation`, or `invalid`
+if the name is taken or the rate isn't above 0. `playAnimation(name, restart = false)` switches
+to an animation; calling it again with the one already playing keeps its place. Until
+`playAnimation` is called, a sprite shows a still cell (`index`, 0 by default).
 
 ## Rectangles
 
@@ -177,7 +209,7 @@ hold a bitmap of its own.
 
 In the oriented and solid draw modes, a filled rectangle is drawn as **texture columns**: tinted
 columns of a shared white texture, projected straight onto the canvas while it moves (see
-[Texture columns](#texture-columns-for-flat-quads) below). Once still, it fills a **temp bitmap** with
+[Texture columns](#texture-columns-for-flat-quads) above). Once still, it fills a **temp bitmap** with
 two triangles and blits that, exactly like a polygon does. Filling a rotated quad is far too expensive
 to repeat every frame for something that hasn't moved - skipping the cache here cost `examples/3d`'s
 RectanglesScene about two thirds of its frame rate (22 FPS vs 63) before it was put back. Whether a
@@ -192,9 +224,8 @@ runs on for its paddle, ball and every brick.
 Keeping the billboard base (rather than making a rectangle a 4-point `DrawablePolygon`) is what buys
 the rest: backface culling and per-face `isShaded` shading, both of which need the surface normal a
 quad has and an arbitrary polygon doesn't; the direct/billboard draw modes, which
-`SceneObjectPolygon` ignores entirely; and a frustum check over the 4 already-computed world corners
-instead of `SceneObjectPolygon.getPositionsForFrustumCheck`'s scan-every-vertex bounding cube (whose
-8 corners collapse to the same 4 points for a flat quad anyway - pure overhead here).
+`SceneObjectPolygon` ignores entirely. (The frustum check is the same either way: a rectangle checks
+its 4 already-computed world corners, and a polygon checks its own world points.)
 
 ## Circles and Spheres
 
@@ -218,7 +249,7 @@ so it uses two different techniques for its fill and its outline:
   circle once (lazily, the first time anything asks for it) and every `DrawableCircle`/
   `DrawableSphere` in that `Renderer` shares the same bitmap - `SceneObjectCircle` just returns a
   region of it from `getRegionWithIdToDraw()`, exactly the way `SceneObjectImage` returns a region
-  of the bitmap its `Image` was constructed with. This gets the same pinned-corners warp,
+  of the bitmap its `Image` was constructed with. This gets the same texture columns,
   color-tinting, and temp-bitmap caching an `Image` gets in the oriented draw modes, for free.
 - **Outline**: computed fresh, not baked into the texture. `outlineSegments` (default 24) points
   are placed around the ellipse inscribed in the object's own already-transformed quad -
@@ -226,14 +257,12 @@ so it uses two different techniques for its fill and its outline:
   quad's own corner vectors, so the outline automatically foreshortens along with the fill in the
   oriented draw modes without a second world-to-canvas transform pass.
 
-A texture-backed fill means a circle pays the same **pinned-corners** cost an `Image` pays in the
-oriented/solid draw modes - real per-pixel perspective warping, not the cheap flat 2-triangle fill
-`DrawableRectangle`/`DrawablePolygon` get away with, since neither of those has a texture to sample.
-`SceneObjectCircle` opts `solid`/`solidDrawBackFace` into the same temp-bitmap caching the oriented
-modes already get, by overriding `usesTempBitmap()` (the same extension point
-`SceneObjectRectangle` overrides for its own reason - skipping the cache for an unfilled
-rectangle), since - unlike `DrawableRectangle`, whose solid-mode fill is cheap enough not to need
-it - a circle's solid fill is exactly as expensive as its oriented fill.
+A texture-backed fill means a circle draws as [texture columns](#texture-columns-for-flat-quads) in
+the oriented and solid draw modes, the same as an `Image`, so its solid fill costs exactly as much
+as its oriented fill. `SceneObjectCircle` opts `solid`/`solidDrawBackFace` into the same temp-bitmap
+caching the oriented modes already get, by overriding `isEligibleForFastDrawCheck()`. The base
+`usesTempBitmap()` then caches once the circle is still, unless its quad is a plain rotated
+rectangle that the one-call fast path can draw.
 
 `DrawableSphere` is a `DrawableCircle` that forces `drawMode = SceneObjectDrawMode.directScaled` in
 its own constructor, so it renders identically in every way except one: it never turns to face a
@@ -324,7 +353,9 @@ sprite.playOrientedAnimation("attack", true) ' Sprite.playAnimation() takes it t
 ```
 
 An animating sprite is redrawn and re-sorted every frame. For a crowd, give an animation a far
-stand-in, such as one frame of it, that plays past `lodDistance` from the camera (across x/z). The distance is
+stand-in, such as one frame of it, that plays past `lodDistance` from the camera (across x/z).
+`lodDistance` is the distance at Medium quality: the render quality's `animationLodDistanceScale`
+multiplies it (0.6 at Basic up to 2.0 at Ultra; see [Render Quality](/render-quality)). The distance is
 rechecked every `lodCheckSeconds` (0.5), at a different moment for each sprite.
 Animations without a stand-in (a walk) carry on as they are:
 
@@ -332,7 +363,7 @@ Animations without a stand-in (a walk) carry on as they are:
 sprite.addOrientedAnimationColumns("still", [0], 4, 1)
 sprite.lodDistance = 320
 sprite.setLodAnimation("idle", "still")
-sprite.playOrientedAnimation("idle") ' plays "still" while the camera is over 320 away
+sprite.playOrientedAnimation("idle") ' plays "still" while the camera is over 320 away (at Medium)
 ' sprite.isLodFar() says which side it was last time, e.g. to only wander about where seen
 ```
 
@@ -378,6 +409,39 @@ Changing `points`, `concave`, `fillRule` or the color redraws the polygon. If a 
 object in a notch may be ordered against it when it needn't be, but never wrongly, and polygons
 are never occluders (see "Occluders and visibility"), so a notch can't hide what's behind it.
 
+## Lines
+
+`DrawableLine` draws a single line segment between two points, in the drawable's own space (moved
+by its owner and its own `offset`, `rotation` and `scale`). There's no `GameEntity` helper, so build it and attach it with `addDrawable`:
+
+```brighterscript
+line = new BGE.DrawableLine(m, BGE.Math.VectorOps.create(0, 0, 0), BGE.Math.VectorOps.create(0, 200, 0), {color: BGE.ColorsRGB.White})
+m.addDrawable("pole", line)
+```
+
+The ends are the public `startPosition` and `endPosition` fields. It draws in `color` and
+`alpha`, always one pixel wide, and ignores the draw mode: the two ends are projected and joined.
+
+## Text
+
+`DrawableText` draws a string in an `roFont`. Build it with `new BGE.DrawableText(owner, text,
+font, args)`; with no font it uses the game's `"default"` font (or the system default with no
+`Game`).
+
+```brighterscript
+m.label = new BGE.DrawableText(m, "-12", m.game.getFont("damage"), {color: BGE.ColorsRGB.Red})
+m.label.setAnchor(0.5, 1)
+m.addDrawable("label", m.label)
+```
+
+The text is drawn into its own bitmap, which is only redrawn when `text`, `textColor` or
+`alignment` changes. Assign `text` directly to change it. To change the font, call `setFont()`:
+a plain assignment to `font` isn't noticed. `textColor` is packed **RGBA** (white by default),
+and the result is tinted by `color` like any drawable, so leaving `textColor` white and setting
+`color` works well. `alignment` (`BGE.UI.HorizAlignment`) aligns the lines of a multi-line
+string (split on `Chr(10)`). Text draws through `SceneObjectText`, a billboard, so it takes the
+usual draw modes and `setAnchor()`.
+
 ## SceneObjectDrawMode
 
 Every `SceneObject` has a `SceneObjectDrawMode`, controlling how it reacts to the camera's rotation
@@ -401,7 +465,7 @@ convention, so its outside. The modes without `DrawBackFace` draw only faces tur
 camera, and `isShaded` shades each face - by how squarely it faces the camera, or by the scene's
 lights once it has some (see [Lighting](#lighting)).
 
-`matchCamera`, `directToCamera` and `directScaled` are the **screen-aligned** (billboard) modes -
+`matchCamera`, `directToCamera`, `directScaled` and `axisAligned` are the **screen-aligned** (billboard) modes -
 `isScreenAlignedDrawMode()` - and they keep an object square to the screen instead of turning it
 in 3D. `directScaled` is the Doom-sprite one: it faces the camera and its on-screen size comes
 from how far away it is, *independently of its own rotation*. That independence is the whole
@@ -625,8 +689,8 @@ With fog on, the draw distance stays at the camera's `maxDrawDistance` at every
 [render quality](/render-quality) level, so the fog's edge, the skyline and every fade stay put
 while the level changes: the level only changes how cheaply things inside it are drawn. To have
 the draw distance shrink at lower levels again for the speed, set `fog.followsQuality = true`;
-changes then ease in over `fog.qualityTransitionSeconds` (default 4) instead of the camera's
-`drawDistanceTransitionSeconds` (unless that's 0, which still applies them at once), so the fog
+changes then ease in over `fog.qualityTransitionSeconds` (default 4) when that's longer than the
+camera's `drawDistanceTransitionSeconds` (a camera value of 0 still applies them at once), so the fog
 creeps in rather than jumps.
 
 All fog is drawn before the objects it's behind. Lower `fog.silhouetteStartAlpha` (default 1)
@@ -700,10 +764,12 @@ A few things the renderer enforces, which are easy to trip over:
 - The drawable must be **fully opaque** (an image with no transparent pixels, a model with no
   translucent colors). The engine can't check this, so anything behind a see-through occluder
   would vanish.
+- Only a drawable drawn by `SceneObjectImage`, `SceneObjectRectangle` or `SceneObjectModel` can occlude. Any
+  other type logs a warning and draws normally.
 - The owner must be `isStatic`, and the drawable's draw mode must be an oriented one
-  (`oriented`, `orientedDrawBackFace`, `solid`, `solidDrawBackFace`). Screen-aligned modes
-  (`matchCamera`, `directToCamera`, `directScaled`) are ignored as occluders, and so is any
-  occluder under a `Camera2d`.
+  (`oriented`, `orientedDrawBackFace`, `solid`, `solidDrawBackFace`). `matchCamera` uses the
+  camera's mode, so it occludes on a `Camera3d`. Screen-aligned modes (`directToCamera`,
+  `directScaled`, `axisAligned`) are ignored as occluders, and so is any occluder under a `Camera2d`.
 - `isOccluder` can be turned on or off at any time, e.g. when a wall becomes see-through.
 - A standalone `SceneObject` with no owner registers itself with `renderer.markOccluder()`.
 - Occlusion is conservative: an object is only hidden when it is clearly behind the occluders,
@@ -752,23 +818,34 @@ moved (0 under rotate). Shear only reads as looking up or down at modest angles.
 ## How `Renderer.render()` actually draws a frame
 
 `Renderer.render()` (`engine/renderer/Renderer.bs`) runs once per frame, per canvas (there's a
-separate `Renderer` for the game canvas and the UI canvas). It does three things, in order:
+separate `Renderer` for the game canvas and the UI canvas). It runs these stages in order. The
+names are the ones `profileStages` times them under:
 
-1. **`updateSceneObjects()`** - recomputes world positions and camera-distance for every registered
-   `SceneObject` (see "Per-object update", below).
-2. **Sort by depth** - by `negSortDepth` (a stable sort), so farther objects draw first and nearer
-   objects draw over them (simple painter's algorithm, no z-buffer). That's `negDistanceFromCamera`,
-   the depth along the view, unless `Camera.sortsByGroundDistance` is on: then it's the distance
-   ahead across the ground, ignoring height. Turn that on for a camera that tilts down at sprites
-   standing among tall props (a chase camera): along a tilted view a higher point counts as nearer,
-   so a tall prop's centre sorts in front of a sprite standing nearer than it. Overlap clusters
-   (`computeOverlapClusters`) still order their primitives by view depth.
-3. **Draw in two passes**: every `SceneObjectPlane` first, then every other enabled `SceneObject`
-   whose `negDistanceFromCamera < 0` (i.e. in front of the camera). Planes are drawn first because
-   they're meant to be a ground/floor - drawing them before anything else means normal
-   painter's-algorithm depth sorting for everything else (which _does_ sort against the camera
-   distance) still looks correct sitting on top of the plane. Objects hidden behind an occluder
-   are skipped before this point (see "Occluders and visibility").
+1. **update** - refreshes lighting, then `updateSceneObjects()` recomputes world positions and
+   camera distance for every registered `SceneObject` (see "Per-object update", below).
+2. **occlusion** - works out which objects are hidden behind an occluder, so they're skipped
+   later (see "Occluders and visibility"). Overlap clusters are grouped here too, when
+   `computeOverlapClusters` is on.
+3. **sort** - sorts by `negSortDepth` (a stable sort), so farther objects draw first and nearer
+   ones draw over them (painter's algorithm, no z-buffer). Skipped when nothing needs re-sorting.
+4. **skybox** - draws any `SceneObjectSkybox`.
+5. **fogBackdrop** - fills the fog backdrop behind everything (`Camera3d` only, see [Fog](#fog)).
+6. **planes** - draws every `SceneObjectPlane`, so the ground sits under everything else.
+7. **fogSilhouettes** - draws the fog-coloured shapes for silhouette casters (`Camera3d` only).
+8. **terrain** - draws the voxel terrain, if there is one (see [Voxel Terrain](/voxel-terrain)).
+9. **walls** - draws the level walls (`SceneObjectWalls`), if there are any.
+10. **objects** - draws every other enabled object in sorted order, skipping those behind the
+    camera. Once anything is static, this walks the static-geometry BSP instead.
+11. **clusters** - draws the primitives of overlap clusters, then redraws terrain and walls over
+    any object they should hide.
+12. **finish** - calls `Finish()` on the canvas, unless it's a double-buffered `roScreen`.
+
+The sort depth is `negDistanceFromCamera`, the depth along the view, unless
+`Camera.sortsByGroundDistance` is on: then it's the distance ahead across the ground, ignoring
+height. Turn that on for a camera that tilts down at sprites standing among tall props (a chase
+camera): along a tilted view a higher point counts as nearer, so a tall prop's centre sorts in
+front of a sprite standing nearer than it. Overlap clusters (`computeOverlapClusters`) still order
+their primitives by view depth.
 
 ### Per-object update (`SceneObject.update`/`draw`)
 
@@ -910,7 +987,12 @@ face and strip width (`BGE.TriangleColumnCuts`, via `Model3dTexture.getColumnCut
 every instance of the model, so drawing a face only projects its strips. A moving model draws its
 faces straight to the canvas, and a still one draws them once into its temp bitmap and blits that.
 With `useImpostor` (the default), only the model's own movement or turning counts: while just the
-camera moves, the impostor reuses its last capture.
+camera moves, the impostor reuses its last capture, scaled and shifted to fit. That only lasts
+while the fit stays within the render quality's limits: `modelImpostorError` (how far off it
+may be), `modelImpostorMaxSizeChange` (how much it may grow or shrink),
+`modelImpostorMaxAngleDegrees` (how far the view direction may turn) and
+`modelImpostorMaxDepthRatio` (how deep the model may be for its distance). Past them it falls back
+to strips (`useImpostorStrips`, on by default) or redraws the model.
 Its `impostor*` fields tune that; `applyImpostorOptions()` sets them from a bag of short names
 that can come straight from deep-link params (`model.applyImpostorOptions(params.pick(["strips",
 "stripStep"]))`; see `BGE.ImpostorOptions`).
@@ -1062,8 +1144,8 @@ size (and consider `maxDrawDistance`) with that in mind: a small tile paired wit
 `maxDrawDistance` builds a much bigger cached bitmap than a coarser tile would.
 
 Note that `maxDrawDistance` itself may be silently capped below whatever you set it to: `Camera3d`
-clamps it per-device (900 on the BrightScript Simulator and, pending real hardware testing, on
-SD/HD devices too; effectively unlimited on FHD) every frame, so a plane's actual far distance and
+clamps it per-device (900 on the BrightScript Simulator, 2500 on FHD devices, 1000 on HD and 30 on
+SD) every frame, so a plane's actual far distance and
 supertexture size follow the capped value, not the requested one.
 
 ### Texture scale
@@ -1105,11 +1187,12 @@ for the full design.
 
 ### Gotchas if you touch this code
 
-- **Scratch bitmaps are pooled and not cleared** (see the `ScratchBitmapPool` note above) - this bit
+- **Scratch bitmaps are reused and not cleared** - this bit
   particularly hard here, because the visual symptom of *not* clearing looked exactly like the
   texture "wrapping/repeating" the further you got from its valid bounds. It wasn't a sampling-wrap
-  bug at all: `populatePerspectiveBmp()`'s scratch region and `prePerspectiveBmp` are reused,
-  uncleared pooled bitmaps, and once the camera's view moved mostly or entirely outside the
+  bug at all: `populatePerspectiveBmp()`'s scratch bitmap and `prePerspectiveBmp` are the plane's own
+  persistent bitmaps (not from `ScratchBitmapPool`, which is only used for the mirrored-and-rotated
+  blit), reused uncleared each frame, and once the camera's view moved mostly or entirely outside the
   texture's valid area, the rotated draw call landed off-canvas and left the *previous, unrelated
   frame's* leftover pixels showing through - which happened to look like the track's own curb
   pattern, because that's literally what it was. Both bitmaps must be `Clear()`-ed before drawing
@@ -1123,8 +1206,7 @@ for the full design.
   moving point, don't use `camera.setTarget(fixedPoint)` every frame if you want the camera to turn
   the way a driver's/person's head turns - `setTarget` points the camera *at* that fixed point,
   which orbits the camera around it as its own position changes, rather than rotating the camera's
-  own view. Set `camera.orientation` directly from your desired look direction instead (see
-  `examples/terrain/src/source/Scenes/MainScene.bs`'s `updateCameraOrientation`).
+  own view. Set `camera.orientation` directly from your desired look direction instead.
 
 ## Skybox (`DrawableSkybox` / `SceneObjectSkybox`)
 
@@ -1162,9 +1244,11 @@ geometry instead of a planar ground.
 
 **Note:** `Camera2d` does not support skyboxes; this feature is 3D-only (issue #65).
 
-**Note:** unlike `SceneObjectPlane`, `SceneObjectSkybox` has no per-frame dirty-check caching yet—it
-recomputes and re-blits its visible band every frame even when yaw/pitch/roll haven't changed. Correct,
-just not optimized; tracked as a follow-up issue.
+`SceneObjectSkybox` caches its last drawing. While the camera's orientation, roll, pitch shift and
+field of view, the canvas size, the texture and the skybox's own fields are all unchanged, it blits
+that drawing again in one call instead of rebuilding its visible band. Camera position isn't
+checked: a skybox is centered on the camera, so moving without turning changes nothing. After
+swapping in a same-sized region, call `invalidateGeometry()` so it redraws.
 
 ## Level walls (`DrawableWalls` / `SceneObjectWalls`)
 
@@ -1241,7 +1325,7 @@ walls.addToRenderer(game.gameRenderer)
 
 Row 0 is -z and column 0 is -x; `origin` is the -x/-z corner of cell (0, 0) and its `y` is the
 floor height. Anything outside the grid counts as solid, so an unclosed map still has walls
-(they use `outsideTexture`, defaulting to the first legend entry). A legend key is one
+(they use `outsideTexture`, defaulting to the texture of the alphabetically first legend key). A legend key is one
 character, and since the legend is an associative array, characters differing only by case
 (`"a"`/`"A"`) collide. Each texture is an `roRegion` one cell wide and one wall height tall.
 To change the maze, pass the new map to `walls.setMap()`, or call it again with `walls.map`
