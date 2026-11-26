@@ -56,10 +56,11 @@ colours. Anything behind a see-through occluder will vanish.
 | --- | --- | --- |
 | Image (`Image`, `AnimatedImage`, `Sprite` via `SceneObjectImage`) | Yes | Only if it has no transparent pixels. The engine can't check that. |
 | Rectangle (`DrawableRectangle`) | Yes, when `filled` | An outline-only rectangle draws but hides nothing. |
-| Model (`DrawableModel`) | Yes | Its opaque faces. A static model is merged into convex panels the first time it registers. |
-| Freestanding wall (`DrawableWall`) | Yes | It is an Image, so it occludes by default. Set `wall.isOccluder = false` where you can see through it. |
+| Model (`DrawableModel`) | Yes | Only if every face is opaque. The engine can't check that. A static model is merged into convex panels the first time it registers. |
+| Freestanding wall (`DrawableWall`) | Yes | It sets `isOccluder` by default. Set `wall.isOccluder = false` where you can see through it. |
 
-Everything else can't occlude: circles, polygons, lines, text and particles. Level walls
+Everything else can't occlude: circles, polygons, lines, text, particles, planes and skyboxes
+(`DrawablePlane` and `DrawableSkybox` are Images, but they can't occlude). Level walls
 (`DrawableWalls`, `DrawableGridWalls`) are a separate system. They hide sorted objects in
 their own pass, not through `isOccluder`.
 
@@ -75,29 +76,32 @@ The renderer occludes only with oriented draw modes:
 - `oriented`, `orientedDrawBackFace`
 - `matchCamera`, which on a `Camera3d` draws as oriented
 
-These are ignored, and the drawable draws normally with a warning logged:
+These are ignored, and the drawable draws normally:
 
-- the screen-aligned modes: `directToCamera`, `directScaled` and `axisAligned`
-- the wireframe modes
+- the screen-aligned modes: `directToCamera`, `directScaled` and `axisAligned`. The renderer
+  logs a warning when it turns one down.
+- the wireframe modes, with no warning
 
-A quad occludes only while it faces the camera. A model occludes with the faces that face the
-camera. The `*DrawBackFace` modes also count the faces turned away. Use one of those for an
-occluder you see from the inside, such as the walls of a room.
+An image or rectangle occludes only while it faces the camera, unless its mode is
+`orientedDrawBackFace`. A model occludes with the faces that face the camera, and in
+`solidDrawBackFace` or `orientedDrawBackFace` with the faces turned away too. Use one of those
+for an occluder you see from the inside, such as the walls of a room.
 
 ## How the span map hides objects
 
 Each frame the renderer does this:
 
-1. It projects every registered occluder to the canvas. Each one becomes a convex polygon.
-   If there are more than `maxOccluders` (32 by default), it keeps the largest by screen area.
+1. It projects every registered occluder to the canvas as convex polygons: one for an image
+   or rectangle, one per merged panel for a model. If there are more than `maxOccluders`
+   polygons (32 by default), it keeps the largest by screen area.
 2. It builds a span map. The canvas is cut into `occlusionBandCount` horizontal bands (45 by
    default). For each band, the map holds the x ranges that some occluder covers across the
    whole band. Each range keeps the farthest depth of the occluders merged into it. That keeps
    the test conservative: an object must be behind all of them.
 3. It tests each object that could be hidden. The object's canvas box is grown by
-   `occlusionMargin` (2 pixels by default). The object is hidden only when, in every band the
-   box touches, one merged range covers the whole box, and that range's depth is nearer than the
-   object's nearest point.
+   `occlusionMargin` (2 pixels by default), plus its `outlineWidth` if it has an outline. The
+   object is hidden only when, in every band the box touches, one merged range covers the whole
+   box, and that range's depth is nearer than the object's nearest point.
 4. Hidden objects are skipped in the draw loop. Their `getVisibility()` reports
    `BGE.VisibilityState.occluded`.
 
@@ -105,7 +109,8 @@ Each frame the renderer does this:
 
 The test only ever hides something it can prove is covered. If any point of the object fails
 to project, the object is drawn. Anything partly off the canvas is drawn too. Planes, skyboxes,
-parallax layers and text are never hidden. Occluders are never hidden either.
+parallax layers, level walls, voxel terrain and text are never hidden. Occluders are never
+hidden either.
 
 ## Approximate drawing and the occluder's claim
 
@@ -132,8 +137,8 @@ A change takes effect on the next frame. The renderer then redraws the cached bi
 
 ## Settings
 
-These are fields on the `Renderer` (`m.game.canvas.renderer`). None of them changes what the
-player sees, so they aren't part of the render quality levels.
+These are fields on the `Renderer` (`m.game.canvas.renderer`). They aren't part of the render
+quality levels.
 
 | Field | Default | What it does |
 | --- | --- | --- |
@@ -165,8 +170,10 @@ compare the frame times. `examples/terrain/src/source/TerrainProfiler.bs` runs t
 - **Nothing without occluders.** With no occluders registered, the renderer does one check
   per frame.
 - **The map is rebuilt only when it changes.** That happens when the camera moves, an occluder
-  is added or removed, the projection changes, or the canvas size changes. A still camera reuses
-  the map, and an object's verdict stands until the object or the map changes.
+  is added or removed, an occluder starts or stops counting (its alpha, fade or enabled state),
+  its draw path changes how much it claims, the projection or canvas size changes, or an
+  occlusion setting changes. A still camera with still occluders reuses the map, and an
+  object's verdict stands until the object or the map changes.
 - **Building costs more with more occluders and bands.** The work grows with the number of
   bands each occluder covers. `maxOccluders` caps the number used.
 - **Moving frames are the expensive ones.** The occluders are projected again, and every
@@ -175,7 +182,8 @@ compare the frame times. `examples/terrain/src/source/TerrainProfiler.bs` runs t
   the best case. A cloud of cheap sprites barely breaks even.
 - **Models are merged once.** The first time a static model registers, its coplanar,
   edge-sharing triangles are merged into convex panels. That is done once per geometry change.
-  A model with many small irregular faces gives many panels, and so costs more.
+  A model with many small irregular faces gives many panels, and so costs more. Each panel
+  counts toward `maxOccluders`.
 
 The thirdPerson example's town is a case where it doesn't pay. Its open streets hide little,
 so occlusion is off there by default (see `examples/thirdPerson/src/source/Scenes/TownScene.bs`).
