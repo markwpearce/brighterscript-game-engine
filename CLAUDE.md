@@ -11,6 +11,7 @@ Topic rules live in `.claude/rules/` and load when you touch matching files. Bef
 - `npm run validate` / `lint` / `build` / `clean`.
 - `npm run test:ci` — headless tests in shards (`scripts/run-tests-sharded.js`), run at once as cores/memory allow (`TEST_SHARD_CONCURRENCY`, `TEST_SHARDS=a,b`); add a shard past ~1000 tests. CI runs one shard per job. `npm run test:device` runs the same shards on a Roku (`ROKU_HOST`/`ROKU_PASSWORD`, ~4 min a shard on an Express).
 - `scripts/examples.js <task>` exits 1 if any example failed; `EXAMPLES_SHARD=i/n` runs a subset (CI splits examples across 3 jobs).
+- `npm run check:credits` — new asset files since `origin/main` must be named in a nearby `CREDITS.md` (CI runs it on PRs).
 - `scripts/*.js` are plain Node (must run on Windows).
 - Run/drive an example on a Roku: the `rokubot-examples` skill.
 
