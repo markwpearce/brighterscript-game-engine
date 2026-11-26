@@ -11,6 +11,8 @@ actually touch (`Game`, `GameScene`, `GameEntity`, `Drawable`, `Collider`) and h
 setting up a game, adding a sprite, moving it, and detecting collisions. For a deeper look at how
 the engine implements these pieces internally, see [Engine Internals](/engine-internals).
 
+New to game engines? Start with [Build Your First Game](/first-game-tutorial), a step-by-step coin collector that you build from an empty project. This guide is the reference you come back to once you know what you're looking for.
+
 ## What you're building on top of
 
 BGE is an object-oriented 2D-first game engine for Roku channels, written in

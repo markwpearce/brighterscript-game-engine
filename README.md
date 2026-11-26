@@ -260,6 +260,8 @@ Use `brighterscript` 1.0.0-alpha.53 or later. Older versions report a false `arg
 
 Documentation can be found [here](https://markwpearce.github.io/brighterscript-game-engine)
 
+New to game engines? Start with the step-by-step [Build Your First Game](https://markwpearce.github.io/brighterscript-game-engine/first-game-tutorial) tutorial, which takes you from an empty project to a finished coin collector.
+
 ## Acknowledgements
 
 This project was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into BrighterScript. This work owes a lot to this original project!

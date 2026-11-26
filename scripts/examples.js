@@ -36,7 +36,11 @@ const CONCURRENCY = Number(process.env.EXAMPLES_CONCURRENCY) || Math.min(8, os.c
 const TASKS = {
   install: [{ command: 'npm', args: ['install'] }],
   build: [{ command: 'npm', args: ['run', 'package'] }],
-  validate: [{ command: 'npx', args: ['bsc', '--validate', '--create-package=false'] }],
+  // The second step runs an example's own "validate" script if it has one (examples/tutorial checks each of its step builds)
+  validate: [
+    { command: 'npx', args: ['bsc', '--validate', '--create-package=false'] },
+    { command: 'npm', args: ['run', 'validate', '--if-present'] }
+  ],
   clean: [{ command: 'npm', args: ['run', 'clean'] }, { command: 'ropm', args: ['clean'] }],
   audit: [{ command: 'npm', args: ['audit', 'fix', '--force'] }],
   'ropm-install': [{ command: 'ropm', args: ['install'] }]
