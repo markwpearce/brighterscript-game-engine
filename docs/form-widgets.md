@@ -229,6 +229,8 @@ m.difficultySelect.options = ["Easy", "Normal", "Hard", "Expert"]
 - `placeholder` is shown dimmed while the field is empty and unfocused.
 - `maxLength` caps the length. `0`, the default, means no cap. Characters past the cap are
   dropped.
+- `setText(text)` replaces the text and moves the caret to the end. Setting `text` directly
+  doesn't fire `onChanged`; `setText()` does, if the text changed.
 - `onChanged` is called after each insert or delete, and `onSubmit` when OK is pressed
   (unless a `keyboard` is set, in which case OK opens the keyboard). Both are called with the
   input as their argument.
@@ -254,7 +256,7 @@ While the keyboard is open, the remote does this:
 | --- | --- |
 | D-pad | Move the highlight. It wraps, and Up and Down land on the nearest key. |
 | OK | Press the highlighted key. |
-| Back | Cancel. The field gets back the text it had when the keyboard opened, and `onCancel` fires. The field's `onChanged` doesn't fire for this, so use `onCancel` to refresh anything that shows the text. |
+| Back | Cancel. The field gets back the text it had when the keyboard opened (firing its `onChanged` if that changes it), and `onCancel` fires. |
 | Play, or the Done key | Close the keyboard, fire `onDone`, then the field's `onSubmit`. |
 | Replay | Delete. |
 | Fast-forward | Type a space. |
