@@ -10,3 +10,4 @@
 | `src/sprites/skybox_night.jpg` (a 1024x512 night-sky panorama, supplied by the repo owner) | not recorded | not recorded | not recorded |
 | `src/sprites/helix_full_sheet.png` (the Guard's 8-direction "Helix" spritesheet, supplied by the repo owner) | not recorded | not recorded | not recorded |
 | `src/sprites/checkerboard.png` (a plain black and white checkerboard test pattern) | not recorded | not recorded | not recorded |
+| `src/sounds/die.wav`, `score.wav` | Romans-I-XVI | MIT | [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) |

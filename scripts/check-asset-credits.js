@@ -34,8 +34,11 @@ function creditRoot(file) {
   if (parts[0] === 'examples' && parts.length > 2) {
     return parts.slice(0, 2).join('/');
   }
-  if (parts[0] === 'src' || file.startsWith('scripts/exampleTemplate/')) {
-    return parts[0] === 'src' ? 'src' : 'scripts/exampleTemplate';
+  if (parts[0] === 'src') {
+    return 'src';
+  }
+  if (file.startsWith('scripts/exampleTemplate/')) {
+    return 'scripts/exampleTemplate';
   }
   return undefined;
 }
@@ -89,11 +92,17 @@ function globToRegExp(glob) {
   return new RegExp('(^|/)' + escaped + '$');
 }
 
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function isCredited(file, texts) {
   const name = path.posix.basename(file);
   const stem = name.replace(/\.[^.]+$/, '');
+  // a whole file name, so `data.png` doesn't credit `a.png`
+  const namePattern = new RegExp('(^|[^\\w.-])' + escapeRegExp(name) + '(?![\\w-]|\\.\\w)', 'i');
   return texts.some(({ dir, text }) => {
-    if (text.includes(name) || text.includes('`' + stem + '`')) {
+    if (namePattern.test(text) || text.includes('`' + stem + '`')) {
       return true;
     }
     const relPath = path.posix.relative(dir, file);
