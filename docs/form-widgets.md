@@ -192,6 +192,8 @@ button above does.
 `selectedIndex` is the current index, and `getValue()` returns the option at that index.
 Set `style` to choose how it works. The default is `BGE.UI.SelectStyle.inline`.
 
+![The three Select styles in examples/ui: inline (top left), popup with an image background (top right) and horizontal (bottom)](images/form-widgets-select-styles.jpg)
+
 - **`inline`** shows the current option in the box. Left and Right cycle through the
   options and wrap around at the ends. Use `next()` and `previous()` to move the selection
   from code.
@@ -215,6 +217,8 @@ m.difficultySelect.options = ["Easy", "Normal", "Hard", "Expert"]
 ## TextInput
 
 `BGE.UI.TextInput` is a single line of text with a caret. Its main fields:
+
+![A TextInput with "Ada" typed in, above the on-screen Keyboard in its ABC layout, in examples/ui](images/form-widgets-text-input.jpg)
 
 - `text` holds the text, and `getValue()` returns it.
 - `placeholder` is shown dimmed while the field is empty and unfocused.
@@ -273,6 +277,8 @@ assign `keyboard.layout` and set `keyboard.width` to suit.
 By default a widget's background is a flat color from the theme. To use an image instead,
 set `backgroundImage` on a theme. `BGE.UI.loadBackgroundImage()` loads one from a path and
 picks the right type for you:
+
+![One nine-patch image stretched to fit three button sizes, in examples/ui](images/form-widgets-nine-patch.jpg)
 
 - A path ending in `.9.png` (any case) loads as a `BGE.UI.NinePatchImage`. Its corners stay
   fixed and its edges and centre stretch, so one small image fits any widget size.
