@@ -80,6 +80,10 @@ namespace BGE
     ' reusing (and clearing) one mid-frame wiped triangles drawn from it (#345).
     private usedThisFrame as ScratchBitmap[] = []
 
+    ' One-off bitmaps handed out this frame. A device drops queued draws whose source was
+    ' freed, even after Finish(), so these are held until onFrameEnd() (#688).
+    private oneOffsThisFrame as ScratchBitmap[] = []
+
     ' initialCount < 0 uses the device tier's default (see setUpBasedOnDevice())
     sub new(doPooling = true as boolean, initialCount = -1 as integer, forcePoolingRegardlessOfDevice = false as boolean)
       m.doPooling = doPooling
@@ -132,7 +136,7 @@ namespace BGE
 
     function getRegion(askedForWidth as float, askedForHeight as float, onTopRight = false as boolean) as BGE.ScratchRegion
       if not m.doPooling
-        return getNewMemoryScratchRegion(askedForWidth, askedForHeight)
+        return m.getHeldOneOffRegion(askedForWidth, askedForHeight)
       end if
       width = BGE.Math.Clamp(fix(askedForWidth + 1), 1, m.scratchWidth)
       height = BGE.Math.Clamp(fix(askedForHeight + 1), 1, m.scratchHeight)
@@ -161,7 +165,7 @@ namespace BGE
       region as roRegion = invalid
       if bmp = invalid
         ' every pooled bitmap is in use this frame - a one-off bitmap is safe to draw into
-        return getNewMemoryScratchRegion(width, height)
+        return m.getHeldOneOffRegion(width, height)
       end if
       if not onTopRight
         ' create region on top left
@@ -180,6 +184,14 @@ namespace BGE
       if askedForWidth > m.scratchWidth or askedForHeight > m.scratchHeight
         minScale = BGE.Math.min(width / askedForWidth, height / askedForHeight)
         result.scale = BGE.Math.createScaleVector(minScale)
+      end if
+      return result
+    end function
+
+    private function getHeldOneOffRegion(width as float, height as float) as BGE.ScratchRegion
+      result = getNewMemoryScratchRegion(width, height)
+      if invalid <> result
+        m.oneOffsThisFrame.push(result.scratchBmp)
       end if
       return result
     end function
@@ -217,18 +229,20 @@ namespace BGE
     sub returnStagedRegions()
     end sub
 
-    ' Makes every bitmap returned this frame available again. Call once per frame, after
-    ' the screen has been swapped (Renderer.onSwapBuffers() does).
+    ' Makes every bitmap returned this frame available again, and frees this frame's
+    ' one-offs. Call once per frame, after the screen has been swapped (Renderer.onSwapBuffers() does).
     sub onFrameEnd()
       for each bmp in m.usedThisFrame
         m.pool.push(bmp)
       end for
       m.usedThisFrame = []
+      m.oneOffsThisFrame = []
     end sub
 
     sub clearPool()
       m.pool = []
       m.usedThisFrame = []
+      m.oneOffsThisFrame = []
       m.activePoolCount = 0
     end sub
 
@@ -244,6 +258,11 @@ namespace BGE
     ' How many returned bitmaps are waiting for onFrameEnd().
     function getUsedThisFrameCount() as integer
       return m.usedThisFrame.count()
+    end function
+
+    ' How many one-off bitmaps are held until onFrameEnd().
+    function getHeldOneOffCount() as integer
+      return m.oneOffsThisFrame.count()
     end function
 
     ' The hard cap on how many ScratchBitmap instances this pool will ever create.
