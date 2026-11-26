@@ -268,3 +268,21 @@ Thanks also to:
 
 - [RokuCommunity](https://github.com/rokucommunity) for [BrighterScript](https://github.com/rokucommunity/brighterscript), [bslint](https://github.com/rokucommunity/bslint), [roku-deploy](https://github.com/rokucommunity/roku-deploy), and the rest of the tooling that makes this project possible.
 - [Marcelo Lv Cabral](https://github.com/lvcabral) for his work on the Roku/BrightScript community and tooling, including the [BrightScript Simulator](https://github.com/lvcabral/brs-desktop) this engine supports developing against.
+
+## Licensing
+
+### Engine
+
+The engine (`src/`, the published npm/ropm package and the repo's tooling) is under the [MIT License](LICENSE). Third-party code it includes is credited in [`LICENSE-THIRD-PARTY.md`](LICENSE-THIRD-PARTY.md).
+
+### Giving credit
+
+If you make a game with BrighterScript Game Engine, please give it credit. The MIT License doesn't require it, but it helps other Roku developers find the engine. You could:
+
+- keep the engine splash screen on at launch,
+- mention BrighterScript Game Engine on your credits or about screen, or
+- add a credit line to your Roku Channel Store or itch.io listing.
+
+### Examples
+
+The example projects in [`examples/`](examples/) are **not** MIT-licensed. They're under [`examples/LICENSE`](examples/LICENSE): you can build, modify, fork and learn from them, and reuse snippets and boilerplate in your own original games, but you can't publish an example, or a lightly reskinned copy of one, to the Roku Channel Store, itch.io or any other game store. [`examples/quickstart`](examples/quickstart) is the exception: it's MIT, so start your game from it freely. Third-party assets in the examples keep their own licenses, listed in each example's `CREDITS.md` or README.
