@@ -71,6 +71,7 @@ isDark = qr.getModule(x, y) ' x, y in [0, qr.size)
 level survives more damage/obstruction before becoming unreadable, at the
 cost of a denser (sometimes larger) code for the same text.
 
-See `examples/controller`'s `MainScene` for a runnable example (drawing the
-controller connection URL as a QR code instead of - or alongside - plain
-text).
+For the controller page's URL, `BGE.UI.ControllerQrWidget` does this for you:
+it draws the QR code with a caption and the URL under it (see
+[HUD and Info Widgets](/hud-widgets#controllerqrwidget)). `examples/controller`'s
+`MainScene` uses one, next to the URL as plain text.

@@ -41,7 +41,7 @@ build it in a `LoadTask` (see [Loading Assets](/loading-assets)) so the
 loading screen keeps drawing:
 
 ```brighterscript
-override sub onLoad(loader as BGE.AssetLoader, args as object)
+override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
   loader.addStep(function(scene as object) as dynamic
     scene.nav = new BGE.NavGrid(scene.solidWorld, {cellSize: 16, agentRadius: 10})
     return true
@@ -129,8 +129,9 @@ get every cell centre instead.
 
 - **Start or goal inside a solid**: it moves to the nearest open cell (up to
   `snapRings` cells away, default 8), and the path starts or ends at that
-  cell's centre. The same goes for a point just outside the grid; one further
-  out than `snapRings` fails.
+  cell's centre. The same goes for a point just outside the grid. A start
+  further out than `snapRings` fails; a goal that far out is treated as walled
+  off (below).
 - **Goal walled off**: by default you get a partial path to the open cell
   nearest the goal, so an agent still heads the right way. If the agent is
   already there, the path is just its start. Pass
@@ -212,7 +213,7 @@ world z as the `SolidWorld`'s y, and read each waypoint's `y` as z:
 m.solidWorld.addSolid(pillar.x - 2, pillar.z - 2, 4, 4)
 path = m.nav.findPath(m.position.x, m.position.z, target.x, target.z)
 for each point in path
-  waypoint = BGE.Math.create(point.x, 0, point.y)
+  waypoint = BGE.Math.VectorOps.create(point.x, 0, point.y)
 end for
 ```
 

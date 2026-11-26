@@ -289,8 +289,9 @@ target once a wall stops it. `examples/thirdPerson` tracks its fighters;
 its knockbacks and lunges use different slide options from walking.
 
 Colliders are still useful for things that *trigger* rather than block: a
-door, a pickup, an enemy's attack. `examples/rpg` uses `onCollisionEnter()`
-on a `feet` collider for doors.
+gate, a pickup, an enemy's attack. `examples/rpg` uses `onCollisionEnter()`
+on a `feet` collider for gates, pickups and switches. Its doors are
+`BGE.SceneExits` with `BGE.RectExitArea`s instead (`World/DoorExits.bs`).
 
 ### Drawing in front of and behind things
 

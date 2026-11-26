@@ -91,9 +91,11 @@ The imports are the form this repo's examples use, since they copy the engine
 into their own `source/` folder. A game that installs the engine with ropm has
 it under `roku_modules`, and `source` scope sees it without any imports.
 
-That loop is the whole contract. `currentLine()` gives `{text, speaker, line}`
-(`text` has `${flags}` filled in, `line` is the raw line if you stored extra
-keys on it). `choices()` gives `{label, enabled, choice}` for each button.
+That loop is the whole contract. `currentLine()` gives `{text, speaker, line,
+isChoice}` (`text` has `${flags}` filled in, `line` is the raw line if you
+stored extra keys on it, `isChoice` is false). `choices()` gives `{label,
+enabled, choice, index}` for each button (`index` is its place in the node's
+choices).
 `advance()` and `choose(index)` return a `StoryResult` (`{changed, posts,
 messages}`) if you want to act on what the story just did.
 
@@ -251,9 +253,9 @@ integers, floats and booleans. Conditions test them. All of these go in a
 
 | Condition | Passes when |
 |---|---|
-| `{flag}` | the flag is set |
-| `{flag, eq}` | the flag equals `eq` |
-| `{flag, gte}` / `{flag, lt}` | the flag, read as an integer (a float is truncated), is at least / below the number |
+| `{flag}` | the flag is set: `true`, a non-empty string, or a non-zero number |
+| `{flag, eq}` | the flag equals `eq`. A boolean `eq` compares with "is set"; a string `eq` needs a string flag (a missing or non-string flag only equals `""`); a number `eq` compares with the flag read as an integer |
+| `{flag, gte}` / `{flag, lt}` | the flag, read as an integer (a float is rounded down, anything else is 0), is at least / below the number |
 | `{notFlag}` | the flag is not set |
 | `{hasItem}` / `{notItem}` | the item is carried / not carried |
 | `{visited}` / `{visited, gte}` / `{notVisited}` | the node was entered (at least n times) / never |
@@ -316,7 +318,9 @@ state.settle()
 ```
 
 `runEvent(name, data)` runs every rule for that event whose `match` (each key
-must equal the same field of `data`) and `when` pass, in order. `settle()` then
+must equal the same field of `data`, with the same type) and `when` pass, in
+order. A `match` value must be a string, number or boolean; anything else logs
+a warning and the rule doesn't match. `settle()` then
 runs the `storyChanged` rules until nothing changes (at most four passes, then
 a warning), so a flag one rule sets can trigger another. Call `settle()` after
 anything that changed the state: after an `advance()` or `choose()` whose
@@ -373,8 +377,8 @@ print state.inventory.count("ration")
 print state.inventory.has("dataCore")
 ```
 
-`inventory.add()` returns `false` at the maximum, and the `giveItem` effect then
-changes nothing. `state.inventory.toAA()` lists what is carried. The extra
+`inventory.add()` returns `false` at the maximum or for an item not in
+`story.items`, and the `giveItem` effect then changes nothing. `state.inventory.toAA()` lists what is carried. The extra
 fields (`name`, `icon`) stay on the definition in `story.items` for you to read.
 
 ## Saving
@@ -404,7 +408,8 @@ end if
 ```
 
 - `toSaveData()` is `{flags, inventory, visits}`. `loadSaveData()` drops
-  anything malformed, so a damaged save gives a fresh state.
+  anything malformed, so a damaged save gives a fresh state. It also drops
+  items no longer in `story.items` and caps counts at each item's `max`.
 - `getPosition()` is `{stack: [{key, line, phase}]}` - where the conversation
   is, including any `call`s still waiting to return. `restore()` returns `false`
   when a node in it no longer exists. A candidate is saved by its index in its
@@ -413,7 +418,8 @@ end if
   `restore()` carries on to the node's fallback or `call`/`goto`, but can't
   return what any effects that run then post or message.
 - `runner.backlog` is the list of lines shown so far, oldest first (capped by
-  `backlogLimit`, default 100). It isn't part of the position; save it yourself
+  `backlogLimit`, default 100). Each choice taken is in it too, with
+  `isChoice` true and its label as the `text`. It isn't part of the position; save it yourself
   if your game shows a history.
 - The save has no UI in it, so an autosave on each node is just a call after
   `advance()` or `choose()`.
@@ -425,12 +431,15 @@ and each can be configured or subclassed.
 
 **`BGE.Story.StorySession`** is a persistent entity that owns the `StoryState` and
 `DialogueRunner`. `session.start()`, `advance()`, `choose()`, `runEvent()` and
-`applyEffects()` each settle the rules and then pass the result on: posts go out as game
+`applyEffects()` each settle the rules and then pass the result on (if nothing changed and
+nothing was posted or messaged, there's nothing to settle or pass on): posts go out as game
 events, messages queue for `takeMessages()`, and a change posts `storyUpdated` (or
 `changedEventName`) and calls `onStoryChanged()`. Override that to autosave.
 `listenTo(["enemyKilled"])` feeds those game events to the story's rules.
 `toSaveData(includeBacklog)`/`loadSaveData()` save the state and position, and the backlog
-if you ask for it.
+(`{text, speaker, isChoice}` per entry) if you ask for it. `loadSaveData()` returns `false`
+if the saved position no longer fits the story; the state still loads but the backlog
+doesn't, so start the conversation again.
 
 ```brighterscript
 session = new BGE.Story.StorySession(game, BGE.Story.loadStory("pkg:/story/main.json"))
@@ -467,7 +476,8 @@ false to show the line first and bring the choices up on the next press. `advanc
 pick the focused choice with it; set `game.focusManager.analogAxisName` to a bound axis so a
 stick moves between choices.
 
-Colors default to the theme's `panel*` fields. Nothing is fixed: override
+Colors default to the theme's `panel*` fields, except `listDisabledColor`, which defaults to
+grey (`&h707070FF`). Nothing is fixed: override
 `createChoiceButton()` (or `createChoiceRow()` for the list) to use your own widgets,
 `layoutChoices()` to place them, and `onLine()`/`onEnded()` to react. `DialogueView` is also
 just one way to show a session - rpg and visualnovel drive their `StorySession` from their
@@ -513,7 +523,7 @@ end namespace
 ```
 
 `loadStory` returns `invalid` (and logs why) if the file can't be read or
-parsed. For an AA literal written in code, include an `items: {}` key if it has
+parsed, or has no `nodes` object. For an AA literal written in code, include an `items: {}` key if it has
 no items, or bsc may mistake the literal for `roAssociativeArray`'s `Items()`
 method.
 

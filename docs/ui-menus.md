@@ -55,10 +55,23 @@ menu.open() ' no parent: owned by the current scene
 ```
 
 Leave `width`/`height` at 0 to fit the content, or set them (or call `setSize()`) to fix
-them. Spacing is set by `panelPadding`, `sectionGap`, `itemHeight`, `itemGap`, `itemWidth`
+them. A fixed height is a minimum: the panel still grows to fit its content. Spacing is set by `panelPadding`, `sectionGap`, `itemHeight`, `itemGap`, `itemWidth`
 and `contentAlign`. Subclass to change more: `createButton(item)` returns the button for an
 item (use your own `Button` subclass for a different look), and `buildChildren()` lays the
 panel out.
+
+While it's open:
+
+- `setItemEnabled(id, enabled)` enables or disables an item and its button.
+- `setMessage(text)` replaces the message in place (e.g. "Not enough coins"). The panel
+  isn't resized, so keep to the lines it had.
+- `focusItem(id)` focuses an item's button (false if it's missing or disabled);
+  `focusFirstEnabled()` focuses the first enabled one.
+- `getButton(id)` returns an item's button, `isOpen()` says whether the menu is open, and
+  `centerIn(container)` re-centers it.
+
+`setTitle()`, `clearItems()`, `addItem()` and `setSize()` take effect the next time the menu
+opens. Opening an open menu rebuilds it.
 
 ## MessagePanel
 
@@ -88,10 +101,12 @@ Panels take their colors from the theme (`game.defaultTheme`, or a container's `
 `game.pushModal()` opens a modal: the game pauses while any modal is open, and nested ones
 just count up. `game.popModal()` closes one and ignores the buttons held right then until
 they're released, so the OK that picked "Resume" doesn't also jump (or close the modal
-underneath); when the last closes the game resumes. A `Pause()` or `Resume()` while a modal
+underneath); when the last closes the game resumes, unless it was already paused before the
+first opened. A `Pause()` or `Resume()` while a modal
 is open takes over, and closing the modal leaves it alone. Changing scene resumes the game
 and forgets open modals, unless `game.keepPauseOnSceneChange` is set - and even then a pause
-that only came from modals ends.
+that only came from modals ends. `game.isModalOpen()` says whether any modal is open, and
+`game.getModalDepth()` how many.
 
 `BGE.PauseMenu` is a ready-made pause entity built on those:
 
