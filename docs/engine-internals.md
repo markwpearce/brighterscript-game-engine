@@ -311,7 +311,10 @@ gameUi.addChild(textInput)
   `maxLength` are silently dropped.
 - `placeholder` — Dimmed text shown when `text` is empty *and* the widget is unfocused; disappears on focus
   or once the player types anything.
-- `onChanged()` — Callback fired after any edit (character inserted or deleted). Receives the `TextInput`
+- `setText(text)` — Replaces the text (cut to `maxLength`), moves the caret to the end, and fires
+  `onChanged()` if the text changed. Assigning `text` directly doesn't fire it.
+- `onChanged()` — Callback fired after any edit (character inserted or deleted, `setText()`, or an
+  on-screen keyboard's cancel changing the text back). Receives the `TextInput`
   itself as an argument so a closure can read the modified `text`/`cursorIndex`.
 - `onSubmit()` — Callback fired on OK press while focused. Same callback signature as `onChanged()`. If
   `keyboard` is set, OK opens that on-screen keyboard instead.
@@ -359,7 +362,7 @@ Or open it yourself with `keyboard.show(container, textInput)`; `hide()` removes
 | --- | --- |
 | D-pad | Move the highlight (it wraps; Up/Down land on the nearest key) |
 | OK | Press the highlighted key |
-| Back | Cancel: restore the text from when it opened, fire `onCancel` |
+| Back | Cancel: hide, restore the text from when it opened (firing the field's `onChanged` if that changes it), fire `onCancel` |
 | Play, or the Done key | Hide, fire `onDone`, then the field's `onSubmit` |
 | Replay | Delete |
 | Fast-forward | Space |

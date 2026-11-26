@@ -229,8 +229,8 @@ m.difficultySelect.options = ["Easy", "Normal", "Hard", "Expert"]
 - `placeholder` is shown dimmed while the field is empty and unfocused.
 - `maxLength` caps the length. `0`, the default, means no cap. Characters past the cap are
   dropped.
-- `setText(text)` replaces the text and moves the caret to the end. Setting `text` directly
-  doesn't fire `onChanged`; `setText()` does, if the text changed.
+- `setText(text)` replaces the text, cut to `maxLength`, and moves the caret to the end.
+  Setting `text` directly doesn't fire `onChanged`; `setText()` does, if the text changed.
 - `onChanged` is called after each insert or delete, and `onSubmit` when OK is pressed
   (unless a `keyboard` is set, in which case OK opens the keyboard). Both are called with the
   input as their argument.
