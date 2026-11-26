@@ -43,7 +43,7 @@ Real 2D and 3D games on a Roku: chase cameras, voxel terrain, textured 3D models
 - Asset loading in the background, with loading screens, and an engine splash screen. [Loading assets](https://markwpearce.github.io/brighterscript-game-engine/loading-assets) · [Splash screen](https://markwpearce.github.io/brighterscript-game-engine/splash-screen)
 
 **Roku integration**
-- Use a phone as a gamepad: scan a QR code on the TV, and every player gets their own controller. A gamepad plugged into the phone page works too. [Controller input](https://markwpearce.github.io/brighterscript-game-engine/controller-input) · [QR codes](https://markwpearce.github.io/brighterscript-game-engine/qr-codes)
+- Use a phone as a gamepad: scan a QR code on the TV, and every player gets their own controller. A gamepad connected to the phone or computer showing that page works too. [Controller input](https://markwpearce.github.io/brighterscript-game-engine/controller-input) · [QR codes](https://markwpearce.github.io/brighterscript-game-engine/qr-codes)
 - Draw the engine on top of a SceneGraph app, or use its SceneGraph shape components without the game loop. [SceneGraph shapes](https://markwpearce.github.io/brighterscript-game-engine/scenegraph-shapes)
 - Deep links into any scene for testing. [Launch params](https://markwpearce.github.io/brighterscript-game-engine/launch-params)
 
