@@ -162,7 +162,7 @@ any change to the layout.
 | 6 | 1 | level count | 1 to 6, fewer for small maps (a 64 map has at most 4) |
 | 7 | 1 | edge mode | `0` wrap, `1` flat |
 | 8 | 1 | flat height | 0-255, used with flat edges |
-| 9 | 1 | flat colour | a palette index, used with flat edges |
+| 9 | 1 | flat colour | a palette index, used with flat edges (must be in the palette even with wrap) |
 | 10 | 1 | palette count | 1-255, or `0` for 256 |
 | 11 | 3 per colour | palette | red, green, blue for each colour, in order |
 | 11 + 3 x palette count | 2 per cell, per level | levels | level 0 first |
@@ -175,8 +175,9 @@ So the file is `11 + 3 x palette count + 2 x (sum of side x side over the levels
 with 4 levels and 3 colours is 11 + 9 + 2 x (4096 + 1024 + 256 + 64) = 10,900 bytes.
 
 The reader checks the magic, version, size shift, level count, edge mode, that the flat colour is
-in the palette, and the exact length. It doesn't check the heights or palette indexes in the levels. A palette index past the palette
-draws as palette colour 0, so a bad file can't crash a draw.
+in the palette, and the exact length. It doesn't check the heights or palette indexes in the
+levels. A palette index past the palette draws as palette colour 0, so a bad file can't crash a
+draw.
 
 ## VoxelMap data API
 
@@ -184,7 +185,9 @@ Make a map with a function on `BGE.VoxelMaps`. Each one returns a `BGE.VoxelMap`
 with the reason printed to the log, so check for `invalid` before you use the result.
 
 - `fromFile(path)` loads a `.bvox` file.
-- `fromByteArray(bytes)` reads a `.bvox` from an `roByteArray` you have in memory.
+- `fromByteArray(bytes)` reads a `.bvox` from an `roByteArray` you have in memory. It copies
+  every cell in a loop, so it's much slower than `fromFile` for a big map. If you can, write the
+  bytes to `tmp:/` and load that with `fromFile`.
 - `fromArrays(size, heights, colors, palette, options)` takes flat arrays, row by row (index
   `z * size + x`), and builds the mip levels for you. It checks every value: size a power of 2 from
   64 to 1024, 1-256 palette colours, heights 0-255, and colour indexes inside the palette.
@@ -253,8 +256,9 @@ A `BGE.VoxelMap` has these for a tool author to use:
 | `toByteArray()` | the map as `.bvox` bytes |
 | `saveToFile(path)` | writes the `.bvox` file, and returns whether it worked |
 
-The fields `size`, `sizeShift`, `palette`, `heightLevels`, `colorLevels`, `edgeMode`, `flatHeight`
-and `flatColor` are public too. `heightLevels` and `colorLevels` are per level, level 0 first.
+The fields `size`, `sizeShift`, `mask` (`size - 1`), `palette`, `heightLevels`, `colorLevels`,
+`edgeMode`, `flatHeight` and `flatColor` are public too. `heightLevels` and `colorLevels` are per
+level, level 0 first.
 
 Editing `heightLevels[0]` in place doesn't update the other levels, so the mips go stale. The
 simplest fix is to read the map out, change it, and rebuild it with `fromArrays`:
@@ -273,7 +277,10 @@ function raiseSquare(map as BGE.VoxelMap, x0 as integer, z0 as integer, side as 
   end for
   for z = z0 to z0 + side - 1
     for x = x0 to x0 + side - 1
-      heights[(z and map.mask) * size + (x and map.mask)] = 255
+      ' clip to the map (a wrap map could use `and map.mask` to wrap instead)
+      if x >= 0 and x < size and z >= 0 and z < size
+        heights[z * size + x] = 255
+      end if
     end for
   end for
   return BGE.VoxelMaps.fromArrays(size, heights, colors, map.palette, {
