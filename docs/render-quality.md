@@ -145,6 +145,11 @@ camera) reuses last frame's rendering instead of drawing again:
 - `billboardReuseMaxAngleDegrees` - how far the direction it's seen from may turn before it's
   redrawn. 180 (no limit) up to Medium, 20 at High, 10 at Ultra.
 
+Model impostors (a `DrawableModel` reusing its last drawing while the camera moves) have their
+own: `modelImpostorError`, `modelImpostorMaxSizeChange`, `modelImpostorMaxAngleDegrees`,
+`modelImpostorMaxDepthRatio` and the rest, with values at every level. See
+[Model Impostors](/model-impostors#quality-settings).
+
 ## Walls
 
 [`DrawableWalls`](/drawables-and-scene-objects) (and `DrawableGridWalls`) draws one strip per
