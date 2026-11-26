@@ -10,6 +10,8 @@ order: 17
 over or levelComplete. It's an entity you add if you want it. Your game keeps its own rules
 and screens, and calls the session when its own events happen.
 
+![examples/breakout, which keeps its score, best and lives in a GameSession, showing its ready prompt: "Press OK to launch"](images/game-session-breakout.jpg)
+
 ```brighterscript
 session = new BGE.GameSession(game, {lives: 3, prompts: true, startButton: "ok"})
 session.persistHighScore("my-game")

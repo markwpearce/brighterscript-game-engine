@@ -14,6 +14,8 @@ better done with a [`DrawablePlane`](/drawables-and-scene-objects).
 
 It needs a `Camera3d`, and a renderer draws one terrain at most.
 
+![examples/flightSim at Ultra: a biplane flying towards a gold ring over a voxel island of green hills and grey and white mountains, with the sea behind](images/voxel-terrain-flightsim.jpg)
+
 ## Maps
 
 A `BGE.VoxelMap` is a square grid, 64 to 1024 cells along each side (a power of 2), with a height
