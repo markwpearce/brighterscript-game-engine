@@ -19,4 +19,5 @@ paths:
 - Package paths are case-insensitive: no `source/story` folder (collides with the engine's).
 - Keep `brightscript.projects` in `.vscode/settings.json` to ≤10 entries (language server runs out of heap); always keep the root `bsconfig.json`.
 - An example may have its own `CLAUDE.md` or rule file for example-specific notes; keep engine-wide facts here.
+- **Credit every new asset file** (image, sound, font, model, map) in a `CREDITS.md` in its folder or a parent up to the example root: author, licence, source, or "made for this repo". Name the file, `` `stem` ``, or a glob like `` `grunt*.wav` ``. CI's `asset-credits` job (`npm run check:credits`) fails PRs that add uncredited assets.
 - Images over ~100 KB: WebP (lossy q90 with lossless alpha; lossless for pixel art), JPG for manifest splash/icons. Asset scripts write WebP via `scripts/webp.js`.
