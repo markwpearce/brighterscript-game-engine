@@ -7,3 +7,5 @@
 | `src/images/decode/decode-2048.png`, `decode-2048.jpg` (a 2048x1024 Mandelbrot render for `texture-decode-benchmark`) | generated for this repo (#301, PR #323) | - | this repo |
 | `src/images/animated/spin-sheet.png`, `spin.gif`, `spin.webp`, `spin.json` (a 12-frame 128 px spinner in each format) | generated for this repo (#664, PR #666) | - | this repo |
 | `src/sprites/crypt_wall.png`, `crypt_floor.png`, `crypt_alcove.png` (copied from `examples/thirdPerson`, see `specs/2026-11-05-grid-walls-plan.md`) | drawn by `examples/thirdPerson/tools/crypt-art.py` for this repo | - | this repo |
+| `src/images/transformTest.jpg` (coloured tiles, an arrow and labelled corners) | drawn by `tools/transform-test-image.js` for this repo | - | this repo |
+| `src/sprites/roku-logo-purple.png` | Roku, Inc. | Roku and the Roku logo are trademarks of Roku, Inc. | Roku, Inc. |
