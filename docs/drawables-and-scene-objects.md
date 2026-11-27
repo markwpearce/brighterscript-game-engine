@@ -680,10 +680,11 @@ That does four things:
 - **Walls.** Level walls (`DrawableWalls`, `DrawableGridWalls`) with `castsFogSilhouette` keep
   their real outline past the draw distance as flat fog-coloured strips, with solid fog under
   them across the fade band, so a fading wall and its fog add up to fully opaque.
-- **The ground.** A `DrawablePlane` ground fades into the fog colour across the same band
-  objects fade in, then stays solid fog out to where it ends, so it has no hard far edge. It's
-  drawn in `fogGroundBands` steps, which the render quality level sets; `fog.groundFade = false`
-  turns it off.
+- **The ground.** A level `DrawablePlane` ground (normal straight up) fades into the fog colour
+  across the same band objects fade in, then stays solid fog out to where it ends, so it has no
+  hard far edge. It's drawn in `fogGroundBands` steps, which the render quality level sets;
+  `fog.groundFade = false` turns it off. The steps are level across the screen, so they don't
+  follow a rolled camera.
 
 For fog that fades things out without a skyline - a dungeon fading to black, say - set
 `fog.silhouetteReach = 1`: fading objects and walls still fade into the fog colour, but nothing

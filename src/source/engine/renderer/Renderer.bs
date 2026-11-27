@@ -27,6 +27,7 @@ import "lighting/Lighting.bs"
 import "RendererHelpers.bs"
 import "ScanlinePolygonFill.bs"
 import "sceneObjects/SceneObject.bs"
+import "sceneObjects/SceneObjectPlane.bs"
 import "sceneObjects/SceneObjectVoxelTerrain.bs"
 import "sceneObjects/SceneObjectWalls.bs"
 import "voxel/VoxelTerrainView.bs"
@@ -1358,8 +1359,9 @@ namespace BGE
 
     ' Fades the ground into the fog colour across the draw distance's fade band in
     ' fogGroundBands rects, then fills solid fog from the draw distance up to where the ground
-    ' ends (see BGE.Fog.groundFade). Assumes level ground at y 0, like the backdrop; roll is ignored.
-    private sub drawFogGround(cam as Camera3d)
+    ' ends (see BGE.Fog.groundFade). `groundY` is the level ground's height and `groundReach` the
+    ' forward depth it's drawn to (SceneObjectPlane.getWorldDrawDistance()); roll is ignored.
+    private sub drawFogGround(cam as Camera3d, groundY as float, groundReach as float)
       fog = cam.fog
       if not fog.enabled or not fog.groundFade
         return
@@ -1367,8 +1369,8 @@ namespace BGE
       ' each row of level ground is one forward distance, so a row fades like an object there
       o = cam.getViewForward()
       flat = Sqr(o.x * o.x + o.z * o.z)
-      p = cam.position
-      if flat < 0.001 or p.y <= 0
+      eye = cam.position.y - groundY
+      if flat < 0.001 or eye <= 0
         return
       end if
       far = cam.getCurrentDrawDistance()
@@ -1377,18 +1379,17 @@ namespace BGE
       if fraction <= 0 or bands < 1
         bands = 0
       end if
-      groundDistance = cam.getPlaneDrawDistance()
       key = m.fogGroundKey
       ' a still camera keeps its rows: working them out is most of the cost (#742)
-      if cam.movedLastFrame() or key.count() = 0 or key[0] <> cam.projectionVersion or key[1] <> far or key[2] <> groundDistance or key[3] <> fraction or key[4] <> bands
-        m.fogGroundKey = [cam.projectionVersion, far, groundDistance, fraction, bands]
+      if cam.movedLastFrame() or key.count() = 0 or key[0] <> cam.projectionVersion or key[1] <> far or key[2] <> groundReach or key[3] <> fraction or key[4] <> bands or key[5] <> groundY
+        m.fogGroundKey = [cam.projectionVersion, far, groundReach, fraction, bands, groundY]
         ' forward distances of the band edges, nearest last, after the ground's edge if farther
         depths = []
         bandDepth = far * fraction / BGE.Math.Max(1, bands)
-        edge = groundDistance * flat - p.y * o.y
-        m.fogGroundSolid = edge > far
+        ' the plane is cut at this forward depth (SceneObjectPlane.getFarEdgeCorner())
+        m.fogGroundSolid = groundReach > far
         if m.fogGroundSolid
-          depths.push(edge)
+          depths.push(groundReach)
         end if
         for i = 0 to bands
           depths.push(far - i * bandDepth)
@@ -1396,7 +1397,7 @@ namespace BGE
         m.fogGroundRows.Clear()
         height = cam.frameSize.y
         for each depth in depths
-          m.fogGroundRows.push(m.fogGroundRow(cam, depth, o, flat, height))
+          m.fogGroundRows.push(m.fogGroundRow(cam, depth, o, flat, eye, groundY, height))
         end for
       end if
       rows = m.fogGroundRows
@@ -1424,14 +1425,14 @@ namespace BGE
 
     ' The whole-pixel screen row, 0 to height, of the level ground straight ahead at a forward
     ' distance: height when that's under or behind the camera.
-    private function fogGroundRow(cam as Camera3d, depth as float, o as BGE.Math.Vector, flat as float, height as integer) as integer
+    private function fogGroundRow(cam as Camera3d, depth as float, o as BGE.Math.Vector, flat as float, eye as float, groundY as float, height as integer) as integer
       p = cam.position
-      ' a ground point h ahead along the level forward is h * flat - p.y * o.y forward
-      h = (depth + p.y * o.y) / flat
+      ' a ground point h ahead along the level forward is h * flat - eye * o.y forward
+      h = (depth + eye * o.y) / flat
       if h <= 0
         return height
       end if
-      point = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(p.x + o.x / flat * h, 0, p.z + o.z / flat * h))
+      point = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(p.x + o.x / flat * h, groundY, p.z + o.z / flat * h))
       if invalid = point
         return height
       end if
@@ -2104,10 +2105,22 @@ namespace BGE
 
       m.pendingClusterDraws = []
 
-      drewGround = false
+      ' the level ground's height and how far it reaches, for drawFogGround()
+      groundReach = 0.0
+      groundY = 0.0
       for each sceneObj in m.sceneObjects
         if sceneObj.isEnabled() and sceneObj.type = SceneObjectType.Plane
-          drewGround = true
+          if m.camera.name = "Camera3d"
+            planeObj = sceneObj as SceneObjectPlane
+            plane = planeObj.drawable.plane
+            if plane.normal.y > 0 and Abs(plane.normal.x) < 0.0001 and Abs(plane.normal.z) < 0.0001
+              reach = planeObj.getWorldDrawDistance(m.camera as Camera3d)
+              if reach > groundReach
+                groundReach = reach
+                groundY = plane.point.y
+              end if
+            end if
+          end if
           ' A plane's negDistanceFromCamera is measured from its fixed anchor point, not
           ' from what's actually visible - gating draw() on it permanently blanked the
           ' plane once the camera passed the anchor. findCanvasPosition() already
@@ -2118,8 +2131,8 @@ namespace BGE
       end for
       lap = m.lapStage("planes", lap)
 
-      if drewGround and m.camera.name = "Camera3d"
-        m.drawFogGround(m.camera as Camera3d)
+      if groundReach > 0
+        m.drawFogGround(m.camera as Camera3d, groundY, groundReach)
       end if
       lap = m.lapStage("fogGround", lap)
 
