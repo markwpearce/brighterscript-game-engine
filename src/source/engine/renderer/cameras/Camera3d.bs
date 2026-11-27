@@ -138,7 +138,8 @@ namespace BGE
 
     ' How far (world units) in front of the camera your game wants to draw. The
     ' distance actually used is `getEffectiveMaxDrawDistance()`: this value scaled by
-    ' the current render quality level and capped per device.
+    ' the current render quality level and the session's `Game.setDrawDistanceScale()`, and
+    ' capped per device.
     maxDrawDistance as float = 1000
 
     ' Last field of view seen by projectionChangedThisFrame(). fieldOfViewDegrees is a
@@ -469,7 +470,7 @@ namespace BGE
 
     ' Judged against the planes isAnyInView() uses for several points: hidden if the sphere is
     ' wholly outside one, in view if it's wholly inside them all.
-    override function getSphereInViewVerdict(sphere as BGE.Math.BoundingSphere) as integer
+    override function getSphereInViewVerdict(sphere as BGE.Math.BoundingSphere, farScale = 1.0 as float) as integer
       normals = m.frustumNormals
       nearN = normals.near
       r = sphere.radius
@@ -498,7 +499,7 @@ namespace BGE
       dz = cz - (camPos.z ?? 0)
       reach = r * Sqr(nn)
       forward = dx * nx + dy * ny + dz * nz
-      drawDistance = m.getCurrentDrawDistance()
+      drawDistance = m.getCurrentDrawDistance() * farScale
       if forward - reach > drawDistance
         return 0
       else if forward + reach > drawDistance
@@ -553,7 +554,7 @@ namespace BGE
 
     ' Same arithmetic as distanceFromFrustumSide() for each side, inlined - this runs for
     ' every bounding point of every object each frame the camera moves.
-    override function isAnyInView(points as BGE.Math.Vector[]) as boolean
+    override function isAnyInView(points as BGE.Math.Vector[], farScale = 1.0 as float) as boolean
       normals = m.frustumNormals
       nearN = normals.near
       topN = normals.top
@@ -571,7 +572,7 @@ namespace BGE
       ' the view direction (level under shear), as the near plane faces
       orient = nearN
       orientZ = orient.z ?? 0
-      drawDistance = m.getCurrentDrawDistance()
+      drawDistance = m.getCurrentDrawDistance() * farScale
       if points.Count() = 0
         return false
       end if
@@ -1283,6 +1284,40 @@ namespace BGE
       return m.currentDrawDistance
     end function
 
+    ' How far fog silhouettes reach, as a multiple of the current draw distance: the fog's
+    ' `silhouetteReach`. A reach past 1 counts from the draw distance before a session scale under
+    ' 1 (`Game.setDrawDistanceScale()`), so a shorter draw distance doesn't pull in the skyline.
+    '
+    ' @return {float}
+    function getFogSilhouetteReach() as float
+      reach = m.fog.silhouetteReach
+      if reach > 1 and m.sessionDrawDistanceScale < 1
+        return reach / m.getSessionDrawDistanceShrink()
+      end if
+      return reach
+    end function
+
+    ' How much the session scale actually shortened the draw distance (1 for not at all). Not
+    ' just the scale: the device cap can hold the unscaled distance in too.
+    private function getSessionDrawDistanceShrink() as float
+      sessionScale = m.sessionDrawDistanceScale
+      if sessionScale <= 0 or sessionScale >= 1
+        return 1.0
+      end if
+      unscaled = m.maxDrawDistance * m.drawDistanceScale / sessionScale
+      if m.drawDistanceOverride > 0
+        unscaled = m.drawDistanceOverride / sessionScale
+      end if
+      deviceCap = m.getMaxDrawDistanceDeviceCap()
+      if unscaled > deviceCap
+        unscaled = deviceCap * 1.0
+      end if
+      if unscaled <= 0
+        return 1.0
+      end if
+      return m.getEffectiveMaxDrawDistance() / unscaled
+    end function
+
     ' Jumps straight to the target draw distance, skipping any transition in progress -
     ' e.g. after a camera cut, where easing the horizon would look odd.
     sub snapDrawDistance()
@@ -1410,7 +1445,8 @@ namespace BGE
     ' The alpha falls with distance, so if the sphere's nearest and farthest reach get the same
     ' alpha, so does every point in it.
     override function getDistanceFadeAlphaForSphere(sphere as BGE.Math.BoundingSphere, distanceScale = 1.0 as float) as float
-      if m.drawDistanceFadeFraction <= 0
+      fraction = m.drawDistanceFadeFraction
+      if fraction <= 0
         return 1.0
       end if
       o = m.orientation
@@ -1424,24 +1460,68 @@ namespace BGE
       centerDistance = (sphere.x - p.x) * ox + (sphere.y - p.y) * oy + (sphere.z - (p.z ?? 0)) * oz
       ' the orientation needn't be unit length
       reach = sphere.radius * Sqr(ox * ox + oy * oy + oz * oz)
-      nearAlpha = m.fadeAlphaForForwardDistance(centerDistance - reach, distanceScale)
-      if nearAlpha <> m.fadeAlphaForForwardDistance(centerDistance + reach, distanceScale)
+      ' fadeAlphaForForwardDistance() for both ends, inlined: this runs for every still object each
+      ' frame the camera moves (#686)
+      if distanceScale <> 1
+        distanceScale = m.getEffectiveFadeDistanceScale(distanceScale)
+        centerDistance = centerDistance / distanceScale
+        reach = reach / distanceScale
+      end if
+      far = m.currentDrawDistance
+      if far < 0
+        far = m.getEffectiveMaxDrawDistance()
+      end if
+      if centerDistance - reach >= far
+        return 0.0
+      end if
+      if fraction > 1
+        fraction = 1.0
+      end if
+      if centerDistance + reach <= far * (1 - fraction)
+        return 1.0
+      end if
+      ' the ends straddle the band's edges or sit inside it, so their alphas differ
+      if reach > 0
         return -1.0
       end if
-      return nearAlpha
+      return m.fadeAlphaForForwardDistance(centerDistance, 1.0)
     end function
 
-    ' `distanceScale` (Drawable.fadeDistanceScale) stretches the band; 0 or less counts as 1, and
-    ' it's kept within fadeDistanceScaleLimit
-    private function fadeAlphaForForwardDistance(forwardDistance as float, distanceScale = 1.0 as float) as float
-      if distanceScale > 1
-        limit = m.fadeDistanceScaleLimit
-        if limit > 0 and distanceScale > limit
-          distanceScale = limit
-        end if
+    ' Over 1, it counts from the draw distance before a session scale under 1, like
+    ' getFogSilhouetteReach(), so lights keep showing through fog. Kept within
+    ' fadeDistanceScaleLimit.
+    override function getFadeReach(distanceScale as float) as float
+      if distanceScale <= 1
+        return 1.0
       end if
-      if distanceScale > 0 and distanceScale <> 1
-        forwardDistance = forwardDistance / distanceScale
+      if m.sessionDrawDistanceScale < 1
+        distanceScale = distanceScale / m.getSessionDrawDistanceShrink()
+      end if
+      limit = m.fadeDistanceScaleLimit
+      if limit > 0 and distanceScale > limit
+        distanceScale = limit
+      end if
+      return distanceScale
+    end function
+
+    ' A Drawable.fadeDistanceScale as fadeAlphaForForwardDistance() applies it: 0 or less is 1,
+    ' and over 1 it's getFadeReach().
+    private function getEffectiveFadeDistanceScale(distanceScale as float) as float
+      if distanceScale <= 0
+        return 1.0
+      end if
+      if distanceScale > 1
+        distanceScale = m.getFadeReach(distanceScale)
+      end if
+      return distanceScale
+    end function
+
+    ' `distanceScale` (Drawable.fadeDistanceScale) stretches the band, as
+    ' getEffectiveFadeDistanceScale() applies it.
+    ' getDistanceFadeAlphaForSphere() inlines this band: change both
+    private function fadeAlphaForForwardDistance(forwardDistance as float, distanceScale = 1.0 as float) as float
+      if distanceScale <> 1
+        forwardDistance = forwardDistance / m.getEffectiveFadeDistanceScale(distanceScale)
       end if
       fraction = m.drawDistanceFadeFraction
       if fraction > 1
