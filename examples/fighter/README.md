@@ -1,31 +1,31 @@
 # Ironyard Brawl (fighter)
 
-A *Street Fighter 2*-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)): one player against the CPU, two players on their own controllers, or training against a dummy. There are four fighters (Blaze, Frost, Bruno and Nova, two colours each), each with three special moves, plus throws, knockdowns, best-of-3 rounds, an announcer and music.
+A _Street Fighter 2_-style fighting game ([#295](https://github.com/markwpearce/brighterscript-game-engine/issues/295)): one player against the CPU, two players on their own controllers, or training against a dummy. There are four fighters (Blaze, Frost, Bruno and Nova, two colours each), each with three special moves, plus throws, knockdowns, best-of-3 rounds, an announcer and music.
 
 ## Playing
 
 The title menu picks **Arcade** (vs CPU), **2 Players** or **Training**, the CPU's level (Easy, Normal, Hard), and **Controllers**. On the select screen, left/right picks a fighter, up/down picks their colour, and any attack button locks it in. In 2 Players, P2 joins by pressing any button. Against the CPU, a second controller pressing a button is a new challenger and goes back to the select screen for a 2-player match. In Training, it takes over the dummy.
 
-Each player uses their own controller (`multi_controllers=1`; every remote, gamepad and phone gets its own player index, in the order they're first used). On the select screen, whichever controller presses first is P1 (and in 2 Players, the next one is P2). The **Controllers** screen sets P1 and P2 up front, and shows a QR code for using a phone as a controller.
+Each player uses their own controller (`multi_controllers=1`; every remote and web-based controller or gamepad gets its own player index, in the order they're first used). On the select screen, whichever controller presses first is P1 (and in 2 Players, the next one is P2). The **Controllers** screen sets P1 and P2 up front, and shows a QR code for using a phone as a controller.
 
-| Action | Gamepad | Roku remote | Browser controller |
-| --- | --- | --- | --- |
-| Walk / jump / crouch | D-pad or left stick | D-pad | Stick 1 |
-| Block | Hold away from the opponent (crouch to block lows) | same | same |
-| Light / heavy punch | X / Y | Rewind / Play | x / y |
-| Light / heavy kick | A / B | OK / Fast-forward | ok / b |
-| Pause | - | Back | - |
-| Debug info (FPS, then everything with colliders, then off) | - | `*` | - |
+| Action                                                     | Gamepad                                            | Roku remote       | Browser controller |
+| ---------------------------------------------------------- | -------------------------------------------------- | ----------------- | ------------------ |
+| Walk / jump / crouch                                       | D-pad or left stick                                | D-pad             | Stick 1            |
+| Block                                                      | Hold away from the opponent (crouch to block lows) | same              | same               |
+| Light / heavy punch                                        | X / Y                                              | Rewind / Play     | x / y              |
+| Light / heavy kick                                         | A / B                                              | OK / Fast-forward | ok / b             |
+| Pause                                                      | -                                                  | Back              | -                  |
+| Debug info (FPS, then everything with colliders, then off) | -                                                  | `*`               | -                  |
 
 Moves, in numpad notation (6 is toward the opponent, 2 down). The diagonals are optional, since the remote's d-pad can't press them:
 
-| Move | Input | Notes |
-| --- | --- | --- |
-| Special 1 | 2, 3, 6 + punch | Blaze/Frost/Nova: fireball (heavy punch throws a faster one; one on screen at a time; fireballs cancel). Bruno: shoulder charge, travels forward and knocks down. |
-| Special 2 | 6, 2, 3 + punch | Blaze/Frost: rising uppercut. Nova: flip kick. Both can't be hit for their first frames (anti-air), knock down, and are slow to recover if blocked. Bruno: overhead hammer fist (block it standing). |
-| Special 3 | 2, 1, 4 + kick | Blaze/Frost: cartwheel kick. Bruno/Nova: slide kick (hits low). Both travel forward and knock down. |
-| Throw | Toward or away + heavy punch, up close | Can't be blocked. Holding away throws them behind you. |
-| Sweep | Crouching heavy kick | Hits low and knocks down. |
+| Move      | Input                                  | Notes                                                                                                                                                                                                |
+| --------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Special 1 | 2, 3, 6 + punch                        | Blaze/Frost/Nova: fireball (heavy punch throws a faster one; one on screen at a time; fireballs cancel). Bruno: shoulder charge, travels forward and knocks down.                                    |
+| Special 2 | 6, 2, 3 + punch                        | Blaze/Frost: rising uppercut. Nova: flip kick. Both can't be hit for their first frames (anti-air), knock down, and are slow to recover if blocked. Bruno: overhead hammer fist (block it standing). |
+| Special 3 | 2, 1, 4 + kick                         | Blaze/Frost: cartwheel kick. Bruno/Nova: slide kick (hits low). Both travel forward and knock down.                                                                                                  |
+| Throw     | Toward or away + heavy punch, up close | Can't be blocked. Holding away throws them behind you.                                                                                                                                               |
+| Sweep     | Crouching heavy kick                   | Hits low and knocks down.                                                                                                                                                                            |
 
 Knocked-down fighters can't be hit until they're back up. An airborne fighter can be hit twice (a juggle) before they're safe until they land.
 
