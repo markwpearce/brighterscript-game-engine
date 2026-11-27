@@ -1,4 +1,6 @@
 import "../drawables/SpriteFrames.bs"
+import "../interfaces.bs"
+import "../../utils/deviceRenderTier.bs"
 import "../../utils/strings.bs"
 import "../../utils/urls.bs"
 
@@ -9,7 +11,9 @@ namespace BGE
   ' into a shared `BGE.SpriteFrames`.
   '
   ' The `.json` it's read from is `{sheets: ["hero.png", "hero_1.png"], frames: [SpriteFrameRect...]}`,
-  ' as `tools/render-character.py --packed` writes. Sheet files are relative to the `.json`.
+  ' as `tools/render-character.py --packed` writes. Sheet files are relative to the `.json`. An
+  ' optional `sheetSizes: [[width, height], ...]` lets it load at a reduced size (see
+  ' `BGE.SpriteAtlasLoadOptions.scale`).
   interface SpriteAtlas
     ' The name it was loaded under
     name as string
@@ -19,9 +23,35 @@ namespace BGE
     sheets as string[]
     ' Each sheet's path or URL
     sheetPaths as string[]
-    ' Every frame, in frame order
+    ' Every frame, in frame order, in the loaded sheets' pixels
     frames as BGE.SpriteFrameRect[]
+    ' The size to load each sheet at, or invalid for its own size
+    sheetLoadSizes as dynamic
+    ' Pixels of the full-size sheets per loaded pixel: 2 for an atlas loaded at half size, 1 at full size
+    texelScale as float
   end interface
+
+  ' Options for `AssetLoader.loadSpriteAtlas()`.
+  interface SpriteAtlasLoadOptions extends DownloadOptions
+    ' Load the sheets at this fraction of their size (0-1), e.g. 0.75 for 56% of the texture
+    ' memory; sprites still draw the same size, from fewer texels. Defaults to
+    ' `BGE.getDefaultSpriteAtlasScale()`: 0.75 on an HD or SD Roku, 1 elsewhere. Needs the atlas's
+    ' `sheetSizes`; without them it loads at full size.
+    optional scale as float
+  end interface
+
+  ' The scale sprite atlases load at when `SpriteAtlasLoadOptions.scale` isn't given: 75% on an HD
+  ' or SD Roku (64 MB of texture memory or less), full size elsewhere.
+  '
+  ' @return {float}
+  function getDefaultSpriteAtlasScale() as float
+    ' not 0.5: half size looked too soft in thirdPerson
+    tier = BGE.getDeviceRenderTier()
+    if tier = BGE.DeviceRenderTier.hd or tier = BGE.DeviceRenderTier.sd
+      return 0.75
+    end if
+    return 1.0
+  end function
 
 end namespace
 
@@ -73,6 +103,17 @@ namespace BGE.SpriteAtlases
         end if
       end if
     end for
+    sizes = parsed.sheetSizes
+    if sizes <> invalid
+      if type(sizes) <> "roArray" or sizes.count() <> sheets.count()
+        return "has ""sheetSizes"" that don't match its sheets"
+      end if
+      for each size in sizes
+        if type(size) <> "roArray" or size.count() <> 2 or not BGE.SpriteAtlases.isNumber(size[0]) or not BGE.SpriteAtlases.isNumber(size[1]) or size[0] <= 0 or size[1] <= 0
+          return "has a sheet size that isn't [width, height]"
+        end if
+      end for
+    end if
     return ""
   end function
 
@@ -81,21 +122,126 @@ namespace BGE.SpriteAtlases
   ' @param {string} atlasName - the name to load it under
   ' @param {string} source - the `.json` path or URL, which sheet files are relative to
   ' @param {roAssociativeArray} parsed
+  ' @param {float} [scale=1] - load the sheets at this fraction of their size, if the json has
+  '   their sizes; frames are scaled to match
   ' @return {BGE.SpriteAtlas}
-  function create(atlasName as string, source as string, parsed as roAssociativeArray) as BGE.SpriteAtlas
+  function create(atlasName as string, source as string, parsed as roAssociativeArray, scale = 1.0 as float) as BGE.SpriteAtlas
     sheets = [] as string[]
     sheetPaths = [] as string[]
     for each sheetFile in parsed.sheets
       sheets.push(BGE.SpriteAtlases.sheetBitmapName(atlasName, sheets.count()))
       sheetPaths.push(BGE.SpriteAtlases.resolveSheetPath(source, sheetFile))
     end for
-    return {
+    atlas = {
       name: atlasName,
       source: source,
       sheets: sheets,
       sheetPaths: sheetPaths,
-      frames: parsed.frames
-    }
+      frames: parsed.frames,
+      sheetLoadSizes: invalid,
+      texelScale: 1.0
+    } as BGE.SpriteAtlas
+    if scale > 0 and scale < 1 and parsed.sheetSizes <> invalid
+      BGE.SpriteAtlases.applyScale(atlas, parsed.sheetSizes, scale)
+    end if
+    return atlas
+  end function
+
+  ' Shrinks an atlas's sheets and frames to `scale` of their size. Frame rects grow to whole
+  ' pixels outward, so a frame keeps all of its pixels (and may pick up a sliver of a neighbour's
+  ' edge, blended in by the resize).
+  '
+  ' @param {BGE.SpriteAtlas} atlas
+  ' @param {roArray} sheetSizes - [width, height] of each full-size sheet
+  ' @param {float} scale - 0-1
+  sub applyScale(atlas as BGE.SpriteAtlas, sheetSizes as roArray, scale as float)
+    loadSizes = [] as BGE.SizeWH[]
+    for each size in sheetSizes
+      loadSizes.push({width: BGE.SpriteAtlases.atLeastOne(size[0] * scale + 0.5), height: BGE.SpriteAtlases.atLeastOne(size[1] * scale + 0.5)})
+    end for
+    frames = [] as BGE.SpriteFrameRect[]
+    for each frame in atlas.frames
+      sheet = frame.sheet ?? 0
+      ' each sheet's own factor, as its size rounded
+      sx = loadSizes[sheet].width / sheetSizes[sheet][0]
+      sy = loadSizes[sheet].height / sheetSizes[sheet][1]
+      left = Int(frame.x * sx)
+      top = Int(frame.y * sy)
+      right = -Int(-(frame.x + frame.width) * sx)
+      bottom = -Int(-(frame.y + frame.height) * sy)
+      ' float error can push a frame ending on the sheet's edge a pixel past the shrunk sheet
+      if right > loadSizes[sheet].width
+        right = loadSizes[sheet].width
+      end if
+      if bottom > loadSizes[sheet].height
+        bottom = loadSizes[sheet].height
+      end if
+      sourceWidth = frame.sourceWidth ?? frame.width
+      sourceHeight = frame.sourceHeight ?? frame.height
+      frames.push({
+        sheet: sheet,
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+        ' where the grown rect now sits in the scaled cell
+        offsetX: (frame.offsetX ?? 0) * sx - (frame.x * sx - left),
+        offsetY: (frame.offsetY ?? 0) * sy - (frame.y * sy - top),
+        sourceWidth: sourceWidth * sx,
+        sourceHeight: sourceHeight * sy
+      })
+    end for
+    atlas.frames = frames
+    atlas.sheetLoadSizes = loadSizes
+    atlas.texelScale = sheetSizes[0][0] / loadSizes[0].width
+  end sub
+
+  ' Whether two atlases load sheet `index` at the same size (both at full size, or both shrunk to
+  ' the same width and height).
+  '
+  ' @param {BGE.SpriteAtlas} a
+  ' @param {BGE.SpriteAtlas} b
+  ' @param {integer} index
+  ' @return {boolean}
+  function sameSheetLoadSize(a as BGE.SpriteAtlas, b as BGE.SpriteAtlas, index as integer) as boolean
+    aSize = invalid
+    if invalid <> a.sheetLoadSizes and index < a.sheetLoadSizes.count()
+      aSize = a.sheetLoadSizes[index]
+    end if
+    bSize = invalid
+    if invalid <> b.sheetLoadSizes and index < b.sheetLoadSizes.count()
+      bSize = b.sheetLoadSizes[index]
+    end if
+    if invalid = aSize or invalid = bSize
+      return invalid = aSize and invalid = bSize
+    end if
+    return aSize.width = bSize.width and aSize.height = bSize.height
+  end function
+
+  ' Whether two atlases load every sheet at the same size.
+  '
+  ' @param {BGE.SpriteAtlas} a
+  ' @param {BGE.SpriteAtlas} b
+  ' @return {boolean}
+  function sameLoadSizes(a as BGE.SpriteAtlas, b as BGE.SpriteAtlas) as boolean
+    if a.sheets.count() <> b.sheets.count()
+      return false
+    end if
+    for i = 0 to a.sheets.count() - 1
+      if not BGE.SpriteAtlases.sameSheetLoadSize(a, b, i)
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  ' A pixel count of at least 1
+  function atLeastOne(value as float) as integer
+    count = Int(value)
+    if count < 1
+      return 1
+    end if
+    return count
   end function
 
   ' A sheet file named in an atlas, as a path or URL: relative to the `.json`, unless it's a
