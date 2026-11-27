@@ -285,8 +285,13 @@ def pack(paths, feet, out, columns, animations, packed, sheet_size):
 
 
 # Trims each cell to its opaque pixels and shelf-packs them, tallest first, into as many
-# sheet_size sheets as it takes. Writes the sheets and a .json frame list next to `out`, in
-# frame order. Returns the total texture bytes.
+# sheet_size sheets as it takes, GAP px apart. Writes the sheets and a .json frame list next to
+# `out`, in frame order. Returns the total texture bytes.
+# The gap keeps neighbours out of a frame when the engine loads the sheets shrunk: each frame's
+# rect grows to whole pixels and the resize blends across it, up to 1 / scale px each.
+GAP = 2
+
+
 def pack_trimmed(cells, cw, ch, out, sheet_size):
     trimmed = []
     for cell in cells:
@@ -298,13 +303,13 @@ def pack_trimmed(cells, cw, ch, out, sheet_size):
     for i in sorted(range(len(trimmed)), key=lambda k: -trimmed[k][0].shape[0]):
         h, w = trimmed[i][0].shape[:2]
         if x + w > sheet_size:
-            x, y, shelf = 0, y + shelf, 0
+            x, y, shelf = 0, y + shelf + GAP, 0
         if y + h > sheet_size:
             sheet, x, y, shelf = sheet + 1, 0, 0, 0
             sizes.append([0, 0])
         placed[i] = (sheet, x, y)
         sizes[sheet] = [max(sizes[sheet][0], x + w), max(sizes[sheet][1], y + h)]
-        x, shelf = x + w, max(shelf, h)
+        x, shelf = x + w + GAP, max(shelf, h)
     base, _ = os.path.splitext(out)
     sheets = [np.zeros((h, w, 4), dtype=np.float32) for w, h in sizes]
     frames = []

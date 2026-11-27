@@ -83,19 +83,19 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 
 ## Sprite sheets
 
-The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so they're rendered a little smaller (`--height 56`, or 58 for the heavy orc, against the knight's 64). The orcs' skin is recoloured a grey-green (about `#9AAE93` once lit) with dark hair (`ORC_COLOURS` in `tools/characters.py`), and every attack gets in-between frames: 9 for the knight; for the monsters 8 drawing back to the top of the swing and 4 for the strike, in place of Flare's 4. The knight's block, hit and death get in-betweens too, so every action plays at 12 fps or more: a monster's wind-up plays at 12 fps or faster and then holds the top of its swing (`BGE.frameRateFor()`'s `minFrameRate`). Each sheet is packed: every frame is trimmed to its own pixels, and a `.json` alongside lists each frame's rect and its offset in the untrimmed cell (loaded with `loader.loadSpriteAtlas()`).
+The knight and the monsters are re-rendered from Flare-style Blender sources (Clint Bellanger's knight and skeleton, johndh's orc; see [CREDITS.md](CREDITS.md)) at the chase camera's angle (12 degrees above horizontal), all at the same scale (64 px for the knight's 1.8 Blender units, which is 2 m in the game), 16 directions, front first then clockwise from above. Flare's monsters are big next to its hero, so they're rendered a little smaller (`--height 56`, or 58 for the heavy orc, against the knight's 64). The orcs' skin is recoloured a grey-green (about `#9AAE93` once lit) with dark hair (`ORC_COLOURS` in `tools/characters.py`), and every attack gets in-between frames: 9 for the knight; for the monsters 8 drawing back to the top of the swing and 4 for the strike, in place of Flare's 4. The knight's block, hit and death get in-betweens too, so every action plays at 12 fps or more: a monster's wind-up plays at 12 fps or faster and then holds the top of its swing (`BGE.frameRateFor()`'s `minFrameRate`). Each sheet is packed: every frame is trimmed to its own pixels and placed 2 px from the next (so a neighbour doesn't bleed in when an HD device loads the sheet shrunk), and a `.json` alongside lists each frame's rect and its offset in the untrimmed cell (loaded with `loader.loadSpriteAtlas()`).
 
 | Sheet | Source | Frames per direction | Untrimmed cell | Texture |
 | --- | --- | --- | --- | --- |
-| `knight.webp` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield`, plus the moves `tools/knight-moves.py` keys | 54 | 92×89 | 14.0 MB |
-| `skeleton.webp` | `skeleton_0.blend` | 30 | 112×75 | 7.7 MB |
-| `orc.webp` | `orc_flare_0.blend`, layer 2 (hand axe) | 29 | 102×84 | 6.7 MB |
-| `orc_heavy.webp` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 26 | 116×101 | 8.7 MB |
+| `knight.webp` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield`, plus the moves `tools/knight-moves.py` keys | 54 | 92×89 | 14.9 MB |
+| `skeleton.webp` | `skeleton_0.blend` | 30 | 112×75 | 8.2 MB |
+| `orc.webp` | `orc_flare_0.blend`, layer 2 (hand axe) | 29 | 102×84 | 7.0 MB |
+| `orc_heavy.webp` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 26 | 116×101 | 9.2 MB |
 | `peasant_m.webp` | [Flare NPCs](https://opengameart.org/content/flare-npcs-animated-pack-1) `art/npcs/MalePeasant.blend` (`--height 62`) | 4 (idle) | 62×68 | 1.0 MB |
 | `peasant_f.webp` | `FemalePeasant4.blend` (`--height 61`) | 4 | 73×68 | 1.0 MB |
 | `nobleman.webp` | `Nobleman.blend` (`--height 60 --mirror`) | 4 | 51×67 | 0.4 MB |
 | `noblewoman.webp` | `NobleWoman1.blend` (`--height 64`) | 4 | 64×65 | 1.0 MB |
-| `old_man.webp` | `OldMan.blend` (`--height 58`) | 4 | 57×63 | 0.9 MB |
+| `old_man.webp` | `OldMan.blend` (`--height 58`) | 4 | 57×63 | 1.0 MB |
 | `priest.webp` | `LuxPriestNPC.blend` (`--height 60`) | 4 | 76×79 | 1.1 MB |
 | `pig.webp` | `Pig.blend` (`--height 34 --mirror`): idle, and a walk from `Armature.001Action` | 12 | 40×23 | 0.3 MB |
 
@@ -128,7 +128,7 @@ Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16 (drawn back a
 
 ## Still needed
 
-- [ ] The four packed sheets take ~37 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
+- [ ] The four packed sheets take ~39 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
 - [ ] The rest of the map: the forest.
 - [ ] Furniture art for the interiors.
 - [ ] Ripostes and backstabs, checkpoints.
