@@ -197,6 +197,17 @@ about one rect per band it spans, so smaller bands follow it more closely for mo
 | High   | 3                   |
 | Ultra  | 2                   |
 
+With fog on, the far ground fades into the fog colour in `fogGroundBands` steps (see
+`fog.groundFade`), one rect each.
+
+| Level  | `fogGroundBands` |
+| ------ | ---------------- |
+| Basic  | 4                |
+| Low    | 6                |
+| Medium | 8                |
+| High   | 12               |
+| Ultra  | 16               |
+
 Past `wallLodDistanceFraction` of the current draw distance, walls draw one strip per two rays,
 twice as wide: far walls are small on screen, and each strip costs about the same however big
 it is. Every ray still closes exactly, so hiding and floors are unchanged.

@@ -218,6 +218,10 @@ namespace BGE
     private fogBoxes = [] as float[]
     private fogBoxRgbas = [] as integer[]
     private fogBoxesValid as boolean = false
+    ' The ground fade's screen rows (see drawFogGround()), kept while nothing that places them changes
+    private fogGroundRows = [] as integer[]
+    private fogGroundSolid as boolean = false
+    private fogGroundKey = [] as float[]
     private fogPoints = [] as float[]
     ' one caster's part boxes, [x0, y0, x1, y1] each, before merging
     private fogPartBoxes = [] as float[]
@@ -1352,6 +1356,95 @@ namespace BGE
       end if
     end sub
 
+    ' Fades the ground into the fog colour across the draw distance's fade band in
+    ' fogGroundBands rects, then fills solid fog from the draw distance up to where the ground
+    ' ends (see BGE.Fog.groundFade). Assumes level ground at y 0, like the backdrop; roll is ignored.
+    private sub drawFogGround(cam as Camera3d)
+      fog = cam.fog
+      if not fog.enabled or not fog.groundFade
+        return
+      end if
+      ' each row of level ground is one forward distance, so a row fades like an object there
+      o = cam.getViewForward()
+      flat = Sqr(o.x * o.x + o.z * o.z)
+      p = cam.position
+      if flat < 0.001 or p.y <= 0
+        return
+      end if
+      far = cam.getCurrentDrawDistance()
+      fraction = BGE.Math.Clamp(cam.drawDistanceFadeFraction, 0, 1)
+      bands = m.qualitySettings.fogGroundBands
+      if fraction <= 0 or bands < 1
+        bands = 0
+      end if
+      groundDistance = cam.getPlaneDrawDistance()
+      key = m.fogGroundKey
+      ' a still camera keeps its rows: working them out is most of the cost (#742)
+      if cam.movedLastFrame() or key.count() = 0 or key[0] <> cam.projectionVersion or key[1] <> far or key[2] <> groundDistance or key[3] <> fraction or key[4] <> bands
+        m.fogGroundKey = [cam.projectionVersion, far, groundDistance, fraction, bands]
+        ' forward distances of the band edges, nearest last, after the ground's edge if farther
+        depths = []
+        bandDepth = far * fraction / BGE.Math.Max(1, bands)
+        edge = groundDistance * flat - p.y * o.y
+        m.fogGroundSolid = edge > far
+        if m.fogGroundSolid
+          depths.push(edge)
+        end if
+        for i = 0 to bands
+          depths.push(far - i * bandDepth)
+        end for
+        m.fogGroundRows.Clear()
+        height = cam.frameSize.y
+        for each depth in depths
+          m.fogGroundRows.push(m.fogGroundRow(cam, depth, o, flat, height))
+        end for
+      end if
+      rows = m.fogGroundRows
+      rgb = fog.color << 8
+      width = cam.frameSize.x
+      i = 0
+      if m.fogGroundSolid
+        ' solid between the ground's edge and the draw distance
+        if rows[1] > rows[0]
+          m.draw2d.DrawRect(0, rows[0], width, rows[1] - rows[0], rgb + &hFF)
+          m.drawCallsLastFrame++
+        end if
+        i = 1
+      end if
+      for band = 0 to bands - 1
+        top = rows[i + band]
+        bottom = rows[i + band + 1]
+        alpha = Int(255 * (1 - (band + 0.5) / bands) + 0.5)
+        if bottom > top and alpha > 0
+          m.draw2d.DrawRect(0, top, width, bottom - top, rgb + alpha)
+          m.drawCallsLastFrame++
+        end if
+      end for
+    end sub
+
+    ' The whole-pixel screen row, 0 to height, of the level ground straight ahead at a forward
+    ' distance: height when that's under or behind the camera.
+    private function fogGroundRow(cam as Camera3d, depth as float, o as BGE.Math.Vector, flat as float, height as integer) as integer
+      p = cam.position
+      ' a ground point h ahead along the level forward is h * flat - p.y * o.y forward
+      h = (depth + p.y * o.y) / flat
+      if h <= 0
+        return height
+      end if
+      point = cam.worldPointToCanvasPoint(BGE.Math.VectorOps.create(p.x + o.x / flat * h, 0, p.z + o.z / flat * h))
+      if invalid = point
+        return height
+      end if
+      row = Int(point.y + 0.5)
+      if row < 0
+        return 0
+      end if
+      if row > height
+        return height
+      end if
+      return row
+    end function
+
     ' Draws a fog-coloured screen box for each caster fading out or past the draw distance, out
     ' to silhouetteReach times it (see BGE.Fog), repeating the last boxes when nothing that
     ' shapes them changed.
@@ -2011,8 +2104,10 @@ namespace BGE
 
       m.pendingClusterDraws = []
 
+      drewGround = false
       for each sceneObj in m.sceneObjects
         if sceneObj.isEnabled() and sceneObj.type = SceneObjectType.Plane
+          drewGround = true
           ' A plane's negDistanceFromCamera is measured from its fixed anchor point, not
           ' from what's actually visible - gating draw() on it permanently blanked the
           ' plane once the camera passed the anchor. findCanvasPosition() already
@@ -2022,6 +2117,11 @@ namespace BGE
         end if
       end for
       lap = m.lapStage("planes", lap)
+
+      if drewGround and m.camera.name = "Camera3d"
+        m.drawFogGround(m.camera as Camera3d)
+      end if
+      lap = m.lapStage("fogGround", lap)
 
       m.fogSilhouettesDrawnLastFrame = 0
       m.fogSilhouettesProjectedLastFrame = 0
