@@ -108,6 +108,23 @@ game struggling.
 m.qualityOptions = {fixedDrawDistance: true}
 ```
 
+### Per device
+
+On top of the level, the whole session draws at a scale picked once from the device: half
+the distance on one that starts at Basic or Low (a Roku Express, say), the full distance
+elsewhere. Adaptive quality never changes it, and it applies with fog or `fixedDrawDistance`
+on too, so a fog's edge moves in with it. Fog silhouettes (a `silhouetteReach` over 1) and
+lights (a `fadeDistanceScale` over 1) still reach as far as they would at the full distance,
+so the skyline and far torches stay put. On an Express, this takes a frame in thirdPerson's
+town from ~155 ms to ~130 ms.
+
+Change it with `game.setDrawDistanceScale()`, e.g. from a player's draw distance setting,
+or to draw the full distance on every device:
+
+```brighterscript
+game.setDrawDistanceScale(1)
+```
+
 The distance actually used is
 `camera.getEffectiveMaxDrawDistance()`, which is also capped per device to avoid
 running out of memory: 900 in the simulator, 1000 on an HD Roku, 2500 on an FHD one.
