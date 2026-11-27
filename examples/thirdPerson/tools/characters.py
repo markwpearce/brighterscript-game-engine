@@ -20,6 +20,10 @@ CHARACTERS = {
             ("block", inbetweens(17, 18, 3)),  # noqa: F821
             ("hit", inbetweens(19, 20, 3)),  # noqa: F821
             ("die", inbetweens(21, 24, 7)),  # noqa: F821
+            # keyed by tools/knight-moves.py: a roll, a hop back, and a side-step to the right
+            ("roll", list(range(41, 49))),
+            ("backstep", [49, 50, 51, 52]),
+            ("strafe", list(range(53, 61))),
         ],
         "parts": {"MaleHead1": "male_head1.blend", "Longsword": "longsword.blend", "HeavyShield": "shield.blend"},
         "size": 2.6,

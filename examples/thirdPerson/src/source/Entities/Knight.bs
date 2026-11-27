@@ -12,6 +12,8 @@ enum KnightState
   block = "block"
   parry = "parry"
   dodge = "dodge"
+  ' Locked on and moving sideways or away: keeps facing the target
+  strafe = "strafe"
   hurt = "hurt"
   dead = "dead"
 end enum
@@ -19,7 +21,8 @@ end enum
 ' The player: Flare's male hero knight, re-rendered from its Blender sources by
 ' tools/render-character.py (sprites/knight.json) and shown as a 16-direction oriented sprite. Moves
 ' relative to the camera and has light attacks (chained), a held block, a timed parry and a dodge,
-' all paid for with stamina. Locked onto an enemy, he faces it (unless running away) and swings at it.
+' all paid for with stamina. Locked onto an enemy, he faces it, side-steps round it or backs away from
+' it, and swings at it.
 class Knight extends Fighter
   ' A move stick reading used while the real stick is centred (deep link `walk`), or invalid
   scriptedMove as BGE.Math.Vector = invalid
@@ -36,15 +39,22 @@ class Knight extends Fighter
   lockHalfAngle as float = BGE.Math.PI * 0.4
   ' Drops the lock past this
   lockBreakRange as float = World.metres(20)
-  ' Locked on, he only keeps facing the target while running within this of it
+  ' Locked on, he runs at the target within this of it; further round he side-steps, and past
+  ' lockBackHalfAngle from it he backs away
   lockRunHalfAngle as float = BGE.Math.PI * 0.25
+  lockBackHalfAngle as float = BGE.Math.PI * 0.75
 
   runSpeed as float = World.metres(3.5)
   blockWalkSpeed as float = World.metres(1.5)
+  ' Side-stepping or backing away while locked on
+  strafeSpeed as float = World.metres(1.8)
   turnSpeed as float = 12 ' radians/sec
   ' Animation rates; the attack's frames fit attackSeconds, and the parry lasts as long as its 4 frames
   frameRate as float = 12
   runFrameRate as float = World.runFrameRate(World.metres(3.5))
+  ' The side-step cycle covers 1.02 m (tools/knight-moves.py)
+  strafeFrameRate as float = BGE.frameRateForStride(8, World.metres(1.02), World.metres(1.8))
+  backpedalFrameRate as float = World.runFrameRate(World.metres(1.8))
   idleFrameRate as float = 5
   attackSeconds as float = 0.5833
   attackLunge as float = World.metres(0.6)
@@ -79,8 +89,9 @@ class Knight extends Fighter
   sub new(game as BGE.Game)
     super(game)
     m.name = "Knight"
-    ' 34 frames per direction: idle 0-3, run 4-11, attack 12-20, block 21-23, hit 24-26, die 27-33.
-    m.framesPerDirection = 34
+    ' 54 frames per direction: idle 0-3, run 4-11, attack 12-20, block 21-23, hit 24-26, die 27-33,
+    ' roll 34-41, backstep 42-45, strafe (to his right) 46-53.
+    m.framesPerDirection = 54
   end sub
 
   override sub onCreate(args as roAssociativeArray)
@@ -109,8 +120,12 @@ class Knight extends Fighter
     ' Raises the shield, then holds it up
     m.sprite.addOrientedAnimationColumns("block", [21, 22, 23], m.framesPerDirection, m.frameRate, BGE.SpritePlayMode.Forward)
     m.sprite.addOrientedAnimationColumns("parry", [21, 22, 23, 22], m.framesPerDirection, m.frameRate, BGE.SpritePlayMode.Forward)
-    m.sprite.addOrientedAnimationColumns("roll", [4, 5, 6, 7, 8, 9, 10, 11], m.framesPerDirection, m.frameRate)
-    m.sprite.addOrientedAnimationColumns("backstep", [11, 10, 9, 8, 7, 6, 5, 4], m.framesPerDirection, m.frameRate)
+    m.sprite.addOrientedAnimationColumns("roll", [34, 35, 36, 37, 38, 39, 40, 41], m.framesPerDirection, BGE.frameRateFor(8, m.dodgeSeconds), BGE.SpritePlayMode.Forward)
+    m.sprite.addOrientedAnimationColumns("backstep", [42, 43, 44, 45], m.framesPerDirection, BGE.frameRateFor(4, m.dodgeSeconds), BGE.SpritePlayMode.Forward)
+    ' The side-step played backwards steps the other way, as the run does to back away
+    m.sprite.addOrientedAnimationColumns("strafeRight", [46, 47, 48, 49, 50, 51, 52, 53], m.framesPerDirection, m.strafeFrameRate)
+    m.sprite.addOrientedAnimationColumns("strafeLeft", [53, 52, 51, 50, 49, 48, 47, 46], m.framesPerDirection, m.strafeFrameRate)
+    m.sprite.addOrientedAnimationColumns("backpedal", [11, 10, 9, 8, 7, 6, 5, 4], m.framesPerDirection, m.backpedalFrameRate)
     ' Reels back and recovers; a guard break holds the last frame for longer
     m.sprite.addOrientedAnimationColumns("hurt", [24, 25, 26, 25], m.framesPerDirection, BGE.frameRateFor(4, m.hurtSeconds, m.frameRate), BGE.SpritePlayMode.Forward)
     ' Falls, then lies there
@@ -159,15 +174,21 @@ class Knight extends Fighter
       m.faceLockTarget(dt)
       m.moveBy(move, m.blockWalkSpeed * dt)
     else if BGE.Math.VectorOps.length(move) > 0.25
-      ' Always full speed: there's only a run animation, so slower would slide the feet
+      ' Always full speed: the cycles' frame rates match their speeds, so slower would slide the feet
       direction = BGE.Math.VectorOps.scale(move, 1 / BGE.Math.VectorOps.length(move))
-      m.setState(KnightState.run)
-      ' Locked on, he keeps facing the target while running roughly toward it. Running away or
-      ' sideways turns him to run that way: there's no strafe or backpedal animation.
-      if not (m.isRunningAtLockTarget(direction) and m.faceLockTarget(dt))
-        m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(direction), m.turnSpeed * dt)
+      strafe = m.strafeAnimation(direction)
+      if strafe <> ""
+        m.setState(KnightState.strafe)
+        m.clock.play(strafe)
+        m.faceLockTarget(dt)
+        m.moveBy(direction, m.strafeSpeed * dt)
+      else
+        m.setState(KnightState.run)
+        if not m.faceLockTarget(dt)
+          m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(direction), m.turnSpeed * dt)
+        end if
+        m.moveBy(direction, m.runSpeed * dt)
       end if
-      m.moveBy(direction, m.runSpeed * dt)
     else
       m.setState(KnightState.idle)
       m.faceLockTarget(dt)
@@ -229,13 +250,22 @@ class Knight extends Fighter
     end if
   end sub
 
-  ' Whether there's a lock target within lockRunHalfAngle of `direction`.
-  private function isRunningAtLockTarget(direction as BGE.Math.Vector) as boolean
+  ' Locked on, the animation for moving in `direction` round the target: a side-step, or backing
+  ' away. "" with no target, or when running at it.
+  private function strafeAnimation(direction as BGE.Math.Vector) as string
     if invalid = m.lockTarget
-      return false
+      return ""
     end if
-    toward = BGE.Math.headingOf(m.directionTo(m.lockTarget))
-    return Abs(BGE.Math.wrapAngle(BGE.Math.headingOf(direction) - toward)) <= m.lockRunHalfAngle
+    ' Clockwise from the target is to his right as he faces it
+    offset = BGE.Math.wrapAngle(BGE.Math.headingOf(direction) - BGE.Math.headingOf(m.directionTo(m.lockTarget)))
+    if Abs(offset) <= m.lockRunHalfAngle
+      return ""
+    else if Abs(offset) >= m.lockBackHalfAngle
+      return "backpedal"
+    else if offset > 0
+      return "strafeRight"
+    end if
+    return "strafeLeft"
   end function
 
   ' Turns toward the lock target, if there is one; returns whether there was.
@@ -266,7 +296,8 @@ class Knight extends Fighter
       return
     end if
     m.invulnerable = false
-    if state <> KnightState.dodge
+    ' A dodge and a strafe pick their own animations
+    if state <> KnightState.dodge and state <> KnightState.strafe
       m.clock.play(state, restart)
     end if
   end sub

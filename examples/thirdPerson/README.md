@@ -28,7 +28,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 
 Movement is relative to the camera, and the camera stays put until you move it.
 
-Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight faces it while he stands, blocks or runs toward it, and swings at it; running away or sideways turns him to run that way. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away. There's no strafe or roll art yet, so the roll reuses the run cycle.
+Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight keeps facing it: he runs toward it, side-steps round it, backs away from it, and swings at it. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away.
 
 Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. Hits spray blood (bone dust from the skeleton), and blocks and parries throw sparks. When the knight dies the field clears and he gets up again.
 
@@ -38,7 +38,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
 - The chase camera is a `BGE.OrbitCamera` with a `BGE.CameraBoom`, set up in `Scenes/FieldScene.bs`. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
-- `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, attack, block, parry, dodge). Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
+- `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, strafe, attack, block, parry, dodge). Locked on, moving sideways plays the side-step (backwards to step left) and moving away plays the run backwards, both at 1.8 m/s with their frame rates matched to it so the feet don't slide. Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
 - `Stamina.bs`: the knight's stamina pool. `spend()` starts an action if there's any stamina left (it can take it to zero); `drain()` takes a blocked hit's cost and says whether the guard held.
 - `Hud.bs`: health and stamina bars, top left in the title-safe area. Lost health stays as a pale chunk that drains after a moment.
 - `Entities/Fighter.bs`: what the knight and the enemies share: health, a round body, knockback and a red flash when hit.
@@ -87,7 +87,7 @@ The knight and the monsters are re-rendered from Flare-style Blender sources (Cl
 
 | Sheet | Source | Frames per direction | Untrimmed cell | Texture |
 | --- | --- | --- | --- | --- |
-| `knight.webp` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield` | 34 | 92×89 | 9.4 MB |
+| `knight.webp` | [`isometric_hero_heroine_blend.zip`](https://opengameart.org/content/isometric-hero-and-heroine): `steel_armor.blend` with `male_head1`, `longsword` and `shield`, plus the moves `tools/knight-moves.py` keys | 54 | 92×89 | 14.0 MB |
 | `skeleton.webp` | `skeleton_0.blend` | 30 | 112×75 | 7.7 MB |
 | `orc.webp` | `orc_flare_0.blend`, layer 2 (hand axe) | 29 | 102×84 | 6.7 MB |
 | `orc_heavy.webp` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 26 | 116×101 | 8.7 MB |
@@ -105,6 +105,12 @@ The knight and the monsters are re-rendered from Flare-style Blender sources (Cl
 blender -b art/skeleton_0.blend --python tools/convert-flare.py -- <converted>/skeleton_0.blend
 ```
 
+   Then, for the knight, key the moves Flare doesn't have (a roll, a backstep and a side-step) into the converted `steel_armor.blend`, `male_head1.blend`, `longsword.blend` and `shield.blend`, with Blender 5. It poses the rig from Flare's own frames, in code, so it's re-run rather than edited in Blender:
+
+```
+Blender -b --python tools/knight-moves.py -- <converted>
+```
+
 2. Render with Blender 5 (Cycles, with a shadow catcher for the ground shadow), using the engine's generic `tools/render-character.py` at the repo root. `--config tools/characters.py` gives it this game's characters, and `--character` picks one: its frames, layers, parts and colours (see `CHARACTERS` in `tools/characters.py`). `--packed` trims and packs the frames into sheets of at most `--sheet-size` (2048) px, with the `.json` frame list. It prints the cell size, the feet anchor, the frame columns of each animation and the texture size; the anchor and columns go in `Knight.bs` or `EnemyTypes.bs`:
 
 ```
@@ -118,11 +124,11 @@ Copy the `.webp` sheets and the `.json` into `src/sprites`. Without `--packed` i
 
 The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/`. They aren't keyed by colour, so clear them after changing `colours`.
 
-Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16 (drawn back at about 14.5); the knight has block 17-18, hit 19-20, die 21-24, cast 25-28 and a thrust 29-32; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32.
+Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16 (drawn back at about 14.5); the knight has block 17-18, hit 19-20, die 21-24, cast 25-28 and a thrust 29-32, and `knight-moves.py` adds a roll 41-48, a backstep 49-52 and a side-step to his right 53-60; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32.
 
 ## Still needed
 
-- [ ] The four packed sheets take ~32 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
+- [ ] The four packed sheets take ~37 MB of texture memory, still a lot for HD devices (64 MB). Mirrored directions (`--mirror`) can't help: the characters are handed (sword in the right hand, shield in the left), so a mirrored direction would swap them.
 - [ ] The rest of the map: the forest.
 - [ ] Furniture art for the interiors.
 - [ ] Ripostes and backstabs, checkpoints.
