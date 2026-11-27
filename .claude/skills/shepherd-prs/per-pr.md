@@ -85,6 +85,10 @@ than in headless tests. Docs-only, script-only or test-only PRs don't need it. S
 in the report. In dry-run, don't sideload. Say what you would run, on which device class, and
 why.
 
+- **Simulator first:** run the tests and examples on the brs-engine simulator (`127.0.0.1`,
+  `--password rokudev`) unless the PR needs real hardware. Hardware means a bug that only shows
+  on a device, a perf claim, texture memory or pooling, or a construct the simulator gets wrong.
+  Don't stop a PR as "Roku busy" when the simulator would do.
 - **Device:** use the Ultra (the default in `.env`). Use the Express, as well as or instead of
   the Ultra, when the PR is about low-end, 720p or Express-specific behaviour. For the Express, ask the maintainer for its address if your memory
   doesn't have it, and pass it as `ROKU_HOST`/`ROKU_PASSWORD` in the environment. Don't read
@@ -92,6 +96,10 @@ why.
 - **The Rokus are shared.** Before sideloading, `rokubot apps | grep ^dev`. If another project's
   dev channel is loaded, ask the maintainer before replacing it.
 - Sideload and screenshot need the sandbox off and `NO_PROXY='*' no_proxy='*'`.
+- `rokubot` reads `.env` from the current directory, so in a PR worktree, link it in first:
+  `ln -s ../../../.env .env`. The link is git-ignored, and removing the worktree removes it.
+- **A test fails on a device:** run the same shards on `origin/<base>` on the same device before
+  you call it a regression. If the base fails the same way, file an issue and carry on.
 - **Behaviour:** run the affected example or test demo with the `rokubot-examples` skill. Run
   `TEST_SHARDS=<shards> npm run test:device` when the PR changes engine code that the headless
   tests cover. `SHARDS` in `scripts/run-tests-sharded.js` maps spec globs to shard names. Pick
@@ -145,7 +153,7 @@ Return exactly these sections:
 - Base update: clean | conflicts in <files>, resolved by <how>
 - Review: <finding, then "fixed here (<sha>)" | "filed #M" | "would fix" | "would file: <title>">
 - Comments: <bot/human comment, then how it was handled>
-- Device: <Ultra|Express, what ran, result> | not needed (<why>)
+- Device: <simulator|Ultra|Express, what ran, result> | not needed (<why>)
 - CI: <result, failures and fixes>
 - Perf: <case | base | PR | change, device class, method, runs> | n/a
 - Commits: <sha subject, one per line; say "pushed" or "local only">
