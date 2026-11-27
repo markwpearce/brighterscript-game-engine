@@ -260,6 +260,8 @@ Use `brighterscript` 1.0.0-alpha.53 or later. Older versions report a false `arg
 
 Documentation can be found [here](https://markwpearce.github.io/brighterscript-game-engine)
 
+To ship a game as a web page or desktop app without a Roku, see the [Standalone Builds guide](https://markwpearce.github.io/brighterscript-game-engine/standalone-builds).
+
 ## Acknowledgements
 
 This project was originally forked from [Roku-gameEngine](https://github.com/Romans-I-XVI/Roku-gameEngine) by Austin Sojka, and converted into BrighterScript. This work owes a lot to this original project!
