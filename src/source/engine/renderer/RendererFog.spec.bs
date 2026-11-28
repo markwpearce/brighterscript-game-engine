@@ -1,5 +1,6 @@
 import "pkg:/source/testing/PixelReadback.spec.bs"
 import "../../math/vector.bs"
+import "../drawables/DrawablePlane.bs"
 import "../drawables/DrawableRectangle.bs"
 import "../drawables/Model3d.bs"
 import "../Game.bs"
@@ -112,6 +113,135 @@ namespace tests
       m.camera.orientation = BGE.Math.VectorOps.create(0, -1, 0)
       m.renderFrames()
       m.assertEqual(0, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @describe("the ground")
+
+    ' A green ground plane at y 0: at depth d it's row 360 + 32000 / d, so the draw distance
+    ' (1000) is row 392 and the fade band's start (850) row 398
+    private sub addGround()
+      ground = new BGE.DrawablePlane(invalid, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: &h00FF00})
+      ground.addToRenderer(m.renderer)
+    end sub
+
+    ' 0-255 green of one pixel of the target
+    private function greenAt(x as integer, y as integer) as integer
+      return tests.readPixels(m.bitmap, x, y, 1, 1)[1]
+    end function
+
+    @it("fades the far ground into the fog colour")
+    function _()
+      m.turnOnFog(0)
+      m.addGround()
+      m.renderFrames()
+      ' near: untouched
+      m.assertEqual(&h00FF00FF, m.pixelAt(640, 420))
+      ' at the draw distance: nearly all fog (green 0x28)
+      green = m.greenAt(640, 392)
+      m.assertTrue(green < 70, `green ${green} at the draw distance`)
+      ' early in the band: nearly all ground
+      green = m.greenAt(640, 397)
+      m.assertTrue(green > 200, `green ${green} early in the fade`)
+      ' between: in between
+      green = m.greenAt(640, 395)
+      m.assertTrue(green > 70 and green < 200, `green ${green} mid-fade`)
+    end function
+
+    @it("moves the fade with the camera after still frames")
+    function _()
+      m.turnOnFog(0)
+      m.addGround()
+      m.renderFrames(3)
+      m.camera.position = BGE.Math.VectorOps.create(0, 100, 0)
+      m.renderFrames()
+      ' the draw distance is now row 360 + 640 * 100 / 1000 = 424
+      green = m.greenAt(640, 424)
+      m.assertTrue(green < 70, `green ${green} at the new draw distance`)
+      ' depth 800, short of the fade band
+      m.assertEqual(&h00FF00FF, m.pixelAt(640, 440))
+    end function
+
+    @it("leaves the ground alone with groundFade off")
+    function _()
+      m.turnOnFog(0)
+      m.camera.fog.groundFade = false
+      m.addGround()
+      m.renderFrames()
+      m.assertEqual(&h00FF00FF, m.pixelAt(640, 392))
+    end function
+
+    @it("leaves the ground alone with fog off")
+    function _()
+      m.addGround()
+      m.renderFrames()
+      m.assertEqual(&h00FF00FF, m.pixelAt(640, 392))
+    end function
+
+    @it("draws nothing without a ground")
+    function _()
+      m.turnOnFog(0)
+      m.renderFrames()
+      m.assertEqual(0, m.renderer.getDrawCallsLastFrame())
+    end function
+
+    @it("fills solid fog where the ground reaches past the draw distance")
+    function _()
+      m.turnOnFog(0)
+      m.camera.fog.followsQuality = true
+      m.renderer.setPlaneDrawDistanceRange(1.5, 0)
+      m.addGround()
+      m.renderFrames()
+      ' the ground ends at 1500: row 381
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 385))
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 390))
+    end function
+
+    @it("ends the solid fog where a pitched camera's ground ends")
+    function _()
+      m.turnOnFog(0)
+      m.camera.fog.followsQuality = true
+      m.renderer.setPlaneDrawDistanceRange(1.5, 0)
+      m.camera.position = BGE.Math.VectorOps.create(0, 500, 0)
+      m.camera.orientation = BGE.Math.VectorOps.getNormalizedCopy(BGE.Math.VectorOps.create(0, -0.3, -1))
+      m.addGround()
+      m.renderFrames()
+      ' the ground ends at forward depth 1500, row 391; the draw distance is row 502
+      m.assertEqual(&h1C2842FF, m.pixelAt(640, 400))
+      m.assertEqual(&h000000FF, m.pixelAt(640, 385))
+    end function
+
+    @it("fades ground that isn't at y 0 at its own rows")
+    function _()
+      m.turnOnFog(0)
+      ground = new BGE.DrawablePlane(invalid, invalid, {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: -100, z: 0}}, {fillMode: BGE.PlaneFillMode.color, color: &h00FF00})
+      ground.addToRenderer(m.renderer)
+      m.renderFrames()
+      ' 150 below the eye: the draw distance is row 360 + 640 * 150 / 1000 = 456
+      green = m.greenAt(640, 456)
+      m.assertTrue(green < 70, `green ${green} at the draw distance`)
+      m.assertEqual(&h00FF00FF, m.pixelAt(640, 500))
+      ' where ground at y 0 would end: past this ground's edge, so left clear
+      m.assertEqual(&h000000FF, m.pixelAt(640, 392))
+    end function
+
+    @it("draws one rect per band of the quality level")
+    function _()
+      m.turnOnFog(0)
+      m.addGround()
+      m.renderer.setQualitySettings(BGE.mergeRenderQualitySettings(m.renderer.qualitySettings, {fogGroundBands: 2}))
+      m.camera.fog.groundFade = false
+      without = m.drawCallsPerFrame()
+      m.camera.fog.groundFade = true
+      ' bands 1000-925 (rows 392-395) and 925-850 (395-398)
+      m.assertEqual(without + 2, m.drawCallsPerFrame())
+    end function
+
+    ' Draw calls one still frame adds (render() alone doesn't reset the count)
+    private function drawCallsPerFrame() as integer
+      m.renderFrames(2)
+      before = m.renderer.getDrawCallsLastFrame()
+      m.renderFrames()
+      return m.renderer.getDrawCallsLastFrame() - before
     end function
 
     ' A 400 wide, 600 tall rectangle facing the camera, centred on x at depth -z, spanning the
