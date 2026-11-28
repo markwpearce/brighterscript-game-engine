@@ -10,6 +10,8 @@ import "../Bonfires.bs"
 import "../Entities/Bonfire.bs"
 import "../Entities/CoinMarker.bs"
 import "../Menus/MenuTheme.bs"
+import "../Menus/ShopPanel.bs"
+import "../Items.bs"
 import "pkg:/source/story/DialogueView.bs"
 import "pkg:/source/utils/Interactables.bs"
 import "pkg:/source/engine/ui/Theme.bs"
@@ -84,6 +86,8 @@ class ThirdPersonScene extends BGE.GameScene
   coinMarker as CoinMarker = invalid
   ' Walking this close to the marker picks the coins up
   coinPickupReach as float = World.metres(1.2)
+  ' The merchant asked to show his wares; the shop opens when the conversation ends
+  private shopPending as boolean = false
   ' The death has been dealt with (coins dropped, saved), until he respawns
   private deathHandled as boolean = false
   ' A respawn has asked for another scene; nothing more to do this visit
@@ -120,14 +124,23 @@ class ThirdPersonScene extends BGE.GameScene
   ' `runid=<id>` tags its console lines)
   ' It also saves the game, arriving here (see GameSave.saveArrival()).
   ' Debug deep links: `die=<seconds>` kills the knight that long after arriving, `coins=<n>` sets
-  ' the coins carried.
+  ' the coins carried, `gear=<id>,...` gives and equips weapons and shields, `items=<id>,...`
+  ' gives any items, `health=<percent>` starts him wounded (addKnight()).
   protected sub readCommonArgs(args as roAssociativeArray)
     params = new BGE.LaunchParams(args)
     m.params = params
     m.dieAfterSeconds = params.getFloat("die", 0)
+    state = RunData.current()
     if params.has("coins")
-      RunData.current().coins = params.getInt("coins", 0)
+      state.coins = params.getInt("coins", 0)
     end if
+    for each id in m.idList("items")
+      state.grantItem(id)
+    end for
+    for each id in m.idList("gear")
+      state.grantItem(id)
+      state.equip(id)
+    end for
     SaveData.current().saveArrival(m.game, m.name, args)
     m.autoOrbit = params.getFloat("orbit", m.autoOrbit)
     m.walkSeconds = params.getFloat("walk", m.walkSeconds)
@@ -146,6 +159,21 @@ class ThirdPersonScene extends BGE.GameScene
       m.perfLog = new PerfLog(m.game.canvas.renderer, perf = "1", params.getString("runid"))
     end if
   end sub
+
+  ' A comma-separated deep link's values (`gear=a,b`), none when it's missing
+  private function idList(name as string) as string[]
+    ids = [] as string[]
+    text = m.params.getString(name)
+    if text = ""
+      return ids
+    end if
+    for each part in text.split(",")
+      if part.trim() <> ""
+        ids.push(part.trim())
+      end if
+    end for
+    return ids
+  end function
 
   ' The `at=<col>,<row>[,<heading in degrees>]` measuring deep link, or invalid. Where it's
   ' given it wins over where a scene change would put the knight.
@@ -446,6 +474,9 @@ class ThirdPersonScene extends BGE.GameScene
     player = new Knight(m.game)
     m.game.addEntity(player, {x: x, z: z, heading: heading, director: m.director})
     m.knight = player
+    if m.params.has("health")
+      player.health.current = BGE.Math.Max(1, player.health.max * m.params.getFloat("health", 100) / 100)
+    end if
     m.placeCoinMarker()
   end sub
 
@@ -502,9 +533,22 @@ class ThirdPersonScene extends BGE.GameScene
     return theme
   end function
 
-  ' The DialogueView's listener: the conversation has ended (or been left)
+  ' The DialogueView's listener: the conversation has ended (or been left). The merchant's
+  ' "openShop" post opens the shop once it has.
   sub onDialogueEnded(view as BGE.Story.DialogueView, cancelled as boolean)
     m.talkView = invalid
+    if m.shopPending and not cancelled and m.knight.isAlive()
+      shop = new ShopPanel(m.game)
+      shop.open()
+    end if
+    m.shopPending = false
+  end sub
+
+  ' The merchant's story post: show the wares when the conversation ends
+  override sub onGameEvent(eventName as string, data as roAssociativeArray)
+    if eventName = "openShop"
+      m.shopPending = true
+    end if
   end sub
 
   ' The nearest talker in front of the knight and within talkReach, else a bonfire, while he's
@@ -701,8 +745,8 @@ class ThirdPersonScene extends BGE.GameScene
       m.hud.hideBanner()
     end if
     m.hud.drawBanner(uiRenderObj)
-    ' the dialogue box draws itself while it's open
-    if invalid = m.talkView and invalid <> m.talkTarget
+    ' the dialogue box draws itself while it's open; no prompt under a menu or the shop
+    if invalid = m.talkView and invalid <> m.talkTarget and not m.game.isModalOpen()
       uiRenderObj.DrawText(m.talkers.promptFor(m.talkTarget, "OK / X"), center.x, center.y * 2 * 0.82, &hF0E0B0FF, font, "center")
     end if
     if not m.knight.isAlive()

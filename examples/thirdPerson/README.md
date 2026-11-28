@@ -25,14 +25,29 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | B | Fast-forward |
 | Dodge (roll toward the stick, or step back) | A | Rewind |
-| Pause menu (Resume, Inventory (not yet), Options, Controls, Quit to Title); Back again closes it | Select | Back |
-| Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
+| Drink a healing draught | Y | `*` |
+| Pause menu (Resume, Inventory, Options, Controls, Quit to Title); Back again closes it | Select | Back |
 
-There are no control hints on screen: the pause menu's **Controls** page shows the remote and a gamepad side by side, each button labelled with what it does (`Menus/ControlsPanel.bs`). Its labels come from the control map (`describeBindings()`), so they follow the bindings in `main.bs`; where each button is in the pictures (the engine's input debug window's, `pkg:/source/engine/debug/images/`) is in `Menus/ControlPictures.bs`. The last debug level (`*` twice) shows the knight's state top right (and the enemy count on the field).
+There are no control hints on screen: the pause menu's **Controls** page shows the remote and a gamepad side by side, each button labelled with what it does (`Menus/ControlsPanel.bs`). Its labels come from the control map (`describeBindings()`), so they follow the bindings in `main.bs`; where each button is in the pictures (the engine's input debug window's, `pkg:/source/engine/debug/images/`) is in `Menus/ControlPictures.bs`. The remote has no free button left for drinking, so `*` drinks and the debug panels (FPS, input, memory, GC, log, then entity details) need the `debug=1` deep link, where `*` cycles them too; the last level shows the knight's state top right (and the enemy count on the field).
 
 Movement is relative to the camera, and the camera stays put until you move it.
 
-Deep links (`scene=...`, `at=...`) skip the title and don't save; debug links: `bonfire=<town|graveyard|crypt1|crypt3>` wakes beside that bonfire, `save=1` loads the save and keeps saving, `die=<seconds>` kills the knight that long after arriving, `coins=<n>` sets the coins carried. Otherwise the game saves on resting, a boss's death, your death, picking up dropped coins, and arriving in each scene (`GameSave.bs`: one `BGE.SaveSlot`, registry section `nightOfTheBarrowKing`, with the scene, its entrance args, the story, the bosses killed and the `RunState`). Continue wakes you at the last bonfire, so progress is where you last rested, though coins and story carry on from the last save; the volumes are kept apart from it in a `BGE.SaveProfile` (`GameSettings.bs`), so a new game keeps them. The engine has no volume control yet, so they're only stored for now.
+**Items** (`Items.bs`, carried in `RunState`): healing draughts (3, refilled at a bonfire; drinking stands the knight still for about a second and heals 40% of his health, and a hit before then wastes it; a Barrow Flask adds one, up to 5), weapons and shields, which change only his numbers, and key items (the Chieftain's Tusk, for the forest). The pause menu's **Inventory** equips a weapon and a shield, with each one's numbers, and shows the draughts and key items. Quick slots bottom left show the shield, weapon and draughts left; coins are bottom right.
+
+| Gear | Damage | Swing | Stamina | Where |
+| --- | --- | --- | --- | --- |
+| Longsword | 30 | 0.58 s | 22 | Start |
+| Orc Cleaver | 40 | 0.70 s | 30 | The orc camp (not yet) |
+| Warden's Blade | 26 | 0.48 s | 18 | Merchant, 2400 |
+
+| Shield | Blocks | Stamina per point blocked | Stamina regen while raised | Where |
+| --- | --- | --- | --- | --- |
+| Heater Shield | 80% | 1.5 | 35% | Start |
+| Tower Shield | 92% | 1.2 | 20% | Merchant, 1600 |
+
+Old Tobias, the old man by the square (`M` in `src/maps/town.txt`), sells them and a Barrow Flask (800) once each: his "Show me your wares" posts `openShop`, and the scene opens `Menus/ShopPanel.bs` when the conversation ends. The item icons are placeholders drawn by `tools/item-icons.py` (`src/images/item_icons.png`).
+
+Deep links (`scene=...`, `at=...`) skip the title and don't save; debug links: `bonfire=<town|graveyard|crypt1|crypt3>` wakes beside that bonfire, `save=1` loads the save and keeps saving, `die=<seconds>` kills the knight that long after arriving, `coins=<n>` sets the coins carried, `gear=<id>,...` gives and equips weapons and shields, `items=<id>,...` gives any items (ids in `Items.bs`: `longsword`, `orcCleaver`, `wardensBlade`, `heaterShield`, `towerShield`, `chieftainsTusk`, `barrowFlask`), `health=<percent>` starts the knight wounded. Otherwise the game saves on resting, a boss's death, your death, picking up dropped coins, equipping, buying, and arriving in each scene (`GameSave.bs`: one `BGE.SaveSlot`, registry section `nightOfTheBarrowKing`, with the scene, its entrance args, the story, the bosses killed and the `RunState`). Continue wakes you at the last bonfire, so progress is where you last rested, though coins and story carry on from the last save; the volumes are kept apart from it in a `BGE.SaveProfile` (`GameSettings.bs`), so a new game keeps them. The engine has no volume control yet, so they're only stored for now.
 
 Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight keeps facing it: he runs toward it, side-steps round it, backs away from it, and swings at it. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away.
 

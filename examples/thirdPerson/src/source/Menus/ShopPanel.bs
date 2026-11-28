@@ -1,0 +1,176 @@
+import "pkg:/source/engine/ui/MenuList.bs"
+import "../Items.bs"
+import "../RunState.bs"
+import "../GameSave.bs"
+import "ItemDetails.bs"
+
+' Something the merchant sells, once
+interface Ware extends roAssociativeArray
+  id as string
+  price as integer
+end interface
+
+' The merchant's wares (opened by his "openShop" story post): a list of what he sells with its
+' price on the left, the focused one's details and the coins carried on the right, and Leave.
+' Buying spends the coins, gives the item and saves. Pauses the game while it's open; Back
+' leaves too.
+class ShopPanel extends BGE.UI.MenuList
+
+  private holdsModal as boolean = false
+  ' A line under the coins: what was bought, or why not
+  private notice as string = ""
+  private unit as float = 1
+
+  sub new(game as BGE.Game)
+    super(game)
+    uiWidth = game.uiCanvas.getWidth()
+    uiHeight = game.uiCanvas.getHeight()
+    m.unit = uiHeight / 720.0
+    m.title = "The Merchant's Wares"
+    m.centered = true
+    m.contentAlign = "left"
+    ' title-safe: well inside 80% of the canvas
+    width = uiWidth * 0.7
+    m.setSize(width, uiHeight * 0.62)
+    m.itemWidth = (width - m.panelPadding * 2) * 0.45
+    m.itemHeight = 48 * m.unit
+    m.listener = m
+    state = RunData.current()
+    for each ware in m.wares()
+      m.addItem("buy:" + ware.id, m.wareLabel(ware), m.isAvailable(ware, state), ware.id)
+    end for
+    m.addItem("leave", "Leave")
+  end sub
+
+  ' What he sells and for how much: a first full run through the crypt pays for about one
+  function wares() as Ware[]
+    return [
+      {id: Items.BARROW_FLASK, price: 800},
+      {id: Items.TOWER_SHIELD, price: 1600},
+      {id: Items.WARDENS_BLADE, price: 2400}
+    ]
+  end function
+
+  ' Pauses the game while it's open
+  override sub open(parent = invalid as BGE.UI.UiContainer)
+    super.open(parent)
+    m.game.pushModal()
+    m.holdsModal = true
+  end sub
+
+  ' Also runs when its scene removes it
+  override sub onDestroy()
+    super.onDestroy()
+    if m.holdsModal
+      m.holdsModal = false
+      m.game.popModal()
+    end if
+  end sub
+
+  override sub onInput(input as BGE.GameInput)
+    super.onInput(input)
+    if m.isOpen() and input.press and input.isButton("back")
+      input.consume()
+      m.close()
+    end if
+  end sub
+
+  sub onUiAction(actionId as string, button as BGE.UI.Button)
+    if actionId = "leave"
+      m.close()
+    else if Left(actionId, 4) = "buy:"
+      m.buy(button.value)
+    end if
+  end sub
+
+  override sub draw(parent = invalid as BGE.UI.UiWidget)
+    super.draw(parent)
+    if not m.isOpen()
+      return
+    end if
+    theme = m.effectiveTheme()
+    renderer = m.canvas.renderer
+    gap = 32 * m.unit
+    x = m.position.x + m.panelPadding + m.itemWidth + gap
+    width = m.width - m.panelPadding * 2 - m.itemWidth - gap
+    y = m.position.y + m.contentTop
+    item = m.focusedItem()
+    if invalid <> item
+      ItemDetails.draw(m.game, renderer, theme, item, x, y, width, m.unit)
+    end if
+    font = m.game.getFontOr("default")
+    smallFont = m.game.getFontOr("small")
+    bottom = m.position.y + m.height - m.panelPadding
+    coinsY = bottom - font.GetOneLineHeight()
+    if m.notice <> ""
+      coinsY -= smallFont.GetOneLineHeight()
+      renderer.drawText(m.notice, x, bottom - smallFont.GetOneLineHeight(), theme.panelTextColor, smallFont)
+    end if
+    renderer.drawText(`Coins  ${RunData.current().coins}`, x, coinsY, &hF0C860FF, font)
+  end sub
+
+  private sub buy(id as string)
+    ware = invalid
+    for each candidate in m.wares()
+      if candidate.id = id
+        ware = candidate
+      end if
+    end for
+    state = RunData.current()
+    if invalid = ware or not m.isAvailable(ware, state)
+      return
+    end if
+    item = Items.get(id)
+    if state.coins < ware.price
+      m.notice = `You need ${ware.price - state.coins} more coins.`
+      return
+    end if
+    state.coins -= ware.price
+    state.grantItem(id)
+    state.purchases.push(id)
+    SaveData.current().saveProgress(m.game)
+    if item.kind = ItemKind.upgrade
+      m.notice = `Bought. Draughts: ${state.maxDraughts}.`
+    else
+      m.notice = "Bought. Equip it from the inventory."
+    end if
+    button = m.getButton("buy:" + id)
+    if invalid <> button
+      button.setLabel(m.wareLabel(ware))
+    end if
+    m.setItemEnabled("buy:" + id, false)
+    if invalid = m.focusedItem()
+      m.focusFirstEnabled()
+    end if
+  end sub
+
+  ' Each sells once; a flask only while there's room for another draught
+  private function isAvailable(ware as Ware, state as RunState) as boolean
+    if RunData.contains(state.purchases, ware.id) or state.owns(ware.id)
+      return false
+    end if
+    if ware.id = Items.BARROW_FLASK
+      return state.maxDraughts < Items.MAX_DRAUGHTS
+    end if
+    return true
+  end function
+
+  private function wareLabel(ware as Ware) as string
+    item = Items.get(ware.id)
+    if not m.isAvailable(ware, RunData.current())
+      return item.name + "  (sold)"
+    end if
+    return `${item.name}  ${ware.price}`
+  end function
+
+  ' The ware whose button has focus, or invalid
+  private function focusedItem() as ItemInfo
+    for each button in m.buttons
+      if button.focused and invalid <> button.value
+        return Items.get(button.value)
+      end if
+    end for
+    return invalid
+  end function
+
+end class
