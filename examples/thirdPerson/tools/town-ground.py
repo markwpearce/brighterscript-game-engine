@@ -20,7 +20,7 @@ PX = 16  # texels per cell (so 4 world units per texel); TownScene.groundTexelSc
 # What each kind of cell is painted as. Buildings, walls and props stand on dirt or grass.
 SURFACE = {
     "=": "cobbles", "-": "dirt", "~": "crops", ":": "ploughed", "x": "mud", "P": "mud",
-    "w": "dirt", "t": "dirt", "G": "cobbles", "H": "dirt", "u": "dirt", "K": "cobbles",
+    "w": "dirt", "t": "dirt", "G": "cobbles", "N": "cobbles", "H": "dirt", "u": "dirt", "K": "cobbles",
     "W": "cobbles", "@": "cobbles",
 }
 # Props on a cell take the surface round them (the most common neighbouring one)
