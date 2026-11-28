@@ -24,6 +24,7 @@
 | `src/models/chapel/textures/*` (`cross.png`, `naveWall.png`, `slate.png`, `stone.png`, `towerFace.png`; the chapel's textures, shared with `examples/terrain`) | - | CC0 | this repo |
 | `src/sprites/crypt_wall.webp`, `crypt_floor.webp`, `crypt_alcove.webp`, `crypt_rubble.webp`, `crypt_bones.webp`, `crypt_altar.webp` (drawn by `tools/crypt-art.py`) | - | CC0 | this repo |
 | `src/sprites/keep_door.webp`, `chapel_door.webp`, `chapel_window.webp`, `keep_banner.webp`, `keep_banner_blue.webp` (drawn by `tools/interior-art.py`) | - | CC0 | this repo |
+| `src/sprites/forest_ground.webp` (drawn by `tools/forest-ground.py` from `src/maps/forest.txt`), `src/maps/forest.txt` (the forest's layout) | - | CC0 | this repo |
 | `src/sprites/fog.webp` (a plain white fog gradient, made for this repo) | - | CC0 | this repo |
 | `src/images/item_icons.png` (placeholder item icons, drawn by `tools/item-icons.py`) | - | CC0 | this repo |
 | `src/images/Splash_HD.jpg` (the key art, also the title screen's background), `Splash_SD.jpg` (cropped from it), `Channel_Icon_HD.png`, `Channel_Icon_SD.png` (scaled from the FHD icon); `art/title/` (`keyart.py` and `bk_style.py`, which drew them over the painting, and `title_logo.png`) | supplied by Mark Pearce | TODO: confirm | TODO: where the painted key art came from |
