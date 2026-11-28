@@ -1,8 +1,7 @@
 # Night of the Barrow King — design
 
-Finishing `examples/thirdPerson` (#385) as a short game. Destination once approved:
-`specs/2026-11-27-night-of-the-barrow-king-design.md` (specs/, not docs/, so it stays off the
-published site).
+Finishing `examples/thirdPerson` (#385) as a short game. Kept in `specs/`, not `docs/`, so it
+stays off the published site.
 
 ## Intent
 
@@ -65,27 +64,30 @@ new story flag: `forest.chieftainSlain`.
 
 - A bonfire is a lit prop with a warm `PointLight` (`Torch`'s flame at a bigger size, on a ring of
   stones and a sword stuck in the ground). Walk up and press OK to **rest**.
-- Resting: full health, flasks refilled, non-boss enemies respawn, **game saved**, and this bonfire
-  becomes the respawn point. A short banner ("Bonfire lit" the first time, "Rested" after).
+- Resting: full health, draughts refilled, non-boss enemies respawn, **game saved**, and this
+  bonfire becomes the respawn point. A short banner ("Bonfire lit" the first time, "Rested" after).
 - Placement (5): town square (by the well), graveyard (by the gate), crypt level 1 (entrance),
   crypt level 3 (before the King's hall), forest (the road's mid-point, before the camp).
 - Respawning crosses scenes: dying in the crypt can put you back in the graveyard if that's where
   you last rested. `ThirdPersonScene.respawnKnight()` becomes "change scene to the last bonfire's
-  scene + spot".
+  scene + spot". Before the first rest (a New Game, a deep link, the Field) it keeps today's
+  behaviour: the current scene's entrance.
 
 ### Death and coins
 
 - Enemies drop coins when they die (an amount per `EnemyType`, more from bosses).
 - On death you **drop all carried coins** where you fell, shown as a glowing marker (a small
   `Torch`-style spirit flame). Reach it again to pick them up. Dying again before then loses them,
-  and the new drop replaces the old one. One marker at a time, saved with its scene and position.
+  and the new drop replaces the old one. One marker at a time, saved with its
+  location (scene plus its args: the crypt level, or keep or chapel, since `CryptScene` and
+  `InteriorScene` each run several places) and position.
 - Bosses stay dead once killed (saved); other enemies come back when you rest or die.
 
 ### Inventory and gear (souls-lite)
 
 - **Healing draughts:** 3 to start, max 5 (2 upgrades to find: one in the crypt, one at the orc
-  camp). A quick slot; a gamepad button (or the remote's `*`, TBD by builder) drinks one: a short
-  animation-lock, heals 40% max.
+  camp). A quick slot; a gamepad button (and a remote button: see *Left to the
+  builder*) drinks one: a short animation-lock, heals 40% max.
 - **Coins:** HUD counter bottom right.
 - **Weapons (stats only; the sprite keeps drawing the same sword):**
   - *Longsword*: start; balanced.
@@ -99,18 +101,26 @@ new story flag: `forest.chieftainSlain`.
   dialogue choices in `town.json` plus a small buy-list screen.
 - **Inventory screen** from the pause menu: equip weapon and shield, view key items and draughts.
   Built from `BGE.UI.MenuList` with item icons.
-- HUD quick slots bottom left: shield, weapon, draught (with count). Title-safe.
+- HUD quick slots bottom left: shield, weapon, draught (with count). Title-safe, and above the
+  boss bar (`Hud.drawBossBar()` spans 20–80% of the width near the bottom), which they and the
+  coin counter mustn't overlap.
 
 ### Title screen and menus
 
 - `TitleScene`: a live 3D backdrop: the graveyard at night with the camera slowly circling, fog on,
   the logo text over it. Menu: **Continue** (only if a save exists), **New Game** (asks before
   overwriting), **Options**, **Credits**.
-- **Options:** music volume, sound volume (`BGE.UI.Slider`), saved in a `SaveProfile` separate
-  from the game save.
-- **Pause menu** (`BGE.PauseMenu`, Options/`*`-style button TBD): Resume, Inventory, Options, Quit
-  to Title (no save: progress is only kept at bonfires).
-- Deep links still go straight into a scene (testing), skipping the title.
+- **Options:** music on/off and sound volume (`BGE.UI.Slider`), saved in a `SaveProfile` separate
+  from the game save. Music is on/off, not a slider: `Game.musicPlay()` uses `roAudioPlayer`,
+  which has no volume control (only `playSound()` takes a volume).
+- **Pause menu** (`BGE.PauseMenu`; not its default `play`, which blocks; see *Left to the
+  builder*): Resume, Inventory, Options, Quit to Title (no save: progress is only kept at
+  bonfires).
+- Deep links still go straight into a scene (testing), skipping the title. A deep-linked launch
+  turns the game save off (`SaveSlot.enabled = false`) so a test run can't overwrite a real save.
+- **New Game, Continue and Quit to Title reset run state:** the story session (`TownStory.session()`
+  is made once in `main()`) and `GetGlobalAA().cryptBossesSlain` are rebuilt from scratch or from
+  the save, so nothing unsaved carries over.
 
 ### Saving
 
@@ -118,7 +128,8 @@ new story flag: `forest.chieftainSlain`.
 - Written when: resting at a bonfire; a boss dies; **on death** (so quitting can't undo losing the
   coins); buying from the merchant.
 - Contents: last bonfire id; coins; draughts (count, max); owned and equipped gear; key items;
-  bosses killed; dropped-coins marker (scene, x, z, amount); `StorySession.toSaveData()`.
+  bosses killed; dropped-coins marker (scene, scene args, x, z, amount);
+  `StorySession.toSaveData()`.
 - Not saved: health (full after a load), non-boss enemies, position other than the bonfire.
 
 ### Audio
@@ -181,10 +192,12 @@ others. Check each sheet with `rokubot textures` on HD.
    marker, enemies reset on rest, bosses stay dead; save moves to the rules above.
 3. **Inventory, gear and merchant.** Items, equip stats, draughts and quick slots, the HUD coin
    counter, the inventory screen, the merchant.
-4. **Audio.** Music per scene and boss, sound effects wired into combat, UI and items; the volume
-   options take effect; CREDITS rows.
+4. **Audio.** Music per scene and boss, sound effects wired into combat, UI and items; the music
+   toggle and sound volume take effect; CREDITS rows.
 5. **New creatures.** Render goblin, hobgoblin and werewolf; `EnemyTypes`; test them in the Field
-   scene (`FieldScene` spawner lists).
+   scene. `FieldScene` loads every atlas in `EnemyTypes.all()`, so give it a pick of types (e.g.
+   `types=goblin,werewolf`; `enemies=` is already the count cap) instead of loading all six
+   creature sheets at once on HD.
 6. **Forest and orc camp.** North gate, `ForestScene`, map, ground art, camp props, chieftain,
    rewards, story lines.
 7. **Ending and credits; README and `rokubot-examples` row.** Closing banner, credits roll, back to
@@ -228,3 +241,7 @@ procedural.
 Exact enemy stats, coin amounts and prices; the exact grid of the forest map; which gamepad and
 remote buttons drink a draught and open the pause menu (they must not clash with the existing
 bindings in `main.bs`); the icon and menu styling within the existing `talkTheme()` look.
+The remote has no free button today: the arrows move, `OK` attacks, `play` blocks, `fastforward`
+parries, `back` and `replay` both dodge, `rewind` locks on, and `*` is the debug-panel toggle
+(`enableDebugToggle`). So the draught and the pause menu need one freed, for example `replay` for
+the draught and `*` for pause, with the debug toggle moved behind a deep link.
