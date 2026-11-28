@@ -1,4 +1,4 @@
-# Third Person
+# Night of the Barrow King
 
 A third-person, souls-like action game in 3D ([#385](https://github.com/markwpearce/brighterscript-game-engine/issues/385)). So far: a walled town to start in, a graveyard and a three-level crypt below it with two bosses, and a knight on a flat field with a chase camera, movement and combat actions, and enemies that keep spawning 20-50 m away (a skeleton, an orc and a heavy orc in turn, up to 3 at once) to fight, with stamina, lock-on and a souls-style HUD, at night under a full moon with torches on the pillars. The map, ripostes and checkpoints come later.
 
@@ -6,7 +6,8 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 
 | Scene | Deep link | What's there |
 | --- | --- | --- |
-| Town (`TownScene`) | (default; `at=<col>,<row>[,<heading>]`) | A walled town at night: houses, huts and a keep round a cobbled square with a well, fenced fields, a pig pen, torches, and townsfolk standing about, who'll talk to you (walk up and press OK). The gate in the south wall leads to the graveyard. |
+| Title (`TitleScene`) | (default) | The graveyard at night, empty, the camera slowly circling it in the fog, under the game's name. **Continue** (when there's a save) picks up at the entrance of the scene the save was made in, **New Game** asks before wiping a save, **Options** has the music and sound volumes, **Credits** rolls the credits. |
+| Town (`TownScene`) | `scene=town` (`at=<col>,<row>[,<heading>]`) | A walled town at night: houses, huts and a keep round a cobbled square with a well, fenced fields, a pig pen, torches, and townsfolk standing about, who'll talk to you (walk up and press OK). The gate in the south wall leads to the graveyard. |
 | Field (`FieldScene`) | `scene=field` | The arena for trying out combat: enemies keep spawning. Nothing leads here; it's for testing. |
 | Graveyard (`GraveyardScene`) | `scene=graveyard` | A fenced churchyard at night: graves, trees, a chapel, the gravedigger's hut and a well. Three skeletons wait among the graves, two of them heaps of bones, and wake when you come within 10 m (or hit one), the heaps getting up as their fall played backwards; killed ones stay dead until you die. The mausoleum's door at the far end leads down into the crypt; the gap in the fence leads back to the town. |
 | Crypt (`CryptScene`) | `scene=crypt` (`level=<1-3>`, `at=<col>,<row>[,<heading>]`) | A torch-lit stone maze three levels deep. The undead sleep in its corridors (every other skeleton as a heap of bones, which gets up as it wakes) and wake when they see you within 12 m, then find their way round the walls to you. Each level's name shows as you arrive. **The Crypt**: skeletons, and the Crypt Warden, a huge pale skeleton, in the hall at the far end; spirit fire seals the stairs down in its hall until it dies. **The Ossuary**, lit by blue spirit fire: skeletons, ghouls and a grave brute. **The Deep Tomb**, lit by green grave fire: the Barrow King guards the altar. A boss's health bar runs along the bottom once it wakes, and once killed it stays dead for the run. Dying puts you back where you came into the level, with its undead back in place. The first level's way up leads to the graveyard. |
@@ -23,10 +24,13 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Attack (press again during a swing to chain) | X | OK |
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | B | Fast-forward |
-| Dodge (roll toward the stick, or step back) | A | Back or Replay |
+| Dodge (roll toward the stick, or step back) | A | Replay |
+| Pause menu (Resume, Inventory (not yet), Options, Quit to Title); Back again closes it | Start (browser controller) | Back |
 | Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
 
 Movement is relative to the camera, and the camera stays put until you move it.
+
+Deep links (`scene=...`, `at=...`) skip the title and don't save. Otherwise the game saves on arriving in each scene (`GameSave.bs`: one `BGE.SaveSlot`, registry section `nightOfTheBarrowKing`, with the scene, its entrance args, the story and the bosses killed); the volumes are kept apart from it in a `BGE.SaveProfile` (`GameSettings.bs`), so a new game keeps them. The engine has no volume control yet, so they're only stored for now.
 
 Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight keeps facing it: he runs toward it, side-steps round it, backs away from it, and swings at it. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away.
 
@@ -36,6 +40,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 
 ## How it works
 
+- `Scenes/TitleScene.bs` extends `GraveyardScene`, building only its world (`loadWorld()`, `buildWorld()`) and moving the camera itself. `Menus/` has the options panel (a `BGE.UI.MenuList` with two `BGE.UI.Slider`s over its Done button), the pause menu (a `BGE.PauseMenu` on the raw Back button: a remote binding would also match a gamepad's B, an alias of Back) and the menus' colours (`MenuTheme.bs`, the dialogue box's too). The title and headings are in Quill and Antler Expanded (`src/fonts`), as are the channel icons and splash, drawn by `tools/title-images.py` (`python3 tools/title-images.py src/images`, needs ImageMagick).
 - `World.bs`: the world scale (32 units per metre, so the knight is 64 units tall) and heading helpers.
 - The chase camera is a `BGE.OrbitCamera` with a `BGE.CameraBoom`, set up in `Scenes/FieldScene.bs`. It sits 4 m behind and 1.8 m up, looking at 1.2 m, so the knight fills about half the screen. The right stick orbits (x) and tilts (y) it around that point.
 - `Entities/Knight.bs`: a 16-direction `DrawableOrientedSprite`, drawn `axisAligned` so he foreshortens as the camera tilts down, and a small state machine (idle, run, strafe, attack, block, parry, dodge). Locked on, moving sideways plays the side-step (backwards to step left) and moving away plays the run backwards, both at 1.8 m/s with their frame rates matched to it so the feet don't slide. Chained attacks replay the attack with `playOrientedAnimation(name, restart = true)`.
