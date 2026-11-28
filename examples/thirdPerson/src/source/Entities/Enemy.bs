@@ -165,6 +165,10 @@ class Enemy extends Fighter
   ' With a nav grid it finds its way round walls to the player, and only wakes when it can see
   ' them. Without one it goes straight at them.
   private follower as BGE.NavFollower = invalid
+  ' Asleep, it walks back and forth between these (`roamTo`), at roamPace of its speed
+  private roamFrom as BGE.Math.Vector = invalid
+  private roamTo as BGE.Math.Vector = invalid
+  private roamPace as float = 0.4
 
   sub new(game as BGE.Game)
     super(game)
@@ -174,7 +178,9 @@ class Enemy extends Fighter
   ' args: type (EnemyType), director (CombatDirector), x, z, heading (optional, radians), wakeDistance
   ' (optional: stands still until the player is this close or hits it), rise (optional: with a
   ' wakeDistance, lies dormant as a heap and gets up when it wakes), nav (optional BGE.NavGrid:
-  ' finds its way round walls, and wakes only in sight of the player)
+  ' finds its way round walls, and wakes only in sight of the player), roamTo (optional
+  ' BGE.Math.Vector: with a wakeDistance, it walks back and forth between where it starts and
+  ' here until it wakes)
   override sub onCreate(args as roAssociativeArray)
     m.type = args.type
     m.director = args.director
@@ -192,6 +198,10 @@ class Enemy extends Fighter
       m.wakeDistance = args.wakeDistance
       m.clock.set(EnemyState.dormant)
       m.risesOnWake = args.rise = true
+      if invalid <> args.roamTo
+        m.roamFrom = BGE.Math.VectorOps.create(m.position.x, 0, m.position.z)
+        m.roamTo = args.roamTo
+      end if
     end if
     if invalid <> args.nav
       m.follower = new BGE.NavFollower(args.nav, {
@@ -230,6 +240,7 @@ class Enemy extends Fighter
     m.sprite.addOrientedAnimation("idle", tables.idle, 5, BGE.SpritePlayMode.PingPong)
     m.sprite.addOrientedAnimation("run", tables.run, World.runFrameRate(m.type.speed))
     m.sprite.addOrientedAnimation("backpedal", tables.backpedal, World.runFrameRate(m.type.speed * 0.6))
+    m.sprite.addOrientedAnimation("walk", tables.run, World.runFrameRate(m.type.speed * m.roamPace))
     ' Spread over the windup and strike, so the swing lines up with its timing, but never under
     ' attackFrameRate: a long windup reaches the top of the swing early and holds it
     m.sprite.addOrientedAnimation("windup", tables.windup, BGE.frameRateFor(frames.windup.Count(), attack.windupSeconds, m.attackFrameRate), BGE.SpritePlayMode.Forward)
@@ -245,6 +256,8 @@ class Enemy extends Fighter
     m.clock.orientedSprite = m.sprite
     if m.risesOnWake
       m.clock.play("bones")
+    else if invalid <> m.roamTo
+      m.clock.play("walk")
     else
       m.clock.play("idle")
     end if
@@ -284,6 +297,7 @@ class Enemy extends Fighter
     if m.clock.state = EnemyState.dead
       ' Lies there until it's removed
     else if m.clock.state = EnemyState.dormant
+      m.roam(dt)
       player = m.director.player
       if invalid <> player and player.isAlive() and m.distanceTo(player) <= m.wakeDistance and m.canSee(player, dt)
         m.wake()
@@ -326,6 +340,25 @@ class Enemy extends Fighter
       m.think(dt)
     end if
     m.updateCombatEffects(dt)
+  end sub
+
+  ' Asleep with somewhere to roam: walks toward roamTo, and turns back at either end
+  private sub roam(dt as float)
+    if invalid = m.roamTo
+      return
+    end if
+    dx = m.roamTo.x - m.position.x
+    dz = m.roamTo.z - m.position.z
+    distance = Sqr(dx * dx + dz * dz)
+    if distance < World.metres(0.5)
+      target = m.roamTo
+      m.roamTo = m.roamFrom
+      m.roamFrom = target
+      return
+    end if
+    way = BGE.Math.VectorOps.create(dx / distance, 0, dz / distance)
+    m.rotation.y = BGE.Math.turnToward(m.rotation.y, BGE.Math.headingOf(way), m.type.turnSpeed * dt)
+    m.moveBy(way, m.type.speed * m.roamPace * dt)
   end sub
 
   ' Movement while it isn't attacking: wait its turn, flank, retreat or close in.
@@ -484,6 +517,15 @@ class Enemy extends Fighter
     m.flankSeconds = 0
     m.retreatDuration = seconds
     m.setState(EnemyState.retreat, "backpedal")
+  end sub
+
+  ' Dies on the spot (debug deep links), coins and all
+  sub kill()
+    if not m.isAlive()
+      return
+    end if
+    m.health.damage(m.health.current)
+    m.die()
   end sub
 
   private sub die()
