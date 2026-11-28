@@ -19,4 +19,5 @@
 | `src/sprites/crypt_wall.webp`, `crypt_floor.webp`, `crypt_alcove.webp`, `crypt_rubble.webp`, `crypt_bones.webp`, `crypt_altar.webp` (drawn by `tools/crypt-art.py`) | - | CC0 | this repo |
 | `src/sprites/keep_door.webp`, `chapel_door.webp`, `chapel_window.webp`, `keep_banner.webp`, `keep_banner_blue.webp` (drawn by `tools/interior-art.py`) | - | CC0 | this repo |
 | `src/sprites/fog.webp` (a plain white fog gradient, made for this repo) | - | CC0 | this repo |
-| `src/images/Channel_Icon_HD.png`, `Channel_Icon_SD.png`, `Splash_HD.png`, `Splash_SD.png` (title text on a dark background, generated for this repo) | - | CC0 | this repo |
+| `src/images/Channel_Icon_HD.png`, `Channel_Icon_SD.png`, `Splash_HD.png`, `Splash_SD.png` (the title in the title font on a night-blue gradient, drawn by `tools/title-images.py`) | - | CC0 | this repo |
+| `src/fonts/quill-and-antler-expanded.ttf` (with its `license.txt` and `readme.txt`; see `src/fonts/CREDITS.md`) | MagicBear | SIL OFL 1.1 | [Quill and Antler Expanded](https://fontstruct.com/fontstructions/show/2907796) |

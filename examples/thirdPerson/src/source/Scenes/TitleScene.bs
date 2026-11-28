@@ -1,0 +1,249 @@
+import "GraveyardScene.bs"
+import "../GameSave.bs"
+import "../Menus/OptionsPanel.bs"
+import "pkg:/source/engine/ui/MenuList.bs"
+import "pkg:/source/engine/ui/CreditsView.bs"
+
+' The title screen: the graveyard at night, empty, the camera slowly circling it in the fog,
+' with the game's name over it and the menu: Continue (when there's a save), New Game, Options
+' and Credits.
+class TitleScene extends GraveyardScene
+
+  ' The camera circles this far from the middle of the graveyard, this high, looking at a point
+  ' this high, turning this fast (radians a second)
+  orbitRadius as float = World.metres(7)
+  orbitHeight as float = World.metres(4)
+  orbitLookHeight as float = World.metres(1.5)
+  orbitSpeed as float = 0.06
+
+  private orbitCenter as BGE.Math.Vector
+  private orbitAngle as float = 0
+  ' What's up: the menu, the new game question, the options or the credits (one at a time)
+  private menu as BGE.UI.MenuList = invalid
+  private confirm as BGE.UI.MenuList = invalid
+  private options as OptionsPanel = invalid
+  private credits as BGE.UI.CreditsView = invalid
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "TitleScene"
+  end sub
+
+  ' The graveyard's world, without the knight or the skeletons
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    m.loadWorld(loader)
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.buildWorld()
+    m.orbitCenter = m.layout.cellCenter(12.5, 12)
+    camera = m.game.canvas.renderer.camera as BGE.Camera3d
+    camera.maxDrawDistance = World.metres(32)
+    camera.drawDistanceFadeFraction = 0.5
+    camera.fieldOfViewDegrees = 90
+    camera.sortsByGroundDistance = true
+    m.useTownFog(args)
+    m.moveCamera(0)
+    m.showMenu("")
+  end sub
+
+  override sub onUpdate(dt as float)
+    m.moveCamera(dt)
+    if invalid <> m.credits and m.credits.isFinished()
+      m.closeCredits()
+    end if
+  end sub
+
+  ' No knight, no chase camera
+  override sub onPostUpdate(dt as float)
+  end sub
+
+  ' Back leaves the question, the options or the credits; OK skips the credits
+  override sub onInput(input as BGE.GameInput)
+    if not input.press or input.consumed
+      return
+    end if
+    if invalid <> m.credits and (input.isButton("back") or input.isButton("ok"))
+      m.closeCredits()
+    else if input.isButton("back")
+      if invalid <> m.confirm
+        m.closeConfirm()
+      else if invalid <> m.options
+        m.closeOptions()
+      end if
+    end if
+  end sub
+
+  sub onUiAction(actionId as string, button as BGE.UI.Button)
+    if actionId = "continue"
+      m.continueGame()
+    else if actionId = "new"
+      if SaveData.current().exists()
+        m.askNewGame()
+      else
+        m.startNewGame()
+      end if
+    else if actionId = "overwrite"
+      m.startNewGame()
+    else if actionId = "cancel"
+      m.closeConfirm()
+    else if actionId = "options"
+      m.openOptions()
+    else if actionId = "done"
+      m.closeOptions()
+    else if actionId = "credits"
+      m.openCredits()
+    end if
+  end sub
+
+  ' The name over the backdrop, unless the credits are rolling
+  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
+    if invalid <> m.credits
+      return
+    end if
+    font = m.game.getFontOr("logo")
+    center = uiRenderObj.getCanvasCenter()
+    y = center.y * 2 * 0.14
+    uiRenderObj.DrawText("Night of the Barrow King", center.x + 3, y + 3, &h000000C0, font, "center")
+    uiRenderObj.DrawText("Night of the Barrow King", center.x, y, &hE0B050FF, font, "center")
+  end sub
+
+  override sub onDestroy()
+    m.menu = invalid
+    m.confirm = invalid
+    m.options = invalid
+    m.credits = invalid
+    super.onDestroy()
+  end sub
+
+  ' Round the middle of the graveyard, looking in
+  private sub moveCamera(dt as float)
+    m.orbitAngle += m.orbitSpeed * dt
+    camera = m.game.canvas.renderer.camera as BGE.Camera3d
+    camera.position = BGE.Math.VectorOps.create(m.orbitCenter.x + Sin(m.orbitAngle) * m.orbitRadius, m.orbitHeight, m.orbitCenter.z + Cos(m.orbitAngle) * m.orbitRadius)
+    camera.setTarget(BGE.Math.VectorOps.create(m.orbitCenter.x, m.orbitLookHeight, m.orbitCenter.z))
+  end sub
+
+  ' The main menu under the name, focused on `focusId` (or its first item)
+  private sub showMenu(focusId as string)
+    width = m.game.uiCanvas.getWidth()
+    height = m.game.uiCanvas.getHeight()
+    menu = new BGE.UI.MenuList(m.game)
+    menu.listener = m
+    if SaveData.current().exists()
+      menu.addItem("continue", "Continue")
+    end if
+    menu.addItem("new", "New Game")
+    menu.addItem("options", "Options")
+    menu.addItem("credits", "Credits")
+    menu.setSize(width * 0.3, 0)
+    menu.customX = width * 0.35
+    menu.customY = height * 0.36
+    menu.open()
+    if focusId <> ""
+      menu.focusItem(focusId)
+    end if
+    m.menu = menu
+  end sub
+
+  private sub closeMenu()
+    if invalid <> m.menu
+      m.menu.close()
+      m.menu = invalid
+    end if
+  end sub
+
+  ' Picks up where the save left off: the story and bosses as they were, at the entrance of the
+  ' scene it was made in
+  private sub continueGame()
+    save = SaveData.current()
+    data = save.read()
+    if invalid = data
+      return
+    end if
+    m.closeMenu()
+    save.restore(m.game, data)
+    m.game.changeSceneWithFade(data.scene, data.entrance)
+  end sub
+
+  ' A new game wipes the save, so ask first
+  private sub askNewGame()
+    m.closeMenu()
+    confirm = new BGE.UI.MenuList(m.game)
+    confirm.title = "Start a new game?"
+    confirm.message = "Your saved game will be lost."
+    confirm.listener = m
+    confirm.addItem("cancel", "Cancel")
+    confirm.addItem("overwrite", "New Game")
+    confirm.centered = true
+    confirm.open()
+    m.confirm = confirm
+  end sub
+
+  private sub closeConfirm()
+    m.confirm.close()
+    m.confirm = invalid
+    m.showMenu("new")
+  end sub
+
+  private sub startNewGame()
+    m.closeMenu()
+    if invalid <> m.confirm
+      m.confirm.close()
+      m.confirm = invalid
+    end if
+    SaveData.current().startNew(m.game)
+    m.game.changeSceneWithFade("TownScene", {})
+  end sub
+
+  private sub openOptions()
+    m.closeMenu()
+    panel = new OptionsPanel(m.game)
+    panel.listener = m
+    panel.open()
+    m.options = panel
+  end sub
+
+  ' Saves the options and goes back to the menu
+  private sub closeOptions()
+    m.options.save()
+    m.options.close()
+    m.options = invalid
+    m.showMenu("options")
+  end sub
+
+  private sub openCredits()
+    m.closeMenu()
+    credits = new BGE.UI.CreditsView(m.game, [
+      {text: "Night of the Barrow King", style: "title"},
+      {text: ""},
+      {text: "Made with", style: "heading"},
+      {text: "the BrighterScript Game Engine"},
+      {text: ""},
+      {text: "The knight and the skeleton", style: "heading"},
+      {text: "Clint Bellanger (CC-BY 3.0, CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "The orcs", style: "heading"},
+      {text: "johndh (CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "The townsfolk", style: "heading"},
+      {text: "Danimal, Clint Bellanger, Tiziana and Quaternius (CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "Title font", style: "heading"},
+      {text: "Quill and Antler Expanded by MagicBear (SIL OFL 1.1)"},
+      {text: ""},
+      {text: "Everything else", style: "heading"},
+      {text: "made for this game (CC0)"}
+    ] as BGE.UI.CreditsEntry[])
+    credits.backgroundRGBA = &h0A0806C0
+    m.addUi(credits)
+    m.credits = credits
+  end sub
+
+  private sub closeCredits()
+    m.removeUi(m.credits)
+    m.credits = invalid
+    m.showMenu("credits")
+  end sub
+
+end class
