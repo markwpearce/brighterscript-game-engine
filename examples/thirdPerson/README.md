@@ -19,12 +19,12 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | --- | --- | --- |
 | Move (relative to the camera) | Left stick | D-pad |
 | Orbit the camera | Right stick | - |
-| Lock onto the enemy in front, or release it; with none in front, recenter the camera behind the knight | L2 | Rewind |
+| Lock onto the enemy in front, or release it; with none in front, recenter the camera behind the knight | L2 | Replay |
 | Switch lock-on target | Flick the right stick left or right | - |
 | Attack (press again during a swing to chain) | X | OK |
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | B | Fast-forward |
-| Dodge (roll toward the stick, or step back) | A | Replay |
+| Dodge (roll toward the stick, or step back) | A | Rewind |
 | Pause menu (Resume, Inventory (not yet), Options, Quit to Title); Back again closes it | Start (browser controller) | Back |
 | Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
 
