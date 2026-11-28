@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 TITLE = "Night of the\nBarrow King"
-FONT = os.path.join(os.path.dirname(__file__), "..", "src", "fonts", "quill-and-antler-expanded.ttf")
+FONT = os.path.join(os.path.dirname(__file__), "..", "src", "fonts", "bluunext-bold.ttf")
 # The night sky's zenith and horizon (tools/night-sky.py), and the menus' gold (MenuTheme.bs)
 TOP = "#080E28"
 BOTTOM = "#26386A"
