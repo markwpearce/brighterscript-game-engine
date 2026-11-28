@@ -235,7 +235,8 @@ myButton.clickSoundKey = "specialClick"
 ```
 
 `Button.onFocus()`/`onClick()` play the button's own key if it's set, else `Game.uiFocusSoundKey`/
-`uiClickSoundKey` - both default to `""` (no sound), so this is entirely opt-in. See
+`uiClickSoundKey` - both default to `""` (no sound), so this is entirely opt-in. They play at
+`Game.uiSoundVolume` (0-100, default 100). See
 `examples/platformer`'s `main.bs` for a full example wiring these game-wide.
 
 ### Widget overlay rendering and popup Select
