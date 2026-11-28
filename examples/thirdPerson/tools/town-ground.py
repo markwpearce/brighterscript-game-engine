@@ -24,7 +24,7 @@ SURFACE = {
     "W": "cobbles", "@": "cobbles",
 }
 # Props on a cell take the surface round them (the most common neighbouring one)
-TAKES_NEIGHBOURS = "lnf"
+TAKES_NEIGHBOURS = "lnMf"
 
 
 def read_rows():
