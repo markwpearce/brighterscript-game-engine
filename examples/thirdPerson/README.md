@@ -25,7 +25,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Block (hold; walk slowly) | L1 | Play |
 | Parry | B | Fast-forward |
 | Dodge (roll toward the stick, or step back) | A | Rewind |
-| Pause menu (Resume, Inventory (not yet), Options, Controls, Quit to Title); Back again closes it | Start (browser controller) | Back |
+| Pause menu (Resume, Inventory (not yet), Options, Controls, Quit to Title); Back again closes it | Select | Back |
 | Debug panels (FPS, input, memory, GC, log) and entity details | - | `*` |
 
 There are no control hints on screen: the pause menu's **Controls** page shows the remote and a gamepad side by side, each button labelled with what it does (`Menus/ControlsPanel.bs`). Its labels come from the control map (`describeBindings()`), so they follow the bindings in `main.bs`; where each button is in the pictures (the engine's input debug window's, `pkg:/source/engine/debug/images/`) is in `Menus/ControlPictures.bs`. The last debug level (`*` twice) shows the knight's state top right (and the enemy count on the field).
