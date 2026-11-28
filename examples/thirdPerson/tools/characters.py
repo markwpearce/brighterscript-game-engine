@@ -9,6 +9,9 @@ ORC_COLOURS = {"Material.skin": (0.18, 0.22, 0.146), "Material.hair": (0.06, 0.0
 # at 12 fps or more before holding there, then 4 for the strike (to 16)
 MONSTER_ATTACK = inbetweens(13, 14.5, 8) + inbetweens(14.5, 16, 5)[1:]  # noqa: F821 (provided by render-character.py)
 
+# The goblins' jab: 8 frames drawing the weapon back (21 to 22), then 4 for the thrust (to 24)
+GOBLIN_ATTACK = inbetweens(21, 22, 8) + inbetweens(22, 24, 5)[1:]  # noqa: F821
+
 CHARACTERS = {
     # steel_armor.blend
     "knight": {
@@ -68,6 +71,48 @@ CHARACTERS = {
         "layers": ["1", "5"],
         "colours": ORC_COLOURS,
         "size": 3.6,
+    },
+    # The forest's creatures. goblin.blend and knife_hobgoblin.blend share Flare's goblin rig:
+    # stance 1-4, a hop 5-12, run 13-20, a jab 21-24 (drawn back at 22), a throw 25-28, hit 29-30,
+    # die 37-40 and a fall dropping the weapon 41-48
+    # goblin.blend: spear; its bright green skin darkened
+    "goblin": {
+        "animations": [
+            ("idle", [1, 2, 3, 4]),
+            ("run", list(range(13, 21))),
+            ("attack", GOBLIN_ATTACK),
+            ("hit", [29]),
+            ("die", [37, 38, 39, 40]),
+        ],
+        "colours": {"Skin": (0.15, 0.26, 0.08)},
+        "size": 3.6,
+    },
+    # knife_hobgoblin.blend: knife; its yellow skin turned a ruddy brown
+    "hobgoblin": {
+        "animations": [
+            ("idle", [1, 2, 3, 4]),
+            ("run", list(range(13, 21))),
+            ("attack", GOBLIN_ATTACK),
+            ("hit", [29]),
+            ("die", [37, 38, 39, 40]),
+        ],
+        "colours": {"Skin": (0.28, 0.13, 0.06)},
+        "size": 3.6,
+    },
+    # Werewolf.blend: its "Action" has stance 0-8, run 9-16, a rearing swipe 17-20 (reared up at
+    # 18), a recoil 21-23 and die 24-28. Unarmed and near enough symmetric to render --mirror
+    "werewolf": {
+        "animations": [
+            ("idle", [0, 2, 4, 6]),
+            ("run", list(range(9, 17))),
+            ("attack", inbetweens(17, 18, 8) + inbetweens(18, 20, 5)[1:]),  # noqa: F821
+            ("hit", [22]),
+            ("die", [24, 25, 26, 28]),
+        ],
+        "rig": "MaleArm",
+        # Its pale belly and legs otherwise burn out white
+        "colours": {"White Fur": (0.45, 0.43, 0.4)},
+        "size": 4.5,
     },
     # Townsfolk, from the Flare NPC sources (art/npcs/), idle only: four frames across each idle loop
     # MalePeasant.blend: the hoe is the short one on layer 12; HumanMale.001 duplicates HumanMale

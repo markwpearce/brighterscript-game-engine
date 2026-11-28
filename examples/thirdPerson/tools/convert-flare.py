@@ -7,6 +7,7 @@
 # voronoi...) that Blender 5 drops, leaving e.g. the skeleton's dark armour plain white. This
 # rebuilds each one as Cycles nodes: the diffuse colour at its intensity, mixed with each
 # colour texture's colour through a noise texture (or the image, for image textures).
+import os
 import sys
 
 import bpy
@@ -14,6 +15,10 @@ import bpy
 
 def link(tree, output, input):
     tree.links.new(output, input)
+
+
+def has_image(image):
+    return image is not None and (image.packed_file is not None or os.path.exists(bpy.path.abspath(image.filepath)))
 
 
 def colour_from_slots(material, tree, base):
@@ -25,7 +30,10 @@ def colour_from_slots(material, tree, base):
         mix = tree.nodes.new("ShaderNodeMixRGB")
         mix.inputs["Color1"].default_value = (0, 0, 0, 1)
         link(tree, colour, mix.inputs["Color1"])
-        if texture.type == "IMAGE" and texture.image:
+        if texture.type == "IMAGE" and not has_image(texture.image):
+            # Werewolf.blend points at images only on its author's machine
+            continue
+        if texture.type == "IMAGE":
             image = tree.nodes.new("ShaderNodeTexImage")
             image.image = texture.image
             link(tree, image.outputs["Color"], mix.inputs["Color2"])
@@ -71,6 +79,14 @@ def convert(material):
         link(tree, surface, add.inputs[0])
         link(tree, emission.outputs["Emission"], add.inputs[1])
         surface = add.outputs["Shader"]
+    if material.use_transparency and material.alpha < 1:
+        # e.g. Werewolf.blend's "Invis" helper faces
+        transparent = tree.nodes.new("ShaderNodeBsdfTransparent")
+        mix = tree.nodes.new("ShaderNodeMixShader")
+        mix.inputs["Fac"].default_value = material.alpha
+        link(tree, transparent.outputs["BSDF"], mix.inputs[1])
+        link(tree, surface, mix.inputs[2])
+        surface = mix.outputs["Shader"]
     link(tree, surface, output.inputs["Surface"])
 
 
