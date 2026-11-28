@@ -48,13 +48,43 @@ Movement is relative to the camera, and the camera stays put until you move it.
 
 Old Tobias, the old man by the square (`M` in `src/maps/town.txt`), sells them and a Barrow Flask (800) once each: his "Show me your wares" posts `openShop`, and the scene opens `Menus/ShopPanel.bs` when the conversation ends. The item icons are placeholders drawn by `tools/item-icons.py` (`src/images/item_icons.png`).
 
-Deep links (`scene=...`, `at=...`) skip the title and don't save; debug links: `bonfire=<town|graveyard|crypt1|crypt3|forest>` wakes beside that bonfire, `save=1` loads the save and keeps saving, `die=<seconds>` kills the knight that long after arriving, `coins=<n>` sets the coins carried, `gear=<id>,...` gives and equips weapons and shields, `items=<id>,...` gives any items (ids in `Items.bs`: `longsword`, `orcCleaver`, `wardensBlade`, `heaterShield`, `towerShield`, `chieftainsTusk`, `barrowFlask`), `health=<percent>` starts the knight wounded, `slay=<seconds>` kills the Orc Chieftain that long after arriving in the forest (his rewards and banners without the fight). Otherwise the game saves on resting, a boss's death, your death, picking up dropped coins, equipping, buying, and arriving in each scene (`GameSave.bs`: one `BGE.SaveSlot`, registry section `nightOfTheBarrowKing`, with the scene, its entrance args, the story, the bosses killed and the `RunState`). Continue wakes you at the last bonfire, so progress is where you last rested, though coins and story carry on from the last save; the volumes are kept apart from it in a `BGE.SaveProfile` (`GameSettings.bs`), so a new game keeps them. The engine has no volume control yet, so they're only stored for now.
+Deep links (`scene=...`, `at=...`) skip the title and don't save; debug links: `bonfire=<town|graveyard|crypt1|crypt3|forest>` wakes beside that bonfire, `save=1` loads the save and keeps saving, `die=<seconds>` kills the knight that long after arriving, `coins=<n>` sets the coins carried, `gear=<id>,...` gives and equips weapons and shields, `items=<id>,...` gives any items (ids in `Items.bs`: `longsword`, `orcCleaver`, `wardensBlade`, `heaterShield`, `towerShield`, `chieftainsTusk`, `barrowFlask`), `health=<percent>` starts the knight wounded, `slay=<seconds>` kills the Orc Chieftain that long after arriving in the forest (his rewards and banners without the fight). Otherwise the game saves on resting, a boss's death, your death, picking up dropped coins, equipping, buying, and arriving in each scene (`GameSave.bs`: one `BGE.SaveSlot`, registry section `nightOfTheBarrowKing`, with the scene, its entrance args, the story, the bosses killed and the `RunState`). Continue wakes you at the last bonfire, so progress is where you last rested, though coins and story carry on from the last save; the volumes are kept apart from it in a `BGE.SaveProfile` (`GameSettings.bs`), so a new game keeps them. The sound volume scales every effect; the music player (`roAudioPlayer`) has no volume, so the music slider only turns the music off at 0 (see Audio).
 
 Locked on, the camera turns to keep the enemy in view beyond the knight, a white dot marks it, and the knight keeps facing it: he runs toward it, side-steps round it, backs away from it, and swings at it. Flicking the right stick switches to the next enemy in view that way. The lock drops when the enemy dies or gets more than 20 m away.
 
 Each enemy telegraphs its attack with a wind-up, strikes, then recovers, which is your opening. Hitting it during the wind-up interrupts it; a parry during the strike leaves it staggered; blocking takes a fifth of the damage; dodging (mid-roll) takes none. Only one enemy attacks at a time, with a short gap between attacks, and only from where the camera can see it; the rest circle until it's their turn. A hit knocks an enemy back, and most then back off for a moment. Hits spray blood (bone dust from the skeleton), and blocks and parries throw sparks. When the knight dies the field clears and he gets up again.
 
 Attacking, dodging and parrying cost stamina, and so does every hit you block (more for heavier hits). It refills after a short pause, more slowly while the shield is up. With none left you can't attack, dodge or parry (the stamina bar flashes), and a blocked hit that empties it breaks your guard and stuns you for a moment.
+
+## Audio
+
+The music streams; it isn't in the package (the BrightScript Simulator refuses a zip over about 7.1 MB). The four tracks in `music/` (mono 80 kbps 32 kHz MP3s, outside `src/`) play from `https://raw.githubusercontent.com/markwpearce/brighterscript-game-engine/<ref>/examples/thirdPerson/music/<file>` with `game.musicPlay(url, true, false)`, so a track shared by the next scene carries on.
+
+| Track | Where |
+| --- | --- |
+| `the_march_upon_the_red_mountain.mp3` | The title screen, and a boss fight (from when the boss wakes until it dies, or you die or leave; then the area's track starts again from the top) |
+| `RPG_The_Lost_Town.mp3` | The town, the keep and the chapel |
+| `foreboding_theme.mp3` | The graveyard, the crypt and the field |
+| `the_wraiths_of_winter.mp3` | The forest |
+
+Deep links: `musicRef=<branch>` streams the tracks from another branch (e.g. `musicRef=feat/754-audio` before they reach `main`), `music=0` turns the music off, `sfxLog=1` prints each sound effect on the console. The console always shows `[audio]` lines: the track's URL as it starts and the music player's status (`start of play`, or `music failed: ...`).
+
+`GameAudio.bs` (a persistent entity, `Audio.current(game)`) owns it all. A scene picks its music with `m.musicTrack = MusicTrack.<track>` in its constructor (`ThirdPersonScene.readCommonArgs()` starts it); `playArea()` and `setBossFight()` do the rest (`CryptScene` calls `setBossFight()` every frame). Effects are sound groups played with `Audio.current(m.game).play("<group>")`: one of the group's variants at random, at the sound volume setting, and not again within the group's gap. The knight, the world and the menus play on channel 0 and enemy voices on channel 1 (the Express has 2; a one-channel device plays both on 0, and a new sound on a channel cuts off the last).
+
+| Group | When | Sounds (`src/sounds/`) |
+| --- | --- | --- |
+| `swing` | the knight swings | `swing1`, `swing2` |
+| `dodge` | he rolls or steps back | `dodge` |
+| `block`, `parry` | a blocked hit (his or an enemy's), a parry | `block`, `parry` |
+| `drink` | a draught heals (`draughtDrunk`) | `drink` |
+| `coin` | coins from a kill, picked up, or spent at the shop | `coin` |
+| `equip` | equipping gear | `sword_unsheathe` |
+| `door` | going through any scene exit | `door` |
+| `bonfire` | resting | `bonfire` |
+| `orc`, `giant`, `undead`, `beast`, `bite` | an enemy's voice (`EnemyType.voice`): as it winds up an attack, is hit and dies. Orcs and ghouls `orc`; heavy orcs, grave brutes and the Barrow King `giant`; skeletons and the Crypt Warden `undead`; `beast` (werewolves) and `bite` (goblins) for the forest | `orc1`-`2`, `giant1`-`2`, `shade1`-`2`, `beast`, `bite` |
+| menus | focus and click on every button (`game.uiFocusSoundKey`/`uiClickSoundKey`, at `game.uiSoundVolume`) | `ui_focus`, `ui_click` |
+
+No sound yet for a blade hitting flesh, footsteps, the bonfire's crackle, death, or rattling bones (the pack has none).
 
 ## Bonfires, death and coins
 
@@ -117,7 +147,7 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
 - `tools/forest-ground.py` (`python3 tools/forest-ground.py`, needs Pillow and numpy) paints the ground from the same file into `src/sprites/forest_ground.webp`, 16 texels per cell, like the town's: the road, forest floor, leaf litter, mud, dark undergrowth under the dense forest and the camp's trampled earth, with dark roots round each tree and glows round the fires. Drawn as one `staticImage` plane at 4 world units per texel; fog as the town's (`useTownFog`), a 30 m draw distance.
 - Only the forest's sheets load: goblin, hobgoblin, werewolf, orc and heavy orc (the chieftain is the heavy orc's), and the knight's. On the Roku Ultra the whole scene takes about 92 MB of texture memory (of 240 MB).
 - Frame rate on the Roku Ultra (`perf=phases`, adaptive quality on): about 20 fps on the road with the camera orbiting or walking, 40 standing still; about 18 orbiting in the camp, 56 still. On the road the trees are the cost (about 0.25 ms each while the camera moves, mostly updating and culling ones out of view): 74 trees ran at 18.5 fps, so there are 52; `trees=0` leaves them out, for measuring. In the camp it's the models (about 3 ms each drawn while the camera moves), so it has 3 tents, 2 totems and 3 crates.
-- Music: a TODO(#754) in `ForestScene` marks where the forest's track (The Wraiths of Winter) and the chieftain's boss music go once audio lands.
+- Music: the forest's track (The Wraiths of Winter), and the boss track while the chieftain fights (`Audio.current(game).setBossFight()`, as in the crypt).
 
 ## Graveyard art
 
