@@ -1,61 +1,42 @@
-import "GraveyardScene.bs"
+import "pkg:/source/engine/GameScene.bs"
 import "../GameSave.bs"
 import "../Menus/OptionsPanel.bs"
+import "../Menus/ControlsPanel.bs"
+import "../Menus/TitleMenu.bs"
 import "pkg:/source/engine/ui/MenuList.bs"
 import "pkg:/source/engine/ui/CreditsView.bs"
 
-' The title screen: the graveyard at night, empty, the camera slowly circling it in the fog,
-' with the game's name over it and the menu: Continue (when there's a save), New Game, Options
-' and Credits.
-class TitleScene extends GraveyardScene
+' The title screen: the key art (the splash screen's painting, title and all) with the menu in a
+' row along the bottom: Continue (when there's a save), New Game, Options, Controls (with a QR
+' code to use a phone as a controller) and Credits.
+class TitleScene extends BGE.GameScene
 
-  ' The camera circles this far from the middle of the graveyard, this high, looking at a point
-  ' this high, turning this fast (radians a second)
-  orbitRadius as float = World.metres(7)
-  orbitHeight as float = World.metres(4)
-  orbitLookHeight as float = World.metres(1.5)
-  orbitSpeed as float = 0.06
-
-  private orbitCenter as BGE.Math.Vector
-  private orbitAngle as float = 0
   ' What's up: the menu, the new game question, the options or the credits (one at a time)
-  private menu as BGE.UI.MenuList = invalid
+  private menu as TitleMenu = invalid
   private confirm as BGE.UI.MenuList = invalid
   private options as OptionsPanel = invalid
+  private controls as ControlsPanel = invalid
   private credits as BGE.UI.CreditsView = invalid
+  ' the fade under the menu, one row per alpha step, stretched to fit
+  private shade as roBitmap = invalid
 
   sub new(game as BGE.Game)
     super(game)
     m.name = "TitleScene"
   end sub
 
-  ' The graveyard's world, without the knight or the skeletons
   override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
-    m.loadWorld(loader)
+    m.loadSceneBitmap(loader, "titleArt", "pkg:/images/Splash_HD.jpg")
   end sub
 
   override sub onCreate(args as roAssociativeArray)
-    m.buildWorld()
-    m.orbitCenter = m.layout.cellCenter(12.5, 12)
-    camera = m.game.canvas.renderer.camera as BGE.Camera3d
-    camera.maxDrawDistance = World.metres(32)
-    camera.drawDistanceFadeFraction = 0.5
-    camera.fieldOfViewDegrees = 90
-    camera.sortsByGroundDistance = true
-    m.useTownFog(args)
-    m.moveCamera(0)
     m.showMenu("")
   end sub
 
   override sub onUpdate(dt as float)
-    m.moveCamera(dt)
     if invalid <> m.credits and m.credits.isFinished()
       m.closeCredits()
     end if
-  end sub
-
-  ' No knight, no chase camera
-  override sub onPostUpdate(dt as float)
   end sub
 
   ' Back leaves the question, the options or the credits; OK skips the credits
@@ -70,6 +51,8 @@ class TitleScene extends GraveyardScene
         m.closeConfirm()
       else if invalid <> m.options
         m.closeOptions()
+      else if invalid <> m.controls
+        m.closeControls()
       end if
     end if
   end sub
@@ -90,56 +73,72 @@ class TitleScene extends GraveyardScene
     else if actionId = "options"
       m.openOptions()
     else if actionId = "done"
-      m.closeOptions()
+      if invalid <> m.controls
+        m.closeControls()
+      else
+        m.closeOptions()
+      end if
+    else if actionId = "controls"
+      m.openControls()
     else if actionId = "credits"
       m.openCredits()
     end if
   end sub
 
-  ' The name over the backdrop, unless the credits are rolling
+  ' The key art, filling the game canvas (under the menu and panels)
   override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
-    if invalid <> m.credits
+    art = m.game.getBitmap("titleArt", false)
+    if invalid = art
       return
     end if
-    font = m.game.getFontOr("logo")
-    center = uiRenderObj.getCanvasCenter()
-    y = center.y * 2 * 0.14
-    uiRenderObj.DrawText("Night of the Barrow King", center.x + 3, y + 3, &h000000C0, font, "center")
-    uiRenderObj.DrawText("Night of the Barrow King", center.x, y, &hE0B050FF, font, "center")
+    canvas = m.game.canvas.bitmap
+    width = canvas.GetWidth()
+    height = canvas.GetHeight()
+    renderObj.drawScaledObject(0, 0, width / art.GetWidth(), height / art.GetHeight(), art)
+    ' darker towards the bottom, under the menu
+    if invalid = m.shade
+      m.shade = m.makeShade()
+    end if
+    top = height * 0.7
+    renderObj.drawScaledObject(0, Int(top), width / m.shade.GetWidth(), (height - Int(top)) / m.shade.GetHeight(), m.shade)
   end sub
 
   override sub onDestroy()
     m.menu = invalid
     m.confirm = invalid
     m.options = invalid
+    m.controls = invalid
     m.credits = invalid
+    m.shade = invalid
     super.onDestroy()
   end sub
 
-  ' Round the middle of the graveyard, looking in
-  private sub moveCamera(dt as float)
-    m.orbitAngle += m.orbitSpeed * dt
-    camera = m.game.canvas.renderer.camera as BGE.Camera3d
-    camera.position = BGE.Math.VectorOps.create(m.orbitCenter.x + Sin(m.orbitAngle) * m.orbitRadius, m.orbitHeight, m.orbitCenter.z + Cos(m.orbitAngle) * m.orbitRadius)
-    camera.setTarget(BGE.Math.VectorOps.create(m.orbitCenter.x, m.orbitLookHeight, m.orbitCenter.z))
-  end sub
+  ' A transparent-to-dark fade, top to bottom, smooth enough to stretch
+  private function makeShade() as roBitmap
+    rows = 160
+    shade = CreateObject("roBitmap", {width: 4, height: rows, AlphaEnable: true})
+    shade.Clear(&h00000000)
+    for row = 0 to rows - 1
+      t = (row + 1) / rows
+      alpha = Int(170 * t * t)
+      shade.DrawRect(0, row, 4, 1, &h05070A00 + alpha)
+    end for
+    shade.Finish()
+    return shade
+  end function
 
-  ' The main menu under the name, focused on `focusId` (or its first item)
+  ' The menu along the bottom of the art, focused on `focusId` (or its first item)
   private sub showMenu(focusId as string)
-    width = m.game.uiCanvas.getWidth()
-    height = m.game.uiCanvas.getHeight()
-    menu = new BGE.UI.MenuList(m.game)
+    menu = new TitleMenu(m.game)
     menu.listener = m
     if SaveData.current().exists()
       menu.addItem("continue", "Continue")
     end if
     menu.addItem("new", "New Game")
     menu.addItem("options", "Options")
+    menu.addItem("controls", "Controls")
     menu.addItem("credits", "Credits")
-    menu.setSize(width * 0.3, 0)
-    menu.customX = width * 0.35
-    menu.customY = height * 0.36
-    menu.open()
+    menu.open(m.game.uiCanvas.getHeight() * 0.86)
     if focusId <> ""
       menu.focusItem(focusId)
     end if
@@ -213,6 +212,20 @@ class TitleScene extends GraveyardScene
     m.showMenu("options")
   end sub
 
+  private sub openControls()
+    m.closeMenu()
+    panel = new ControlsPanel(m.game, true)
+    panel.listener = m
+    panel.open()
+    m.controls = panel
+  end sub
+
+  private sub closeControls()
+    m.controls.close()
+    m.controls = invalid
+    m.showMenu("controls")
+  end sub
+
   private sub openCredits()
     m.closeMenu()
     credits = new BGE.UI.CreditsView(m.game, [
@@ -229,6 +242,9 @@ class TitleScene extends GraveyardScene
       {text: ""},
       {text: "The townsfolk", style: "heading"},
       {text: "Danimal, Clint Bellanger, Tiziana and Quaternius (CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "Title art", style: "heading"},
+      {text: "Mark Pearce"},
       {text: ""},
       {text: "Fonts", style: "heading"},
       {text: "Bluu Next by Jean-Baptiste Morizot, Velvetyne (SIL OFL 1.1)"},
