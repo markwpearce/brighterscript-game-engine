@@ -1,0 +1,413 @@
+import "../World.bs"
+import "../Night.bs"
+import "../Dressing.bs"
+import "../GameSave.bs"
+import "../RunState.bs"
+import "../Items.bs"
+import "../Entities/Enemy.bs"
+import "../Entities/EnemyTypes.bs"
+import "../Entities/PropModel.bs"
+import "../Entities/Torch.bs"
+import "../Forest/ForestMap.bs"
+import "ThirdPersonScene.bs"
+import "pkg:/source/engine/sceneFlow/SpawnPoints.bs"
+import "pkg:/source/engine/sceneFlow/ExitArea.bs"
+import "pkg:/source/engine/navigation/NavGrid.bs"
+
+' The forest north of the town, laid out by src/maps/forest.txt: a road winding north from the
+' town's north gate between dense trees, past goblin packs, a roaming werewolf and a bonfire in a
+' clearing, to the orc camp behind its palisade, where the Orc Chieftain sits by the campfire.
+' Optional: nothing on the main path needs it. The road's south end leads back to the town.
+class ForestScene extends ThirdPersonScene
+
+  ' World units per ground texel; tools/forest-ground.py paints 16 texels per 2 m cell
+  groundTexelScale as float = 4
+  ' Enemies wake when the knight is this close and in sight
+  wakeDistance as float = World.metres(12)
+  ' The chieftain wakes when he's this close: well inside the camp
+  bossWakeDistance as float = World.metres(10)
+  ' The chieftain's save id (SaveData.bossesKilled()), and the story post when he dies
+  bossId as string = "chieftain"
+
+  private layout as ForestLayout
+  ' For the enemies: paths round the trees and the palisade, and whether they can see the knight
+  private nav as BGE.NavGrid
+  ' The enemy kinds by their map character
+  private enemyKinds as roAssociativeArray = {}
+  private enemySpots as BGE.CharGridCell[] = []
+  ' The second `w`: the far end of the werewolf's roam
+  private roamEnd as BGE.CharGridCell = invalid
+  private chieftain as Enemy = invalid
+  private showEnemies as boolean = true
+  private showTrees as boolean = true
+  ' Banners still to show, one after another (the rewards), and how long until the next
+  private bannerQueue as string[] = []
+  private bannerWait as float = 0
+  ' Debug deep link `slay=<seconds>`: the chieftain dies this long after arriving (0 is off)
+  private slayAfterSeconds as float = 0
+  private occlusionWas as boolean = true
+
+  ' Bitmaps the other scenes use too, kept when the scene ends
+  private sharedBitmapPaths as roAssociativeArray = {
+    nightSky: "pkg:/sprites/night_sky.webp",
+    propsAtlas: "pkg:/models/props/props_atlas.png"
+  }
+  ' Bitmaps only this scene uses, freed when it ends
+  private bitmapPaths as roAssociativeArray = {
+    forestGround: "pkg:/sprites/forest_ground.webp",
+    ' white, clear at the top and bottom: the fog backdrop's soft edges
+    fog: "pkg:/sprites/fog.webp"
+  }
+  private modelPaths as roAssociativeArray = {
+    tent: "pkg:/models/props/tent.obj",
+    campfire: "pkg:/models/props/campfire.obj",
+    totem: "pkg:/models/props/totem.obj",
+    crate: "pkg:/models/props/crate.obj",
+    bonfire: "pkg:/models/props/bonfire.obj"
+  }
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "ForestScene"
+    m.qualityOptions = {targetFps: 20}
+    ' TODO(#754): the forest's music (the_wraiths_of_winter.mp3), once audio lands: import
+    ' "../GameAudio.bs" and set `m.musicTrack = MusicTrack.forest` (readCommonArgs() starts it)
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    m.enemyKinds = {
+      g: EnemyTypes.goblin(),
+      h: EnemyTypes.hobgoblin(),
+      w: EnemyTypes.werewolf(),
+      o: EnemyTypes.orc(),
+      O: EnemyTypes.heavyOrc(),
+      C: EnemyTypes.orcChieftain()
+    }
+    m.loadSceneAtlas(loader, "knight", true)
+    ' Only the forest's creatures (the chieftain is the heavy orc's sheet), each sheet once
+    atlases = {}
+    for each key in m.enemyKinds
+      kind = m.enemyKinds[key] as EnemyType
+      atlases[kind.atlas] = true
+    end for
+    for each atlas in atlases
+      m.loadSceneAtlas(loader, atlas)
+    end for
+    m.loadSceneBitmaps(loader, m.sharedBitmapPaths, true)
+    m.loadSceneBitmaps(loader, m.bitmapPaths)
+    m.loadSceneBitmaps(loader, Dressing.treeBitmapPaths())
+    m.loadSceneModels(loader, m.modelPaths)
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.readCommonArgs(args)
+    m.chieftain = invalid
+    m.enemySpots = []
+    m.roamEnd = invalid
+    m.bannerQueue = []
+    m.bannerWait = 0
+    m.slayAfterSeconds = m.params.getFloat("slay", 0)
+    ' Measuring: `enemies=0` leaves the enemies out, `trees=0` the trees
+    m.showEnemies = args.enemies <> "0"
+    m.showTrees = args.trees <> "0"
+    ' Nothing here hides much (trees and the palisade are see-through), so occlusion culling
+    ' would cost more than it saves
+    m.occlusionWas = m.game.canvas.renderer.occlusionCullingEnabled
+    m.game.canvas.renderer.occlusionCullingEnabled = false
+    m.game.setBackgroundColor(&h080E28FF)
+    layout = new ForestLayout(ForestMap.readRows())
+    m.layout = layout
+
+    groundBmp = m.game.getBitmap("forestGround")
+    ground = new BGE.DrawablePlane(m, CreateObject("roRegion", groundBmp, 0, 0, groundBmp.GetWidth(), groundBmp.GetHeight()), {normal: {x: 0, y: 1, z: 0}, point: {x: 0, y: 0, z: 0}}, {
+      fillMode: BGE.PlaneFillMode.staticImage,
+      scale: BGE.Math.VectorOps.create(m.groundTexelScale, m.groundTexelScale, 1)
+    })
+    ground.isShaded = true
+    m.addDrawable("Ground", ground)
+    skyBmp = m.game.getBitmap("nightSky")
+    m.addDrawable("Sky", new BGE.DrawableSkybox(m, CreateObject("roRegion", skyBmp, 0, 0, skyBmp.GetWidth(), skyBmp.GetHeight())))
+    Night.addLights(m)
+
+    solids = m.layout.denseSolids()
+    m.addPalisade(solids)
+    fire = m.findFire()
+    for each tent in m.layout.tents
+      m.addTent(tent, fire, solids)
+    end for
+    startCell = invalid
+    for each cell in m.layout.cells
+      if cell.kind = "@"
+        startCell = cell
+      else
+        m.addCellContents(cell, solids)
+      end if
+    end for
+    m.addBonfires(m.layout, solids)
+
+    ' Where he arrives, by the scene he came from (args.from): up the road from the town's north
+    ' gate, facing north
+    spawns = new BGE.SpawnPoints("from")
+    if invalid <> startCell
+      spawns.add("town", m.layout.cellCenter(startCell.col, startCell.row), 0)
+    end if
+    spawn = spawns.resolve(args, "town")
+    spot = spawn.position
+    heading = spawn.heading
+    wake = m.bonfireWake(args)
+    if invalid <> wake
+      spot = BGE.Math.VectorOps.create(wake.x, 0, wake.z)
+      heading = wake.heading
+    end if
+    at = m.parseAt()
+    if invalid <> at
+      ' Measuring: starts in another cell
+      spot = m.layout.cellCenter(at.col, at.row)
+      heading = at.heading
+    end if
+    m.addKnight(spot.x, spot.z, heading)
+    ' Back down the road to the town's north gate
+    if invalid <> m.layout.exit
+      m.exits.add(World.groupArea(m.layout, m.layout.exit), "TownScene", {from: "forest"})
+    end if
+    ' Short like the town's, its end hidden by the same fog: every tree in view costs a blit
+    m.setUpCamera(m.drawDistance(30), 0.5, 0)
+    m.useTownFog(args)
+    m.useSolids(solids)
+    ' Grown by the biggest body, so paths keep every body clear of the trunks and the palisade
+    agentRadius = World.metres(0.4)
+    for each key in m.enemyKinds
+      agentRadius = BGE.Math.Max(agentRadius, m.enemyKinds[key].bodyRadius)
+    end for
+    m.nav = new BGE.NavGrid(solids, {cellSize: World.metres(1), agentRadius: agentRadius})
+    m.addEnemies()
+  end sub
+
+  ' The campfire's cell's centre (the tents face it), or the middle of the map without one
+  private function findFire() as BGE.Math.Vector
+    for each cell in m.layout.cells
+      if cell.kind = "F"
+        return m.layout.cellCenter(cell.col, cell.row)
+      end if
+    end for
+    return BGE.Math.VectorOps.create(0, 0, 0)
+  end function
+
+  ' The camp's palisade: a 3 m wall of sharpened logs along each straight run of `p`, with a
+  ' thin solid along it
+  private sub addPalisade(solids as BGE.SolidWorld)
+    logs = Dressing.palisadeRegion(m.game)
+    for each wallRun in m.layout.palisadeRuns
+      first = m.layout.cellCenter(wallRun.col, wallRun.row)
+      last = m.layout.cellCenter(wallRun.col + wallRun.cols - 1, wallRun.row + wallRun.rows - 1)
+      Dressing.addFence(m.game, first, last, logs, solids, World.metres(3))
+    end for
+  end sub
+
+  ' A hide tent on its 2x2 cells, its doorway toward the campfire
+  private sub addTent(group as BGE.CharGridGroup, fire as BGE.Math.Vector, solids as BGE.SolidWorld)
+    center = m.layout.groupCenter(group)
+    turn = BGE.Math.rotationFacing(BGE.Math.VectorOps.subtract(fire, center))
+    m.addModel("tent", center, turn, 3.6, 2.6, 3.6, true)
+    half = World.metres(1.7)
+    solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+  end sub
+
+  ' A loaded model on the ground (sizes in metres), facing +z turned by `turn`, fading into the
+  ' fog. Only the tents block the camera: each blocker costs the boom a ray test.
+  private sub addModel(model as string, center as BGE.Math.Vector, turn as float, width as float, height as float, depth as float, blocksCamera as boolean)
+    entity = new PropModel(m.game)
+    m.game.addEntity(entity, {
+      x: center.x,
+      z: center.z,
+      model: model,
+      width: World.metres(width),
+      height: World.metres(height),
+      depth: World.metres(depth),
+      turn: turn,
+      castsFog: true,
+      blocksCamera: blocksCamera
+    })
+  end sub
+
+  ' Trees, the camp's fire, totems, crates and torches, and where enemies start
+  private sub addCellContents(cell as BGE.CharGridCell, solids as BGE.SolidWorld)
+    center = m.layout.cellCenter(cell.col, cell.row)
+    if cell.kind = "Y"
+      if m.showTrees
+        ' Off the cell's centre by a number fixed per cell, so rows of trees don't line up
+        jitter = World.metres(ForestMap.CELL_METRES) * 0.4
+        x = center.x + (BGE.Math.hash2(cell.col, cell.row, 1) - 0.5) * jitter
+        z = center.z + (BGE.Math.hash2(cell.col, cell.row, 2) - 0.5) * jitter
+        Dressing.addTree(m.game, x, z, BGE.Math.hash2(cell.col, cell.row, 7), BGE.Math.hash2(cell.col, cell.row, 8), solids)
+      end if
+    else if cell.kind = "F"
+      m.addCampfire(center, solids)
+    else if cell.kind = "t"
+      turn = BGE.Math.hash2(cell.col, cell.row, 3) * BGE.Math.PI * 2
+      m.addModel("totem", center, turn, 0.5, 3, 0.5, false)
+      half = World.metres(0.3)
+      solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+    else if cell.kind = "c"
+      turn = BGE.Math.hash2(cell.col, cell.row, 4) * BGE.Math.PI
+      m.addModel("crate", center, turn, 0.9, 0.9, 0.9, false)
+      half = World.metres(0.5)
+      solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+    else if cell.kind = "l"
+      flame = new Torch(m.game)
+      m.game.addEntity(flame, {x: center.x, y: World.metres(2), z: center.z, kind: FlameKind.fire, post: true})
+      half = World.metres(0.15)
+      solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+    else if cell.kind = "w" and m.isRoamStart()
+      ' The first `w` is where the werewolf starts; the second, the far end of its roam
+      m.enemySpots.push(cell)
+    else if cell.kind = "w"
+      m.roamEnd = cell
+    else if invalid <> m.enemyKinds[cell.kind]
+      m.enemySpots.push(cell)
+    end if
+  end sub
+
+  ' True until the werewolf's first `w` has been found
+  private function isRoamStart() as boolean
+    for each spot in m.enemySpots
+      if spot.kind = "w"
+        return false
+      end if
+    end for
+    return true
+  end function
+
+  ' The orcs' campfire: a ring of stones round burning logs, and a big flame whose warm light
+  ' reaches across the camp
+  private sub addCampfire(center as BGE.Math.Vector, solids as BGE.SolidWorld)
+    m.addModel("campfire", center, 0, 1.8, 0.3, 1.8, false)
+    flame = new Torch(m.game)
+    m.game.addEntity(flame, {x: center.x, y: World.metres(0.1), z: center.z, kind: FlameKind.fire, size: 2})
+    flame.light.intensity = 1.1
+    flame.light.range = World.metres(14)
+    half = World.metres(0.9)
+    solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+  end sub
+
+  ' An enemy on each of the map's enemy cells, asleep and facing down the road (south); the
+  ' chieftain only until he has been killed
+  private sub addEnemies()
+    m.chieftain = invalid
+    if not m.showEnemies
+      return
+    end if
+    for each cell in m.enemySpots
+      kind = m.enemyKinds[cell.kind] as EnemyType
+      if cell.kind <> "C"
+        m.addEnemy(kind, cell, m.wakeDistance)
+      else if not SaveData.isBossSlain(m.bossId)
+        m.chieftain = m.addEnemy(kind, cell, m.bossWakeDistance)
+      end if
+    end for
+  end sub
+
+  private function addEnemy(kind as EnemyType, cell as BGE.CharGridCell, wakeDistance as float) as Enemy
+    spot = m.layout.cellCenter(cell.col, cell.row)
+    args = {
+      type: kind,
+      director: m.director,
+      x: spot.x,
+      z: spot.z,
+      heading: BGE.Math.PI + (BGE.Math.hash2(cell.col, cell.row, 5) - 0.5),
+      wakeDistance: wakeDistance,
+      nav: m.nav
+    }
+    if cell.kind = "w" and invalid <> m.roamEnd
+      args.roamTo = m.layout.cellCenter(m.roamEnd.col, m.roamEnd.row)
+    end if
+    foe = new Enemy(m.game)
+    m.game.addEntity(foe, args)
+    m.trackBody(foe)
+    return foe
+  end function
+
+  ' Start over: every enemy back in its place and asleep (the chieftain only while he lives)
+  protected override sub onRespawn()
+    m.addEnemies()
+  end sub
+
+  override sub onDestroy()
+    super.onDestroy()
+    m.game.canvas.renderer.occlusionCullingEnabled = m.occlusionWas
+    m.chieftain = invalid
+    m.nav = invalid
+  end sub
+
+  override sub onUpdate(dt as float)
+    skip = m.beginUpdate(dt)
+    ' TODO(#754): the boss track while he fights, as CryptScene does:
+    ' Audio.current(m.game).setBossFight(m.isChieftainFighting())
+    m.updateDebugSlay(dt)
+    m.updateBoss()
+    m.updateBanners(dt)
+    if skip
+      return
+    end if
+    m.exits.update(m.knight.position)
+  end sub
+
+  ' The chieftain is awake and the knight alive (his boss bar shows, and his music will play)
+  private function isChieftainFighting() as boolean
+    return invalid <> m.chieftain and m.chieftain.isAwake() and m.knight.isAlive()
+  end function
+
+  ' The `slay=<seconds>` debug deep link
+  private sub updateDebugSlay(dt as float)
+    if m.slayAfterSeconds <= 0
+      return
+    end if
+    m.slayAfterSeconds -= dt
+    if m.slayAfterSeconds <= 0 and invalid <> m.chieftain
+      m.chieftain.kill()
+    end if
+  end sub
+
+  ' Notices the chieftain's death: he stays dead, the story hears of it, and his hoard is the
+  ' knight's (the Orc Cleaver, a Barrow Flask and his tusk; his coins came as he died)
+  private sub updateBoss()
+    if invalid = m.chieftain or m.chieftain.isAlive()
+      return
+    end if
+    m.chieftain = invalid
+    SaveData.markBossSlain(m.bossId)
+    m.game.postGameEvent("forestBossSlain", {boss: m.bossId})
+    m.bannerQueue = ["THE CHIEFTAIN FALLS"]
+    state = RunData.current()
+    rewards = [Items.ORC_CLEAVER, Items.BARROW_FLASK, Items.CHIEFTAINS_TUSK]
+    for each id in rewards
+      if state.grantItem(id)
+        m.bannerQueue.push("RECEIVED " + UCase(Items.get(id).name))
+      end if
+    end for
+    m.bannerWait = 0
+    SaveData.current().saveProgress(m.game)
+  end sub
+
+  ' Shows the queued banners one after another
+  private sub updateBanners(dt as float)
+    if m.bannerQueue.Count() = 0
+      return
+    end if
+    m.bannerWait -= dt
+    if m.bannerWait > 0
+      return
+    end if
+    m.hud.showBanner(m.bannerQueue.Shift(), 3)
+    m.bannerWait = 3.2
+  end sub
+
+  ' The chieftain's health along the bottom once he wakes
+  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
+    super.onDrawEnd(renderObj, uiRenderObj)
+    if m.isChieftainFighting()
+      m.hud.drawBossBar(uiRenderObj, m.chieftain.name, m.chieftain.health.current, m.chieftain.health.max)
+    end if
+  end sub
+
+end class
