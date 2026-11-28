@@ -8,7 +8,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | --- | --- | --- |
 | Title (`TitleScene`) | (default) | The key art (the knight kneeling before the Barrow King), still, with the menu in a row along the bottom. **Continue** (when there's a save) picks up beside the last bonfire you rested at (before any, at the entrance of the scene the save was made in), **New Game** asks before wiping a save, **Options** has the music and sound volumes, **Controls** shows the remote's buttons and a QR code that opens the phone controller page (`game.enableControllerInput()`, port 8888), **Credits** rolls the credits. |
 | Town (`TownScene`) | `scene=town` (`at=<col>,<row>[,<heading>]`) | A walled town at night: houses, huts and a keep round a cobbled square with a well and a bonfire beside it, fenced fields, a pig pen, torches, and townsfolk standing about, who'll talk to you (walk up and press OK). The gate in the south wall leads to the graveyard. |
-| Field (`FieldScene`) | `scene=field` | The arena for trying out combat: enemies keep spawning. Nothing leads here; it's for testing. |
+| Field (`FieldScene`) | `scene=field` (`enemies=<n>`, `types=<kind>,...`) | The arena for trying out combat: enemies keep spawning, a skeleton, an orc and a heavy orc in turn, or the kinds `types` lists (`skeleton`, `orc`, `heavyOrc`, `ghoul`, `graveBrute`, `goblin`, `hobgoblin`, `werewolf`; `EnemyTypes.named()`), loading only their sheets; `enemies` caps how many at once (default 3). Nothing leads here; it's for testing. |
 | Graveyard (`GraveyardScene`) | `scene=graveyard` | A fenced churchyard at night: graves, trees, a chapel, the gravedigger's hut and a well. Three skeletons wait among the graves, two of them heaps of bones, and wake when you come within 10 m (or hit one), the heaps getting up as their fall played backwards; killed ones stay dead until you rest or die. A bonfire stands just inside the gap in the fence. The mausoleum's door at the far end leads down into the crypt; the gap in the fence leads back to the town. |
 | Crypt (`CryptScene`) | `scene=crypt` (`level=<1-3>`, `at=<col>,<row>[,<heading>]`) | A torch-lit stone maze three levels deep. The undead sleep in its corridors (every other skeleton as a heap of bones, which gets up as it wakes) and wake when they see you within 12 m, then find their way round the walls to you. Each level's name shows as you arrive. **The Crypt**: skeletons, and the Crypt Warden, a huge pale skeleton, in the hall at the far end; spirit fire seals the stairs down in its hall until it dies. **The Ossuary**, lit by blue spirit fire: skeletons, ghouls and a grave brute. **The Deep Tomb**, lit by green grave fire: the Barrow King guards the altar. A boss's health bar runs along the bottom once it wakes, and once killed it stays dead for the run. Bonfires burn by the first level's way up and in the Deep Tomb's corridor before the King's hall. The first level's way up leads to the graveyard. |
 | Inside (`InteriorScene`) | `scene=keep`, `scene=chapel` (`at=<col>,<row>[,<heading>]`) | Walk up to the keep's door in town, or the chapel's in the graveyard, to go in. The keep's great hall: long tables and benches, a hearth either side, red and blue banners, the lord beside his throne. The chapel: pews either side of the aisle, stained glass windows, the priest before a candle-lit altar between two torches, candles in front of him. Walking into the doorway leads back out in front of the building. |
@@ -83,6 +83,9 @@ Attacking, dodging and parrying cost stamina, and so does every hit you block (m
   - Heavy orc: slow and tough, blocks often, never flinches; a long wind-up and a heavy hit.
   - Ghoul and grave brute: the orc and heavy orc greyed (`tint`), with a faint `glow` so they show in the dark; the ghoul is quicker and frailer than the orc.
   - The Barrow King: the heavy orc half again as big and bronze-dark, with a long reach and a crushing swing that often comes twice.
+  - Goblin: small, fast and frail, with a spear; flanks round to your side, jabs quickly, then backs off.
+  - Hobgoblin: a bigger goblin with a knife and twice the health; comes straight in, and more often than not stabs twice (`comboChance`).
+  - Werewolf: the forest's elite. Fast, with a long reach and a leaping swipe that covers 2 m; barely flinches and recovers quickly from a parry. Its sheet is rendered `--mirror` (`mirrored`: `DrawableOrientedSprite.mirrorBuckets` draws its left side flipped).
   - Crypt Warden: the skeleton's sheet drawn half again as big (`scale`), pale (`tint`) and faintly glowing (`glow`, its sprite's `ambientBrightness`), so it shows in the dark. Never flinches, reaches far, and half its strikes go straight into a second, quicker one (`comboChance`: the second wind-up is half as long), so roll twice or block the second.
 - Given a `BGE.NavGrid` (`nav`), an enemy wakes only when it can see the knight, and with a wall in the way it follows a path round it instead of circling: a `BGE.NavFollower` checks sight four times a second and re-plans twice a second. The crypt builds one from its `SolidWorld`, its walls grown by the biggest body radius among that level's undead.
 - `Hud.drawBossBar()` and `drawBanner()`: a boss's name and health along the bottom, and a line that fades in and out across the middle (a level's name, "THE WARDEN FALLS").
@@ -120,6 +123,9 @@ The knight and the monsters are re-rendered from Flare-style Blender sources (Cl
 | `skeleton.webp` | `skeleton_0.blend` | 30 | 112×75 | 8.2 MB |
 | `orc.webp` | `orc_flare_0.blend`, layer 2 (hand axe) | 29 | 102×84 | 7.0 MB |
 | `orc_heavy.webp` | `orc_flare_0.blend`, layer 5 (armour, shield, axe) | 26 | 116×101 | 9.2 MB |
+| `goblin.webp` | [`goblin.blend`](https://opengameart.org/content/goblin) (`--height 64`) | 29 | 94×51 | 3.4 MB |
+| `hobgoblin.webp` | [`knife_hobgoblin.blend`](https://opengameart.org/content/flare-mod-hobgoblin) (`--height 76`) | 29 | 87×54 | 4.3 MB |
+| `werewolf.webp` | [`Werewolf.blend`](https://opengameart.org/content/flare-mod-werewolf) (`--height 76 --mirror`: 9 directions) | 29 | 99×81 | 4.4 MB |
 | `peasant_m.webp` | [Flare NPCs](https://opengameart.org/content/flare-npcs-animated-pack-1) `art/npcs/MalePeasant.blend` (`--height 62`) | 4 (idle) | 62×68 | 1.0 MB |
 | `peasant_f.webp` | `FemalePeasant4.blend` (`--height 61`) | 4 | 73×68 | 1.0 MB |
 | `nobleman.webp` | `Nobleman.blend` (`--height 60 --mirror`) | 4 | 51×67 | 0.4 MB |
@@ -128,7 +134,7 @@ The knight and the monsters are re-rendered from Flare-style Blender sources (Cl
 | `priest.webp` | `LuxPriestNPC.blend` (`--height 60`) | 4 | 76×79 | 1.1 MB |
 | `pig.webp` | `Pig.blend` (`--height 34 --mirror`): idle, and a walk from `Armature.001Action` | 12 | 40×23 | 0.3 MB |
 
-1. The sources are in `art/` (the townsfolk in `art/npcs/`), unchanged from their downloads. The knight's and monsters' are Blender 2.49 files and the townsfolk's 2.79, and Blender 5 drops their animation and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
+1. The sources are in `art/` (the townsfolk in `art/npcs/`), unchanged from their downloads. The knight's, the skeleton's, the orc's and the goblin's are Blender 2.49 files, the hobgoblin's and werewolf's 2.6x and the townsfolk's 2.79, and Blender 5 drops their animation (the 2.49 ones) and their procedural textures. Convert each one with Blender 2.79, which re-saves it and rebuilds its materials as Cycles nodes:
 
 ```
 blender -b art/skeleton_0.blend --python tools/convert-flare.py -- <converted>/skeleton_0.blend
@@ -147,13 +153,16 @@ Blender -b <converted>/steel_armor.blend --python ../../tools/render-character.p
 Blender -b <converted>/skeleton_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character skeleton --height 56 --packed --out <somewhere>/skeleton.webp
 Blender -b <converted>/orc_flare_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character orc --height 56 --packed --out <somewhere>/orc.webp
 Blender -b <converted>/orc_flare_0.blend --python ../../tools/render-character.py -- --config tools/characters.py --character orc-heavy --height 58 --packed --out <somewhere>/orc_heavy.webp
+Blender -b <converted>/goblin.blend --python ../../tools/render-character.py -- --config tools/characters.py --character goblin --height 64 --packed --out <somewhere>/goblin.webp
+Blender -b <converted>/knife_hobgoblin.blend --python ../../tools/render-character.py -- --config tools/characters.py --character hobgoblin --height 76 --packed --out <somewhere>/hobgoblin.webp
+Blender -b <converted>/Werewolf.blend --python ../../tools/render-character.py -- --config tools/characters.py --character werewolf --height 76 --packed --mirror --out <somewhere>/werewolf.webp
 ```
 
 Copy the `.webp` sheets and the `.json` into `src/sprites`. Without `--packed` it writes a full grid instead, wrapping at `--columns`. Add `--mirror` to render only the front-to-back half of the directions, for `DrawableOrientedSprite.mirrorBuckets`.
 
 The frames it renders are kept in a `<character>_<height>_frames` folder next to the sheet, so render outside `src/`. They aren't keyed by colour, so clear them after changing `colours`.
 
-Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16 (drawn back at about 14.5); the knight has block 17-18, hit 19-20, die 21-24, cast 25-28 and a thrust 29-32, and `knight-moves.py` adds a roll 41-48, a backstep 49-52 and a side-step to his right 53-60; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32.
+Flare's actions put stance at frames 1-4, run 5-12 and melee 13-16 (drawn back at about 14.5); the knight has block 17-18, hit 19-20, die 21-24, cast 25-28 and a thrust 29-32, and `knight-moves.py` adds a roll 41-48, a backstep 49-52 and a side-step to his right 53-60; the skeleton has block 17-18, hit 19-20 and die 21-28, and the orc hit 17-18, die 17-24, cast 25-28 and block 29-32. The goblins differ: stance 1-4, a hop 5-12, run 13-20, a jab 21-24, a throw 25-28, hit 29-30 and die 37-40; and the werewolf's action has stance 0-8, run 9-16, a rearing swipe 17-20, a recoil 21-23 and die 24-28. The goblins' skin is recoloured (dark green, and a ruddy brown for the hobgoblin), and the werewolf's pale fur toned down so it doesn't burn out white. The goblin is rendered at the knight's scale (64) and the hobgoblin and werewolf a little over it (76), so they stand up to him; the werewolf is unarmed and near enough symmetric for `--mirror`.
 
 ## Still needed
 
