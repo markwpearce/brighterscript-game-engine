@@ -1,13 +1,14 @@
 import "pkg:/source/utils/SaveSlot.bs"
 import "pkg:/source/story/StorySession.bs"
 import "TownStory.bs"
+import "RunState.bs"
+import "RunData.bs"
+import "Bonfires.bs"
 
-' Coins left where the knight died, waiting to be picked up
-interface DroppedCoins extends roAssociativeArray
+' Where Continue (or a respawn) takes the knight: a scene and the args that place him
+interface ResumePoint extends roAssociativeArray
   scene as string
-  x as float
-  z as float
-  amount as integer
+  args as roAssociativeArray
 end interface
 
 ' The one saved game. Every field is plain data, safe for BGE.SaveSlot.
@@ -20,12 +21,14 @@ interface GameSaveData extends roAssociativeArray
   story as BGE.Story.StorySessionSave
   ' Ids of the bosses killed ("crypt1"...), which stay dead
   optional bossesKilled as string[]
-  ' Not used yet: the bonfire to wake at, coins, healing draughts, gear, key items, and coins
+  ' RunState: the bonfire to wake at, the ones rested at, coins, healing draughts, and coins
   ' dropped at a death
   optional bonfireId as string
+  optional litBonfires as string[]
   optional coins as integer
   optional draughts as integer
   optional maxDraughts as integer
+  ' Not used yet: gear and key items
   optional ownedGear as string[]
   ' Slot name -> gear id
   optional equippedGear as roAssociativeArray
@@ -51,8 +54,8 @@ class GameSave
     return m.slot.write(data)
   end function
 
-  ' Saves arriving in a scene: where (`entrance` picks the args that place the knight), the story
-  ' and the bosses killed. Anything else already in the save is kept.
+  ' Saves arriving in a scene: where (`entrance` picks the args that place the knight), and the
+  ' progress (see saveProgress()). Anything else already in the save is kept.
   function saveArrival(game as BGE.Game, sceneName as string, args as roAssociativeArray) as boolean
     if not m.slot.enabled
       return false
@@ -62,16 +65,55 @@ class GameSave
       data = {} as GameSaveData
     end if
     entrance = {}
-    for each key in ["from", "place", "level"]
+    for each key in ["from", "place", "level", "bonfire"]
       if invalid <> args[key]
         entrance[key] = args[key]
       end if
     end for
     data.scene = sceneName
     data.entrance = entrance
+    m.fillProgress(game, data)
+    return m.write(data)
+  end function
+
+  ' Saves the progress, keeping where the save resumes: the story, the bosses killed and the
+  ' RunState (bonfire, coins, draughts, dropped coins). On resting, a boss's death, the knight's
+  ' death and picking up dropped coins. Does nothing before the first arrival has saved.
+  function saveProgress(game as BGE.Game) as boolean
+    if not m.slot.enabled
+      return false
+    end if
+    data = m.read()
+    if invalid = data
+      return false
+    end if
+    m.fillProgress(game, data)
+    return m.write(data)
+  end function
+
+  private sub fillProgress(game as BGE.Game, data as GameSaveData)
     data.story = TownStory.session(game).toSaveData()
     data.bossesKilled = SaveData.bossesKilled()
-    return m.write(data)
+    state = RunData.current()
+    data.bonfireId = state.bonfireId
+    data.litBonfires = state.litBonfires
+    data.coins = state.coins
+    data.draughts = state.draughts
+    data.maxDraughts = state.maxDraughts
+    data.droppedCoins = state.droppedCoins
+  end sub
+
+  ' Where Continue takes the knight: beside the last bonfire he rested at, else where he last
+  ' came into a scene
+  function resumePoint(data as GameSaveData) as ResumePoint
+    spot = invalid
+    if invalid <> data.bonfireId and data.bonfireId <> ""
+      spot = Bonfires.get(data.bonfireId)
+    end if
+    if invalid <> spot
+      return {scene: spot.scene, args: Bonfires.sceneArgs(spot)}
+    end if
+    return {scene: data.scene, args: data.entrance}
   end function
 
   ' Puts the game back as `data` left it (call before changing to data.scene)
@@ -86,13 +128,23 @@ class GameSave
       end for
     end if
     GetGlobalAA().cryptBossesSlain = slain
+    state = RunData.reset()
+    state.bonfireId = data.bonfireId ?? ""
+    if invalid <> data.litBonfires
+      state.litBonfires = data.litBonfires
+    end if
+    state.coins = data.coins ?? 0
+    state.maxDraughts = data.maxDraughts ?? state.maxDraughts
+    state.draughts = data.draughts ?? state.maxDraughts
+    state.droppedCoins = data.droppedCoins
   end sub
 
-  ' Wipes the save and starts the story and bosses afresh
+  ' Wipes the save and starts the story, bosses and run afresh
   sub startNew(game as BGE.Game)
     m.slot.delete()
     TownStory.session(game).loadSaveData(invalid)
     GetGlobalAA().cryptBossesSlain = {}
+    RunData.reset()
   end sub
 
 end class
