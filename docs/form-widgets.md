@@ -338,6 +338,8 @@ m.game.uiClickSoundKey = "uiClick"
 Every `Button` then plays `uiFocus` when it gains focus and `uiClick` when it's clicked. A
 button can set its own `focusSoundKey` or `clickSoundKey` to override the default. The
 defaults are empty, so a game with no keys set plays nothing.
+`game.uiSoundVolume` (0-100, default 100) sets how loud they play, e.g. from a sound volume
+setting.
 
 The checkboxes, sliders and selects in this guide don't play sounds. If you want one, call
 `m.game.playSound()` yourself in the code that reacts to the change, such as the Save handler

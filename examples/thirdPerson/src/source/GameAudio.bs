@@ -1,0 +1,211 @@
+import "pkg:/source/engine/Game.bs"
+import "pkg:/source/engine/GameEntity.bs"
+import "pkg:/source/utils/LaunchParams.bs"
+import "pkg:/source/math/math.bs"
+import "GameSettings.bs"
+
+' A scene's music (ThirdPersonScene.musicTrack). The files are streamed, not packaged: see
+' GameAudio.trackUrl().
+enum MusicTrack
+  none = ""
+  ' The title screen and boss fights
+  march = "the_march_upon_the_red_mountain.mp3"
+  ' The town, the keep and the chapel
+  town = "RPG_The_Lost_Town.mp3"
+  ' The graveyard and the crypt
+  foreboding = "foreboding_theme.mp3"
+  ' The forest
+  forest = "the_wraiths_of_winter.mp3"
+end enum
+
+' A named sound effect: a few loaded variants, one picked at random each time
+interface SoundGroup extends roAssociativeArray
+  ' Game.loadSound() keys (pkg:/sounds/<key>.wav)
+  keys as string[]
+  ' Before the sound volume setting, 0-100
+  volume as integer
+  ' Plays no more often than this (seconds), so a crowd doesn't spam it
+  gap as float
+  ' 0: the knight, the world and the menus; 1: enemy voices (devices with one channel play both on 0)
+  channel as integer
+end interface
+
+' The game's music and sound effects: a persistent entity (it logs the music player's events),
+' added by main(). Get the shared one with Audio.current(game).
+class GameAudio extends BGE.GameEntity
+
+  ' Where the tracks stream from: the repo at musicRef
+  musicRepo as string = "https://raw.githubusercontent.com/markwpearce/brighterscript-game-engine"
+  ' Deep link `musicRef=<branch>` to stream an unmerged branch's tracks
+  musicRef as string = "main"
+  ' Deep link `music=0` turns the music off
+  musicEnabled as boolean = true
+  ' Deep link `sfxLog=1` prints each sound effect as it plays
+  logSounds as boolean = false
+
+  ' The track for where the knight is, and whether a boss fight's track has replaced it
+  private areaTrack as string = ""
+  private bossFight as boolean = false
+  private groups as roAssociativeArray = {}
+  ' When each group last played (seconds on `clock`)
+  private lastPlayed as roAssociativeArray = {}
+  private clock as roTimespan = CreateObject("roTimespan")
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "GameAudio"
+    m.persistent = true
+    m.groups = {
+      swing: m.group(["swing1", "swing2"], 70, 0),
+      equip: m.group(["sword_unsheathe"], 80, 0),
+      coin: m.group(["coin"], 80, 0),
+      drink: m.group(["drink"], 90, 0),
+      block: m.group(["block"], 90, 0),
+      parry: m.group(["parry"], 100, 0),
+      dodge: m.group(["dodge"], 70, 0),
+      door: m.group(["door"], 90, 0),
+      bonfire: m.group(["bonfire"], 90, 0),
+      orc: m.group(["orc1", "orc2"], 80, 1, 0.5),
+      giant: m.group(["giant1", "giant2"], 100, 1, 0.6),
+      undead: m.group(["shade1", "shade2"], 80, 1, 0.5),
+      beast: m.group(["beast"], 90, 1, 0.5),
+      bite: m.group(["bite"], 80, 1, 0.4)
+    }
+  end sub
+
+  private function group(keys as string[], volume as integer, channel as integer, gap = 0.08 as float) as SoundGroup
+    return {keys: keys, volume: volume, channel: channel, gap: gap}
+  end function
+
+  ' Deep links: `music=0` turns the music off, `musicRef=<branch or tag>` streams the tracks from
+  ' that ref instead of main, `sfxLog=1` prints each sound effect played
+  sub configure(params as BGE.LaunchParams)
+    if params.getString("music") = "0"
+      m.musicEnabled = false
+    end if
+    m.logSounds = params.getString("sfxLog") = "1"
+    ref = params.getString("musicRef").trim()
+    if ref <> ""
+      m.musicRef = ref
+    end if
+  end sub
+
+  ' Loads every effect (pkg:/sounds/), and the menus' focus and click sounds
+  sub loadSounds()
+    for each name in m.groups
+      for each key in m.groups[name].keys
+        m.game.loadSound(key, `pkg:/sounds/${key}.wav`)
+      end for
+    end for
+    m.game.loadSound("uiFocus", "pkg:/sounds/ui_focus.wav")
+    m.game.loadSound("uiClick", "pkg:/sounds/ui_click.wav")
+    m.game.uiFocusSoundKey = "uiFocus"
+    m.game.uiClickSoundKey = "uiClick"
+    m.applySoundVolume()
+    print `[audio] sounds loaded, ${m.game.getSoundChannelCount()} channel(s)`
+  end sub
+
+  ' Plays one of a group's sounds at the sound volume setting, unless it played within its gap.
+  ' An unknown or empty name plays nothing.
+  sub play(name as string)
+    if name = ""
+      return
+    end if
+    info = m.groups[name]
+    if invalid = info
+      return
+    end if
+    now = m.clock.TotalMilliseconds() / 1000.0
+    last = m.lastPlayed[name]
+    if invalid <> last and now - last < info.gap
+      return
+    end if
+    volume = Int(info.volume * Settings.current().soundVolume() / 100)
+    if volume <= 0
+      return
+    end if
+    m.lastPlayed[name] = now
+    key = info.keys[Rnd(info.keys.count()) - 1]
+    m.game.playSound(key, volume, info.channel)
+    if m.logSounds
+      print `[audio] sfx ${name}: ${key} at ${volume}`
+    end if
+  end sub
+
+  ' The menus' sounds follow the sound volume setting
+  sub applySoundVolume()
+    m.game.uiSoundVolume = Settings.current().soundVolume()
+  end sub
+
+  ' The URL a track streams from
+  function trackUrl(track as string) as string
+    return `${m.musicRepo}/${m.musicRef}/examples/thirdPerson/music/${track}`
+  end function
+
+  ' The music for where the knight is now: carries on if it's already playing, and ends a boss
+  ' fight's track. MusicTrack.none stops the music.
+  sub playArea(track as string)
+    m.areaTrack = track
+    m.bossFight = false
+    m.applyMusic()
+  end sub
+
+  ' A boss fight's track while `fighting`, back to the area's after. Call every frame; it only
+  ' acts on a change.
+  sub setBossFight(fighting as boolean)
+    if fighting = m.bossFight
+      return
+    end if
+    m.bossFight = fighting
+    m.applyMusic()
+  end sub
+
+  ' Starts the track that should be playing, or stops the music when the music volume is 0 (the
+  ' music player has no volume of its own) or it's turned off
+  sub applyMusic()
+    track = m.areaTrack
+    if m.bossFight
+      track = MusicTrack.march
+    end if
+    if track = "" or not m.musicEnabled or Settings.current().musicVolume() <= 0
+      if m.game.getMusicPath() <> ""
+        m.game.musicStop()
+      end if
+      return
+    end if
+    url = m.trackUrl(track)
+    if url <> m.game.getMusicPath()
+      print "[audio] music: "; url
+    end if
+    m.game.musicPlay(url, true, false)
+  end sub
+
+  ' Logs the music player's progress and failures (rokubot can't hear)
+  override sub onAudioEvent(msg as roAudioPlayerEvent)
+    ' bsc's roAudioPlayerEvent type lacks GetMessage()/GetIndex()
+    event = msg as object
+    if msg.isRequestFailed()
+      print "[audio] music failed: "; event.GetMessage(); " ("; event.GetIndex(); ") "; m.game.getMusicPath()
+    else if msg.isStatusMessage() and event.GetMessage() <> "startup progress"
+      print "[audio] music status: "; event.GetMessage()
+    else if msg.isRequestSucceeded()
+      print "[audio] music track ended"
+    end if
+  end sub
+
+end class
+
+namespace Audio
+
+  ' The game's audio, made the first time anything asks for it
+  function current(game as BGE.Game) as GameAudio
+    globals = GetGlobalAA()
+    if invalid = globals.gameAudio
+      audio = new GameAudio(game)
+      game.addEntity(audio)
+      globals.gameAudio = audio
+    end if
+    return globals.gameAudio
+  end function
+
+end namespace
