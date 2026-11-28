@@ -2,7 +2,7 @@
 Low-poly prop generator for examples/thirdPerson.
 
 Outputs (in ./out):
-  props_atlas.png   256x320 palette PNG shared by every model (4x5 grid of 64px tiles)
+  props_atlas.png   256x384 palette PNG shared by every model (4x6 grid of 64px tiles)
   props.mtl         one material, "props", pointing at the atlas
   *.obj             models: metres, Y-up, origin at the centre of the base, front faces +Z,
                     counter-clockwise winding, flat normals
@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw
 SCALE = 1.0
 TILE = 64
 GRID = 4            # tiles across
-ROWS = 5            # tiles down; new tiles go on new rows so existing ones keep their place
+ROWS = 6            # tiles down; new tiles go on new rows so existing ones keep their place
 ATLAS = TILE * GRID
 ATLAS_H = TILE * ROWS
 INSET = 1.0  # px kept clear at tile edges so bilinear filtering doesn't bleed
@@ -192,12 +192,50 @@ def t_banner():       # the keep's red banner
     d.polygon([(T // 2, T // 6), (T // 2 + 8, T // 3), (T // 2, T // 2), (T // 2 - 8, T // 3)], fill=(200, 170, 70, 255))
     return noise(im, 5, 19)
 
+def t_canvas():      # the orcs' tents: patched, stitched hide
+    r = rng(20); im = Image.new("RGBA", (T, T), (112, 92, 66, 255)); d = ImageDraw.Draw(im)
+    for _ in range(5):
+        x, y = r.randint(0, T - 16), r.randint(0, T - 16); w, h = r.randint(10, 22), r.randint(8, 18)
+        d.rectangle([x, y, x + w, y + h], fill=jitter((98, 78, 54), r, 10) + (255,))
+        d.rectangle([x, y, x + w, y + h], outline=(62, 46, 30, 255))
+    for y in range(T // 4, T, T // 4): d.line([0, y, T, y + r.randint(-2, 2)], fill=(70, 54, 36, 255))
+    return noise(im, 8, 20)
+def t_tentfront():   # gable UV (0,0) (1,0) (0.5,1): canvas with a dark doorway at the foot
+    im = t_canvas(); d = ImageDraw.Draw(im); cx = T // 2
+    d.polygon([(cx - T // 5, T - 1), (cx + T // 5, T - 1), (cx, T // 3)], fill=(18, 14, 10, 255))
+    d.line([cx, T // 3, cx - T // 5, T - 1], fill=(62, 46, 30, 255)); d.line([cx, T // 3, cx + T // 5, T - 1], fill=(62, 46, 30, 255))
+    return im
+def t_palisade():    # alpha cut-out: sharpened logs lashed together
+    im = Image.new("RGBA", (T, T), (0, 0, 0, 0)); d = ImageDraw.Draw(im); r = rng(22)
+    n = 8; lw = T // n
+    for i in range(n):
+        x0, x1 = i * lw, (i + 1) * lw - 1; top = T // 8 + r.randint(0, T // 12)
+        c = jitter((84, 62, 40), r, 12)
+        d.rectangle([x0, top, x1, T - 1], fill=c + (255,))
+        d.polygon([(x0, top), ((x0 + x1) / 2, top - T // 8), (x1, top)], fill=c + (255,))
+        d.line([x0, top, x0, T - 1], fill=(48, 34, 22, 255))
+        d.line([x1 - 1, top, x1 - 1, T - 1], fill=tuple(min(255, v + 18) for v in c) + (255,))
+    for y in (int(T * 0.42), int(T * 0.78)):
+        d.rectangle([0, y, T, y + 1], fill=(40, 30, 20, 255))
+    return noise(im, 6, 22)
+def t_totem():       # carved, painted faces stacked up a post
+    im = t_wood(); d = ImageDraw.Draw(im)
+    for k, y in enumerate((T // 8, T // 2 + T // 16)):
+        paint = ((150, 34, 26), (200, 170, 70))[k % 2]
+        d.rectangle([T // 6, y, 5 * T // 6, y + T // 3], fill=(70, 50, 32, 255))
+        d.rectangle([T // 4, y + T // 12, T // 4 + T // 8, y + T // 12 + T // 12], fill=paint + (255,))
+        d.rectangle([3 * T // 4 - T // 8, y + T // 12, 3 * T // 4, y + T // 12 + T // 12], fill=paint + (255,))
+        d.rectangle([T // 3, y + T // 4 - 2, 2 * T // 3, y + T // 4 + 2], fill=(20, 14, 10, 255))
+        for x in range(T // 3 + 2, 2 * T // 3, 4): d.line([x, y + T // 4 - 2, x, y + T // 4 + 4], fill=(220, 210, 180, 255))
+    return im
+
 TILES = [  # name, builder          grid position = index (row-major)
     ("stone", t_stone), ("flag", t_flag), ("tower", t_tower), ("slate", t_slate),
     ("housefront", t_housefront), ("housewall", t_housewall), ("gable", t_gable), ("thatch", t_thatch),
     ("hutdoor", lambda: t_hutwall(True)), ("hutwall", lambda: t_hutwall(False)), ("cryptfront", t_cryptfront), ("cryptside", t_cryptside),
     ("wood", t_wood), ("wellstone", t_wellstone), ("water", t_water), ("fence", t_fence),
     ("keepdoor", t_keepdoor), ("iron", t_iron), ("merlons", t_merlons), ("banner", t_banner),
+    ("canvas", t_canvas), ("tentfront", t_tentfront), ("palisade", t_palisade), ("totem", t_totem),
 ]
 TILE_INDEX = {n: i for i, (n, _) in enumerate(TILES)}
 
@@ -400,6 +438,41 @@ def models():
     prism(m, (0.05, 0, 0.02), (0.08, 0.75, 0.0), 0.035, "iron")
     prism(m, (-0.12, 0.75, 0.0), (0.28, 0.77, 0.0), 0.03, "iron")
     prism(m, (0.08, 0.77, 0.0), (0.09, 0.98, 0.0), 0.025, "wood")
+    out.append(m)
+
+    # --- the orc camp (the forest). Tent: an A-frame of hide, 3.6 m square, 2.6 m to the ridge,
+    # its doorway facing +Z.
+    m = Model("tent"); x, z, h = 1.8, 1.8, 2.6
+    m.quad((x, 0, z), (x, 0, -z), (0, h, -z), (0, h, z), "canvas")
+    m.quad((-x, 0, -z), (-x, 0, z), (0, h, z), (0, h, -z), "canvas")
+    m.gable((-x, 0, z), (x, 0, z), (0, h, z), "tentfront")
+    m.gable((x, 0, -z), (-x, 0, -z), (0, h, -z), "canvas")
+    out.append(m)
+
+    # --- campfire: the bonfire's ring of stones and logs, without the sword, a little wider
+    m = Model("campfire"); r = rng(31)
+    for k in range(6):
+        a = k * 2 * math.pi / 6 + r.uniform(-0.2, 0.2)
+        cx, cz, s, h = 0.8 * math.cos(a), 0.8 * math.sin(a), r.uniform(0.15, 0.2), r.uniform(0.18, 0.26)
+        apex = (cx + r.uniform(-0.04, 0.04), h, cz + r.uniform(-0.04, 0.04))
+        base = [(cx - s, 0, cz + s), (cx + s, 0, cz + s), (cx + s, 0, cz - s), (cx - s, 0, cz - s)]
+        for i in range(4):
+            m.gable(base[i], base[(i + 1) % 4], apex, "wellstone")
+    prism(m, (-0.55, 0.07, -0.25), (0.55, 0.07, 0.25), 0.08, "wood")
+    prism(m, (-0.5, 0.07, 0.35), (0.5, 0.07, -0.35), 0.08, "wood")
+    out.append(m)
+
+    # --- totem: a carved post 0.5 m square and 3 m tall, faces painted on every side, with a
+    # crossbar near the top
+    m = Model("totem"); s, h = 0.25, 3.0
+    box_walls(m, -s, s, -s, s, 0, h, ("totem",), ("totem",), ("totem",), ("totem",))
+    prism(m, (-0.7, 2.55, 0), (0.7, 2.75, 0), 0.08, "wood")
+    out.append(m)
+
+    # --- crate: 0.9 m of planks, with a lid
+    m = Model("crate"); s = 0.45
+    box_walls(m, -s, s, -s, s, 0, 2 * s, ("wood",), ("wood",), ("wood",), ("wood",))
+    m.quad((-s, 2 * s, s), (s, 2 * s, s), (s, 2 * s, -s), (-s, 2 * s, -s), "wood")
     out.append(m)
 
     # --- fence: 3 m x 1.2 m alpha cut-out, both sides.
