@@ -26,7 +26,7 @@ A third-person, souls-like action game in 3D ([#385](https://github.com/markwpea
 | Parry | B | Fast-forward |
 | Dodge (roll toward the stick, or step back) | A | Rewind |
 | Drink a healing draught | Y | `*` |
-| Pause menu (Resume, Inventory, Options, Controls, Quit to Title); Back again closes it | Start (browser controller) | Back |
+| Pause menu (Resume, Inventory, Options, Controls, Quit to Title); Back again closes it | Select | Back |
 
 There are no control hints on screen: the pause menu's **Controls** page shows the remote and a gamepad side by side, each button labelled with what it does (`Menus/ControlsPanel.bs`). Its labels come from the control map (`describeBindings()`), so they follow the bindings in `main.bs`; where each button is in the pictures (the engine's input debug window's, `pkg:/source/engine/debug/images/`) is in `Menus/ControlPictures.bs`. The remote has no free button left for drinking, so `*` drinks and the debug panels (FPS, input, memory, GC, log, then entity details) need the `debug=1` deep link, where `*` cycles them too; the last level shows the knight's state top right (and the enemy count on the field).
 
