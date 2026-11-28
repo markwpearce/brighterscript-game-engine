@@ -5,6 +5,10 @@ import "../Hud.bs"
 import "../PerfLog.bs"
 import "../TownStory.bs"
 import "../GameSave.bs"
+import "../RunState.bs"
+import "../Bonfires.bs"
+import "../Entities/Bonfire.bs"
+import "../Entities/CoinMarker.bs"
 import "../Menus/MenuTheme.bs"
 import "pkg:/source/story/DialogueView.bs"
 import "pkg:/source/utils/Interactables.bs"
@@ -14,6 +18,7 @@ import "pkg:/source/engine/sceneFlow/SceneExits.bs"
 import "pkg:/source/utils/RespawnTimer.bs"
 import "pkg:/source/utils/deviceRenderTier.bs"
 import "pkg:/source/engine/renderer/cameras/GridWallsCameraBoom.bs"
+import "pkg:/source/engine/gridMaps/CharGrid.bs"
 
 ' The `at=<col>,<row>[,<heading in degrees>]` deep link (see ThirdPersonScene.parseAt())
 interface AtCell extends roAssociativeArray
@@ -22,6 +27,14 @@ interface AtCell extends roAssociativeArray
   ' Radians, when given
   heading as float
   hasHeading as boolean
+end interface
+
+' Where the knight wakes beside a bonfire, in world units
+interface BonfireWake extends roAssociativeArray
+  x as float
+  z as float
+  ' Radians, facing away from the fire
+  heading as float
 end interface
 
 ' What every playable scene shares: the knight, the chase camera, the HUD, the control hints,
@@ -61,6 +74,22 @@ class ThirdPersonScene extends BGE.GameScene
   talkView as BGE.Story.DialogueView = invalid
   ' How far away, and how far either side of where he faces, someone can be talked to
   talkReach as float = World.metres(2.4)
+  ' This place's bonfires to rest at (addBonfires()), with ids "bonfire:<Bonfires id>", and where
+  ' the knight wakes beside each, by Bonfires id
+  bonfires as BGE.Interactables = new BGE.Interactables()
+  bonfireWakes as roAssociativeArray = {}
+  ' Resting is refused with an awake enemy this close
+  restSafeDistance as float = World.metres(12)
+  ' The coins dropped at the last death, when they're in this place
+  coinMarker as CoinMarker = invalid
+  ' Walking this close to the marker picks the coins up
+  coinPickupReach as float = World.metres(1.2)
+  ' The death has been dealt with (coins dropped, saved), until he respawns
+  private deathHandled as boolean = false
+  ' A respawn has asked for another scene; nothing more to do this visit
+  private respawnLeaving as boolean = false
+  ' Debug deep link `die=<seconds>`: the knight dies this long after arriving (0 is off)
+  private dieAfterSeconds as float = 0
 
   ' Camera spin speed with no input (deep link `orbit`), for repeatable measurements
   autoOrbit as float = 0
@@ -90,10 +119,16 @@ class ThirdPersonScene extends BGE.GameScene
   ' Deep links every scene takes: `orbit=<-1..1>`, `walk=<seconds>`, `tilt=<radians>`, `lockZone=<0..1>`, `zoom=<camera zoom>` and `perf=1` (or `perf=phases`, frame rate only;
   ' `runid=<id>` tags its console lines)
   ' It also saves the game, arriving here (see GameSave.saveArrival()).
+  ' Debug deep links: `die=<seconds>` kills the knight that long after arriving, `coins=<n>` sets
+  ' the coins carried.
   protected sub readCommonArgs(args as roAssociativeArray)
-    SaveData.current().saveArrival(m.game, m.name, args)
     params = new BGE.LaunchParams(args)
     m.params = params
+    m.dieAfterSeconds = params.getFloat("die", 0)
+    if params.has("coins")
+      RunData.current().coins = params.getInt("coins", 0)
+    end if
+    SaveData.current().saveArrival(m.game, m.name, args)
     m.autoOrbit = params.getFloat("orbit", m.autoOrbit)
     m.walkSeconds = params.getFloat("walk", m.walkSeconds)
     m.startTilt = params.getFloat("tilt", m.startTilt)
@@ -124,6 +159,40 @@ class ThirdPersonScene extends BGE.GameScene
       at.heading = BGE.Math.DegreesToRadians(parts[2])
     end if
     return at
+  end function
+
+  ' Which place this is, for the dropped coins and bonfires: the scene's name (the crypt adds its
+  ' level)
+  function placeKey() as string
+    return m.name
+  end function
+
+  ' The bonfires in this place (Bonfires.all()), on `grid`'s cells, each with a small solid round
+  ' it. Call before placing the knight, so bonfireWake() can find them.
+  protected sub addBonfires(grid as BGE.CharGrid, solids as BGE.SolidWorld)
+    here = m.placeKey()
+    for each spot in Bonfires.all()
+      if Bonfires.placeKey(spot) = here
+        center = grid.cellCenter(spot.col, spot.row)
+        fire = new Bonfire(m.game)
+        m.game.addEntity(fire, {x: center.x, z: center.z, id: spot.id})
+        item = m.bonfires.add(fire, "bonfire:" + spot.id, "rest at the bonfire", spot.id)
+        item.radius = World.metres(0.7)
+        half = World.metres(0.6)
+        solids.addSolid(center.x - half, center.z - half, half * 2, half * 2)
+        wake = grid.cellCenter(spot.wakeCol, spot.wakeRow)
+        heading = BGE.Math.headingOf(BGE.Math.flatDirection(center, wake))
+        m.bonfireWakes[spot.id] = {x: wake.x, z: wake.z, heading: heading}
+      end if
+    end for
+  end sub
+
+  ' Where a scene change to Bonfires.sceneArgs() puts the knight (args.bonfire), or invalid
+  protected function bonfireWake(args as roAssociativeArray) as BonfireWake
+    if invalid = args.bonfire
+      return invalid
+    end if
+    return m.bonfireWakes[args.bonfire]
   end function
 
   ' A scene's draw distance in world units: `draw=<metres>` (measuring) overrides `metres`
@@ -200,6 +269,9 @@ class ThirdPersonScene extends BGE.GameScene
     ' atlases unload
     m.talkers = new BGE.Interactables()
     m.talkTarget = invalid
+    m.bonfires = new BGE.Interactables()
+    m.bonfireWakes = {}
+    m.coinMarker = invalid
     m.walls = invalid
     m.director = new CombatDirector()
     m.knight = invalid
@@ -218,28 +290,138 @@ class ThirdPersonScene extends BGE.GameScene
       if invalid <> m.talkView
         m.talkView.close()
       end if
+      if not m.deathHandled
+        m.deathHandled = true
+        m.onKnightDied()
+      end if
       m.respawnTimer.start()
       if m.respawnTimer.update(dt)
         m.respawnKnight()
       end if
       return true
     end if
+    m.updateDebugDeath(dt)
+    m.updateDroppedCoins()
     return m.updateTalk() or m.exits.hasLeft()
   end function
 
-  ' Once respawnTimer runs out: no enemies, the knight back where he started, then onRespawn()
+  ' The `die=<seconds>` debug deep link
+  private sub updateDebugDeath(dt as float)
+    if m.dieAfterSeconds <= 0
+      return
+    end if
+    m.dieAfterSeconds -= dt
+    if m.dieAfterSeconds <= 0
+      m.knight.kill()
+    end if
+  end sub
+
+  ' The moment he dies: every coin carried drops where he fell (losing any dropped before), and
+  ' the game is saved, so quitting can't undo it
+  private sub onKnightDied()
+    state = RunData.current()
+    state.dropCoins(m.placeKey(), m.knight.position.x, m.knight.position.z)
+    m.placeCoinMarker()
+    SaveData.current().saveProgress(m.game)
+  end sub
+
+  ' The marker on the dropped coins, if they're in this place; the old one goes
+  private sub placeCoinMarker()
+    if invalid <> m.coinMarker
+      m.coinMarker.invalidate()
+      m.coinMarker = invalid
+    end if
+    dropped = RunData.current().droppedCoins
+    if invalid = dropped or dropped.scene <> m.placeKey()
+      return
+    end if
+    marker = new CoinMarker(m.game)
+    m.game.addEntity(marker, {x: dropped.x, z: dropped.z})
+    m.coinMarker = marker
+  end sub
+
+  ' Picks the dropped coins up when he walks onto their marker
+  private sub updateDroppedCoins()
+    if invalid = m.coinMarker
+      return
+    end if
+    dx = m.coinMarker.position.x - m.knight.position.x
+    dz = m.coinMarker.position.z - m.knight.position.z
+    if dx * dx + dz * dz > m.coinPickupReach * m.coinPickupReach
+      return
+    end if
+    amount = RunData.current().recoverCoins()
+    m.coinMarker.invalidate()
+    m.coinMarker = invalid
+    m.hud.showBanner(`RECOVERED ${amount} COINS`, 3)
+    SaveData.current().saveProgress(m.game)
+  end sub
+
+  ' Once respawnTimer runs out. With a bonfire rested at, he wakes beside it, in another scene if
+  ' it's elsewhere (enemies, but not bosses, come back with the scene). Without one, he gets up
+  ' where he came into this place. Then onRespawn().
   private sub respawnKnight()
+    if m.respawnLeaving
+      return
+    end if
+    spot = invalid
+    state = RunData.current()
+    if state.bonfireId <> ""
+      spot = Bonfires.get(state.bonfireId)
+    end if
+    if invalid <> spot and Bonfires.placeKey(spot) <> m.placeKey()
+      m.respawnLeaving = true
+      m.game.changeSceneWithFade(spot.scene, Bonfires.sceneArgs(spot))
+      return
+    end if
+    wake = invalid
+    if invalid <> spot
+      wake = m.bonfireWakes[spot.id]
+    end if
+    if invalid <> wake
+      m.knight.respawn(wake.x, wake.z)
+      m.knight.rotation.y = wake.heading
+    else
+      m.knight.respawn(m.startX, m.startZ)
+    end if
+    m.deathHandled = false
+    m.resetEnemies()
+  end sub
+
+  ' Every enemy gone, then onRespawn() puts them back
+  private sub resetEnemies()
     m.director.clearEnemies()
     if invalid <> m.walls
       m.walls.untrackAll()
     end if
-    m.knight.respawn(m.startX, m.startZ)
     m.trackBody(m.knight)
     m.onRespawn()
   end sub
 
-  ' After a respawn, e.g. to put the enemies back
+  ' After a respawn or a rest, to put the enemies back (bosses only while they live)
   protected sub onRespawn()
+  end sub
+
+  ' Rests at a bonfire: full health, draughts refilled, the scene's enemies back in their places,
+  ' and the game saved with this bonfire to wake at. Refused with an enemy awake nearby.
+  private sub rest(bonfireId as string)
+    ' the OK that rested doesn't swing too (the knight updates after the scene)
+    m.game.controls.blockUntilReleased("attack")
+    for each foe in m.director.enemies
+      if foe.isAwake() and m.knight.distanceTo(foe) < m.restSafeDistance
+        m.hud.showBanner("YOU CANNOT REST WITH ENEMIES NEAR", 2.5)
+        return
+      end if
+    end for
+    m.knight.respawn(m.knight.position.x, m.knight.position.z)
+    firstTime = RunData.current().rest(bonfireId)
+    m.resetEnemies()
+    SaveData.current().saveProgress(m.game)
+    if firstTime
+      m.hud.showBanner("BONFIRE LIT", 3)
+    else
+      m.hud.showBanner("RESTED", 3)
+    end if
   end sub
 
   ' The knight (heading in radians, 0 faces -z), and the particle bursts hits spray. Call before
@@ -248,6 +430,8 @@ class ThirdPersonScene extends BGE.GameScene
   protected sub addKnight(x as float, z as float, heading as float)
     m.startX = x
     m.startZ = z
+    m.deathHandled = false
+    m.respawnLeaving = false
     m.respawnTimer.cancel()
     m.exits.clear()
     m.director = new CombatDirector()
@@ -258,6 +442,7 @@ class ThirdPersonScene extends BGE.GameScene
     player = new Knight(m.game)
     m.game.addEntity(player, {x: x, z: z, heading: heading, director: m.director})
     m.knight = player
+    m.placeCoinMarker()
   end sub
 
   ' Someone the knight can walk up to and talk to (OK), starting the story at `node`
@@ -270,6 +455,10 @@ class ThirdPersonScene extends BGE.GameScene
   private function updateTalk() as boolean
     m.talkTarget = m.talkerInReach()
     if invalid <> m.talkTarget and m.game.controls.isActionPressed("attack")
+      if invalid <> m.bonfires.get(m.talkTarget.id)
+        m.rest(m.talkTarget.data as string)
+        return false
+      end if
       return m.startTalk(m.talkTarget)
     end if
     return false
@@ -314,12 +503,17 @@ class ThirdPersonScene extends BGE.GameScene
     m.talkView = invalid
   end sub
 
-  ' The nearest talker in front of the knight and within talkReach, while he's free to talk
+  ' The nearest talker in front of the knight and within talkReach, else a bonfire, while he's
+  ' free to talk
   private function talkerInReach() as BGE.Interactable
     if not m.knight.isAlive() or (m.knight.clock.state <> KnightState.idle and m.knight.clock.state <> KnightState.run)
       return invalid
     end if
-    return m.talkers.nearestInArc(m.knight.position, m.knight.rotation.y, m.talkReach, BGE.Math.PI / 3)
+    target = m.talkers.nearestInArc(m.knight.position, m.knight.rotation.y, m.talkReach, BGE.Math.PI / 3)
+    if invalid = target
+      target = m.bonfires.nearestInArc(m.knight.position, m.knight.rotation.y, m.talkReach, BGE.Math.PI / 3)
+    end if
+    return target
   end function
 
   ' The town's fog, which the graveyard shares: buildings fade into it rather than turning
@@ -518,6 +712,11 @@ class ThirdPersonScene extends BGE.GameScene
     end for
 
     m.hud.draw(uiRenderObj)
+    ' a banner doesn't outlive the knight
+    if not m.knight.isAlive()
+      m.hud.hideBanner()
+    end if
+    m.hud.drawBanner(uiRenderObj)
     ' the dialogue box draws itself while it's open
     if invalid = m.talkView and invalid <> m.talkTarget
       uiRenderObj.DrawText(m.talkers.promptFor(m.talkTarget, "OK / X"), center.x, center.y * 2 * 0.82, &hF0E0B0FF, font, "center")
