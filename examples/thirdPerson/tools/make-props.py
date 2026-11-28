@@ -383,6 +383,25 @@ def models():
     prism(m, (0, 2.3, 0.36), (0, 2.75, 0.4), 0.06, "wood")
     out.append(m)
 
+    # --- bonfire: a ring of low stones round two charred logs, and a sword stuck point-down in
+    # the middle (the flame is a Torch drawn over it). Stones are 4-sided pyramids, so it stays
+    # well under 100 triangles.
+    m = Model("bonfire"); r = rng(30)
+    for k in range(8):
+        a = k * 2 * math.pi / 8 + r.uniform(-0.15, 0.15)
+        cx, cz, s, h = 0.62 * math.cos(a), 0.62 * math.sin(a), r.uniform(0.13, 0.18), r.uniform(0.16, 0.24)
+        apex = (cx + r.uniform(-0.04, 0.04), h, cz + r.uniform(-0.04, 0.04))
+        base = [(cx - s, 0, cz + s), (cx + s, 0, cz + s), (cx + s, 0, cz - s), (cx - s, 0, cz - s)]
+        for i in range(4):
+            m.gable(base[i], base[(i + 1) % 4], apex, "wellstone")
+    prism(m, (-0.45, 0.06, -0.2), (0.45, 0.06, 0.2), 0.07, "wood")
+    prism(m, (-0.4, 0.06, 0.3), (0.4, 0.06, -0.3), 0.07, "wood")
+    # the sword: blade from the ground up, a crossguard, a grip
+    prism(m, (0.05, 0, 0.02), (0.08, 0.75, 0.0), 0.035, "iron")
+    prism(m, (-0.12, 0.75, 0.0), (0.28, 0.77, 0.0), 0.03, "iron")
+    prism(m, (0.08, 0.77, 0.0), (0.09, 0.98, 0.0), 0.025, "wood")
+    out.append(m)
+
     # --- fence: 3 m x 1.2 m alpha cut-out, both sides.
     m = Model("fence"); fx = 1.5
     m.quad((-fx, 0, 0), (fx, 0, 0), (fx, 1.2, 0), (-fx, 1.2, 0), "fence")
