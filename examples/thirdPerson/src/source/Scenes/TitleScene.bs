@@ -1,0 +1,274 @@
+import "pkg:/source/engine/GameScene.bs"
+import "../GameSave.bs"
+import "../Menus/OptionsPanel.bs"
+import "../Menus/ControlsPanel.bs"
+import "../Menus/TitleMenu.bs"
+import "pkg:/source/engine/ui/MenuList.bs"
+import "pkg:/source/engine/ui/CreditsView.bs"
+
+' The title screen: the key art (the splash screen's painting, title and all) with the menu in a
+' row along the bottom: Continue (when there's a save), New Game, Options, Controls (with a QR
+' code to use a phone as a controller) and Credits.
+class TitleScene extends BGE.GameScene
+
+  ' What's up: the menu, the new game question, the options or the credits (one at a time)
+  private menu as TitleMenu = invalid
+  private confirm as BGE.UI.MenuList = invalid
+  private options as OptionsPanel = invalid
+  private controls as ControlsPanel = invalid
+  private credits as BGE.UI.CreditsView = invalid
+  ' the fade under the menu, one row per alpha step, stretched to fit
+  private shade as roBitmap = invalid
+
+  sub new(game as BGE.Game)
+    super(game)
+    m.name = "TitleScene"
+  end sub
+
+  override sub onLoad(loader as BGE.AssetLoader, args as roAssociativeArray)
+    m.loadSceneBitmap(loader, "titleArt", "pkg:/images/Splash_HD.jpg")
+  end sub
+
+  override sub onCreate(args as roAssociativeArray)
+    m.showMenu("")
+  end sub
+
+  override sub onUpdate(dt as float)
+    if invalid <> m.credits and m.credits.isFinished()
+      m.closeCredits()
+    end if
+  end sub
+
+  ' Back leaves the question, the options or the credits (or, on the menu, the channel); OK skips
+  ' the credits
+  override sub onInput(input as BGE.GameInput)
+    if not input.press or input.consumed
+      return
+    end if
+    if invalid <> m.credits and (input.isButton("back") or input.isButton("ok"))
+      m.closeCredits()
+    else if input.isButton("back")
+      if invalid <> m.confirm
+        m.closeConfirm()
+      else if invalid <> m.options
+        m.closeOptions()
+      else if invalid <> m.controls
+        m.closeControls()
+      else if input.isRemoteBack()
+        ' the channel's first screen: Back leaves, as Roku expects (a gamepad's B doesn't)
+        m.game.End()
+      end if
+    end if
+  end sub
+
+  sub onUiAction(actionId as string, button as BGE.UI.Button)
+    ' mid-fade (just back from the game) a scene change would be refused, leaving no menu
+    if m.game.isTransitioning()
+      return
+    end if
+    if actionId = "continue"
+      m.continueGame()
+    else if actionId = "new"
+      if SaveData.current().exists()
+        m.askNewGame()
+      else
+        m.startNewGame()
+      end if
+    else if actionId = "overwrite"
+      m.startNewGame()
+    else if actionId = "cancel"
+      m.closeConfirm()
+    else if actionId = "options"
+      m.openOptions()
+    else if actionId = "done"
+      if invalid <> m.controls
+        m.closeControls()
+      else
+        m.closeOptions()
+      end if
+    else if actionId = "controls"
+      m.openControls()
+    else if actionId = "credits"
+      m.openCredits()
+    end if
+  end sub
+
+  ' The key art, filling the game canvas (under the menu and panels)
+  override sub onDrawEnd(renderObj as BGE.Renderer, uiRenderObj as BGE.Renderer)
+    art = m.game.getBitmap("titleArt", false)
+    if invalid = art
+      return
+    end if
+    canvas = m.game.canvas.bitmap
+    width = canvas.GetWidth()
+    height = canvas.GetHeight()
+    renderObj.drawScaledObject(0, 0, width / art.GetWidth(), height / art.GetHeight(), art)
+    ' darker towards the bottom, under the menu
+    if invalid = m.shade
+      m.shade = m.makeShade()
+    end if
+    top = height * 0.7
+    renderObj.drawScaledObject(0, Int(top), width / m.shade.GetWidth(), (height - Int(top)) / m.shade.GetHeight(), m.shade)
+  end sub
+
+  override sub onDestroy()
+    m.menu = invalid
+    m.confirm = invalid
+    m.options = invalid
+    m.controls = invalid
+    m.credits = invalid
+    m.shade = invalid
+    super.onDestroy()
+  end sub
+
+  ' A transparent-to-dark fade, top to bottom, smooth enough to stretch
+  private function makeShade() as roBitmap
+    rows = 160
+    shade = CreateObject("roBitmap", {width: 4, height: rows, AlphaEnable: true})
+    shade.Clear(&h00000000)
+    for row = 0 to rows - 1
+      t = (row + 1) / rows
+      alpha = Int(170 * t * t)
+      shade.DrawRect(0, row, 4, 1, &h05070A00 + alpha)
+    end for
+    shade.Finish()
+    return shade
+  end function
+
+  ' The menu along the bottom of the art, focused on `focusId` (or its first item)
+  private sub showMenu(focusId as string)
+    menu = new TitleMenu(m.game)
+    menu.listener = m
+    if SaveData.current().exists()
+      menu.addItem("continue", "Continue")
+    end if
+    menu.addItem("new", "New Game")
+    menu.addItem("options", "Options")
+    menu.addItem("controls", "Controls")
+    menu.addItem("credits", "Credits")
+    menu.open(m.game.uiCanvas.getHeight() * 0.86)
+    if focusId <> ""
+      menu.focusItem(focusId)
+    end if
+    m.menu = menu
+  end sub
+
+  private sub closeMenu()
+    if invalid <> m.menu
+      m.menu.close()
+      m.menu = invalid
+    end if
+  end sub
+
+  ' Picks up where the save left off: the story and bosses as they were, at the entrance of the
+  ' scene it was made in
+  private sub continueGame()
+    save = SaveData.current()
+    data = save.read()
+    if invalid = data
+      return
+    end if
+    m.closeMenu()
+    save.restore(m.game, data)
+    m.game.changeSceneWithFade(data.scene, data.entrance)
+  end sub
+
+  ' A new game wipes the save, so ask first
+  private sub askNewGame()
+    m.closeMenu()
+    confirm = new BGE.UI.MenuList(m.game)
+    confirm.title = "Start a new game?"
+    confirm.message = "Your saved game will be lost."
+    confirm.listener = m
+    confirm.addItem("cancel", "Cancel")
+    confirm.addItem("overwrite", "New Game")
+    confirm.centered = true
+    confirm.open()
+    m.confirm = confirm
+  end sub
+
+  private sub closeConfirm()
+    m.confirm.close()
+    m.confirm = invalid
+    m.showMenu("new")
+  end sub
+
+  private sub startNewGame()
+    m.closeMenu()
+    if invalid <> m.confirm
+      m.confirm.close()
+      m.confirm = invalid
+    end if
+    SaveData.current().startNew(m.game)
+    m.game.changeSceneWithFade("TownScene", {})
+  end sub
+
+  private sub openOptions()
+    m.closeMenu()
+    panel = new OptionsPanel(m.game)
+    panel.listener = m
+    panel.open()
+    m.options = panel
+  end sub
+
+  ' Saves the options and goes back to the menu
+  private sub closeOptions()
+    m.options.save()
+    m.options.close()
+    m.options = invalid
+    m.showMenu("options")
+  end sub
+
+  private sub openControls()
+    m.closeMenu()
+    panel = new ControlsPanel(m.game, true)
+    panel.listener = m
+    panel.open()
+    m.controls = panel
+  end sub
+
+  private sub closeControls()
+    m.controls.close()
+    m.controls = invalid
+    m.showMenu("controls")
+  end sub
+
+  private sub openCredits()
+    m.closeMenu()
+    credits = new BGE.UI.CreditsView(m.game, [
+      {text: "Night of the Barrow King", style: "title"},
+      {text: ""},
+      {text: "Made with", style: "heading"},
+      {text: "the BrighterScript Game Engine"},
+      {text: ""},
+      {text: "The knight and the skeleton", style: "heading"},
+      {text: "Clint Bellanger (CC-BY 3.0, CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "The orcs", style: "heading"},
+      {text: "johndh (CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "The townsfolk", style: "heading"},
+      {text: "Danimal, Clint Bellanger, Tiziana and Quaternius (CC-BY-SA 3.0)"},
+      {text: ""},
+      {text: "Title art", style: "heading"},
+      {text: "Mark Pearce"},
+      {text: ""},
+      {text: "Fonts", style: "heading"},
+      {text: "Bluu Next by Jean-Baptiste Morizot, Velvetyne (SIL OFL 1.1)"},
+      {text: "EB Garamond by Georg Duffner and Octavio Pardo (SIL OFL 1.1)"},
+      {text: ""},
+      {text: "Everything else", style: "heading"},
+      {text: "made for this game (CC0)"}
+    ] as BGE.UI.CreditsEntry[])
+    credits.backgroundRGBA = &h0A0806C0
+    m.addUi(credits)
+    m.credits = credits
+  end sub
+
+  private sub closeCredits()
+    m.removeUi(m.credits)
+    m.credits = invalid
+    m.showMenu("credits")
+  end sub
+
+end class

@@ -41,6 +41,8 @@ import json
 import math
 import os
 import runpy
+import shutil
+import subprocess
 import sys
 
 import bpy
@@ -235,14 +237,25 @@ def load_rgba(path):
     return np.flipud(px.reshape(h, w, 4))
 
 
-# Sheets are lossy WebP (alpha stays lossless) to keep the channel under Roku's 4 MB limit
+# Sheets are lossy WebP, alpha too when cwebp is installed: the soft ground shadows make lossless
+# alpha half of each sheet, and the BrightScript Simulator won't load a zip over ~7.1 MB
 def save_webp(pixels, path):
     h, w = pixels.shape[:2]
     img = bpy.data.images.new("sheet", w, h, alpha=True)
     img.pixels.foreach_set(np.flipud(pixels).ravel())
-    img.filepath_raw = path
-    img.file_format = "WEBP"
-    img.save(quality=90)
+    cwebp = shutil.which("cwebp")
+    if cwebp:
+        png = path + ".png"
+        img.filepath_raw = png
+        img.file_format = "PNG"
+        img.save()
+        subprocess.run([cwebp, "-quiet", "-q", "80", "-alpha_q", "70", "-alpha_filter", "best", "-m", "6",
+                        "-exact", png, "-o", path], check=True)
+        os.remove(png)
+    else:
+        img.filepath_raw = path
+        img.file_format = "WEBP"
+        img.save(quality=90)
     bpy.data.images.remove(img)
 
 

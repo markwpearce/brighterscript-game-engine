@@ -1,0 +1,145 @@
+import "pkg:/source/utils/SaveSlot.bs"
+import "pkg:/source/story/StorySession.bs"
+import "TownStory.bs"
+
+' Coins left where the knight died, waiting to be picked up
+interface DroppedCoins extends roAssociativeArray
+  scene as string
+  x as float
+  z as float
+  amount as integer
+end interface
+
+' The one saved game. Every field is plain data, safe for BGE.SaveSlot.
+interface GameSaveData extends roAssociativeArray
+  ' The scene to resume in, and the args that bring the knight in at its entrance ({from},
+  ' {place}, {level, from})
+  scene as string
+  entrance as roAssociativeArray
+  ' TownStory's StorySession.toSaveData()
+  story as BGE.Story.StorySessionSave
+  ' Ids of the bosses killed ("crypt1"...), which stay dead
+  optional bossesKilled as string[]
+  ' Not used yet: the bonfire to wake at, coins, healing draughts, gear, key items, and coins
+  ' dropped at a death
+  optional bonfireId as string
+  optional coins as integer
+  optional draughts as integer
+  optional maxDraughts as integer
+  optional ownedGear as string[]
+  ' Slot name -> gear id
+  optional equippedGear as roAssociativeArray
+  optional keyItems as string[]
+  optional droppedCoins as DroppedCoins
+end interface
+
+' Reads and writes the game's one save slot. Get the shared one with SaveData.current().
+class GameSave
+
+  slot as BGE.SaveSlot = new BGE.SaveSlot(SaveData.SECTION, "save", 1)
+
+  ' The save, or invalid if there's none it can use
+  function read() as GameSaveData
+    return m.slot.read(SaveData.validate)
+  end function
+
+  function exists() as boolean
+    return m.slot.exists(SaveData.validate)
+  end function
+
+  function write(data as GameSaveData) as boolean
+    return m.slot.write(data)
+  end function
+
+  ' Saves arriving in a scene: where (`entrance` picks the args that place the knight), the story
+  ' and the bosses killed. Anything else already in the save is kept.
+  function saveArrival(game as BGE.Game, sceneName as string, args as roAssociativeArray) as boolean
+    if not m.slot.enabled
+      return false
+    end if
+    data = m.read()
+    if invalid = data
+      data = {} as GameSaveData
+    end if
+    entrance = {}
+    for each key in ["from", "place", "level"]
+      if invalid <> args[key]
+        entrance[key] = args[key]
+      end if
+    end for
+    data.scene = sceneName
+    data.entrance = entrance
+    data.story = TownStory.session(game).toSaveData()
+    data.bossesKilled = SaveData.bossesKilled()
+    return m.write(data)
+  end function
+
+  ' Puts the game back as `data` left it (call before changing to data.scene)
+  sub restore(game as BGE.Game, data as GameSaveData)
+    TownStory.session(game).loadSaveData(data.story)
+    slain = {}
+    if invalid <> data.bossesKilled
+      for each id in data.bossesKilled
+        if Left(id, 5) = "crypt"
+          slain[Mid(id, 6)] = true
+        end if
+      end for
+    end if
+    GetGlobalAA().cryptBossesSlain = slain
+  end sub
+
+  ' Wipes the save and starts the story and bosses afresh
+  sub startNew(game as BGE.Game)
+    m.slot.delete()
+    TownStory.session(game).loadSaveData(invalid)
+    GetGlobalAA().cryptBossesSlain = {}
+  end sub
+
+end class
+
+namespace SaveData
+
+  ' The registry section for the save and the settings
+  const SECTION = "nightOfTheBarrowKing"
+
+  ' The game's save, made the first time anything asks for it
+  function current() as GameSave
+    globals = GetGlobalAA()
+    if invalid = globals.gameSave
+      globals.gameSave = new GameSave()
+    end if
+    return globals.gameSave
+  end function
+
+  ' The bosses killed this run, as save ids
+  function bossesKilled() as string[]
+    ids = [] as string[]
+    slain = GetGlobalAA().cryptBossesSlain
+    if invalid <> slain
+      for each level in slain
+        if slain[level] = true
+          ids.push("crypt" + level)
+        end if
+      end for
+    end if
+    return ids
+  end function
+
+  ' SaveSlot's validate: the save if it names a scene, else invalid
+  function validate(data as dynamic) as dynamic
+    if type(data) <> "roAssociativeArray"
+      return invalid
+    end if
+    if type(data.scene) <> "roString" and type(data.scene) <> "String"
+      return invalid
+    end if
+    if data.scene = ""
+      return invalid
+    end if
+    if type(data.entrance) <> "roAssociativeArray"
+      data.entrance = {}
+    end if
+    return data
+  end function
+
+end namespace
