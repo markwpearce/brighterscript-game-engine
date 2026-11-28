@@ -18,6 +18,7 @@
 | `src/models/chapel/textures/*` (`cross.png`, `naveWall.png`, `slate.png`, `stone.png`, `towerFace.png`; the chapel's textures, shared with `examples/terrain`) | - | CC0 | this repo |
 | `src/sprites/crypt_wall.webp`, `crypt_floor.webp`, `crypt_alcove.webp`, `crypt_rubble.webp`, `crypt_bones.webp`, `crypt_altar.webp` (drawn by `tools/crypt-art.py`) | - | CC0 | this repo |
 | `src/sprites/keep_door.webp`, `chapel_door.webp`, `chapel_window.webp`, `keep_banner.webp`, `keep_banner_blue.webp` (drawn by `tools/interior-art.py`) | - | CC0 | this repo |
+| `src/sprites/prop_wood.webp`, `prop_stone.webp` (drawn by `tools/prop-art.py`) | - | CC0 | this repo |
 | `src/sprites/fog.webp` (a plain white fog gradient, made for this repo) | - | CC0 | this repo |
 | `src/images/Splash_HD.jpg` (the key art, also the title screen's background), `Splash_SD.jpg` (cropped from it), `Channel_Icon_HD.png`, `Channel_Icon_SD.png` (scaled from the FHD icon); `art/title/` (`keyart.py` and `bk_style.py`, which drew them over the painting, and `title_logo.png`) | Mark Pearce | MIT (the repo's `LICENSE`) | made for this repo |
 | `src/fonts/bluunext-bold.ttf` (with its `OFL-BluuNext.txt`; see `src/fonts/CREDITS.md`) | Jean-Baptiste Morizot, Velvetyne | SIL OFL 1.1 | [Bluu Next](https://github.com/velvetyne/BluuNext) |
